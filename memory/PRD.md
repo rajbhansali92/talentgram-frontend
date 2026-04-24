@@ -43,6 +43,16 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 
 ## Recent Updates
 ## Recent Updates
+- **2026-04-24 (v19)** — **Secure Change Password + admin-only Reset Password flows.** Production-grade auth recovery.
+  - **Change Password** (`POST /api/auth/change-password`): authenticated; verifies current with bcrypt; new password policy = min 8 chars + at least 1 number or special character; rejects same-as-current; on success bumps `token_version` which kills every existing JWT for that user. Modal accessible from `AdminLayout` sidebar + mobile top bar; logs the user out post-change and bounces them to `/admin/login`.
+  - **JWT invalidation via `tv` claim**: `make_token` callers embed `tv = user.token_version`; `current_user` dependency compares token `tv` vs stored value — mismatch → `401 "Session expired"`. Stateless, no allowlist, instant global logout.
+  - **Forgot Password** (`POST /api/public/forgot-password`): public page at `/forgot-password`. Always returns the exact generic message `"If that account exists, contact your administrator to reset your password."` regardless of whether the email exists — zero enumeration surface. No reset token is ever generated here. Rate-limited at 5 hits / 15 min per IP (in-memory sliding window → 429 with Retry-After header).
+  - **Admin-generated reset link** (`POST /api/users/{uid}/reset-password`, admin-only): returns `{reset_token, reset_path: "/reset-password?token=…", expires_at, email}`. Raw token shown to the admin ONCE in a copyable modal; Mongo stores only the SHA-256 hex digest. 1-hour TTL (enforced by Mongo TTL index on `password_reset_tokens.expires_at`). Single-use — completing or re-generating invalidates the old token. Team users get 403.
+  - **Reset Password page** (`/reset-password?token=…`): validates the token on mount (`POST /api/public/reset-password/validate`), shows the associated email, lets the user set a new password, completes via `POST /api/public/reset-password` which enforces policy, bumps `token_version`, marks the token used, and redirects to `/admin/login`.
+  - **401 interceptor** in `lib/api.js`: any `"Session expired"` / `"Invalid token"` / `"Not authenticated"` response clears localStorage and bounces the user to login — BUT guarded against infinite loops on auth pages (`/admin/login`, `/forgot-password`, `/reset-password`, `/signup`).
+  - **Bonus perf fix**: `/api/links` rewrote view_count/unique_viewers from an N+1 round-trip (2 queries × N links) into a single aggregation pipeline — was timing out on Atlas past ~20 links.
+  - **Testing**: 81 existing pytests + 9 new `test_password_flows.py` + 1 updated `test_user_roles_api.py` = **87/87 passing on Atlas**. Testing agent iteration_5.json reports **100% backend + 100% frontend critical path** with zero issues across change-password, forgot, admin-reset, reset-consume, single-use, token_version invalidation, and rate-limit paths.
+
 - **2026-04-24 (v18)** — **MongoDB Atlas migration complete.** Production-ready persistence.
   - `backend/.env` switched to `mongodb+srv://...@cluster0.sipmssu.mongodb.net/talentgram?retryWrites=true&w=majority` with `DB_NAME=talentgram`.
   - Atlas Network Access configured with `0.0.0.0/0` allowlist (creds-only auth). TLS handshake confirmed OK; `admin ping` returns `{ok:1}`.

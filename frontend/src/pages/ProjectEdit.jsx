@@ -855,9 +855,6 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
     if (!submission) return null;
     const media = submission.media || [];
     const intro = media.find((m) => m.category === "intro_video");
-    const takes = ["take_1", "take_2", "take_3"]
-        .map((k) => media.find((m) => m.category === k))
-        .filter(Boolean);
     const images = media.filter((m) => m.category === "image");
 
     const save = async () => {
@@ -1103,35 +1100,51 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                     </button>
                 </section>
 
-                {intro && (
+                {intro ? (
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
                         <video
                             src={FILE_URL(intro.storage_path)}
                             controls
                             className="w-full max-w-3xl border border-white/10 bg-black"
+                            data-testid="review-intro-video"
                         />
                     </section>
-                )}
-                {takes.length > 0 && (
+                ) : (
                     <section className="mb-10">
-                        <p className="eyebrow mb-3">Audition Takes</p>
-                        <div className="grid md:grid-cols-2 gap-4">
-                            {takes.map((t) => (
-                                <div key={t.id}>
-                                    <p className="text-xs text-white/50 mb-2 tg-mono">
-                                        Take {t.category.split("_")[1]}
-                                    </p>
-                                    <video
-                                        src={FILE_URL(t.storage_path)}
-                                        controls
-                                        className="w-full border border-white/10 bg-black"
-                                    />
-                                </div>
-                            ))}
+                        <p className="eyebrow mb-3">Introduction Video</p>
+                        <div className="max-w-3xl border border-dashed border-white/10 bg-black/40 aspect-video flex items-center justify-center text-white/30 text-xs tg-mono">
+                            Not submitted
                         </div>
                     </section>
                 )}
+                <section className="mb-10" data-testid="review-takes-section">
+                    <p className="eyebrow mb-3">Audition Takes</p>
+                    <div className="grid md:grid-cols-2 gap-4">
+                        {["take_1", "take_2", "take_3"].map((key) => {
+                            const t = media.find((m) => m.category === key);
+                            const label = `Take ${key.split("_")[1]}`;
+                            return (
+                                <div key={key} data-testid={`review-${key}`}>
+                                    <p className="text-xs text-white/50 mb-2 tg-mono">
+                                        {label}
+                                    </p>
+                                    {t ? (
+                                        <video
+                                            src={FILE_URL(t.storage_path)}
+                                            controls
+                                            className="w-full border border-white/10 bg-black"
+                                        />
+                                    ) : (
+                                        <div className="w-full border border-dashed border-white/10 bg-black/40 aspect-video flex items-center justify-center text-white/30 text-xs tg-mono">
+                                            Not submitted
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </section>
                 {images.length > 0 && (
                     <section className="mb-10">
                         <p className="eyebrow mb-3">

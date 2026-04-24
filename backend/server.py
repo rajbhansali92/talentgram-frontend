@@ -482,6 +482,9 @@ async def add_media(
         "original_filename": file.filename,
         "size": result.get("size", len(data)),
         "created_at": _now(),
+        # Explicit scope — talent media is global portfolio media, tied only to the talent.
+        "scope": "talent_portfolio",
+        "talent_id": tid,
     }
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
     # set cover if none
@@ -695,6 +698,19 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
     return {"token": token}
 
 
+def _public_media(m: dict) -> dict:
+    """Strip internal scope metadata (project_id / submission_id / talent_id / scope) before sending to client."""
+    return {
+        "id": m.get("id"),
+        "category": m.get("category"),
+        "storage_path": m.get("storage_path"),
+        "content_type": m.get("content_type"),
+        "original_filename": m.get("original_filename"),
+        "size": m.get("size", 0),
+        "created_at": m.get("created_at"),
+    }
+
+
 def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict:
     """STRICT allowlist: client receives only fields explicitly enabled via visibility.
     No raw talent document is ever returned. Fields not toggled on are never included."""
@@ -705,11 +721,11 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
     for m in talent.get("media") or []:
         cat = m.get("category")
         if cat in ("indian", "western", "portfolio") and v.get("portfolio"):
-            filtered_media.append(m)
+            filtered_media.append(_public_media(m))
             if not cover_mid and talent.get("cover_media_id") == m.get("id"):
                 cover_mid = m["id"]
         elif cat == "video" and v.get("intro_video"):
-            filtered_media.append(m)
+            filtered_media.append(_public_media(m))
     # Fallback cover: first visible portfolio image if declared cover was filtered out
     if v.get("portfolio") and not cover_mid:
         for m in filtered_media:
@@ -997,6 +1013,9 @@ async def add_material(
         "original_filename": file.filename,
         "size": result.get("size", len(data)),
         "created_at": _now(),
+        # Explicit scope — project material is bound to this project only
+        "scope": "project_material",
+        "project_id": pid,
     }
     await db.projects.update_one({"id": pid}, {"$push": {"materials": material}})
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
@@ -1141,6 +1160,11 @@ async def submission_upload(
         "original_filename": file.filename,
         "size": result.get("size", len(data)),
         "created_at": _now(),
+        # Explicit scope markers — submission media is project+submission bound,
+        # NEVER to be reused as global portfolio media.
+        "scope": "submission",
+        "submission_id": sid,
+        "project_id": sub["project_id"],
     }
     await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})

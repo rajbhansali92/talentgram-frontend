@@ -664,6 +664,68 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
     return {"token": token}
 
 
+def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict:
+    """STRICT allowlist: client receives only fields explicitly enabled via visibility.
+    No raw talent document is ever returned. Fields not toggled on are never included."""
+    v = visibility or {}
+    # Filter media strictly by visibility: portfolio → images, intro_video → video
+    filtered_media: List[dict] = []
+    cover_mid: Optional[str] = None
+    for m in talent.get("media") or []:
+        cat = m.get("category")
+        if cat in ("indian", "western", "portfolio") and v.get("portfolio"):
+            filtered_media.append(m)
+            if not cover_mid and talent.get("cover_media_id") == m.get("id"):
+                cover_mid = m["id"]
+        elif cat == "video" and v.get("intro_video"):
+            filtered_media.append(m)
+    # Fallback cover: first visible portfolio image if declared cover was filtered out
+    if v.get("portfolio") and not cover_mid:
+        for m in filtered_media:
+            if m.get("category") in ("indian", "western", "portfolio"):
+                cover_mid = m["id"]
+                break
+
+    out: Dict[str, Any] = {
+        "id": talent["id"],
+        "name": talent.get("name"),
+        "media": filtered_media,
+        "cover_media_id": cover_mid,
+    }
+    # Demographics — only if explicitly toggled on AND value exists
+    if v.get("age") and talent.get("age") is not None:
+        out["age"] = talent["age"]
+    if v.get("height") and talent.get("height"):
+        out["height"] = talent["height"]
+    if v.get("location") and talent.get("location"):
+        out["location"] = talent["location"]
+    if v.get("ethnicity") and talent.get("ethnicity"):
+        out["ethnicity"] = talent["ethnicity"]
+    # Social
+    if v.get("instagram") and talent.get("instagram_handle"):
+        out["instagram_handle"] = talent["instagram_handle"]
+    if v.get("instagram_followers") and talent.get("instagram_followers"):
+        out["instagram_followers"] = talent["instagram_followers"]
+    # Work links
+    if v.get("work_links") and talent.get("work_links"):
+        out["work_links"] = talent["work_links"]
+    # NEVER included: dob, gender, bio, source, created_at, created_by, instagram_handle
+    # unless toggled above. Fields such as gender/bio are internal-only for now.
+    return out
+
+
+def _public_link_view(link: dict) -> dict:
+    """Return only fields the client needs. Strip admin-only fields (notes, password, created_by)."""
+    v = link.get("visibility") or {}
+    return {
+        "id": link["id"],
+        "slug": link.get("slug"),
+        "title": link.get("title"),
+        "brand_name": link.get("brand_name"),
+        "visibility": v,
+    }
+
+
 @api.get("/public/links/{slug}")
 async def get_public_link(slug: str, authorization: Optional[str] = Header(None)):
     viewer = decode_viewer(authorization)
@@ -672,17 +734,17 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
-    talents = await db.talents.find(
+    visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
+
+    raw_talents = await db.talents.find(
         {"id": {"$in": link.get("talent_ids", [])}},
         {"_id": 0, "created_by": 0},
     ).to_list(5000)
-    # preserve original order
     order = {tid: i for i, tid in enumerate(link.get("talent_ids", []))}
-    talents.sort(key=lambda t: order.get(t["id"], 999))
-    # Enrich with computed age and STRIP dob — clients must never see DOB
-    for t in talents:
-        enrich_talent(t)
-        t.pop("dob", None)
+    raw_talents.sort(key=lambda t: order.get(t["id"], 999))
+
+    # Enrich age from dob internally (never exposes dob), then apply strict visibility filter
+    talents = [_filter_talent_for_client(enrich_talent(t), visibility) for t in raw_talents]
 
     # viewer's existing actions
     actions = await db.link_actions.find({
@@ -690,7 +752,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         "viewer_email": viewer["email"],
     }, {"_id": 0}).to_list(5000)
     return {
-        "link": link,
+        "link": _public_link_view(link),
         "talents": talents,
         "actions": actions,
         "viewer": {"email": viewer["email"], "name": viewer["name"]},
@@ -1012,6 +1074,24 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     for field in ("first_name", "last_name", "height", "location"):
         if not (form.get(field) or "").strip():
             raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
+    # Availability
+    avail = form.get("availability") or {}
+    if isinstance(avail, str):
+        avail = {"status": "yes" if avail else "", "note": avail}
+    status = (avail.get("status") or "").strip()
+    if status not in {"yes", "no"}:
+        raise HTTPException(400, "Please confirm your availability")
+    if status == "no" and not (avail.get("note") or "").strip():
+        raise HTTPException(400, "Please share your alternate availability")
+    # Budget
+    budget = form.get("budget") or {}
+    if isinstance(budget, str):
+        budget = {"status": "accept" if budget else "", "value": budget}
+    bstatus = (budget.get("status") or "").strip()
+    if bstatus not in {"accept", "custom"}:
+        raise HTTPException(400, "Please confirm the budget")
+    if bstatus == "custom" and not (budget.get("value") or "").strip():
+        raise HTTPException(400, "Please enter your expected budget")
     media = sub.get("media", [])
     has_intro = any(m["category"] == "intro_video" for m in media)
     has_take1 = any(m["category"] == "take_1" for m in media)

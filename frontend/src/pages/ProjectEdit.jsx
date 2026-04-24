@@ -838,7 +838,18 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
 }
 
 function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
-    const [form, setForm] = useState(submission?.form_data || {});
+    const normalize = (fd) => ({
+        ...fd,
+        availability:
+            typeof fd?.availability === "object" && fd.availability !== null
+                ? fd.availability
+                : { status: "", note: fd?.availability || "" },
+        budget:
+            typeof fd?.budget === "object" && fd.budget !== null
+                ? fd.budget
+                : { status: "", value: fd?.budget || "" },
+    });
+    const [form, setForm] = useState(normalize(submission?.form_data));
     const [fv, setFv] = useState(submission?.field_visibility || {});
     const [saving, setSaving] = useState(false);
     if (!submission) return null;
@@ -872,8 +883,6 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         { key: "height", label: "Height" },
         { key: "location", label: "Location" },
         { key: "competitive_brand", label: "Competitive Brand" },
-        { key: "availability", label: "Availability" },
-        { key: "budget", label: "Budget" },
     ];
 
     return (
@@ -955,6 +964,104 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                 </button>
                             </div>
                         ))}
+
+                        {/* Availability (structured) */}
+                        <div className="md:col-span-2 border-t border-white/10 pt-4">
+                            <label className="text-[11px] text-white/50 tracking-widest uppercase">
+                                Availability
+                            </label>
+                            <div className="mt-2 flex items-center gap-3">
+                                <select
+                                    value={form.availability?.status || ""}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            availability: {
+                                                ...form.availability,
+                                                status: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    data-testid="review-avail-status"
+                                    className="bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                >
+                                    <option value="" className="bg-black">
+                                        —
+                                    </option>
+                                    <option value="yes" className="bg-black">
+                                        Yes
+                                    </option>
+                                    <option value="no" className="bg-black">
+                                        No
+                                    </option>
+                                </select>
+                                <input
+                                    type="text"
+                                    value={form.availability?.note || ""}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            availability: {
+                                                ...form.availability,
+                                                note: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    placeholder="Note / reason"
+                                    data-testid="review-avail-note"
+                                    className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Budget (structured) */}
+                        <div className="md:col-span-2">
+                            <label className="text-[11px] text-white/50 tracking-widest uppercase">
+                                Budget
+                            </label>
+                            <div className="mt-2 flex items-center gap-3">
+                                <select
+                                    value={form.budget?.status || ""}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            budget: {
+                                                ...form.budget,
+                                                status: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    data-testid="review-budget-status"
+                                    className="bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                >
+                                    <option value="" className="bg-black">
+                                        —
+                                    </option>
+                                    <option value="accept" className="bg-black">
+                                        Accept
+                                    </option>
+                                    <option value="custom" className="bg-black">
+                                        Not accepting
+                                    </option>
+                                </select>
+                                <input
+                                    type="text"
+                                    value={form.budget?.value || ""}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            budget: {
+                                                ...form.budget,
+                                                value: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    placeholder="Expected budget (if not accepting)"
+                                    data-testid="review-budget-value"
+                                    className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                />
+                            </div>
+                        </div>
                     </div>
 
                     {Array.isArray(submission.project_custom_questions) &&

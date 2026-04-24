@@ -77,8 +77,9 @@ export default function SubmissionPage() {
         height: "",
         location: "",
         competitive_brand: "",
-        availability: "",
-        budget: "",
+        availability: { status: "", note: "" },
+        budget: { status: "", value: "" },
+        commission: "",
         custom_answers: {},
     });
     const [starting, setStarting] = useState(false);
@@ -101,11 +102,10 @@ export default function SubmissionPage() {
                     `${API}/public/projects/${slug}`,
                 );
                 setProject(data);
-                // Prefill availability + budget
+                // Snapshot commission on the form so it's preserved at submission time
                 setForm((f) => ({
                     ...f,
-                    availability: f.availability || data.shoot_dates || "",
-                    budget: f.budget || data.budget_per_day || "",
+                    commission: f.commission || data.commission_percent || "",
                 }));
             } catch {
                 toast.error("Project not found");
@@ -126,7 +126,22 @@ export default function SubmissionPage() {
                 );
                 setSubmission(data);
                 if (data.form_data) {
-                    setForm((f) => ({ ...f, ...data.form_data }));
+                    setForm((f) => {
+                        const fd = data.form_data;
+                        return {
+                            ...f,
+                            ...fd,
+                            availability:
+                                typeof fd.availability === "object" &&
+                                fd.availability !== null
+                                    ? { status: "", note: "", ...fd.availability }
+                                    : f.availability,
+                            budget:
+                                typeof fd.budget === "object" && fd.budget !== null
+                                    ? { status: "", value: "", ...fd.budget }
+                                    : f.budget,
+                        };
+                    });
                 }
             } catch {
                 localStorage.removeItem(LS_KEY(slug));
@@ -154,6 +169,15 @@ export default function SubmissionPage() {
         if (!form.email.trim()) return "Email is required";
         if (!form.height) return "Height is required";
         if (!form.location.trim()) return "Current location is required";
+        if (!form.availability.status) return "Please confirm your availability";
+        if (
+            form.availability.status === "no" &&
+            !form.availability.note.trim()
+        )
+            return "Please share your alternate availability";
+        if (!form.budget.status) return "Please confirm the budget";
+        if (form.budget.status === "custom" && !form.budget.value.trim())
+            return "Please enter your expected budget";
         return null;
     };
 
@@ -349,7 +373,12 @@ export default function SubmissionPage() {
         form.first_name &&
         form.last_name &&
         form.height &&
-        form.location;
+        form.location &&
+        form.availability.status &&
+        (form.availability.status !== "no" ||
+            form.availability.note.trim()) &&
+        form.budget.status &&
+        (form.budget.status !== "custom" || form.budget.value.trim());
 
     // ---------------------------------------------------------------
     if (isSubmitted) {
@@ -571,51 +600,169 @@ export default function SubmissionPage() {
                                     wide
                                 />
                             )}
-                            <FormField
-                                label="Availability"
-                                value={form.availability}
-                                onChange={(v) =>
-                                    setForm({ ...form, availability: v })
-                                }
-                                onBlur={saveForm}
-                                hint="Pre-filled from shoot dates — edit if different"
-                                testid="form-availability"
-                                wide
-                            />
-                            <div data-testid="form-budget-field" className="md:col-span-2">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
-                                    Budget
-                                </span>
-                                <input
-                                    type="text"
-                                    value={form.budget}
+                        </div>
+
+                        {/* AVAILABILITY — decision block */}
+                        <div
+                            className="border-t border-white/10 pt-7"
+                            data-testid="availability-block"
+                        >
+                            <p className="eyebrow mb-2">
+                                Availability{" "}
+                                <span className="text-[#FF3B30]">*</span>
+                            </p>
+                            {project.shoot_dates && (
+                                <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                                    {project.shoot_dates}
+                                    {" — "}Costume trial and rehearsal dates
+                                    (if any) will be informed.
+                                </p>
+                            )}
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                                {[
+                                    { key: "yes", label: "Yes, available" },
+                                    { key: "no", label: "Not available" },
+                                ].map((opt) => {
+                                    const active =
+                                        form.availability.status === opt.key;
+                                    return (
+                                        <button
+                                            key={opt.key}
+                                            type="button"
+                                            onClick={() => {
+                                                setForm({
+                                                    ...form,
+                                                    availability: {
+                                                        ...form.availability,
+                                                        status: opt.key,
+                                                    },
+                                                });
+                                                setTimeout(saveForm, 0);
+                                            }}
+                                            data-testid={`avail-${opt.key}-btn`}
+                                            className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${active ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                        >
+                                            {opt.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            {form.availability.status === "no" && (
+                                <textarea
+                                    value={form.availability.note}
                                     onChange={(e) =>
                                         setForm({
                                             ...form,
-                                            budget: e.target.value,
+                                            availability: {
+                                                ...form.availability,
+                                                note: e.target.value,
+                                            },
                                         })
                                     }
                                     onBlur={saveForm}
-                                    data-testid="form-budget"
-                                    className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
+                                    rows={3}
+                                    placeholder="Please specify reason / alternate availability"
+                                    data-testid="availability-note-input"
+                                    className="w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
                                 />
-                                {project.commission_percent && (
-                                    <p className="text-[11px] text-white/40 mt-2 tg-mono">
-                                        Commission: {project.commission_percent}
-                                    </p>
-                                )}
-                            </div>
-                            {project.medium_usage && (
-                                <div className="md:col-span-2">
-                                    <span className="text-[11px] text-white/60 tracking-widest uppercase">
-                                        Medium / Usage
-                                    </span>
-                                    <div className="mt-2 border-b border-white/10 py-3 text-sm text-white/70">
-                                        {project.medium_usage}
-                                    </div>
-                                </div>
                             )}
                         </div>
+
+                        {/* BUDGET — decision block */}
+                        <div
+                            className="border-t border-white/10 pt-7"
+                            data-testid="budget-block"
+                        >
+                            <p className="eyebrow mb-4">
+                                Budget{" "}
+                                <span className="text-[#FF3B30]">*</span>
+                            </p>
+                            {project.commission_percent && (
+                                <div
+                                    className="flex items-center justify-between border border-white/25 bg-white/[0.04] px-4 py-3 mb-5"
+                                    data-testid="commission-card"
+                                >
+                                    <span className="text-[11px] tracking-widest uppercase text-white/70">
+                                        Commission
+                                    </span>
+                                    <span className="font-display text-2xl text-white">
+                                        {project.commission_percent}
+                                    </span>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setForm({
+                                            ...form,
+                                            budget: {
+                                                status: "accept",
+                                                value: "",
+                                            },
+                                        });
+                                        setTimeout(saveForm, 0);
+                                    }}
+                                    data-testid="budget-accept-btn"
+                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "accept" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                >
+                                    Accept
+                                    {project.budget_per_day && (
+                                        <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
+                                            {project.budget_per_day} / day
+                                        </span>
+                                    )}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setForm({
+                                            ...form,
+                                            budget: {
+                                                ...form.budget,
+                                                status: "custom",
+                                            },
+                                        });
+                                        setTimeout(saveForm, 0);
+                                    }}
+                                    data-testid="budget-custom-btn"
+                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "custom" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                >
+                                    Not accepting
+                                    <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
+                                        Propose your own
+                                    </span>
+                                </button>
+                            </div>
+                            {form.budget.status === "custom" && (
+                                <input
+                                    type="text"
+                                    value={form.budget.value}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            budget: {
+                                                ...form.budget,
+                                                value: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    onBlur={saveForm}
+                                    placeholder="Enter your expected budget per day"
+                                    data-testid="budget-value-input"
+                                    className="w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
+                                />
+                            )}
+                        </div>
+
+                        {project.medium_usage && (
+                            <div className="border-t border-white/10 pt-7">
+                                <p className="eyebrow mb-3">Medium / Usage</p>
+                                <p className="text-sm text-white/80">
+                                    {project.medium_usage}
+                                </p>
+                            </div>
+                        )}
 
                         {(project.custom_questions || []).length > 0 && (
                             <div className="border-t border-white/10 pt-6 space-y-5">

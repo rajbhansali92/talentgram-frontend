@@ -27,6 +27,9 @@ Build a production-grade client-review system for Talentgram (talent agency). Co
 - ✅ Mobile-responsive dark UI (Obsidian/Pearl palette, Outfit + Manrope fonts)
 - ✅ Testing: 100% backend pytest + 100% frontend Playwright E2E
 
+## Recent Updates
+- **2026-04-24** — Strict client visibility: `/api/public/links/{slug}` now returns an explicit allowlist per talent, filtered by the link's `visibility` map. Admin-only fields (`notes`, `password`, `created_by`, `talent_ids`, `is_public`) are stripped from the link response. Talent fields (`dob`, `gender`, `bio`, `source`, `created_at`, any toggled-off demographic/social data) are never sent to the client. Media is filtered: images require `visibility.portfolio`, videos require `visibility.intro_video`.
+
 ## Phase 2 — Backlog
 ### P1 (high-value)
 - [ ] Private link permissions (per-email ACL, password-protected links)

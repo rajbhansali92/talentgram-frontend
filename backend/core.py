@@ -497,7 +497,9 @@ class SubmissionUpdateIn(BaseModel):
 
 class AdminSubmissionEditIn(BaseModel):
     form_data: Optional[Dict[str, Any]] = None
-    field_visibility: Optional[Dict[str, bool]] = None
+    # Value is `bool` for most fields, OR a `{question_label: bool}` dict for
+    # `custom_answers` to support per-question visibility.
+    field_visibility: Optional[Dict[str, Any]] = None
 
 
 class SubmissionDecisionIn(BaseModel):

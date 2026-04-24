@@ -234,42 +234,44 @@ function InviteModal({ open, onClose, onInvited }) {
     );
 }
 
-function TempPasswordModal({ open, onClose, payload }) {
+function ResetLinkModal({ open, onClose, payload }) {
     if (!open || !payload) return null;
+    const BASE = window.location.origin;
+    const fullLink = `${BASE}${payload.reset_path}`;
     const copy = () => {
-        navigator.clipboard.writeText(payload.temp_password);
-        toast.success("Temporary password copied");
+        navigator.clipboard.writeText(fullLink);
+        toast.success("Reset link copied to clipboard");
     };
     return (
         <div
             className="fixed inset-0 z-50 bg-black/80 backdrop-blur flex items-center justify-center p-4"
-            data-testid="temp-password-modal"
+            data-testid="reset-link-modal"
         >
             <div className="w-full max-w-md border border-border bg-background p-6 md:p-8">
                 <p className="eyebrow mb-1">Password reset</p>
-                <h2 className="font-display text-2xl mb-4">Temporary password</h2>
+                <h2 className="font-display text-2xl mb-4">Single-use reset link</h2>
                 <p className="text-sm text-muted-foreground mb-5">
-                    Share this with the user over a secure channel. It is shown
-                    once — we won't be able to recover it later.
+                    Send this link to <span className="text-foreground">{payload.email}</span> over a secure channel.
+                    It expires in 1 hour and can only be used once. We never store the raw token.
                 </p>
                 <div
-                    className="font-display text-2xl tg-mono tracking-wider bg-muted/40 border border-border rounded-sm p-4 text-center mb-5"
-                    data-testid="temp-password-value"
+                    className="text-xs tg-mono break-all bg-muted/40 border border-border rounded-sm p-4 mb-5"
+                    data-testid="reset-link-value"
                 >
-                    {payload.temp_password}
+                    {fullLink}
                 </div>
                 <div className="flex gap-2">
                     <button
                         onClick={copy}
                         className="flex-1 border border-border hover:border-foreground/60 py-3 rounded-sm text-sm inline-flex items-center justify-center gap-2"
-                        data-testid="temp-password-copy-btn"
+                        data-testid="reset-link-copy-btn"
                     >
-                        <Copy className="w-3.5 h-3.5" /> Copy
+                        <Copy className="w-3.5 h-3.5" /> Copy link
                     </button>
                     <button
                         onClick={onClose}
                         className="flex-1 bg-foreground text-background py-3 rounded-sm text-sm"
-                        data-testid="temp-password-close-btn"
+                        data-testid="reset-link-close-btn"
                     >
                         Done
                     </button>
@@ -286,7 +288,7 @@ export default function UserManagement() {
     const [stats, setStats] = useState({ total: 0, admin: 0, team: 0 });
     const [loading, setLoading] = useState(true);
     const [inviteOpen, setInviteOpen] = useState(false);
-    const [tempPw, setTempPw] = useState(null);
+    const [resetLink, setResetLink] = useState(null);
     const [busyId, setBusyId] = useState(null);
 
     const load = useCallback(async () => {
@@ -337,7 +339,11 @@ export default function UserManagement() {
         setBusyId(u.id);
         try {
             const { data } = await adminApi.post(`/users/${u.id}/reset-password`);
-            setTempPw({ temp_password: data.temp_password, email: u.email });
+            setResetLink({
+                reset_path: data.reset_path,
+                email: data.email || u.email,
+                expires_at: data.expires_at,
+            });
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed");
         } finally {
@@ -548,10 +554,10 @@ export default function UserManagement() {
                 onClose={() => setInviteOpen(false)}
                 onInvited={load}
             />
-            <TempPasswordModal
-                open={!!tempPw}
-                onClose={() => setTempPw(null)}
-                payload={tempPw}
+            <ResetLinkModal
+                open={!!resetLink}
+                onClose={() => setResetLink(null)}
+                payload={resetLink}
             />
         </div>
     );

@@ -81,9 +81,27 @@ async def list_links(
         skip, limit, p, s = _paginate_params(page, size)
         total = await db.links.count_documents({})
         links = await cursor.skip(skip).limit(limit).to_list(limit)
+    # Bulk-aggregate view stats in a single pipeline — avoids N+1 round-trips
+    # on Atlas (2 queries per link was timing out on large datasets).
+    link_ids = [link["id"] for link in links]
+    view_stats: Dict[str, Dict[str, int]] = {}
+    if link_ids:
+        async for row in db.link_views.aggregate([
+            {"$match": {"link_id": {"$in": link_ids}}},
+            {"$group": {
+                "_id": "$link_id",
+                "count": {"$sum": 1},
+                "emails": {"$addToSet": "$viewer_email"},
+            }},
+        ]):
+            view_stats[row["_id"]] = {
+                "view_count": row["count"],
+                "unique_viewers": len(row.get("emails", [])),
+            }
     for link in links:
-        link["view_count"] = await db.link_views.count_documents({"link_id": link["id"]})
-        link["unique_viewers"] = len(await db.link_views.distinct("viewer_email", {"link_id": link["id"]}))
+        stats = view_stats.get(link["id"], {})
+        link["view_count"] = stats.get("view_count", 0)
+        link["unique_viewers"] = stats.get("unique_viewers", 0)
     if page is None:
         return links
     return _paginated(links, total, p, s)

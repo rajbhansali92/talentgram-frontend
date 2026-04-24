@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
-import { LayoutDashboard, Users, Link2, LogOut, Clapperboard, UserPlus, Shield } from "lucide-react";
+import ChangePasswordModal from "@/components/ChangePasswordModal";
+import { LayoutDashboard, Users, Link2, LogOut, Clapperboard, UserPlus, Shield, KeyRound } from "lucide-react";
 
 const baseNav = [
     { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
@@ -23,6 +24,7 @@ export default function AdminLayout() {
     const role = admin?.role || "team";
     const isAdminRole = role === "admin";
     const navItems = isAdminRole ? [...baseNav, ...adminOnlyNav] : baseNav;
+    const [pwOpen, setPwOpen] = useState(false);
 
     const logout = () => {
         clearAdminSession();
@@ -81,6 +83,14 @@ export default function AdminLayout() {
                         <ThemeToggle size="sm" />
                     </div>
                     <button
+                        data-testid="admin-change-password-btn"
+                        onClick={() => setPwOpen(true)}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-sm text-xs text-white/70 hover:text-white hover:bg-white/5 transition-all mb-1"
+                    >
+                        <KeyRound className="w-3.5 h-3.5" strokeWidth={1.5} />
+                        Change password
+                    </button>
+                    <button
                         data-testid="admin-logout-btn"
                         onClick={logout}
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-sm text-xs text-white/70 hover:text-white hover:bg-white/5 transition-all"
@@ -94,14 +104,24 @@ export default function AdminLayout() {
             {/* Mobile top bar */}
             <div className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur-xl px-4 py-3 flex items-center justify-between">
                 <Logo size="sm" />
-                <button
-                    onClick={logout}
-                    data-testid="admin-logout-mobile-btn"
-                    className="text-xs text-white/60"
-                >
-                    Sign out
-                </button>
-                <ThemeToggle size="sm" />
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => setPwOpen(true)}
+                        data-testid="admin-change-password-mobile-btn"
+                        className="text-[11px] text-white/60 inline-flex items-center gap-1"
+                    >
+                        <KeyRound className="w-3 h-3" />
+                        Password
+                    </button>
+                    <button
+                        onClick={logout}
+                        data-testid="admin-logout-mobile-btn"
+                        className="text-xs text-white/60"
+                    >
+                        Sign out
+                    </button>
+                    <ThemeToggle size="sm" />
+                </div>
             </div>
 
             <main className="flex-1 min-w-0 md:pt-0 pt-14">
@@ -125,6 +145,7 @@ export default function AdminLayout() {
                 </div>
                 <Outlet />
             </main>
+            <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
         </div>
     );
 }

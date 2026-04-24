@@ -15,9 +15,11 @@ from core import (
     _public_user,
     current_user,
     db,
+    enforce_password_policy,
     generate_invite_token,
-    generate_temp_password,
+    generate_reset_token,
     hash_password,
+    hash_reset_token,
     require_role,
 )
 
@@ -25,6 +27,8 @@ router = APIRouter(prefix="/api", tags=["users"])
 
 # Invites expire after 7 days. Tokens are single-use (consumed on signup).
 INVITE_TTL_DAYS = 7
+# Admin-generated password reset links expire after 1 hour. Single-use.
+RESET_TOKEN_TTL_SECONDS = 3600
 
 
 def _invite_expires_at() -> str:
@@ -163,23 +167,41 @@ async def delete_user(uid: str, admin: dict = Depends(require_role("admin"))):
 
 
 @router.post("/users/{uid}/reset-password")
-async def reset_password(uid: str, _: dict = Depends(require_role("admin"))):
+async def admin_generate_reset_link(
+    uid: str, admin: dict = Depends(require_role("admin"))
+):
+    """Admin-only: generate a single-use password reset link for a user.
+
+    The raw token is returned to the admin ONCE (shown in a modal) and
+    never persisted — only its SHA-256 hash is stored. Old JWTs remain
+    valid until the reset is completed; completion bumps `token_version`
+    which kills every existing session for that user.
+    """
     target = await db.users.find_one({"id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
-    temp = generate_temp_password()
-    await db.users.update_one(
-        {"id": uid},
-        {
-            "$set": {
-                "password_hash": hash_password(temp),
-                # Keep status; if they were 'invited' with no hash, now they have one.
-                "status": "active" if target.get("status") != "disabled" else "disabled",
-            }
-        },
-    )
-    # Returned ONCE — not stored in cleartext anywhere.
-    return {"temp_password": temp}
+    raw = generate_reset_token()
+    token_hash = hash_reset_token(raw)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=RESET_TOKEN_TTL_SECONDS)
+
+    # Invalidate any prior unused tokens for this user — only one active at a time.
+    await db.password_reset_tokens.delete_many({"user_id": uid, "used_at": None})
+    await db.password_reset_tokens.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": uid,
+        "email": target["email"],
+        "token_hash": token_hash,
+        "expires_at": expires_at,
+        "created_at": _now(),
+        "created_by": admin["id"],
+        "used_at": None,
+    })
+    return {
+        "reset_token": raw,
+        "reset_path": f"/reset-password?token={raw}",
+        "expires_at": expires_at.isoformat(),
+        "email": target["email"],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -203,8 +225,7 @@ async def signup_validate(payload: SignupValidateIn):
 @router.post("/public/signup/complete")
 async def signup_complete(payload: SignupCompleteIn):
     pwd = (payload.password or "").strip()
-    if len(pwd) < 8:
-        raise HTTPException(400, "Password must be at least 8 characters")
+    enforce_password_policy(pwd)
 
     user = await db.users.find_one({"invite_token": payload.token}, {"_id": 0})
     if not user or user.get("status") != "invited":
@@ -219,6 +240,7 @@ async def signup_complete(payload: SignupCompleteIn):
             "$set": {
                 "password_hash": hash_password(pwd),
                 "status": "active",
+                "token_version": int(user.get("token_version") or 0) + 1,
             },
             "$unset": {"invite_token": "", "invite_expires_at": ""},
         },

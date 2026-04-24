@@ -109,9 +109,18 @@ export default function AdminLogin() {
                         )}
                         Enter Dashboard
                     </button>
-                    <p className="text-[11px] text-white/40 mt-6 tg-mono">
-                        Default · admin@talentgram.com · Admin@123
-                    </p>
+                    <div className="flex items-center justify-between mt-4">
+                        <p className="text-[11px] text-white/40 tg-mono">
+                            Default · admin@talentgram.com · Admin@123
+                        </p>
+                        <a
+                            href="/forgot-password"
+                            data-testid="login-forgot-link"
+                            className="text-[11px] text-white/60 hover:text-white underline-offset-4 hover:underline"
+                        >
+                            Forgot password?
+                        </a>
+                    </div>
                 </form>
             </div>
         </div>

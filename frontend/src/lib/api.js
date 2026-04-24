@@ -18,6 +18,31 @@ adminApi.interceptors.request.use((cfg) => {
     if (t) cfg.headers.Authorization = `Bearer ${t}`;
     return cfg;
 });
+// Centralised 401 handler: any "Session expired" response from the backend
+// (e.g. after a password change on another device, or a token-version bump)
+// clears the local session and bounces the user to the login screen.
+adminApi.interceptors.response.use(
+    (r) => r,
+    (err) => {
+        const status = err?.response?.status;
+        const detail = err?.response?.data?.detail || "";
+        const onAuthPage =
+            typeof window !== "undefined" &&
+            /\/admin\/login|\/forgot-password|\/reset-password|\/signup/.test(window.location.pathname);
+        if (
+            status === 401 &&
+            !onAuthPage &&
+            /session expired|invalid token|not authenticated/i.test(detail)
+        ) {
+            try {
+                localStorage.removeItem("tg_admin_token");
+                localStorage.removeItem("tg_admin");
+            } catch {}
+            window.location.href = "/admin/login";
+        }
+        return Promise.reject(err);
+    },
+);
 
 export const viewerApi = axios.create({ baseURL: API });
 viewerApi.interceptors.request.use((cfg) => {

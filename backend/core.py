@@ -74,11 +74,45 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def enforce_password_policy(pw: str) -> None:
+    """Raise HTTPException if the password doesn't meet the minimum policy:
+
+    - >= 8 characters
+    - contains at least one digit OR symbol (non-alphanumeric counts)
+    Spec pinned by product owner 2026-04.
+    """
+    if not pw or len(pw) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    has_digit = any(c.isdigit() for c in pw)
+    has_symbol = any(not c.isalnum() for c in pw)
+    if not (has_digit or has_symbol):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain at least one number or special character",
+        )
+
+
+def hash_reset_token(raw: str) -> str:
+    """SHA-256 hex digest — used so we never store raw reset tokens in Mongo."""
+    import hashlib as _h
+    return _h.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def generate_reset_token() -> str:
+    """Cryptographically random reset token (~43 chars, URL-safe)."""
+    import secrets
+    return secrets.token_urlsafe(32)
+
+
 async def current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),
 ) -> Dict[str, Any]:
     """Return the active user behind the JWT. Rejects disabled users and
-    unknown roles. Used by every admin-plane route."""
+    unknown roles. Used by every admin-plane route.
+
+    Also invalidates tokens whose `tv` claim is older than the user's current
+    `token_version` — this is how password changes kill all existing sessions.
+    """
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     data = decode_token(credentials.credentials)
@@ -94,6 +128,13 @@ async def current_user(
         raise HTTPException(status_code=403, detail="Account disabled")
     if user.get("status") == "invited":
         raise HTTPException(status_code=403, detail="Account not activated")
+    # Token-version check: any old token (including ones issued before a
+    # password change) becomes invalid when the user's stored version is
+    # higher than the claim embedded at issue time.
+    token_tv = int(data.get("tv") or 0)
+    user_tv = int(user.get("token_version") or 0)
+    if token_tv < user_tv:
+        raise HTTPException(status_code=401, detail="Session expired — please sign in again")
     user["role"] = user.get("role", "team")
     return user
 
@@ -368,6 +409,13 @@ async def seed_admin() -> None:
             await db[coll].create_index(keys, **opts)
         except Exception as e:
             logger.warning(f"{coll} index {keys}: {e}")
+
+    # Password reset tokens — lookup by hashed token, TTL auto-prune on expiry.
+    try:
+        await db.password_reset_tokens.create_index("token_hash", unique=True)
+        await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
+    except Exception as e:
+        logger.warning(f"password_reset_tokens index: {e}")
 
     legacy = await db.admins.find_one({"email": ADMIN_EMAIL}) if "admins" in await db.list_collection_names() else None
     existing = await db.users.find_one({"email": ADMIN_EMAIL})
@@ -671,6 +719,24 @@ class SignupValidateIn(BaseModel):
 class SignupCompleteIn(BaseModel):
     token: str
     password: str
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+class ResetTokenValidateIn(BaseModel):
+    token: str
+
+
+class ResetPasswordCompleteIn(BaseModel):
+    token: str
+    new_password: str
 
 
 def _public_user(u: dict) -> dict:

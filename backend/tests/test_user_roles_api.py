@@ -280,14 +280,48 @@ class TestAdminUserActions:
         r = login(throwaway_user["email"], throwaway_user["pw"])
         assert r.status_code == 200
 
-    def test_reset_password_returns_temp_and_works(self, admin_token, throwaway_user):
+    def test_reset_password_returns_reset_link_and_works(self, admin_token, throwaway_user):
+        """Admin reset now returns a single-use reset-link instead of a temp password.
+        The raw token is shown ONCE; only a SHA-256 hash is stored in the DB.
+        Completing the reset via /api/public/reset-password finalises the new password
+        and bumps the user's token_version, invalidating every old session."""
         uid = throwaway_user["id"]
         r = requests.post(f"{API}/users/{uid}/reset-password", headers=hdr(admin_token))
         assert r.status_code == 200
-        temp = r.json()["temp_password"]
-        assert len(temp) >= 10
-        r = login(throwaway_user["email"], temp)
+        body = r.json()
+        raw = body["reset_token"]
+        assert isinstance(raw, str) and len(raw) >= 30
+        assert body["reset_path"].startswith("/reset-password?token=")
+        assert body["email"] == throwaway_user["email"]
+
+        # Old password still works until the reset is completed.
+        r = login(throwaway_user["email"], throwaway_user["pw"])
         assert r.status_code == 200
+
+        # Validate endpoint — does not consume the token.
+        r = requests.post(f"{API}/public/reset-password/validate", json={"token": raw})
+        assert r.status_code == 200 and r.json()["email"] == throwaway_user["email"]
+
+        # Complete reset with a new password that satisfies the policy.
+        new_pw = "Reset@Test123"
+        r = requests.post(
+            f"{API}/public/reset-password",
+            json={"token": raw, "new_password": new_pw},
+        )
+        assert r.status_code == 200, r.text
+
+        # Old password rejected, new one works.
+        r = login(throwaway_user["email"], throwaway_user["pw"])
+        assert r.status_code == 401
+        r = login(throwaway_user["email"], new_pw)
+        assert r.status_code == 200
+
+        # Single-use: replay must fail.
+        r = requests.post(
+            f"{API}/public/reset-password",
+            json={"token": raw, "new_password": "Replay@Test123"},
+        )
+        assert r.status_code == 400
 
     def test_cannot_disable_self(self, admin_token):
         r = requests.get(f"{API}/users", headers=hdr(admin_token))

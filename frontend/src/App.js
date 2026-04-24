@@ -18,6 +18,8 @@ import ApplicationPage from "@/pages/ApplicationPage";
 import Applications from "@/pages/Applications";
 import UserManagement from "@/pages/UserManagement";
 import SignupPage from "@/pages/SignupPage";
+import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
+import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import Landing from "@/pages/Landing";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
@@ -72,6 +74,8 @@ function App() {
                     <Route path="/submit/:slug" element={<SubmissionPage />} />
                     <Route path="/apply" element={<ApplicationPage />} />
                     <Route path="/signup" element={<SignupPage />} />
+                    <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                    <Route path="/reset-password" element={<ResetPasswordPage />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
             </BrowserRouter>

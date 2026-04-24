@@ -41,6 +41,7 @@ async def login(payload: LoginIn):
         "email": user["email"],
         "role": role,
         "id": user["id"],
+        "tv": int(user.get("token_version") or 0),
     })
     # Track last_login (best-effort)
     try:

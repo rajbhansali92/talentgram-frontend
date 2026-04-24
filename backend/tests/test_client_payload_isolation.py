@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from server import (  # noqa: E402
+from core import (  # noqa: E402
     CLIENT_ALLOWED_FIELDS,
     DEFAULT_VISIBILITY,
     _filter_talent_for_client,

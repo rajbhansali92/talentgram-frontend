@@ -15,7 +15,7 @@ import {
 
 /**
  * Modal for creating a client-ready portfolio link from APPROVED submissions.
- * Multi-select + reuse existing visibility toggles + server-side talent creation.
+ * Theme-aware: uses shadcn tokens (bg-background, text-foreground, text-muted-foreground, border-border).
  */
 export default function ForwardToLinkModal({
     project,
@@ -71,27 +71,27 @@ export default function ForwardToLinkModal({
 
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl overflow-y-auto"
+            className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xl overflow-y-auto"
             data-testid="forward-to-link-modal"
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50"
+                className="fixed top-5 right-5 z-10 w-10 h-10 border border-border hover:border-foreground rounded-sm flex items-center justify-center bg-background/80 text-foreground"
             >
                 <X className="w-4 h-4" />
             </button>
-            <div className="max-w-6xl mx-auto px-5 md:px-12 py-10 md:py-14">
+            <div className="max-w-6xl mx-auto px-5 md:px-12 py-10 md:py-14 text-foreground">
                 <p className="eyebrow mb-3">Forward to Client</p>
                 <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2">
                     Talentgram × {project.brand_name}
                 </h2>
-                <p className="text-white/50 text-sm mb-10">
+                <p className="text-muted-foreground text-sm mb-10">
                     Select approved submissions to push into a client-ready
                     portfolio link. Only approved talents appear below.
                 </p>
 
                 {approved.length === 0 ? (
-                    <div className="border border-white/10 p-10 text-center text-white/50 text-sm">
+                    <div className="border border-border p-10 text-center text-muted-foreground text-sm">
                         No approved submissions yet. Review submissions and
                         mark as approved first.
                     </div>
@@ -114,7 +114,7 @@ export default function ForwardToLinkModal({
                                                   ),
                                         )
                                     }
-                                    className="text-xs text-white/60 hover:text-white"
+                                    className="text-xs text-muted-foreground hover:text-foreground"
                                 >
                                     {selected.size === approved.length
                                         ? "Clear all"
@@ -136,9 +136,9 @@ export default function ForwardToLinkModal({
                                             key={s.id}
                                             onClick={() => toggle(s.id)}
                                             data-testid={`forward-select-${s.id}`}
-                                            className={`relative text-left border transition-all ${active ? "border-white" : "border-white/10 hover:border-white/30"}`}
+                                            className={`relative text-left border transition-all ${active ? "border-foreground" : "border-border hover:border-foreground/40"}`}
                                         >
-                                            <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
+                                            <div className="aspect-[3/4] bg-muted overflow-hidden">
                                                 {thumb ? (
                                                     <img
                                                         src={thumb}
@@ -147,7 +147,7 @@ export default function ForwardToLinkModal({
                                                         className="w-full h-full object-cover"
                                                     />
                                                 ) : (
-                                                    <div className="w-full h-full flex items-center justify-center text-white/20">
+                                                    <div className="w-full h-full flex items-center justify-center text-muted-foreground/50">
                                                         <ImageIcon className="w-6 h-6" />
                                                     </div>
                                                 )}
@@ -156,7 +156,7 @@ export default function ForwardToLinkModal({
                                                 <div className="font-display text-base truncate">
                                                     {s.talent_name}
                                                 </div>
-                                                <div className="flex items-center gap-3 mt-1 text-[10px] tg-mono text-white/50">
+                                                <div className="flex items-center gap-3 mt-1 text-[10px] tg-mono text-muted-foreground">
                                                     <span className="inline-flex items-center gap-1">
                                                         <Video className="w-3 h-3" />
                                                         {hasIntro ? "intro" : "no intro"}
@@ -168,7 +168,7 @@ export default function ForwardToLinkModal({
                                                 </div>
                                             </div>
                                             {active && (
-                                                <div className="absolute top-2 right-2 w-6 h-6 bg-white text-black flex items-center justify-center rounded-sm">
+                                                <div className="absolute top-2 right-2 w-6 h-6 bg-foreground text-background flex items-center justify-center rounded-sm">
                                                     <Check className="w-3.5 h-3.5" />
                                                 </div>
                                             )}
@@ -180,7 +180,7 @@ export default function ForwardToLinkModal({
 
                         {/* Visibility + submit */}
                         <div className="lg:col-span-1 space-y-6">
-                            <div className="border border-white/10 p-5">
+                            <div className="border border-border p-5">
                                 <p className="eyebrow mb-4">
                                     Client Visibility
                                 </p>
@@ -193,7 +193,7 @@ export default function ForwardToLinkModal({
                                 onClick={submit}
                                 disabled={saving || selected.size === 0}
                                 data-testid="confirm-forward-btn"
-                                className="w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40 inline-flex items-center justify-center gap-2 min-h-[52px]"
+                                className="w-full bg-foreground text-background py-4 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40 inline-flex items-center justify-center gap-2 min-h-[52px]"
                             >
                                 {saving ? (
                                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -202,7 +202,7 @@ export default function ForwardToLinkModal({
                                 )}
                                 Generate Client Link ({selected.size})
                             </button>
-                            <p className="text-[11px] text-white/40 text-center tg-mono">
+                            <p className="text-[11px] text-muted-foreground text-center tg-mono">
                                 Link will be titled "Talentgram × {project.brand_name}"
                             </p>
                         </div>

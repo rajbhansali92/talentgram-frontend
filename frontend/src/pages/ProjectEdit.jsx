@@ -884,21 +884,21 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl overflow-y-auto"
+            className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xl overflow-y-auto"
             data-testid="submission-review-modal"
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50"
+                className="fixed top-5 right-5 z-10 w-10 h-10 border border-border hover:border-foreground rounded-sm flex items-center justify-center bg-background/80 text-foreground"
             >
                 <X className="w-4 h-4" />
             </button>
-            <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14">
+            <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14 text-foreground">
                 <p className="eyebrow mb-3">Submission</p>
                 <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2">
                     {submission.talent_name}
                 </h2>
-                <p className="text-sm text-white/50 tg-mono mb-10">
+                <p className="text-sm text-muted-foreground tg-mono mb-10">
                     {submission.talent_email}
                     {submission.talent_phone
                         ? ` · ${submission.talent_phone}`
@@ -907,12 +907,12 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                 {/* Editable form data with per-field visibility toggles */}
                 <section
-                    className="mb-10 border border-white/10 p-5 md:p-6"
+                    className="mb-10 border border-border p-5 md:p-6"
                     data-testid="review-form-data-section"
                 >
                     <div className="flex items-center justify-between mb-5">
                         <p className="eyebrow">Talent Details</p>
-                        <span className="text-[10px] tg-mono text-white/40">
+                        <span className="text-[10px] tg-mono text-muted-foreground">
                             Toggle per-field to control client visibility
                         </span>
                     </div>
@@ -923,7 +923,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                 className="flex items-start gap-3"
                             >
                                 <div className="flex-1 min-w-0">
-                                    <label className="text-[11px] text-white/50 tracking-widest uppercase">
+                                    <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
                                         {f.label}
                                     </label>
                                     <input
@@ -936,7 +936,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             })
                                         }
                                         data-testid={`review-field-${f.key}`}
-                                        className="mt-1 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                        className="mt-1 w-full bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
                                     />
                                 </div>
                                 <button
@@ -953,18 +953,18 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Visible to client"
                                             : "Hidden from client"
                                     }
-                                    className={`mt-5 w-10 h-5 rounded-full relative transition-all shrink-0 ${fv[f.key] ? "bg-white" : "bg-white/15"}`}
+                                    className={`mt-5 w-10 h-5 rounded-full relative transition-all shrink-0 ${fv[f.key] ? "bg-foreground" : "bg-muted"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv[f.key] ? "translate-x-5 bg-black" : "bg-white"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv[f.key] ? "translate-x-5 bg-background" : "bg-foreground"}`}
                                     />
                                 </button>
                             </div>
                         ))}
 
                         {/* Availability (structured) */}
-                        <div className="md:col-span-2 border-t border-white/10 pt-4">
-                            <label className="text-[11px] text-white/50 tracking-widest uppercase">
+                        <div className="md:col-span-2 border-t border-border pt-4">
+                            <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
                                 Availability
                             </label>
                             <div className="mt-2 flex items-center gap-3">
@@ -980,15 +980,15 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                         })
                                     }
                                     data-testid="review-avail-status"
-                                    className="bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                    className="bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
                                 >
-                                    <option value="" className="bg-black">
+                                    <option value="" className="bg-background text-foreground">
                                         —
                                     </option>
-                                    <option value="yes" className="bg-black">
+                                    <option value="yes" className="bg-background text-foreground">
                                         Yes
                                     </option>
-                                    <option value="no" className="bg-black">
+                                    <option value="no" className="bg-background text-foreground">
                                         No
                                     </option>
                                 </select>
@@ -1006,14 +1006,14 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     }
                                     placeholder="Note / reason"
                                     data-testid="review-avail-note"
-                                    className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                    className="flex-1 bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
                                 />
                             </div>
                         </div>
 
                         {/* Budget (structured) */}
                         <div className="md:col-span-2">
-                            <label className="text-[11px] text-white/50 tracking-widest uppercase">
+                            <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
                                 Budget
                             </label>
                             <div className="mt-2 flex items-center gap-3">
@@ -1029,15 +1029,15 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                         })
                                     }
                                     data-testid="review-budget-status"
-                                    className="bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                    className="bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
                                 >
-                                    <option value="" className="bg-black">
+                                    <option value="" className="bg-background text-foreground">
                                         —
                                     </option>
-                                    <option value="accept" className="bg-black">
+                                    <option value="accept" className="bg-background text-foreground">
                                         Accept
                                     </option>
-                                    <option value="custom" className="bg-black">
+                                    <option value="custom" className="bg-background text-foreground">
                                         Not accepting
                                     </option>
                                 </select>
@@ -1055,7 +1055,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     }
                                     placeholder="Expected budget (if not accepting)"
                                     data-testid="review-budget-value"
-                                    className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                    className="flex-1 bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
                                 />
                             </div>
                         </div>
@@ -1063,7 +1063,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {Array.isArray(submission.project_custom_questions) &&
                         submission.project_custom_questions.length > 0 && (
-                            <div className="border-t border-white/10 pt-5">
+                            <div className="border-t border-border pt-5">
                                 <p className="eyebrow mb-3">
                                     Custom Answers
                                 </p>
@@ -1073,10 +1073,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             key={q.id}
                                             className="mb-3 text-sm"
                                         >
-                                            <div className="text-white/60 text-xs mb-1">
+                                            <div className="text-muted-foreground text-xs mb-1">
                                                 {q.question}
                                             </div>
-                                            <div className="text-white/90">
+                                            <div className="text-foreground">
                                                 {(form.custom_answers || {})[
                                                     q.id
                                                 ] || "—"}
@@ -1091,7 +1091,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         onClick={save}
                         disabled={saving}
                         data-testid="review-save-btn"
-                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-white text-black rounded-sm text-xs font-medium hover:opacity-90"
+                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-foreground text-background rounded-sm text-xs font-medium hover:opacity-90"
                     >
                         {saving && (
                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -1106,14 +1106,14 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         <video
                             src={FILE_URL(intro.storage_path)}
                             controls
-                            className="w-full max-w-3xl border border-white/10 bg-black"
+                            className="w-full max-w-3xl border border-border bg-muted rounded-lg"
                             data-testid="review-intro-video"
                         />
                     </section>
                 ) : (
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
-                        <div className="max-w-3xl border border-dashed border-white/10 bg-black/40 aspect-video flex items-center justify-center text-white/30 text-xs tg-mono">
+                        <div className="max-w-3xl border border-dashed border-border bg-muted/40 aspect-video flex items-center justify-center text-muted-foreground text-xs tg-mono rounded-lg">
                             Not submitted
                         </div>
                     </section>
@@ -1126,17 +1126,17 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             const label = `Take ${key.split("_")[1]}`;
                             return (
                                 <div key={key} data-testid={`review-${key}`}>
-                                    <p className="text-xs text-white/50 mb-2 tg-mono">
+                                    <p className="text-xs text-muted-foreground mb-2 tg-mono">
                                         {label}
                                     </p>
                                     {t ? (
                                         <video
                                             src={FILE_URL(t.storage_path)}
                                             controls
-                                            className="w-full border border-white/10 bg-black"
+                                            className="w-full border border-border bg-muted rounded-lg"
                                         />
                                     ) : (
-                                        <div className="w-full border border-dashed border-white/10 bg-black/40 aspect-video flex items-center justify-center text-white/30 text-xs tg-mono">
+                                        <div className="w-full border border-dashed border-border bg-muted/40 aspect-video flex items-center justify-center text-muted-foreground text-xs tg-mono rounded-lg">
                                             Not submitted
                                         </div>
                                     )}
@@ -1157,7 +1157,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     href={FILE_URL(m.storage_path)}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="aspect-square bg-[#0a0a0a] overflow-hidden border border-white/10"
+                                    className="aspect-square bg-muted overflow-hidden border border-border"
                                 >
                                     <img
                                         src={FILE_URL(m.storage_path)}

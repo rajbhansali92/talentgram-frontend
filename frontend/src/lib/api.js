@@ -3,6 +3,14 @@ import axios from "axios";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
 export const FILE_URL = (path) => `${API}/files/${path}`;
+/**
+ * Prefer the 1600px JPEG copy if the backend has generated one (images only).
+ * Falls back to the original upload — used for downloads + non-image media.
+ */
+export const IMAGE_URL = (media) => {
+    const p = (media && (media.resized_storage_path || media.storage_path)) || media;
+    return FILE_URL(p);
+};
 
 export const adminApi = axios.create({ baseURL: API });
 adminApi.interceptors.request.use((cfg) => {

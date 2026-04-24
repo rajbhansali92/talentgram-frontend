@@ -22,12 +22,17 @@ from core import (
     APP_NAME,
     APPLICATION_DECISIONS,
     APPLICATION_UPLOAD_CATEGORIES,
+    IMAGE_RESIZE_MAX_WIDTH,
     MAX_APPLICATION_IMAGES,
+    MAX_SUBMISSION_IMAGE_BYTES,
+    MAX_SUBMISSION_VIDEO_BYTES,
     MIN_APPLICATION_IMAGES,
     ApplicationStartIn,
     SubmissionDecisionIn,
     SubmissionUpdateIn,
     _now,
+    _paginate_params,
+    _paginated,
     compute_age,
     current_admin,
     current_team_or_admin,
@@ -35,6 +40,7 @@ from core import (
     decode_submitter,
     make_token,
     put_object,
+    resize_image_bytes,
 )
 
 router = APIRouter(prefix="/api", tags=["applications"])
@@ -160,6 +166,22 @@ async def upload_application_media(
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
     path = f"{APP_NAME}/applications/{aid}/{uuid.uuid4()}.{ext}"
     data = await file.read()
+
+    size_bytes = len(data)
+    if category == "intro_video" and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
+        mb = size_bytes // (1024 * 1024)
+        cap_mb = MAX_SUBMISSION_VIDEO_BYTES // (1024 * 1024)
+        raise HTTPException(
+            400,
+            f"Video is too large ({mb} MB). Max {cap_mb} MB — please compress and retry.",
+        )
+    if category == "image" and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+        mb = size_bytes // (1024 * 1024)
+        cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
+        raise HTTPException(
+            400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
+        )
+
     result = put_object(path, data, file.content_type or "application/octet-stream")
     media = {
         "id": str(uuid.uuid4()),
@@ -167,11 +189,18 @@ async def upload_application_media(
         "storage_path": result["path"],
         "content_type": file.content_type or "application/octet-stream",
         "original_filename": file.filename,
-        "size": result.get("size", len(data)),
+        "size": result.get("size", size_bytes),
         "created_at": _now(),
         "scope": "application",
         "application_id": aid,
     }
+    if category == "image":
+        resized = resize_image_bytes(data, max_width=IMAGE_RESIZE_MAX_WIDTH)
+        if resized and len(resized) < size_bytes:
+            resized_path = f"{APP_NAME}/applications/{aid}/{uuid.uuid4()}_1600.jpg"
+            r2 = put_object(resized_path, resized, "image/jpeg")
+            media["resized_storage_path"] = r2["path"]
+            media["resized_size"] = len(resized)
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
     return await db.applications.find_one({"id": aid}, {"_id": 0})
 
@@ -223,6 +252,8 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
 async def list_applications(
     status: Optional[str] = None,
     decision: Optional[str] = None,
+    page: Optional[int] = None,
+    size: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {}
@@ -230,8 +261,13 @@ async def list_applications(
         query["status"] = status
     if decision:
         query["decision"] = decision
-    items = await db.applications.find(query, {"_id": 0}).sort("created_at", -1).to_list(5000)
-    return items
+    cursor = db.applications.find(query, {"_id": 0}).sort("created_at", -1)
+    if page is None:
+        return await cursor.to_list(5000)
+    skip, limit, p, s = _paginate_params(page, size)
+    total = await db.applications.count_documents(query)
+    items = await cursor.skip(skip).limit(limit).to_list(limit)
+    return _paginated(items, total, p, s)
 
 
 @router.get("/applications/{aid}")

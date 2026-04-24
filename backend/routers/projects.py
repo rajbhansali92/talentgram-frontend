@@ -49,9 +49,18 @@ async def create_project(payload: ProjectIn, admin: dict = Depends(current_team_
 
 
 @router.get("/projects")
-async def list_projects(admin: dict = Depends(current_team_or_admin)):
-    items = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
-    return items
+async def list_projects(
+    page: Optional[int] = None,
+    size: Optional[int] = None,
+    admin: dict = Depends(current_team_or_admin),
+):
+    cursor = db.projects.find({}, {"_id": 0}).sort("created_at", -1)
+    if page is None:
+        return await cursor.to_list(2000)
+    skip, limit, p, s = _paginate_params(page, size)
+    total = await db.projects.count_documents({})
+    items = await cursor.skip(skip).limit(limit).to_list(limit)
+    return _paginated(items, total, p, s)
 
 
 @router.get("/projects/{pid}")
@@ -224,15 +233,6 @@ async def forward_to_link(
         "is_public": True,
         "password": None,
         "notes": f"Forwarded from project: {project['brand_name']}",
-        "created_at": _now(),
-        "created_by": admin["id"],
-    }
-    await db.links.insert_one(link_doc)
-    link_doc.pop("_id", None)
-    link_doc["view_count"] = 0
-    link_doc["unique_viewers"] = 0
-    return link_doc
-d from project: {project['brand_name']}",
         "created_at": _now(),
         "created_by": admin["id"],
     }

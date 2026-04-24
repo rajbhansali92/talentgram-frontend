@@ -191,6 +191,34 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
     return resp.json()
 
 
+def resize_image_bytes(data: bytes, max_width: int = 1600, quality: int = 85) -> Optional[bytes]:
+    """Generate a display-optimised JPEG copy of a source image.
+
+    Returns the JPEG bytes if the source is a decodable image, or ``None`` if
+    the bytes are not a valid image (in which case callers should skip the
+    resize step and keep only the original). Width is capped at ``max_width``;
+    taller portraits preserve aspect ratio. Animated sources (GIF/WEBP) are
+    flattened to the first frame — acceptable for portfolio thumbnails.
+    """
+    try:
+        from PIL import Image  # local import keeps server startup light
+        import io as _io
+        img = Image.open(_io.BytesIO(data))
+        img.load()
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        w, h = img.size
+        if w > max_width:
+            new_h = int(h * (max_width / float(w)))
+            img = img.resize((max_width, new_h), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True)
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning("resize_image_bytes skipped: %s", e)
+        return None
+
+
 def get_object(path: str) -> tuple[bytes, str]:
     """Buffered fetch — kept for small payloads and back-compat. For large
     media (video), prefer `stream_object` which never loads the full body."""
@@ -437,6 +465,12 @@ LEGACY_TAKE_CATEGORIES = {"take_1", "take_2", "take_3"}
 MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
+# Public audition upload size cap: 150 MB for videos (intro/take), 25 MB for images.
+# Enforced server-side to protect against accidental/malicious bloat.
+MAX_SUBMISSION_VIDEO_BYTES = 150 * 1024 * 1024
+MAX_SUBMISSION_IMAGE_BYTES = 25 * 1024 * 1024
+# Target width when generating the display-optimised JPEG copy.
+IMAGE_RESIZE_MAX_WIDTH = 1600
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 
@@ -693,7 +727,7 @@ def generate_invite_token() -> str:
 # --------------------------------------------------------------------------
 def _public_media(m: dict) -> dict:
     """Strip internal scope metadata (project_id / submission_id / talent_id / scope) before sending to client."""
-    return {
+    out = {
         "id": m.get("id"),
         "category": m.get("category"),
         "storage_path": m.get("storage_path"),
@@ -702,6 +736,13 @@ def _public_media(m: dict) -> dict:
         "size": m.get("size", 0),
         "created_at": m.get("created_at"),
     }
+    # Display-optimised 1600px JPEG variant (images only). Frontend prefers this
+    # path for the portfolio view; the original remains available for download.
+    if m.get("resized_storage_path"):
+        out["resized_storage_path"] = m["resized_storage_path"]
+    if m.get("label"):
+        out["label"] = m["label"]
+    return out
 
 
 def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict:

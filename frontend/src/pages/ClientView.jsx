@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo } from "react";
 import { useParams } from "react-router-dom";
-import { viewerApi, FILE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { viewerApi, FILE_URL, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import axios from "axios";
@@ -327,7 +327,7 @@ export default function ClientView() {
                                 <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10 group-hover:border-white/30 transition-all">
                                     {cover ? (
                                         <img
-                                            src={FILE_URL(cover.storage_path)}
+                                            src={IMAGE_URL(cover)}
                                             alt={t.name}
                                             loading="lazy"
                                             className="w-full h-full object-cover group-hover:scale-[1.03] transition-all duration-700"
@@ -493,7 +493,7 @@ function TalentDetail({
                         {images.length > 0 ? (
                             <div className="relative bg-[#0a0a0a] aspect-[3/4] border border-white/10 overflow-hidden">
                                 <img
-                                    src={FILE_URL(images[idx].storage_path)}
+                                    src={IMAGE_URL(images[idx])}
                                     alt={talent.name}
                                     className="w-full h-full object-contain"
                                 />
@@ -542,7 +542,7 @@ function TalentDetail({
                                         className={`shrink-0 w-16 h-20 border ${i === idx ? "border-white" : "border-white/10"}`}
                                     >
                                         <img
-                                            src={FILE_URL(m.storage_path)}
+                                            src={IMAGE_URL(m)}
                                             alt=""
                                             className="w-full h-full object-cover"
                                         />

@@ -87,6 +87,7 @@ export default function SubmissionPage() {
 
     const [submission, setSubmission] = useState(null);
     const [uploading, setUploading] = useState(null);
+    const [uploadPct, setUploadPct] = useState(0);
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
@@ -276,7 +277,15 @@ export default function SubmissionPage() {
     };
 
     const uploadFile = async (file, category, label = null) => {
+        // Client-side guard mirrors backend cap (150 MB videos / 25 MB images)
+        const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
+        const CAP_MB = isVideoSlot ? 150 : 25;
+        if (file && file.size > CAP_MB * 1024 * 1024) {
+            toast.error(`File too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
+            return;
+        }
         setUploading(label ? `${category}:${label}` : category);
+        setUploadPct(0);
         try {
             const fd = new FormData();
             fd.append("file", file);
@@ -291,6 +300,9 @@ export default function SubmissionPage() {
                         ...authCfg.headers,
                         "Content-Type": "multipart/form-data",
                     },
+                    onUploadProgress: (e) => {
+                        if (e.total) setUploadPct(Math.round((e.loaded / e.total) * 100));
+                    },
                 },
             );
             setSubmission(data);
@@ -298,6 +310,7 @@ export default function SubmissionPage() {
             toast.error(err?.response?.data?.detail || "Upload failed");
         } finally {
             setUploading(null);
+            setUploadPct(0);
         }
     };
 
@@ -321,10 +334,19 @@ export default function SubmissionPage() {
         if (files.length > room) {
             toast.info(`Only ${room} more images allowed (max ${MAX_IMAGES})`);
         }
+        // Client-side per-image cap (25 MB)
+        const over = accepted.find((f) => f.size > 25 * 1024 * 1024);
+        if (over) {
+            toast.error(`"${over.name}" is too large (max 25 MB per image).`);
+            return;
+        }
         setUploading("image");
+        setUploadPct(0);
         try {
             let last = null;
-            for (const f of accepted) {
+            const totalFiles = accepted.length;
+            for (let i = 0; i < accepted.length; i++) {
+                const f = accepted[i];
                 const fd = new FormData();
                 fd.append("file", f);
                 fd.append("category", "image");
@@ -337,6 +359,13 @@ export default function SubmissionPage() {
                             ...authCfg.headers,
                             "Content-Type": "multipart/form-data",
                         },
+                        onUploadProgress: (e) => {
+                            if (e.total) {
+                                const thisPct = (e.loaded / e.total) * 100;
+                                const overall = (i * 100 + thisPct) / totalFiles;
+                                setUploadPct(Math.round(overall));
+                            }
+                        },
                     },
                 );
                 last = data;
@@ -346,6 +375,7 @@ export default function SubmissionPage() {
             toast.error(err?.response?.data?.detail || "Upload failed");
         } finally {
             setUploading(null);
+            setUploadPct(0);
         }
     };
 
@@ -955,6 +985,7 @@ export default function SubmissionPage() {
                             inputRef={introRef}
                             onPick={(f) => uploadFile(f[0], "intro_video")}
                             uploading={uploading === "intro_video"}
+                            uploadPct={uploadPct}
                             media={intro}
                             onRemove={(m) => removeMedia(m.id)}
                             testid="upload-intro"
@@ -999,6 +1030,7 @@ export default function SubmissionPage() {
                                     number={takes.length + 1}
                                     required={takes.length === 0}
                                     uploading={uploading}
+                                    uploadPct={uploadPct}
                                     onPick={(file, label) =>
                                         uploadFile(file, "take", label)
                                     }
@@ -1054,12 +1086,24 @@ export default function SubmissionPage() {
                                         }
                                         disabled={uploading === "image"}
                                         data-testid="add-image-btn"
-                                        className="aspect-square border border-dashed border-white/20 hover:border-white/50 flex items-center justify-center text-white/50 hover:text-white transition-all"
+                                        className="relative aspect-square border border-dashed border-white/20 hover:border-white/50 flex items-center justify-center text-white/50 hover:text-white transition-all overflow-hidden"
                                     >
+                                        {uploading === "image" && uploadPct > 0 && (
+                                            <span
+                                                aria-hidden
+                                                className="absolute inset-y-0 left-0 bg-white/10"
+                                                style={{ width: `${uploadPct}%` }}
+                                            />
+                                        )}
                                         {uploading === "image" ? (
-                                            <Loader2 className="w-5 h-5 animate-spin" />
+                                            <div className="relative flex flex-col items-center gap-1">
+                                                <Loader2 className="w-5 h-5 animate-spin" />
+                                                <span className="text-[10px] tg-mono">
+                                                    {uploadPct ? `${uploadPct}%` : "…"}
+                                                </span>
+                                            </div>
                                         ) : (
-                                            <div className="flex flex-col items-center gap-1">
+                                            <div className="relative flex flex-col items-center gap-1">
                                                 <Camera className="w-5 h-5" />
                                                 <span className="text-[10px] tg-mono">
                                                     Add
@@ -1180,6 +1224,7 @@ function UploadSlot({
     inputRef,
     onPick,
     uploading,
+    uploadPct,
     media,
     onRemove,
     testid,
@@ -1240,15 +1285,22 @@ function UploadSlot({
                     onClick={() => inputRef.current?.click()}
                     disabled={uploading}
                     data-testid={`${testid}-btn`}
-                    className="w-full border border-dashed border-white/20 hover:border-white/50 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all"
+                    className="w-full border border-dashed border-white/20 hover:border-white/50 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all relative overflow-hidden"
                 >
+                    {uploading && typeof uploadPct === "number" && uploadPct > 0 && (
+                        <span
+                            aria-hidden
+                            className="absolute inset-y-0 left-0 bg-white/10 transition-[width]"
+                            style={{ width: `${uploadPct}%` }}
+                        />
+                    )}
                     {uploading ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <Loader2 className="w-4 h-4 animate-spin relative" />
                     ) : (
-                        <Upload className="w-4 h-4 text-white/60" />
+                        <Upload className="w-4 h-4 text-white/60 relative" />
                     )}
                     {compact ? (
-                        <span className="text-sm flex-1">
+                        <span className="text-sm flex-1 relative">
                             <span className="font-display mr-2">
                                 {title}
                                 {required && (
@@ -1256,12 +1308,12 @@ function UploadSlot({
                                 )}
                             </span>
                             <span className="text-white/40 text-xs">
-                                Tap to upload
+                                {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
                             </span>
                         </span>
                     ) : (
-                        <span className="text-sm text-white/70">
-                            Tap to upload
+                        <span className="text-sm text-white/70 relative">
+                            {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
                         </span>
                     )}
                 </button>
@@ -1352,28 +1404,35 @@ function TakeRow({ index, media, canRename, onRename, onRemove }) {
 // Add-a-new-take slot — user picks a file, we upload with the label they type
 // (falls back to "Take N" if empty).
 // --------------------------------------------------------------------------
-function AddTakeSlot({ number, required, uploading, onPick, inputRef }) {
+function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef }) {
     const [label, setLabel] = useState("");
     const busy = uploading && uploading.startsWith("take");
     const fallback = `Take ${number}`;
 
     return (
         <div
-            className="border border-dashed border-white/15 p-3 flex items-center gap-2"
+            className="border border-dashed border-white/15 p-3 flex items-center gap-2 relative overflow-hidden"
             data-testid={`add-take-${number}`}
         >
+            {busy && typeof uploadPct === "number" && uploadPct > 0 && (
+                <span
+                    aria-hidden
+                    className="absolute inset-y-0 left-0 bg-white/10"
+                    style={{ width: `${uploadPct}%` }}
+                />
+            )}
             <input
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 placeholder={`${fallback} — add a label (e.g. Scene 1)`}
-                className="flex-1 bg-transparent outline-none text-sm py-1.5 border-b border-white/10 focus:border-white/40"
+                className="relative flex-1 bg-transparent outline-none text-sm py-1.5 border-b border-white/10 focus:border-white/40"
                 data-testid={`new-take-label-${number}`}
             />
             <button
                 type="button"
                 onClick={() => inputRef.current?.click()}
                 disabled={busy}
-                className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 rounded-sm inline-flex items-center gap-1 disabled:opacity-40"
+                className="relative text-xs px-3 py-2 border border-white/15 hover:border-white/40 rounded-sm inline-flex items-center gap-1 disabled:opacity-40"
                 data-testid={`new-take-upload-${number}`}
             >
                 {busy ? (
@@ -1381,7 +1440,8 @@ function AddTakeSlot({ number, required, uploading, onPick, inputRef }) {
                 ) : (
                     <Plus className="w-3 h-3" />
                 )}
-                Upload {required && <span className="text-[#FF3B30]">*</span>}
+                {busy && uploadPct ? `${uploadPct}%` : "Upload"}
+                {required && <span className="text-[#FF3B30]">*</span>}
             </button>
             <input
                 ref={inputRef}

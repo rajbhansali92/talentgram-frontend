@@ -7,9 +7,12 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Uploa
 from core import (
     APP_NAME,
     DEFAULT_FIELD_VISIBILITY,
+    IMAGE_RESIZE_MAX_WIDTH,
     LEGACY_TAKE_CATEGORIES,
     MAX_SUBMISSION_IMAGES,
+    MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_TAKES,
+    MAX_SUBMISSION_VIDEO_BYTES,
     MIN_SUBMISSION_IMAGES,
     SUBMISSION_DECISIONS,
     SUBMISSION_UPLOAD_CATEGORIES,
@@ -18,6 +21,8 @@ from core import (
     SubmissionStartIn,
     SubmissionUpdateIn,
     _now,
+    _paginate_params,
+    _paginated,
     _public_project,
     _submission_to_client_shape,
     current_admin,
@@ -26,6 +31,7 @@ from core import (
     decode_submitter,
     make_token,
     put_object,
+    resize_image_bytes,
 )
 
 router = APIRouter(prefix="/api", tags=["submissions"])
@@ -191,6 +197,25 @@ async def submission_upload(
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
     path = f"{APP_NAME}/submissions/{sid}/{uuid.uuid4()}.{ext}"
     data = await file.read()
+
+    # Enforce size caps up front so oversized bodies never make it to storage.
+    # Videos (intro/takes) are capped at 150 MB; images at 25 MB raw.
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    size_bytes = len(data)
+    if is_video_slot and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
+        mb = size_bytes // (1024 * 1024)
+        cap_mb = MAX_SUBMISSION_VIDEO_BYTES // (1024 * 1024)
+        raise HTTPException(
+            400,
+            f"Video is too large ({mb} MB). Max {cap_mb} MB — please compress and retry.",
+        )
+    if category == "image" and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+        mb = size_bytes // (1024 * 1024)
+        cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
+        raise HTTPException(
+            400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
+        )
+
     result = put_object(path, data, file.content_type or "application/octet-stream")
     media = {
         "id": str(uuid.uuid4()),
@@ -198,7 +223,7 @@ async def submission_upload(
         "storage_path": result["path"],
         "content_type": file.content_type or "application/octet-stream",
         "original_filename": file.filename,
-        "size": result.get("size", len(data)),
+        "size": result.get("size", size_bytes),
         "created_at": _now(),
         "scope": "submission",
         "submission_id": sid,
@@ -206,6 +231,16 @@ async def submission_upload(
     }
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
+
+    # Generate an optimised 1600px JPEG variant for portfolio images so the
+    # client view loads fast. Original is retained for downloads.
+    if category == "image":
+        resized = resize_image_bytes(data, max_width=IMAGE_RESIZE_MAX_WIDTH)
+        if resized and len(resized) < size_bytes:
+            resized_path = f"{APP_NAME}/submissions/{sid}/{uuid.uuid4()}_1600.jpg"
+            r2 = put_object(resized_path, resized, "image/jpeg")
+            media["resized_storage_path"] = r2["path"]
+            media["resized_size"] = len(resized)
 
     patch: Dict[str, Any] = {"$push": {"media": media}}
     # Re-upload after finalize flips status back to "updated" and decision → pending
@@ -394,35 +429,56 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
 # Admin review
 # --------------------------------------------------------------------------
 @router.get("/submissions/approved")
-async def list_approved_submissions(admin: dict = Depends(current_team_or_admin)):
+async def list_approved_submissions(
+    page: Optional[int] = None,
+    size: Optional[int] = None,
+    admin: dict = Depends(current_team_or_admin),
+):
     """All approved submissions across every project (admin convenience for Link picker)."""
-    subs = await db.submissions.find(
-        {"decision": "approved"},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(5000)
+    query = {"decision": "approved"}
+    cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1)
+    if page is None:
+        subs = await cursor.to_list(5000)
+        total = None
+        p = s = None
+    else:
+        skip, limit, p, s = _paginate_params(page, size)
+        total = await db.submissions.count_documents(query)
+        subs = await cursor.skip(skip).limit(limit).to_list(limit)
     projects = await db.projects.find({}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(2000)
     pmap = {p["id"]: p.get("brand_name") for p in projects}
     out: List[Dict[str, Any]] = []
-    for s in subs:
-        shape = _submission_to_client_shape(s)
+    for sub in subs:
+        shape = _submission_to_client_shape(sub)
         out.append({
-            "id": s["id"],
+            "id": sub["id"],
             "talent_name": shape["name"],
-            "project_id": s.get("project_id"),
-            "project_brand": pmap.get(s.get("project_id")),
+            "project_id": sub.get("project_id"),
+            "project_brand": pmap.get(sub.get("project_id")),
             "cover_media_id": shape.get("cover_media_id"),
             "media": shape.get("media"),
-            "created_at": s.get("created_at"),
+            "created_at": sub.get("created_at"),
         })
-    return out
+    if page is None:
+        return out
+    return _paginated(out, total, p, s)
 
 
 @router.get("/projects/{pid}/submissions")
-async def list_submissions(pid: str, admin: dict = Depends(current_team_or_admin)):
-    subs = await db.submissions.find(
-        {"project_id": pid}, {"_id": 0}
-    ).sort("created_at", -1).to_list(5000)
-    return subs
+async def list_submissions(
+    pid: str,
+    page: Optional[int] = None,
+    size: Optional[int] = None,
+    admin: dict = Depends(current_team_or_admin),
+):
+    query = {"project_id": pid}
+    cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1)
+    if page is None:
+        return await cursor.to_list(5000)
+    skip, limit, p, s = _paginate_params(page, size)
+    total = await db.submissions.count_documents(query)
+    items = await cursor.skip(skip).limit(limit).to_list(limit)
+    return _paginated(items, total, p, s)
 
 
 @router.post("/projects/{pid}/submissions/{sid}/decision")

@@ -17,6 +17,8 @@ from core import (
     _clean_ids,
     _filter_talent_for_client,
     _now,
+    _paginate_params,
+    _paginated,
     _public_link_view,
     _slugify,
     _submission_to_client_shape,
@@ -67,12 +69,24 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
 
 
 @router.get("/links")
-async def list_links(admin: dict = Depends(current_team_or_admin)):
-    links = await db.links.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+async def list_links(
+    page: Optional[int] = None,
+    size: Optional[int] = None,
+    admin: dict = Depends(current_team_or_admin),
+):
+    cursor = db.links.find({}, {"_id": 0}).sort("created_at", -1)
+    if page is None:
+        links = await cursor.to_list(2000)
+    else:
+        skip, limit, p, s = _paginate_params(page, size)
+        total = await db.links.count_documents({})
+        links = await cursor.skip(skip).limit(limit).to_list(limit)
     for link in links:
         link["view_count"] = await db.link_views.count_documents({"link_id": link["id"]})
         link["unique_viewers"] = len(await db.link_views.distinct("viewer_email", {"link_id": link["id"]}))
-    return links
+    if page is None:
+        return links
+    return _paginated(links, total, p, s)
 
 
 @router.get("/links/{lid}")

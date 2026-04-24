@@ -1,63 +1,42 @@
 import React from "react";
+import { useTheme } from "@/lib/theme";
 
 /**
- * Talentgram brand logo — wordmark with two diagonal slashes (top-right + bottom-left)
- * forming the signature off-axis frame. Uses currentColor → automatically
- * adapts to light/dark theme via the parent's text color.
+ * Talentgram brand logo — uses the original uploaded asset directly.
+ * Two transparent PNG variants (black ink / white ink) are swapped by theme.
+ * No CSS filters, no SVG recreation — pixel-perfect to source.
  *
- * size: 'sm' (chrome/header) | 'md' (default) | 'lg' (hero)
+ * size controls only height; width auto-derives from intrinsic aspect ratio
+ * (≈ 1413 × 711 → 1.99:1).
  */
-export default function Logo({ size = "md", className = "", showSlashes = true }) {
-    const sizes = {
-        sm: { wordmark: "text-[13px]", slash: "h-3.5" },
-        md: { wordmark: "text-base", slash: "h-4" },
-        lg: { wordmark: "text-2xl md:text-3xl", slash: "h-7 md:h-8" },
-        xl: { wordmark: "text-4xl md:text-6xl", slash: "h-12 md:h-16" },
-    };
-    const s = sizes[size] || sizes.md;
-    return (
-        <div
-            data-testid="brand-logo"
-            className={`relative inline-flex flex-col items-center justify-center leading-none select-none ${className}`}
-            aria-label="Talentgram"
-        >
-            {showSlashes && (
-                <Slash
-                    className={`${s.slash} self-end -mb-1 mr-[8%] opacity-90`}
-                />
-            )}
-            <span
-                className={`font-logo text-current ${s.wordmark} whitespace-nowrap`}
-                style={{ lineHeight: 1 }}
-            >
-                Talentgram
-            </span>
-            {showSlashes && (
-                <Slash
-                    className={`${s.slash} self-start -mt-1 ml-[8%] opacity-90`}
-                />
-            )}
-        </div>
-    );
-}
+const SIZES = {
+    sm: 22,
+    md: 36,
+    lg: 56,
+    xl: 96,
+};
 
-function Slash({ className = "" }) {
+const SRC_DARK = "/brand/talentgram-white.png"; // white ink → for dark backgrounds
+const SRC_LIGHT = "/brand/talentgram-black.png"; // black ink → for light backgrounds
+
+export default function Logo({ size = "md", className = "" }) {
+    const { isLight } = useTheme();
+    const h = typeof size === "number" ? size : SIZES[size] || SIZES.md;
+    const src = isLight ? SRC_LIGHT : SRC_DARK;
     return (
-        <svg
-            viewBox="0 0 12 40"
-            preserveAspectRatio="none"
-            className={`block ${className}`}
-            aria-hidden="true"
-        >
-            <line
-                x1="11"
-                y1="0"
-                x2="1"
-                y2="40"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinecap="round"
-            />
-        </svg>
+        <img
+            src={src}
+            alt="Talentgram"
+            data-testid="brand-logo"
+            draggable={false}
+            decoding="async"
+            className={`block select-none ${className}`}
+            style={{
+                height: `${h}px`,
+                width: "auto",
+                maxHeight: `${h}px`,
+                objectFit: "contain",
+            }}
+        />
     );
 }

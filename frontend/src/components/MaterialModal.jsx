@@ -11,6 +11,7 @@ import {
 /**
  * Full-screen modal viewer for project audition material.
  * Used on both admin ProjectEdit and public SubmissionPage.
+ * Theme-aware: respects light/dark mode via shadcn tokens (bg-background, text-foreground, etc.)
  *
  * Props:
  *  - project: { brand_name, materials: [{id, category, storage_path, content_type, original_filename}], video_links: [] }
@@ -24,18 +25,18 @@ export default function MaterialModal({ project, onClose, onRemove }) {
 
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl overflow-y-auto"
+            className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xl overflow-y-auto"
             data-testid="audition-material-modal"
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50"
+                className="fixed top-5 right-5 z-10 w-10 h-10 border border-border hover:border-foreground rounded-sm flex items-center justify-center bg-background/80 text-foreground"
                 aria-label="Close"
                 data-testid="material-modal-close-btn"
             >
                 <X className="w-4 h-4" />
             </button>
-            <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14">
+            <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14 text-foreground">
                 <p className="eyebrow mb-3">Audition Material</p>
                 <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-8 md:mb-10">
                     {project?.brand_name}
@@ -52,12 +53,12 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                             rel="noreferrer"
                             className="flex items-center gap-3 flex-1"
                         >
-                            <FileText className="w-5 h-5 text-white/60" />
+                            <FileText className="w-5 h-5 text-muted-foreground" />
                             <div className="min-w-0">
                                 <div className="text-sm truncate">
                                     {m.original_filename || "script.pdf"}
                                 </div>
-                                <div className="text-[10px] tg-mono text-white/40">
+                                <div className="text-[10px] tg-mono text-muted-foreground">
                                     Open PDF →
                                 </div>
                             </div>
@@ -75,7 +76,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                             href={FILE_URL(m.storage_path)}
                             target="_blank"
                             rel="noreferrer"
-                            className="block aspect-square bg-[#0a0a0a] overflow-hidden"
+                            className="block aspect-square bg-muted overflow-hidden"
                         >
                             <img
                                 src={FILE_URL(m.storage_path)}
@@ -92,8 +93,8 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     items={byCat("audio")}
                     onRemove={onRemove}
                     render={(m) => (
-                        <div className="flex items-center gap-3 flex-1">
-                            <Music className="w-5 h-5 text-white/60 shrink-0" />
+                        <div className="flex items-center gap-3 flex-1 bg-muted p-3 rounded-lg">
+                            <Music className="w-5 h-5 text-muted-foreground shrink-0" />
                             <audio
                                 src={FILE_URL(m.storage_path)}
                                 controls
@@ -113,9 +114,9 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                                     href={v}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="flex items-center gap-3 p-3 border border-white/10 hover:border-white/30 transition-all"
+                                    className="flex items-center gap-3 p-3 border border-border hover:border-foreground/40 transition-all"
                                 >
-                                    <PlayCircle className="w-5 h-5 text-white/60" />
+                                    <PlayCircle className="w-5 h-5 text-muted-foreground" />
                                     <span className="text-sm tg-mono truncate">
                                         {v}
                                     </span>
@@ -126,7 +127,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                 )}
 
                 {materials.length === 0 && videos.length === 0 && (
-                    <p className="text-white/40 text-sm">
+                    <p className="text-muted-foreground text-sm">
                         No audition materials yet.
                     </p>
                 )}
@@ -153,7 +154,7 @@ function Group({ title, items, onRemove, render, grid }) {
                         className={
                             grid
                                 ? "relative group"
-                                : "flex items-center gap-3 p-3 border border-white/10"
+                                : "flex items-center gap-3 p-3 border border-border"
                         }
                     >
                         {render(m)}
@@ -162,8 +163,8 @@ function Group({ title, items, onRemove, render, grid }) {
                                 onClick={() => onRemove(m.id)}
                                 className={
                                     grid
-                                        ? "absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 bg-black/70 hover:bg-[var(--tg-danger)] rounded-sm transition-all"
-                                        : "text-white/40 hover:text-[var(--tg-danger)]"
+                                        ? "absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 bg-background/80 text-foreground hover:bg-[var(--tg-danger)] hover:text-white rounded-sm transition-all"
+                                        : "text-muted-foreground hover:text-[var(--tg-danger)]"
                                 }
                             >
                                 <Trash2 className="w-3.5 h-3.5" />

@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Sparkles } from "lucide-react";
+import ThemeToggle from "@/components/ThemeToggle";
 
 export default function Landing() {
     return (
@@ -30,6 +31,7 @@ export default function Landing() {
                             Talentgram
                         </span>
                     </div>
+                    <div className="flex items-center gap-3">
                     <Link
                         to="/admin/login"
                         data-testid="landing-login-btn"
@@ -37,6 +39,8 @@ export default function Landing() {
                     >
                         Admin Sign in
                     </Link>
+                    <ThemeToggle />
+                    </div>
                 </header>
 
                 <div className="flex-1 flex items-center px-6 md:px-16 max-w-6xl">

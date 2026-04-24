@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { adminApi, saveAdminSession } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 import { Sparkles, Loader2 } from "lucide-react";
 
 export default function AdminLogin() {
@@ -29,7 +30,10 @@ export default function AdminLogin() {
     };
 
     return (
-        <div className="min-h-screen grid md:grid-cols-2 bg-[#050505]">
+        <div className="min-h-screen grid md:grid-cols-2 bg-[#050505] relative">
+            <div className="absolute top-5 right-5 z-20">
+                <ThemeToggle />
+            </div>
             <div className="hidden md:block relative">
                 <div
                     className="absolute inset-0"

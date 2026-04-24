@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import { viewerApi, FILE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 import axios from "axios";
 import { toast } from "sonner";
 import {
@@ -145,6 +146,9 @@ export default function ClientView() {
     if (!identified) {
         return (
             <div className="min-h-screen bg-[#050505] relative">
+                <div className="absolute top-5 right-5 z-20">
+                    <ThemeToggle />
+                </div>
                 <div
                     className="absolute inset-0 opacity-30"
                     style={{
@@ -248,6 +252,7 @@ export default function ClientView() {
                         <p className="text-xs text-white/50">Viewing as</p>
                         <p className="text-sm font-medium">{viewer.name}</p>
                     </div>
+                    <ThemeToggle />
                 </div>
             </header>
 

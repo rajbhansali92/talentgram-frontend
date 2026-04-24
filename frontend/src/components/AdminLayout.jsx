@@ -1,6 +1,7 @@
 import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 import {
     LayoutDashboard,
     Users,
@@ -67,11 +68,16 @@ export default function AdminLayout() {
                     ))}
                 </nav>
                 <div className="p-4 border-t border-white/10">
-                    <div className="text-xs text-white/50 mb-2">
-                        {admin?.name || "Admin"}
-                    </div>
-                    <div className="text-[11px] text-white/40 mb-3 truncate">
-                        {admin?.email}
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="min-w-0">
+                            <div className="text-xs text-white/50 truncate">
+                                {admin?.name || "Admin"}
+                            </div>
+                            <div className="text-[11px] text-white/40 truncate">
+                                {admin?.email}
+                            </div>
+                        </div>
+                        <ThemeToggle size="sm" />
                     </div>
                     <button
                         data-testid="admin-logout-btn"
@@ -102,6 +108,7 @@ export default function AdminLayout() {
                 >
                     Sign out
                 </button>
+                <ThemeToggle size="sm" />
             </div>
 
             <main className="flex-1 min-w-0 md:pt-0 pt-14">

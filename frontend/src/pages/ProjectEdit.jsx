@@ -767,7 +767,8 @@ export default function ProjectEdit() {
                                 submissions.filter(
                                     (s) =>
                                         s.decision === "approved" &&
-                                        s.status === "submitted",
+                                        (s.status === "submitted" ||
+                                            s.status === "updated"),
                                 ).length === 0
                             }
                             data-testid="create-client-link-btn"
@@ -1058,9 +1059,31 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                         {/* Availability (structured) */}
                         <div className="md:col-span-2 border-t border-border pt-4">
-                            <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
-                                Availability
-                            </label>
+                            <div className="flex items-center justify-between">
+                                <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
+                                    Availability
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFv({
+                                            ...fv,
+                                            availability: fv.availability === false,
+                                        })
+                                    }
+                                    data-testid="review-fv-availability"
+                                    title={
+                                        fv.availability === false
+                                            ? "Hidden from client"
+                                            : "Visible to client"
+                                    }
+                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.availability !== false ? "bg-foreground" : "bg-muted"}`}
+                                >
+                                    <span
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.availability !== false ? "translate-x-5 bg-background" : "bg-foreground"}`}
+                                    />
+                                </button>
+                            </div>
                             <div className="mt-2 flex items-center gap-3">
                                 <select
                                     value={form.availability?.status || ""}
@@ -1107,9 +1130,31 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                         {/* Budget (structured) */}
                         <div className="md:col-span-2">
-                            <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
-                                Budget
-                            </label>
+                            <div className="flex items-center justify-between">
+                                <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
+                                    Budget
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFv({
+                                            ...fv,
+                                            budget: !fv.budget,
+                                        })
+                                    }
+                                    data-testid="review-fv-budget"
+                                    title={
+                                        fv.budget
+                                            ? "Visible to client"
+                                            : "Hidden from client"
+                                    }
+                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.budget ? "bg-foreground" : "bg-muted"}`}
+                                >
+                                    <span
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.budget ? "translate-x-5 bg-background" : "bg-foreground"}`}
+                                    />
+                                </button>
+                            </div>
                             <div className="mt-2 flex items-center gap-3">
                                 <select
                                     value={form.budget?.status || ""}

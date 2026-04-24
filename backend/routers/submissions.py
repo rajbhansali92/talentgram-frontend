@@ -323,8 +323,60 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     if is_retest:
         patch["decision"] = "pending"
         patch["updated_at"] = _now()
+
+    # ------------------------------------------------------------------
+    # Auto-link to global Talent DB (dedupe by email).
+    # First-time finalize only — retest never overwrites global talent data.
+    # ------------------------------------------------------------------
+    if not is_retest and not sub.get("talent_id"):
+        email = (sub.get("talent_email") or "").lower().strip()
+        talent_doc = None
+        if email:
+            talent_doc = await db.talents.find_one({"email": email}, {"_id": 0})
+        if not talent_doc:
+            # Build a minimal talent record from the submission's form_data.
+            full_name = (
+                f"{(form.get('first_name') or '').strip()} "
+                f"{(form.get('last_name') or '').strip()}"
+            ).strip() or sub.get("talent_name") or "Unnamed"
+            age_val = None
+            if form.get("age") not in (None, ""):
+                try:
+                    age_val = int(form["age"])
+                except Exception:
+                    age_val = None
+            new_talent = {
+                "id": str(uuid.uuid4()),
+                "name": full_name,
+                "email": email or None,
+                "phone": sub.get("talent_phone"),
+                "age": age_val,
+                "dob": (form.get("dob") or None),
+                "height": (form.get("height") or None),
+                "location": (form.get("location") or None),
+                "ethnicity": None,
+                "instagram_handle": (form.get("instagram_handle") or None),
+                "instagram_followers": None,
+                "work_links": [],
+                "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
+                "source": "audition_submission",
+                "media": [],                 # keep global media separate (spec: media must NOT merge)
+                "cover_media_id": None,
+                "created_at": _now(),
+                "created_by": "auto-audition",
+            }
+            await db.talents.insert_one(new_talent)
+            new_talent.pop("_id", None)
+            talent_doc = new_talent
+        patch["talent_id"] = talent_doc["id"]
+
     await db.submissions.update_one({"id": sid}, {"$set": patch})
-    return {"ok": True, "status": new_status, "resubmitted": is_retest}
+    return {
+        "ok": True,
+        "status": new_status,
+        "resubmitted": is_retest,
+        "talent_id": patch.get("talent_id") or sub.get("talent_id"),
+    }
 
 
 @router.get("/public/submissions/{sid}")

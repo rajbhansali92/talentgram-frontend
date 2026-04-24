@@ -258,6 +258,12 @@ async def seed_admin() -> None:
         await db.users.create_index("email", unique=True)
     except Exception as e:
         logger.warning(f"users email index: {e}")
+    # Talents: non-unique email index for fast dedupe lookup. Not unique —
+    # some legacy talents may lack email; we dedupe in application code.
+    try:
+        await db.talents.create_index("email")
+    except Exception as e:
+        logger.warning(f"talents email index: {e}")
 
     legacy = await db.admins.find_one({"email": ADMIN_EMAIL}) if "admins" in await db.list_collection_names() else None
     existing = await db.users.find_one({"email": ADMIN_EMAIL})
@@ -331,10 +337,15 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     "age": True,
     "height": True,
     "location": True,
-    "competitive_brand": False,
+    "competitive_brand": False,  # opt-in — brand conflicts are sensitive
     "availability": True,
-    "budget": False,
-    "custom_answers": False,
+    # Budget defaults to visible at submission level. Link-level `visibility.budget`
+    # is still the final gate for what each client sees — this just stops the
+    # per-submission layer from silently dropping budget before the link can
+    # decide. (Without this, admins toggle "Budget" ON at the link level and
+    # still see nothing reach the client.)
+    "budget": True,
+    "custom_answers": False,     # opt-in — typed answers may contain PII
 }
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
@@ -723,7 +734,10 @@ def _submission_to_client_shape(sub: dict) -> dict:
         `{question_label: bool}` for per-question control.
     """
     fd = sub.get("form_data") or {}
-    fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
+    # Merge defaults with stored visibility so newly added keys (e.g.
+    # competitive_brand, custom_answers) inherit safe defaults for
+    # submissions created before those keys existed.
+    fv = {**DEFAULT_FIELD_VISIBILITY, **(sub.get("field_visibility") or {})}
 
     fn = (fd.get("first_name") or "").strip()
     ln = (fd.get("last_name") or "").strip()

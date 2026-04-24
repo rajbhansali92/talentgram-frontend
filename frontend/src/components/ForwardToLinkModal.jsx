@@ -26,7 +26,9 @@ export default function ForwardToLinkModal({
     const approved = useMemo(
         () =>
             (submissions || []).filter(
-                (s) => s.decision === "approved" && s.status === "submitted",
+                (s) =>
+                    s.decision === "approved" &&
+                    (s.status === "submitted" || s.status === "updated"),
             ),
         [submissions],
     );

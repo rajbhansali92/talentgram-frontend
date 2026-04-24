@@ -1,4 +1,5 @@
 """Project CRUD, materials, forward-to-link."""
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,7 @@ from core import (
     put_object,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["projects"])
 
 
@@ -73,10 +75,22 @@ async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(cur
 
 @router.delete("/projects/{pid}")
 async def delete_project(pid: str, admin: dict = Depends(current_admin)):
+    logger.info(
+        "DELETE /projects/%s requested by admin=%s (role=%s)",
+        pid, admin.get("email"), admin.get("role"),
+    )
     res = await db.projects.delete_one({"id": pid})
     if not res.deleted_count:
+        logger.warning("DELETE /projects/%s failed — not found", pid)
         raise HTTPException(404, "Project not found")
-    return {"ok": True}
+    # Cascade: drop the project's submissions (they can never be revived once
+    # the parent project is gone) — keeps listings consistent.
+    sub_res = await db.submissions.delete_many({"project_id": pid})
+    logger.info(
+        "DELETE /projects/%s succeeded (by %s); cascade removed %d submissions",
+        pid, admin.get("email"), sub_res.deleted_count,
+    )
+    return {"ok": True, "deleted_id": pid, "cascaded_submissions": sub_res.deleted_count}
 
 
 @router.post("/projects/{pid}/material")

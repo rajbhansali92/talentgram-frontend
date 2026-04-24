@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
+import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import {
     ExternalLink,
     Copy,
@@ -14,6 +15,7 @@ import {
 export default function LinkHistory() {
     const [links, setLinks] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [pendingDelete, setPendingDelete] = useState(null);
     const canDelete = isAdmin();
     const canCreate = isAdmin();
 
@@ -51,10 +53,24 @@ export default function LinkHistory() {
     };
 
     const del = async (id) => {
-        if (!window.confirm("Delete this link and its analytics?")) return;
-        await adminApi.delete(`/links/${id}`);
-        toast.success("Deleted");
-        load();
+        // Called from the confirm modal's onConfirm.
+        try {
+            const res = await adminApi.delete(`/links/${id}`);
+             
+            console.info("[delete link]", id, res?.data);
+            toast.success("Link deleted");
+            setPendingDelete(null);
+            load();
+        } catch (err) {
+             
+            console.error("[delete link] failed", err?.response?.data || err);
+            toast.error(
+                err?.response?.data?.detail ||
+                    err?.message ||
+                    "Delete failed — check console for details",
+            );
+            throw err; // keep modal open
+        }
     };
 
     return (
@@ -186,7 +202,12 @@ export default function LinkHistory() {
                                     </button>
                                     {canDelete && (
                                         <button
-                                            onClick={() => del(l.id)}
+                                            onClick={() =>
+                                                setPendingDelete({
+                                                    id: l.id,
+                                                    title: l.title,
+                                                })
+                                            }
                                             title="Delete"
                                             data-testid={`delete-link-${l.id}`}
                                             className="p-2 hover:bg-white/10 hover:text-[var(--tg-danger)] rounded-sm"
@@ -200,6 +221,14 @@ export default function LinkHistory() {
                     </div>
                 </div>
             )}
+            <ConfirmDeleteDialog
+                open={!!pendingDelete}
+                title={`Delete "${pendingDelete?.title || "this link"}"?`}
+                description="This permanently removes the link and all associated views, actions, downloads and client comments. This cannot be undone."
+                confirmLabel="Delete link"
+                onCancel={() => setPendingDelete(null)}
+                onConfirm={() => del(pendingDelete.id)}
+            />
         </div>
     );
 }

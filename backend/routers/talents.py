@@ -1,4 +1,5 @@
 """Talent CRUD + media management."""
+import logging
 import uuid
 from typing import Any, Dict, Optional
 
@@ -16,6 +17,7 @@ from core import (
     put_object,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["talents"])
 
 
@@ -66,10 +68,16 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
 
 @router.delete("/talents/{tid}")
 async def delete_talent(tid: str, admin: dict = Depends(current_admin)):
+    logger.info(
+        "DELETE /talents/%s requested by admin=%s (role=%s)",
+        tid, admin.get("email"), admin.get("role"),
+    )
     res = await db.talents.delete_one({"id": tid})
     if not res.deleted_count:
+        logger.warning("DELETE /talents/%s failed — not found", tid)
         raise HTTPException(404, "Talent not found")
-    return {"ok": True}
+    logger.info("DELETE /talents/%s succeeded (by %s)", tid, admin.get("email"))
+    return {"ok": True, "deleted_id": tid}
 
 
 @router.post("/talents/{tid}/media", response_model=TalentOut)

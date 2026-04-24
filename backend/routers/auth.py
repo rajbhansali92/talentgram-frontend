@@ -62,6 +62,23 @@ async def me(user: dict = Depends(current_user)):
     return user
 
 
+@router.get("/debug/user-role")
+async def debug_user_role(user: dict = Depends(current_user)):
+    """Diagnostic endpoint — returns the currently authenticated user's role.
+
+    Useful for verifying that the frontend is sending the right JWT and that
+    the backend agrees on the user's role. Intentionally minimal; does NOT
+    leak password hashes or invite tokens.
+    """
+    return {
+        "id": user.get("id"),
+        "email": user.get("email"),
+        "role": user.get("role"),
+        "status": user.get("status"),
+        "is_admin": user.get("role") == "admin",
+    }
+
+
 @router.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),

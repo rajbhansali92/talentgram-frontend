@@ -1,4 +1,5 @@
 """Admin link CRUD + public client link viewer."""
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,7 @@ from core import (
 )
 
 router = APIRouter(prefix="/api", tags=["links"])
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -104,11 +106,30 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
 
 @router.delete("/links/{lid}")
 async def delete_link(lid: str, admin: dict = Depends(current_admin)):
-    await db.links.delete_one({"id": lid})
-    await db.link_views.delete_many({"link_id": lid})
-    await db.link_actions.delete_many({"link_id": lid})
-    await db.link_downloads.delete_many({"link_id": lid})
-    return {"ok": True}
+    logger.info(
+        "DELETE /links/%s requested by admin=%s (role=%s)",
+        lid, admin.get("email"), admin.get("role"),
+    )
+    res = await db.links.delete_one({"id": lid})
+    if not res.deleted_count:
+        logger.warning("DELETE /links/%s failed — not found", lid)
+        raise HTTPException(404, "Link not found")
+    v = await db.link_views.delete_many({"link_id": lid})
+    a = await db.link_actions.delete_many({"link_id": lid})
+    d = await db.link_downloads.delete_many({"link_id": lid})
+    logger.info(
+        "DELETE /links/%s succeeded (by %s); cascade views=%d actions=%d downloads=%d",
+        lid, admin.get("email"), v.deleted_count, a.deleted_count, d.deleted_count,
+    )
+    return {
+        "ok": True,
+        "deleted_id": lid,
+        "cascaded": {
+            "views": v.deleted_count,
+            "actions": a.deleted_count,
+            "downloads": d.deleted_count,
+        },
+    }
 
 
 @router.post("/links/{lid}/duplicate", response_model=LinkOut)

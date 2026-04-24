@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
+import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import {
     Select,
     SelectContent,
@@ -158,13 +159,27 @@ export default function TalentEdit() {
         [talent.dob, talent.age],
     );
 
+    const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+
     const deleteTalent = async () => {
         if (!isEdit) return;
-        if (!window.confirm("Delete this talent? This cannot be undone."))
-            return;
-        await adminApi.delete(`/talents/${id}`);
-        toast.success("Talent deleted");
-        nav("/admin/talents");
+        try {
+            const res = await adminApi.delete(`/talents/${id}`);
+             
+            console.info("[delete talent]", id, res?.data);
+            toast.success("Talent deleted");
+            setConfirmDeleteOpen(false);
+            nav("/admin/talents");
+        } catch (err) {
+             
+            console.error("[delete talent] failed", err?.response?.data || err);
+            toast.error(
+                err?.response?.data?.detail ||
+                    err?.message ||
+                    "Delete failed — check console for details",
+            );
+            throw err;
+        }
     };
 
     const uploadFiles = async (files, category) => {
@@ -245,7 +260,7 @@ export default function TalentEdit() {
                 <div className="flex gap-2">
                     {isEdit && isAdminRole && (
                         <button
-                            onClick={deleteTalent}
+                            onClick={() => setConfirmDeleteOpen(true)}
                             data-testid="delete-talent-btn"
                             className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/15 text-white/60 hover:text-[var(--tg-danger)] hover:border-[var(--tg-danger)]/40 rounded-sm text-xs transition-all"
                         >
@@ -628,6 +643,15 @@ export default function TalentEdit() {
                     Save this talent first to start uploading media.
                 </p>
             )}
+            <ConfirmDeleteDialog
+                open={confirmDeleteOpen}
+                title={`Delete "${talent.name || "this talent"}"?`}
+                description="This permanently removes the talent record and all their portfolio media. Any submissions linked to this talent remain (they live on the project). This cannot be undone."
+                confirmLabel="Delete talent"
+                typeToConfirm="DELETE"
+                onCancel={() => setConfirmDeleteOpen(false)}
+                onConfirm={deleteTalent}
+            />
         </div>
     );
 }

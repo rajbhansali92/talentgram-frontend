@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
+import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import ForwardToLinkModal from "@/components/ForwardToLinkModal";
@@ -166,12 +167,29 @@ export default function ProjectEdit() {
         }
     };
 
+    const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+
     const deleteProject = async () => {
         if (!isEdit) return;
-        if (!window.confirm("Delete this project?")) return;
-        await adminApi.delete(`/projects/${id}`);
-        toast.success("Project deleted");
-        nav("/admin/projects");
+        try {
+            const res = await adminApi.delete(`/projects/${id}`);
+             
+            console.info("[delete project]", id, res?.data);
+            toast.success(
+                `Project deleted${res?.data?.cascaded_submissions ? ` (+${res.data.cascaded_submissions} submissions removed)` : ""}`,
+            );
+            setConfirmDeleteOpen(false);
+            nav("/admin/projects");
+        } catch (err) {
+             
+            console.error("[delete project] failed", err?.response?.data || err);
+            toast.error(
+                err?.response?.data?.detail ||
+                    err?.message ||
+                    "Delete failed — check console for details",
+            );
+            throw err;
+        }
     };
 
     const uploadMaterial = async (files, category) => {
@@ -282,7 +300,7 @@ export default function ProjectEdit() {
                                 Material ({materialsCount})
                             </button>
                             <button
-                                onClick={deleteProject}
+                                onClick={() => setConfirmDeleteOpen(true)}
                                 className={`inline-flex items-center gap-2 px-4 py-2.5 border border-white/15 text-white/60 hover:text-[var(--tg-danger)] hover:border-[var(--tg-danger)]/40 rounded-sm text-xs ${isAdminRole ? "" : "hidden"}`}
                                 data-testid="delete-project-btn"
                             >
@@ -840,6 +858,15 @@ export default function ProjectEdit() {
                     }}
                 />
             )}
+            <ConfirmDeleteDialog
+                open={confirmDeleteOpen}
+                title={`Delete "${project.brand_name || "this project"}"?`}
+                description="This permanently removes the project, all talent submissions for it, and all project materials. Client links that reference this project keep their snapshots. This cannot be undone."
+                confirmLabel="Delete project"
+                typeToConfirm="DELETE"
+                onCancel={() => setConfirmDeleteOpen(false)}
+                onConfirm={deleteProject}
+            />
         </div>
     );
 }

@@ -34,6 +34,17 @@ export function getAdmin() {
         return null;
     }
 }
+/**
+ * Role check — never trust this for authorization (backend is the source of
+ * truth). Safe to use for UI affordances like hiding buttons / routes.
+ */
+export function isAdmin() {
+    const a = getAdmin();
+    return a?.role === "admin";
+}
+export function getRole() {
+    return getAdmin()?.role || null;
+}
 export function saveViewerToken(slug, token) {
     localStorage.setItem(`tg_viewer_${slug}`, token);
 }

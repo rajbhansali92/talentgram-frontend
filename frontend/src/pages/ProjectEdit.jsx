@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, FILE_URL } from "@/lib/api";
+import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import ForwardToLinkModal from "@/components/ForwardToLinkModal";
+import BudgetLines from "@/components/BudgetLines";
 import {
     Select,
     SelectContent,
@@ -49,6 +50,8 @@ const empty = {
     video_links: [],
     competitive_brand_enabled: false,
     custom_questions: [],
+    talent_budget: [],
+    client_budget: [],
 };
 
 function TextField({ label, value, onChange, type = "text", ...rest }) {
@@ -72,6 +75,7 @@ export default function ProjectEdit() {
     const { id } = useParams();
     const nav = useNavigate();
     const isEdit = Boolean(id);
+    const isAdminRole = isAdmin();
 
     const [project, setProject] = useState(empty);
     const [saving, setSaving] = useState(false);
@@ -279,7 +283,8 @@ export default function ProjectEdit() {
                             </button>
                             <button
                                 onClick={deleteProject}
-                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/15 text-white/60 hover:text-[var(--tg-danger)] hover:border-[var(--tg-danger)]/40 rounded-sm text-xs"
+                                className={`inline-flex items-center gap-2 px-4 py-2.5 border border-white/15 text-white/60 hover:text-[var(--tg-danger)] hover:border-[var(--tg-danger)]/40 rounded-sm text-xs ${isAdminRole ? "" : "hidden"}`}
+                                data-testid="delete-project-btn"
                             >
                                 <Trash2 className="w-3 h-3" /> Delete
                             </button>
@@ -539,6 +544,59 @@ export default function ProjectEdit() {
                 </p>
             )}
 
+            {/* Budget Configuration */}
+            {isEdit && (
+                <section
+                    className="border border-white/10 p-6 md:p-8 mt-6"
+                    data-testid="budget-config-section"
+                >
+                    <p className="eyebrow mb-2">Project Budget</p>
+                    <p className="text-xs text-white/40 mb-6">
+                        Keep the talent-facing and client-facing breakdowns separate.
+                        Talents see only the talent budget; clients see only the client
+                        budget (gated by the link's Budget visibility toggle).
+                    </p>
+
+                    <div className="mb-8">
+                        <p className="text-sm text-white/80 mb-1">
+                            Talent-Facing Budget
+                        </p>
+                        <p className="text-xs text-white/40 mb-3">
+                            Hint shown on the audition submission form so talents
+                            understand the offer before they quote.
+                        </p>
+                        <BudgetLines
+                            lines={project.talent_budget || []}
+                            onChange={(lines) =>
+                                setProject({ ...project, talent_budget: lines })
+                            }
+                            testidPrefix="talent-budget"
+                        />
+                    </div>
+
+                    <div className="border-t border-white/10 pt-6">
+                        <p className="text-sm text-white/80 mb-1">
+                            Client-Facing Budget
+                        </p>
+                        <p className="text-xs text-white/40 mb-3">
+                            Shown to clients on the shared link view. Individual
+                            links can still override this via the Link Generator.
+                        </p>
+                        <BudgetLines
+                            lines={project.client_budget || []}
+                            onChange={(lines) =>
+                                setProject({ ...project, client_budget: lines })
+                            }
+                            testidPrefix="client-budget"
+                        />
+                    </div>
+
+                    <p className="text-[10px] text-white/30 mt-6 tg-mono">
+                        Save project to apply changes
+                    </p>
+                </section>
+            )}
+
             {/* Submission Form Configuration */}
             {isEdit && (
                 <section
@@ -732,7 +790,7 @@ export default function ProjectEdit() {
                                     submission={s}
                                     onOpen={() => setReviewingSid(s.id)}
                                     onDecision={(d) => setDecision(s.id, d)}
-                                    onDelete={() => deleteSubmission(s.id)}
+                                    onDelete={isAdminRole ? () => deleteSubmission(s.id) : null}
                                 />
                             ))}
                         </div>
@@ -855,12 +913,14 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 >
                     <XCircle className="w-3.5 h-3.5" />
                 </button>
-                <button
-                    onClick={onDelete}
-                    className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 text-white/50 rounded-sm"
-                >
-                    <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {onDelete && (
+                    <button
+                        onClick={onDelete}
+                        className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 text-white/50 rounded-sm"
+                    >
+                        <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                )}
             </div>
         </div>
     );

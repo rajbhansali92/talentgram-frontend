@@ -10,6 +10,7 @@ from core import (
     TalentOut,
     _now,
     current_admin,
+    current_team_or_admin,
     db,
     enrich_talent,
     put_object,
@@ -19,7 +20,7 @@ router = APIRouter(prefix="/api", tags=["talents"])
 
 
 @router.post("/talents", response_model=TalentOut)
-async def create_talent(payload: TalentIn, admin: dict = Depends(current_admin)):
+async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
     doc = payload.model_dump()
     doc.update({
         "id": str(uuid.uuid4()),
@@ -36,7 +37,7 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_admin))
 @router.get("/talents")
 async def list_talents(
     q: Optional[str] = None,
-    admin: dict = Depends(current_admin),
+    admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {}
     if q:
@@ -46,7 +47,7 @@ async def list_talents(
 
 
 @router.get("/talents/{tid}")
-async def get_talent(tid: str, admin: dict = Depends(current_admin)):
+async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     if not t:
         raise HTTPException(404, "Talent not found")
@@ -54,7 +55,7 @@ async def get_talent(tid: str, admin: dict = Depends(current_admin)):
 
 
 @router.put("/talents/{tid}", response_model=TalentOut)
-async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_admin)):
+async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
     update = payload.model_dump()
     res = await db.talents.update_one({"id": tid}, {"$set": update})
     if not res.matched_count:
@@ -76,7 +77,7 @@ async def add_media(
     tid: str,
     category: str = Form(...),
     file: UploadFile = File(...),
-    admin: dict = Depends(current_admin),
+    admin: dict = Depends(current_team_or_admin),
 ):
     if category not in {"indian", "western", "portfolio", "video"}:
         raise HTTPException(400, "Invalid category")
@@ -118,7 +119,7 @@ async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin))
 
 
 @router.post("/talents/{tid}/cover/{mid}")
-async def set_cover(tid: str, mid: str, admin: dict = Depends(current_admin)):
+async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_admin)):
     res = await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": mid}})
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")

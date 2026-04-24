@@ -12,9 +12,11 @@ from core import (
     MAX_VIDEO_FILE_BYTES,
     ForwardToLinkIn,
     ProjectIn,
+    _clean_budget_lines,
     _now,
     _slugify,
     current_admin,
+    current_team_or_admin,
     db,
     put_object,
 )
@@ -23,10 +25,12 @@ router = APIRouter(prefix="/api", tags=["projects"])
 
 
 @router.post("/projects")
-async def create_project(payload: ProjectIn, admin: dict = Depends(current_admin)):
+async def create_project(payload: ProjectIn, admin: dict = Depends(current_team_or_admin)):
     if payload.commission_percent and payload.commission_percent not in COMMISSION_OPTIONS:
         raise HTTPException(400, "Invalid commission_percent")
     doc = payload.model_dump()
+    doc["talent_budget"] = _clean_budget_lines(doc.get("talent_budget"))
+    doc["client_budget"] = _clean_budget_lines(doc.get("client_budget"))
     doc.update({
         "id": str(uuid.uuid4()),
         "slug": _slugify(payload.brand_name),
@@ -40,13 +44,13 @@ async def create_project(payload: ProjectIn, admin: dict = Depends(current_admin
 
 
 @router.get("/projects")
-async def list_projects(admin: dict = Depends(current_admin)):
+async def list_projects(admin: dict = Depends(current_team_or_admin)):
     items = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return items
 
 
 @router.get("/projects/{pid}")
-async def get_project(pid: str, admin: dict = Depends(current_admin)):
+async def get_project(pid: str, admin: dict = Depends(current_team_or_admin)):
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
     if not p:
         raise HTTPException(404, "Project not found")
@@ -54,10 +58,13 @@ async def get_project(pid: str, admin: dict = Depends(current_admin)):
 
 
 @router.put("/projects/{pid}")
-async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(current_admin)):
+async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(current_team_or_admin)):
     if payload.commission_percent and payload.commission_percent not in COMMISSION_OPTIONS:
         raise HTTPException(400, "Invalid commission_percent")
-    res = await db.projects.update_one({"id": pid}, {"$set": payload.model_dump()})
+    patch = payload.model_dump()
+    patch["talent_budget"] = _clean_budget_lines(patch.get("talent_budget"))
+    patch["client_budget"] = _clean_budget_lines(patch.get("client_budget"))
+    res = await db.projects.update_one({"id": pid}, {"$set": patch})
     if not res.matched_count:
         raise HTTPException(404, "Project not found")
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
@@ -77,7 +84,7 @@ async def add_material(
     pid: str,
     category: str = Form(...),
     file: UploadFile = File(...),
-    admin: dict = Depends(current_admin),
+    admin: dict = Depends(current_team_or_admin),
 ):
     if category not in MATERIAL_CATEGORIES:
         raise HTTPException(400, "Invalid category (script|image|audio|video_file)")
@@ -129,7 +136,7 @@ async def delete_material(pid: str, mid: str, admin: dict = Depends(current_admi
 
 
 @router.get("/projects/meta/commission-options")
-async def commission_options(admin: dict = Depends(current_admin)):
+async def commission_options(admin: dict = Depends(current_team_or_admin)):
     return {"options": COMMISSION_OPTIONS}
 
 

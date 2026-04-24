@@ -30,6 +30,7 @@ from core import (
     _now,
     compute_age,
     current_admin,
+    current_team_or_admin,
     db,
     decode_submitter,
     make_token,
@@ -222,7 +223,7 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
 async def list_applications(
     status: Optional[str] = None,
     decision: Optional[str] = None,
-    admin: dict = Depends(current_admin),
+    admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {}
     if status:
@@ -234,7 +235,7 @@ async def list_applications(
 
 
 @router.get("/applications/{aid}")
-async def get_admin_application(aid: str, admin: dict = Depends(current_admin)):
+async def get_admin_application(aid: str, admin: dict = Depends(current_team_or_admin)):
     app_doc = await db.applications.find_one({"id": aid}, {"_id": 0})
     if not app_doc:
         raise HTTPException(404, "Application not found")

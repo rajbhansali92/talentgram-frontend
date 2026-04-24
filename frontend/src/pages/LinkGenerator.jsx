@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL } from "@/lib/api";
 import { toast } from "sonner";
+import BudgetLines from "@/components/BudgetLines";
 import {
     ArrowLeft,
     Search,
@@ -62,6 +63,7 @@ export default function LinkGenerator() {
     const [visibility, setVisibility] = useState(DEFAULT_VIS);
     const [isPublic, setIsPublic] = useState(true);
     const [notes, setNotes] = useState("");
+    const [clientBudgetOverride, setClientBudgetOverride] = useState([]);
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
@@ -83,6 +85,7 @@ export default function LinkGenerator() {
                 setVisibility({ ...DEFAULT_VIS, ...(data.visibility || {}) });
                 setIsPublic(data.is_public);
                 setNotes(data.notes || "");
+                setClientBudgetOverride(data.client_budget_override || []);
                 // Auto-switch to submissions tab if link is submission-driven
                 if ((data.submission_ids || []).length && !(data.talent_ids || []).length) {
                     setTab("submissions");
@@ -142,6 +145,10 @@ export default function LinkGenerator() {
                 visibility,
                 is_public: isPublic,
                 notes,
+                client_budget_override:
+                    clientBudgetOverride && clientBudgetOverride.length > 0
+                        ? clientBudgetOverride
+                        : null,
             };
             const { data } = isEdit
                 ? await adminApi.put(`/links/${id}`, payload)
@@ -246,6 +253,23 @@ export default function LinkGenerator() {
                                 </label>
                             ))}
                         </div>
+                    </section>
+
+                    <section className="border border-white/10 p-6" data-testid="link-budget-override-section">
+                        <p className="eyebrow mb-1">Client Budget Override</p>
+                        <p className="text-[11px] text-white/40 mb-4">
+                            Optional. When non-empty, replaces the project's
+                            client-facing budget for this link only. Leave blank to
+                            inherit from the underlying project(s).
+                        </p>
+                        <BudgetLines
+                            lines={clientBudgetOverride}
+                            onChange={setClientBudgetOverride}
+                            testidPrefix="link-client-budget"
+                        />
+                        <p className="text-[10px] text-white/30 mt-4 tg-mono">
+                            Requires "Budget" visibility toggle to be ON for clients to see it.
+                        </p>
                     </section>
 
                     <section className="border border-white/10 p-6">

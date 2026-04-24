@@ -724,6 +724,32 @@ export default function SubmissionPage() {
                                     </span>
                                 </div>
                             )}
+                            {(project.talent_budget || []).length > 0 && (
+                                <div
+                                    className="border border-white/15 bg-white/[0.03] px-4 py-3 mb-5"
+                                    data-testid="talent-budget-hint"
+                                >
+                                    <div className="text-[10px] tracking-widest uppercase text-white/50 mb-2">
+                                        Offered Budget
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        {project.talent_budget.map((row, i) => (
+                                            <div
+                                                key={`${row.label || ""}-${i}`}
+                                                className="flex items-center justify-between gap-3 text-sm"
+                                                data-testid={`talent-budget-line-${i}`}
+                                            >
+                                                <span className="text-white/70">
+                                                    {row.label || "—"}
+                                                </span>
+                                                <span className="tg-mono text-white/90">
+                                                    {row.value || "—"}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
                                 <button
                                     type="button"

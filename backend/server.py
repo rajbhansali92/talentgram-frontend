@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from core import init_storage, mongo_client, seed_admin
-from routers import applications, auth, links, projects, submissions, talents
+from routers import applications, auth, links, projects, submissions, talents, users
 
 app = FastAPI(title="Talentgram Portfolio Engine")
 
@@ -58,6 +58,7 @@ app.include_router(links.router)
 app.include_router(projects.router)
 app.include_router(submissions.router)
 app.include_router(applications.router)
+app.include_router(users.router)
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(

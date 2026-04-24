@@ -19,6 +19,7 @@ from core import (
     _public_project,
     _submission_to_client_shape,
     current_admin,
+    current_team_or_admin,
     db,
     decode_submitter,
     make_token,
@@ -33,7 +34,7 @@ router = APIRouter(prefix="/api", tags=["submissions"])
 # --------------------------------------------------------------------------
 @router.get("/public/projects/{slug}")
 async def public_project(slug: str):
-    project = await db.projects.find_one({"slug": slug}, {"_id": 0, "created_by": 0})
+    project = await db.projects.find_one({"slug": slug}, {"_id": 0, "created_by": 0, "client_budget": 0})
     if not project:
         raise HTTPException(404, "Project not found")
     return project
@@ -250,7 +251,7 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
 # Admin review
 # --------------------------------------------------------------------------
 @router.get("/submissions/approved")
-async def list_approved_submissions(admin: dict = Depends(current_admin)):
+async def list_approved_submissions(admin: dict = Depends(current_team_or_admin)):
     """All approved submissions across every project (admin convenience for Link picker)."""
     subs = await db.submissions.find(
         {"decision": "approved"},
@@ -274,7 +275,7 @@ async def list_approved_submissions(admin: dict = Depends(current_admin)):
 
 
 @router.get("/projects/{pid}/submissions")
-async def list_submissions(pid: str, admin: dict = Depends(current_admin)):
+async def list_submissions(pid: str, admin: dict = Depends(current_team_or_admin)):
     subs = await db.submissions.find(
         {"project_id": pid}, {"_id": 0}
     ).sort("created_at", -1).to_list(5000)
@@ -286,7 +287,7 @@ async def set_decision(
     pid: str,
     sid: str,
     payload: SubmissionDecisionIn,
-    admin: dict = Depends(current_admin),
+    admin: dict = Depends(current_team_or_admin),
 ):
     if payload.decision not in SUBMISSION_DECISIONS:
         raise HTTPException(400, "Invalid decision")
@@ -304,7 +305,7 @@ async def admin_edit_submission(
     pid: str,
     sid: str,
     payload: AdminSubmissionEditIn,
-    admin: dict = Depends(current_admin),
+    admin: dict = Depends(current_team_or_admin),
 ):
     """Admin can edit form_data and toggle per-field visibility for the client view."""
     sub = await db.submissions.find_one({"id": sid, "project_id": pid})

@@ -16,6 +16,8 @@ import ClientView from "@/pages/ClientView";
 import SubmissionPage from "@/pages/SubmissionPage";
 import ApplicationPage from "@/pages/ApplicationPage";
 import Applications from "@/pages/Applications";
+import UserManagement from "@/pages/UserManagement";
+import SignupPage from "@/pages/SignupPage";
 import Landing from "@/pages/Landing";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
@@ -64,10 +66,12 @@ function App() {
                             path="links/:id/edit"
                             element={<LinkGenerator />}
                         />
+                        <Route path="users" element={<UserManagement />} />
                     </Route>
                     <Route path="/l/:slug" element={<ClientView />} />
                     <Route path="/submit/:slug" element={<SubmissionPage />} />
                     <Route path="/apply" element={<ApplicationPage />} />
+                    <Route path="/signup" element={<SignupPage />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
             </BrowserRouter>

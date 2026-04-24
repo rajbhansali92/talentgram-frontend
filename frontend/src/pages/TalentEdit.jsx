@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, FILE_URL } from "@/lib/api";
+import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
 import {
     Select,
@@ -101,6 +101,7 @@ export default function TalentEdit() {
     const { id } = useParams();
     const nav = useNavigate();
     const isEdit = Boolean(id);
+    const isAdminRole = isAdmin();
     const [talent, setTalent] = useState(emptyTalent);
     const [workInput, setWorkInput] = useState("");
     const [saving, setSaving] = useState(false);
@@ -242,7 +243,7 @@ export default function TalentEdit() {
                     </h1>
                 </div>
                 <div className="flex gap-2">
-                    {isEdit && (
+                    {isEdit && isAdminRole && (
                         <button
                             onClick={deleteTalent}
                             data-testid="delete-talent-btn"

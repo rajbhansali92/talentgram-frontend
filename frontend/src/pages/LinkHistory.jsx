@@ -70,7 +70,8 @@ export default function LinkHistory() {
                 <Link
                     to="/admin/links/new"
                     data-testid="new-link-btn"
-                    className="inline-flex items-center gap-2 bg-white text-black px-5 py-3 rounded-sm text-xs tracking-wide hover:opacity-90"
+                    className={`inline-flex items-center gap-2 bg-white text-black px-5 py-3 rounded-sm text-xs tracking-wide hover:opacity-90 ${canCreate ? "" : "pointer-events-none opacity-40"}`}
+                    aria-disabled={!canCreate}
                 >
                     <Plus className="w-4 h-4" strokeWidth={1.5} /> Generate Link
                 </Link>
@@ -177,17 +178,20 @@ export default function LinkHistory() {
                                     <button
                                         onClick={() => duplicate(l.id)}
                                         title="Duplicate"
-                                        className="p-2 hover:bg-white/10 rounded-sm"
+                                        className={`p-2 hover:bg-white/10 rounded-sm ${canCreate ? "" : "hidden"}`}
                                     >
                                         <Files className="w-3.5 h-3.5" />
                                     </button>
-                                    <button
-                                        onClick={() => del(l.id)}
-                                        title="Delete"
-                                        className="p-2 hover:bg-white/10 hover:text-[var(--tg-danger)] rounded-sm"
-                                    >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
+                                    {canDelete && (
+                                        <button
+                                            onClick={() => del(l.id)}
+                                            title="Delete"
+                                            data-testid={`delete-link-${l.id}`}
+                                            className="p-2 hover:bg-white/10 hover:text-[var(--tg-danger)] rounded-sm"
+                                        >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         ))}

@@ -11,6 +11,7 @@ from core import (
     IdentifyIn,
     LinkIn,
     LinkOut,
+    _clean_budget_lines,
     _clean_ids,
     _filter_talent_for_client,
     _now,
@@ -18,6 +19,7 @@ from core import (
     _slugify,
     _submission_to_client_shape,
     current_admin,
+    current_team_or_admin,
     db,
     decode_viewer,
     enrich_talent,
@@ -48,6 +50,9 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
         "is_public": payload.is_public,
         "password": payload.password,
         "notes": payload.notes,
+        "client_budget_override": _clean_budget_lines(payload.client_budget_override)
+        if payload.client_budget_override
+        else None,
         "created_at": _now(),
         "created_by": admin["id"],
     }
@@ -59,7 +64,7 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
 
 
 @router.get("/links")
-async def list_links(admin: dict = Depends(current_admin)):
+async def list_links(admin: dict = Depends(current_team_or_admin)):
     links = await db.links.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
     for link in links:
         link["view_count"] = await db.link_views.count_documents({"link_id": link["id"]})
@@ -68,7 +73,7 @@ async def list_links(admin: dict = Depends(current_admin)):
 
 
 @router.get("/links/{lid}")
-async def get_link(lid: str, admin: dict = Depends(current_admin)):
+async def get_link(lid: str, admin: dict = Depends(current_team_or_admin)):
     link = await db.links.find_one({"id": lid}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
@@ -86,6 +91,8 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
     update["submission_ids"] = _clean_ids(payload.submission_ids)
     if not update["talent_ids"] and not update["submission_ids"]:
         raise HTTPException(400, "Select at least one talent or submission")
+    override = _clean_budget_lines(update.get("client_budget_override"))
+    update["client_budget_override"] = override if override else None
     res = await db.links.update_one({"id": lid}, {"$set": update})
     if not res.matched_count:
         raise HTTPException(404, "Link not found")
@@ -121,7 +128,7 @@ async def duplicate_link(lid: str, admin: dict = Depends(current_admin)):
 
 
 @router.get("/links/{lid}/results")
-async def link_results(lid: str, admin: dict = Depends(current_admin)):
+async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
     link = await db.links.find_one({"id": lid}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
@@ -251,6 +258,41 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
 
     talents = [_filter_talent_for_client(it, visibility) for it in subjects]
 
+    # Client-facing project budget (gated by visibility.budget)
+    project_budget: List[Dict[str, Any]] = []
+    if visibility.get("budget"):
+        override = link.get("client_budget_override")
+        if override:
+            project_budget = [{
+                "project_id": None,
+                "brand_name": link.get("brand_name") or link.get("title"),
+                "lines": override,
+            }]
+        elif raw_subs:
+            # Aggregate unique projects from submissions (preserve first-seen order)
+            seen_pids: List[str] = []
+            for s in raw_subs:
+                pid = s.get("project_id")
+                if pid and pid not in seen_pids:
+                    seen_pids.append(pid)
+            if seen_pids:
+                projects = await db.projects.find(
+                    {"id": {"$in": seen_pids}},
+                    {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1},
+                ).to_list(500)
+                by_id = {p["id"]: p for p in projects}
+                for pid in seen_pids:
+                    proj = by_id.get(pid)
+                    if not proj:
+                        continue
+                    lines = proj.get("client_budget") or []
+                    if lines:
+                        project_budget.append({
+                            "project_id": pid,
+                            "brand_name": proj.get("brand_name"),
+                            "lines": lines,
+                        })
+
     actions = await db.link_actions.find({
         "link_id": link["id"],
         "viewer_email": viewer["email"],
@@ -259,6 +301,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         "link": _public_link_view(link),
         "talents": talents,
         "actions": actions,
+        "project_budget": project_budget,
         "viewer": {"email": viewer["email"], "name": viewer["name"]},
     }
 

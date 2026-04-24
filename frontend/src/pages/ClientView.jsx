@@ -229,6 +229,7 @@ export default function ClientView() {
 
     const { link, talents, viewer } = data;
     const vis = link.visibility || {};
+    const projectBudget = data.project_budget || [];
 
     return (
         <div className="min-h-screen bg-[#050505] text-white" data-testid="client-view-page">
@@ -263,6 +264,44 @@ export default function ClientView() {
                         comments are saved instantly.
                     </p>
                 </div>
+
+                {projectBudget.length > 0 && (
+                    <section
+                        className="mb-10 border border-white/10 bg-white/[0.02] p-5 md:p-6"
+                        data-testid="project-budget-block"
+                    >
+                        <p className="eyebrow mb-4">Project Budget</p>
+                        <div className="grid gap-6 md:grid-cols-2">
+                            {projectBudget.map((grp, gi) => (
+                                <div
+                                    key={grp.project_id || `grp-${gi}`}
+                                    className="space-y-2"
+                                    data-testid={`project-budget-group-${gi}`}
+                                >
+                                    {grp.brand_name && projectBudget.length > 1 && (
+                                        <div className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+                                            {grp.brand_name}
+                                        </div>
+                                    )}
+                                    {(grp.lines || []).map((row, ri) => (
+                                        <div
+                                            key={`${row.label || ""}-${ri}`}
+                                            className="flex items-center justify-between gap-3 border-b border-white/5 pb-2 text-sm"
+                                            data-testid={`project-budget-line-${gi}-${ri}`}
+                                        >
+                                            <span className="text-white/70">
+                                                {row.label || "—"}
+                                            </span>
+                                            <span className="tg-mono text-white/95">
+                                                {row.value || "—"}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                )}
 
                 <div
                     className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6"

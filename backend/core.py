@@ -74,17 +74,62 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def current_admin(
+async def current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),
 ) -> Dict[str, Any]:
+    """Return the active user behind the JWT. Rejects disabled users and
+    unknown roles. Used by every admin-plane route."""
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     data = decode_token(credentials.credentials)
-    if not data or data.get("role") != "admin":
+    if not data or data.get("role") not in ("admin", "team"):
         raise HTTPException(status_code=401, detail="Invalid token")
-    user = await db.admins.find_one({"email": data.get("email")}, {"_id": 0, "password_hash": 0})
+    user = await db.users.find_one(
+        {"email": data.get("email")},
+        {"_id": 0, "password_hash": 0, "invite_token": 0},
+    )
     if not user:
-        raise HTTPException(status_code=401, detail="Admin not found")
+        raise HTTPException(status_code=401, detail="User not found")
+    if user.get("status") == "disabled":
+        raise HTTPException(status_code=403, detail="Account disabled")
+    if user.get("status") == "invited":
+        raise HTTPException(status_code=403, detail="Account not activated")
+    user["role"] = user.get("role", "team")
+    return user
+
+
+def require_role(*roles: str):
+    """Dependency factory — 403s if current_user.role not in allowed set.
+
+    Never trust frontend role checks — this is the single source of truth.
+    """
+    allowed = set(roles)
+
+    async def _dep(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+        if user.get("role") not in allowed:
+            raise HTTPException(status_code=403, detail="Access denied")
+        return user
+
+    return _dep
+
+
+async def current_admin(
+    user: Dict[str, Any] = Depends(current_user),
+) -> Dict[str, Any]:
+    """Admin-only dependency. Kept for backwards-compat with existing DELETE
+    routes. New code should prefer `require_role("admin")`."""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+async def current_team_or_admin(
+    user: Dict[str, Any] = Depends(current_user),
+) -> Dict[str, Any]:
+    """Allow any active admin or team member. Use on non-destructive routes
+    where team members need create/edit/read parity with admins."""
+    if user.get("role") not in ("admin", "team"):
+        raise HTTPException(status_code=403, detail="Access denied")
     return user
 
 
@@ -201,17 +246,63 @@ def _slugify(title: str) -> str:
 
 
 async def seed_admin() -> None:
-    existing = await db.admins.find_one({"email": ADMIN_EMAIL})
-    if existing:
+    """Idempotently seed the root admin into `db.users`.
+
+    Migration: if a legacy `db.admins` record exists for this email but no
+    matching `db.users` row, move the hash + name over. New installs skip this.
+    Password is refreshed from env on every boot (upsert semantics) so the
+    playbook's "rotate ADMIN_PASSWORD in .env" pattern works.
+    """
+    # Unique email index — idempotent.
+    try:
+        await db.users.create_index("email", unique=True)
+    except Exception as e:
+        logger.warning(f"users email index: {e}")
+
+    legacy = await db.admins.find_one({"email": ADMIN_EMAIL}) if "admins" in await db.list_collection_names() else None
+    existing = await db.users.find_one({"email": ADMIN_EMAIL})
+
+    if existing is None and legacy:
+        # Migrate legacy admin → users
+        await db.users.insert_one({
+            "id": legacy.get("id") or str(uuid.uuid4()),
+            "email": ADMIN_EMAIL,
+            "name": legacy.get("name") or "Talentgram Admin",
+            "password_hash": legacy.get("password_hash") or hash_password(ADMIN_PASSWORD),
+            "role": "admin",
+            "status": "active",
+            "created_at": legacy.get("created_at") or _now(),
+            "last_login": None,
+        })
+        logger.info(f"Migrated legacy admin {ADMIN_EMAIL} → db.users")
+        existing = await db.users.find_one({"email": ADMIN_EMAIL})
+
+    if existing is None:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "email": ADMIN_EMAIL,
+            "name": "Talentgram Admin",
+            "password_hash": hash_password(ADMIN_PASSWORD),
+            "role": "admin",
+            "status": "active",
+            "created_at": _now(),
+            "last_login": None,
+        })
+        logger.info(f"Seeded admin {ADMIN_EMAIL}")
         return
-    await db.admins.insert_one({
-        "id": str(uuid.uuid4()),
-        "email": ADMIN_EMAIL,
-        "name": "Talentgram Admin",
-        "password_hash": hash_password(ADMIN_PASSWORD),
-        "created_at": _now(),
-    })
-    logger.info(f"Seeded admin {ADMIN_EMAIL}")
+
+    # Ensure role/status are correct for the seeded admin account.
+    patch: Dict[str, Any] = {}
+    if existing.get("role") != "admin":
+        patch["role"] = "admin"
+    if existing.get("status") != "active":
+        patch["status"] = "active"
+    # Refresh hash only if env password doesn't match (rotation support).
+    if not verify_password(ADMIN_PASSWORD, existing.get("password_hash") or ""):
+        patch["password_hash"] = hash_password(ADMIN_PASSWORD)
+    if patch:
+        await db.users.update_one({"email": ADMIN_EMAIL}, {"$set": patch})
+        logger.info(f"Updated seeded admin {ADMIN_EMAIL}: {list(patch.keys())}")
 
 
 # --------------------------------------------------------------------------
@@ -332,6 +423,9 @@ class LinkIn(BaseModel):
     is_public: bool = True
     password: Optional[str] = None
     notes: Optional[str] = None
+    # Optional per-link override for client-facing budget. When non-empty it
+    # REPLACES the aggregated project client_budget in the public link payload.
+    client_budget_override: Optional[List[Dict[str, str]]] = None
 
 
 class LinkOut(LinkIn):
@@ -373,6 +467,11 @@ class ProjectIn(BaseModel):
     video_links: List[str] = Field(default_factory=list)
     competitive_brand_enabled: bool = False
     custom_questions: List[Dict[str, Any]] = Field(default_factory=list)
+    # Structured key/value pricing. Each entry: {"label": str, "value": str}
+    # talent_budget  — shown to talents on the audition submission form (hint)
+    # client_budget  — shown to clients on the link view (gated by visibility.budget)
+    talent_budget: List[Dict[str, str]] = Field(default_factory=list)
+    client_budget: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class SubmissionStartIn(BaseModel):
@@ -408,6 +507,81 @@ class ApplicationStartIn(BaseModel):
     last_name: str
     email: EmailStr
     phone: Optional[str] = None
+
+
+# --------------------------------------------------------------------------
+# User management (role-based access control)
+# --------------------------------------------------------------------------
+USER_ROLES = ("admin", "team")
+USER_STATUSES = ("active", "invited", "disabled")
+
+
+class UserInviteIn(BaseModel):
+    name: str
+    email: EmailStr
+    role: str = "team"
+
+
+class UserRolePatchIn(BaseModel):
+    role: str
+
+
+class SignupValidateIn(BaseModel):
+    token: str
+
+
+class SignupCompleteIn(BaseModel):
+    token: str
+    password: str
+
+
+def _public_user(u: dict) -> dict:
+    """Strip secret fields before returning a user document."""
+    return {
+        "id": u.get("id"),
+        "name": u.get("name"),
+        "email": u.get("email"),
+        "role": u.get("role"),
+        "status": u.get("status"),
+        "created_at": u.get("created_at"),
+        "last_login": u.get("last_login"),
+    }
+
+
+def generate_temp_password(length: int = 14) -> str:
+    """Cryptographically strong, human-readable temp password.
+
+    Drops ambiguous chars (O/0/l/1/I). Guarantees at least 1 lower, 1 upper,
+    1 digit, 1 symbol. Uses `secrets` — never `random`.
+    """
+    import secrets
+
+    lower = "abcdefghijkmnopqrstuvwxyz"           # no "l"
+    upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"            # no "I", "O"
+    digits = "23456789"                           # no "0", "1"
+    symbols = "!@#$%^&*"
+    alphabet = lower + upper + digits + symbols
+    # Ensure class coverage
+    required = [
+        secrets.choice(lower),
+        secrets.choice(upper),
+        secrets.choice(digits),
+        secrets.choice(symbols),
+    ]
+    remaining = [secrets.choice(alphabet) for _ in range(max(0, length - len(required)))]
+    raw = required + remaining
+    # Fisher-Yates shuffle via secrets (uniform)
+    for i in range(len(raw) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        raw[i], raw[j] = raw[j], raw[i]
+    return "".join(raw)
+
+
+def generate_invite_token() -> str:
+    """URL-safe cryptographically random invite token (≈43 chars)."""
+    import secrets
+
+    return secrets.token_urlsafe(32)
 
 
 # --------------------------------------------------------------------------
@@ -569,6 +743,34 @@ def _submission_to_client_shape(sub: dict) -> dict:
 def _public_project(project: dict) -> dict:
     """Strip internal/private fields before returning project info publicly."""
     return {k: v for k, v in project.items() if k not in {"_id", "created_by"}}
+
+
+def _public_project_for_talent(project: dict) -> dict:
+    """Public project shape for the audition/submission form.
+
+    Talents MUST NOT see the client-facing budget — only the talent_budget hint.
+    """
+    return {
+        k: v
+        for k, v in project.items()
+        if k not in {"_id", "created_by", "client_budget"}
+    }
+
+
+def _clean_budget_lines(lines: Any) -> List[Dict[str, str]]:
+    """Normalise a key/value budget list: drop empty rows, coerce strings, trim."""
+    out: List[Dict[str, str]] = []
+    if not isinstance(lines, list):
+        return out
+    for row in lines:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if not label and not value:
+            continue
+        out.append({"label": label, "value": value})
+    return out
 
 
 def _clean_ids(ids: List[str]) -> List[str]:

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL } from "@/lib/api";
 import { toast } from "sonner";
+import MaterialModal from "@/components/MaterialModal";
 import {
     Select,
     SelectContent,
@@ -21,6 +22,12 @@ import {
     PlayCircle,
     FolderOpen,
     Plus,
+    Copy,
+    MessageCircle,
+    Check,
+    XCircle,
+    Clock,
+    ExternalLink,
 } from "lucide-react";
 
 const COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"];
@@ -66,9 +73,18 @@ export default function ProjectEdit() {
     const [uploading, setUploading] = useState(null); // category string
     const [videoInput, setVideoInput] = useState("");
     const [showMaterialModal, setShowMaterialModal] = useState(false);
+    const [submissions, setSubmissions] = useState([]);
+    const [reviewingSid, setReviewingSid] = useState(null);
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
+
+    const loadSubmissions = async (pid) => {
+        try {
+            const { data } = await adminApi.get(`/projects/${pid}/submissions`);
+            setSubmissions(data);
+        } catch {}
+    };
 
     useEffect(() => {
         if (!isEdit) return;
@@ -76,11 +92,42 @@ export default function ProjectEdit() {
             try {
                 const { data } = await adminApi.get(`/projects/${id}`);
                 setProject({ ...empty, ...data });
+                loadSubmissions(id);
             } catch {
                 toast.error("Failed to load project");
             }
         })();
     }, [id, isEdit]);
+
+    const setDecision = async (sid, decision) => {
+        await adminApi.post(`/projects/${id}/submissions/${sid}/decision`, {
+            decision,
+        });
+        toast.success(`Marked ${decision}`);
+        loadSubmissions(id);
+    };
+
+    const deleteSubmission = async (sid) => {
+        if (!window.confirm("Delete this submission?")) return;
+        await adminApi.delete(`/projects/${id}/submissions/${sid}`);
+        loadSubmissions(id);
+    };
+
+    const submissionUrl = project?.slug
+        ? `${window.location.origin}/submit/${project.slug}`
+        : "";
+
+    const copySubmitLink = () => {
+        navigator.clipboard.writeText(submissionUrl);
+        toast.success("Submission link copied");
+    };
+
+    const shareWhatsApp = () => {
+        const msg = encodeURIComponent(
+            `Talentgram x ${project.brand_name}\n\nAudition submission link: ${submissionUrl}`,
+        );
+        window.open(`https://wa.me/?text=${msg}`, "_blank");
+    };
 
     const save = async () => {
         if (!project.brand_name.trim()) {
@@ -444,6 +491,99 @@ export default function ProjectEdit() {
                 </p>
             )}
 
+            {/* Share submission link */}
+            {isEdit && (
+                <section
+                    className="border border-white/10 p-6 md:p-8 mt-6"
+                    data-testid="submission-link-section"
+                >
+                    <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+                        <div>
+                            <p className="eyebrow">Talent Submission Link</p>
+                            <p className="text-xs text-white/40 mt-1">
+                                Share this public link with talents. They can
+                                submit intro video, takes and images.
+                            </p>
+                        </div>
+                        <div className="flex gap-2 flex-wrap">
+                            <a
+                                href={submissionUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                            >
+                                <ExternalLink className="w-3.5 h-3.5" /> Preview
+                            </a>
+                            <button
+                                onClick={copySubmitLink}
+                                data-testid="copy-submit-link-btn"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                            >
+                                <Copy className="w-3.5 h-3.5" /> Copy
+                            </button>
+                            <button
+                                onClick={shareWhatsApp}
+                                data-testid="whatsapp-submit-link-btn"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 bg-[#25D366] text-black hover:opacity-90 rounded-sm"
+                            >
+                                <MessageCircle className="w-3.5 h-3.5" />{" "}
+                                WhatsApp
+                            </button>
+                        </div>
+                    </div>
+                    <div className="border border-white/10 bg-white/[0.02] px-4 py-3 tg-mono text-xs text-white/70 break-all">
+                        {submissionUrl}
+                    </div>
+                </section>
+            )}
+
+            {/* Submissions Review */}
+            {isEdit && (
+                <section
+                    className="border border-white/10 mt-6"
+                    data-testid="submissions-review-section"
+                >
+                    <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                        <div>
+                            <p className="eyebrow">Submissions</p>
+                            <p className="text-xs text-white/40 mt-1">
+                                {submissions.length} total ·{" "}
+                                {
+                                    submissions.filter(
+                                        (s) => s.decision === "approved",
+                                    ).length
+                                }{" "}
+                                approved ·{" "}
+                                {
+                                    submissions.filter(
+                                        (s) => s.decision === "rejected",
+                                    ).length
+                                }{" "}
+                                rejected
+                            </p>
+                        </div>
+                    </div>
+                    {submissions.length === 0 ? (
+                        <div className="p-8 text-center text-white/40 text-sm">
+                            No submissions yet. Share the link above with
+                            talents.
+                        </div>
+                    ) : (
+                        <div className="divide-y divide-white/10">
+                            {submissions.map((s) => (
+                                <SubmissionRow
+                                    key={s.id}
+                                    submission={s}
+                                    onOpen={() => setReviewingSid(s.id)}
+                                    onDecision={(d) => setDecision(s.id, d)}
+                                    onDelete={() => deleteSubmission(s.id)}
+                                />
+                            ))}
+                        </div>
+                    )}
+                </section>
+            )}
+
             {/* Material viewer modal */}
             {showMaterialModal && (
                 <MaterialModal
@@ -452,6 +592,209 @@ export default function ProjectEdit() {
                     onRemove={removeMaterial}
                 />
             )}
+
+            {/* Submission review modal */}
+            {reviewingSid && (
+                <SubmissionReviewModal
+                    submission={submissions.find((s) => s.id === reviewingSid)}
+                    onClose={() => setReviewingSid(null)}
+                    onDecision={(d) => setDecision(reviewingSid, d)}
+                />
+            )}
+        </div>
+    );
+}
+
+function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
+    const s = submission;
+    const meta = {
+        pending: { icon: Clock, label: "Pending", color: "text-white/60" },
+        approved: { icon: Check, label: "Approved", color: "text-[#34C759]" },
+        rejected: {
+            icon: XCircle,
+            label: "Rejected",
+            color: "text-[#FF3B30]",
+        },
+    }[s.decision || "pending"];
+    const mediaCounts = {
+        intro: (s.media || []).filter((m) => m.category === "intro_video")
+            .length,
+        takes: (s.media || []).filter((m) => m.category?.startsWith("take_"))
+            .length,
+        images: (s.media || []).filter((m) => m.category === "image").length,
+    };
+    return (
+        <div
+            className="px-6 py-4 flex items-center justify-between gap-4 flex-wrap"
+            data-testid={`submission-row-${s.id}`}
+        >
+            <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-display text-lg">
+                        {s.talent_name}
+                    </span>
+                    <span
+                        className={`inline-flex items-center gap-1 text-[10px] tracking-widest uppercase ${meta.color}`}
+                    >
+                        <meta.icon className="w-3 h-3" /> {meta.label}
+                    </span>
+                    {s.status === "draft" && (
+                        <span className="text-[10px] tracking-widest uppercase text-white/30">
+                            · Draft
+                        </span>
+                    )}
+                </div>
+                <div className="text-xs text-white/40 tg-mono mt-1 truncate">
+                    {s.talent_email}
+                    {s.talent_phone ? ` · ${s.talent_phone}` : ""}
+                </div>
+                <div className="text-[11px] text-white/40 mt-2">
+                    {mediaCounts.intro ? "1 intro video · " : "no intro · "}
+                    {mediaCounts.takes} takes · {mediaCounts.images} images
+                </div>
+            </div>
+            <div className="flex gap-1 flex-wrap">
+                <button
+                    onClick={onOpen}
+                    className="text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                    data-testid={`review-submission-${s.id}`}
+                >
+                    Review
+                </button>
+                <button
+                    onClick={() => onDecision("approved")}
+                    className="text-xs px-3 py-2 border border-white/15 hover:border-[#34C759] hover:text-[#34C759] rounded-sm"
+                    data-testid={`approve-${s.id}`}
+                >
+                    <Check className="w-3.5 h-3.5" />
+                </button>
+                <button
+                    onClick={() => onDecision("rejected")}
+                    className="text-xs px-3 py-2 border border-white/15 hover:border-[#FF3B30] hover:text-[#FF3B30] rounded-sm"
+                    data-testid={`reject-${s.id}`}
+                >
+                    <XCircle className="w-3.5 h-3.5" />
+                </button>
+                <button
+                    onClick={onDelete}
+                    className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 text-white/50 rounded-sm"
+                >
+                    <Trash2 className="w-3.5 h-3.5" />
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function SubmissionReviewModal({ submission, onClose, onDecision }) {
+    if (!submission) return null;
+    const media = submission.media || [];
+    const intro = media.find((m) => m.category === "intro_video");
+    const takes = ["take_1", "take_2", "take_3"]
+        .map((k) => media.find((m) => m.category === k))
+        .filter(Boolean);
+    const images = media.filter((m) => m.category === "image");
+    return (
+        <div
+            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl overflow-y-auto"
+            data-testid="submission-review-modal"
+        >
+            <button
+                onClick={onClose}
+                className="fixed top-5 right-5 z-10 w-10 h-10 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50"
+            >
+                <X className="w-4 h-4" />
+            </button>
+            <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14">
+                <p className="eyebrow mb-3">Submission</p>
+                <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2">
+                    {submission.talent_name}
+                </h2>
+                <p className="text-sm text-white/50 tg-mono mb-10">
+                    {submission.talent_email}
+                    {submission.talent_phone
+                        ? ` · ${submission.talent_phone}`
+                        : ""}
+                </p>
+
+                {intro && (
+                    <section className="mb-10">
+                        <p className="eyebrow mb-3">Introduction Video</p>
+                        <video
+                            src={FILE_URL(intro.storage_path)}
+                            controls
+                            className="w-full max-w-3xl border border-white/10 bg-black"
+                        />
+                    </section>
+                )}
+                {takes.length > 0 && (
+                    <section className="mb-10">
+                        <p className="eyebrow mb-3">Audition Takes</p>
+                        <div className="grid md:grid-cols-2 gap-4">
+                            {takes.map((t, i) => (
+                                <div key={t.id}>
+                                    <p className="text-xs text-white/50 mb-2 tg-mono">
+                                        Take {t.category.split("_")[1]}
+                                    </p>
+                                    <video
+                                        src={FILE_URL(t.storage_path)}
+                                        controls
+                                        className="w-full border border-white/10 bg-black"
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                )}
+                {images.length > 0 && (
+                    <section className="mb-10">
+                        <p className="eyebrow mb-3">
+                            Images ({images.length})
+                        </p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {images.map((m) => (
+                                <a
+                                    key={m.id}
+                                    href={FILE_URL(m.storage_path)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="aspect-square bg-[#0a0a0a] overflow-hidden border border-white/10"
+                                >
+                                    <img
+                                        src={FILE_URL(m.storage_path)}
+                                        alt=""
+                                        loading="lazy"
+                                        className="w-full h-full object-cover"
+                                    />
+                                </a>
+                            ))}
+                        </div>
+                    </section>
+                )}
+
+                <div className="sticky bottom-4 flex gap-2 justify-end">
+                    <button
+                        onClick={() => {
+                            onDecision("approved");
+                            onClose();
+                        }}
+                        data-testid="review-approve-btn"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#34C759] text-black rounded-sm text-xs font-medium"
+                    >
+                        <Check className="w-3.5 h-3.5" /> Approve — Forward
+                    </button>
+                    <button
+                        onClick={() => {
+                            onDecision("rejected");
+                            onClose();
+                        }}
+                        data-testid="review-reject-btn"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#FF3B30]/60 text-[#FF3B30] hover:bg-[#FF3B30]/10 rounded-sm text-xs"
+                    >
+                        <XCircle className="w-3.5 h-3.5" /> Reject
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }
@@ -498,159 +841,5 @@ function UploadTile({
                 }}
             />
         </button>
-    );
-}
-
-function MaterialModal({ project, onClose, onRemove }) {
-    const materials = project.materials || [];
-    const videos = project.video_links || [];
-    const byCat = (c) => materials.filter((m) => m.category === c);
-
-    return (
-        <div
-            className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl overflow-y-auto"
-            data-testid="audition-material-modal"
-        >
-            <button
-                onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50"
-            >
-                <X className="w-4 h-4" />
-            </button>
-            <div className="max-w-5xl mx-auto px-6 md:px-12 py-12">
-                <p className="eyebrow mb-3">Audition Material</p>
-                <h2 className="font-display text-4xl md:text-5xl tracking-tight mb-10">
-                    {project.brand_name}
-                </h2>
-
-                <MaterialGroup
-                    title="Script (PDF)"
-                    items={byCat("script")}
-                    onRemove={onRemove}
-                    render={(m) => (
-                        <a
-                            href={FILE_URL(m.storage_path)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="flex items-center gap-3 flex-1"
-                        >
-                            <FileText className="w-5 h-5 text-white/60" />
-                            <div className="min-w-0">
-                                <div className="text-sm truncate">
-                                    {m.original_filename || "script.pdf"}
-                                </div>
-                                <div className="text-[10px] tg-mono text-white/40">
-                                    Open PDF →
-                                </div>
-                            </div>
-                        </a>
-                    )}
-                />
-
-                <MaterialGroup
-                    title="Images"
-                    items={byCat("image")}
-                    onRemove={onRemove}
-                    grid
-                    render={(m) => (
-                        <a
-                            href={FILE_URL(m.storage_path)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="block aspect-square bg-[#0a0a0a] overflow-hidden"
-                        >
-                            <img
-                                src={FILE_URL(m.storage_path)}
-                                alt=""
-                                className="w-full h-full object-cover"
-                            />
-                        </a>
-                    )}
-                />
-
-                <MaterialGroup
-                    title="Audio Notes"
-                    items={byCat("audio")}
-                    onRemove={onRemove}
-                    render={(m) => (
-                        <div className="flex items-center gap-3 flex-1">
-                            <Music className="w-5 h-5 text-white/60 shrink-0" />
-                            <audio
-                                src={FILE_URL(m.storage_path)}
-                                controls
-                                className="w-full max-w-md"
-                            />
-                        </div>
-                    )}
-                />
-
-                {videos.length > 0 && (
-                    <div className="mb-10">
-                        <p className="eyebrow mb-4">Video Links</p>
-                        <div className="space-y-2">
-                            {videos.map((v, i) => (
-                                <a
-                                    key={i}
-                                    href={v}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="flex items-center gap-3 p-3 border border-white/10 hover:border-white/30 transition-all"
-                                >
-                                    <PlayCircle className="w-5 h-5 text-white/60" />
-                                    <span className="text-sm tg-mono truncate">
-                                        {v}
-                                    </span>
-                                </a>
-                            ))}
-                        </div>
-                    </div>
-                )}
-
-                {materials.length === 0 && videos.length === 0 && (
-                    <p className="text-white/40 text-sm">
-                        No audition materials yet.
-                    </p>
-                )}
-            </div>
-        </div>
-    );
-}
-
-function MaterialGroup({ title, items, onRemove, render, grid }) {
-    if (!items || items.length === 0) return null;
-    return (
-        <div className="mb-10">
-            <p className="eyebrow mb-4">{title}</p>
-            <div
-                className={
-                    grid
-                        ? "grid grid-cols-2 md:grid-cols-4 gap-3"
-                        : "space-y-2"
-                }
-            >
-                {items.map((m) => (
-                    <div
-                        key={m.id}
-                        className={
-                            grid
-                                ? "relative group"
-                                : "flex items-center gap-3 p-3 border border-white/10"
-                        }
-                    >
-                        {render(m)}
-                        <button
-                            onClick={() => onRemove(m.id)}
-                            className={
-                                grid
-                                    ? "absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 bg-black/70 hover:bg-[var(--tg-danger)] rounded-sm transition-all"
-                                    : "text-white/40 hover:text-[var(--tg-danger)]"
-                            }
-                        >
-                            <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                    </div>
-                ))}
-            </div>
-        </div>
     );
 }

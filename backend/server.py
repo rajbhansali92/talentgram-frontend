@@ -248,6 +248,19 @@ class ProjectIn(BaseModel):
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
 MATERIAL_CATEGORIES = {"script", "image", "audio"}
+SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take_1", "take_2", "take_3", "image"}
+MAX_SUBMISSION_IMAGES = 8
+SUBMISSION_DECISIONS = {"pending", "approved", "rejected"}
+
+
+class SubmissionStartIn(BaseModel):
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+
+
+class SubmissionDecisionIn(BaseModel):
+    decision: str  # pending | approved | rejected
 
 
 # --------------------------------------------------------------------------
@@ -804,6 +817,193 @@ async def delete_material(pid: str, mid: str, admin: dict = Depends(current_admi
 @api.get("/projects/meta/commission-options")
 async def commission_options(admin: dict = Depends(current_admin)):
     return {"options": COMMISSION_OPTIONS}
+
+
+# --------------------------------------------------------------------------
+# Talent Submission routes (public + admin review)
+# --------------------------------------------------------------------------
+def _public_project(project: dict) -> dict:
+    """Strip internal/private fields before returning project info publicly."""
+    out = {k: v for k, v in project.items() if k not in {"_id", "created_by"}}
+    return out
+
+
+def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1]
+    data = decode_token(token)
+    if not data or data.get("role") != "submitter":
+        return None
+    return data
+
+
+@api.get("/public/projects/{slug}")
+async def public_project(slug: str):
+    project = await db.projects.find_one({"slug": slug}, {"_id": 0, "created_by": 0})
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return project
+
+
+@api.post("/public/projects/{slug}/submission")
+async def start_submission(slug: str, payload: SubmissionStartIn):
+    project = await db.projects.find_one({"slug": slug})
+    if not project:
+        raise HTTPException(404, "Project not found")
+    sid = str(uuid.uuid4())
+    doc = {
+        "id": sid,
+        "project_id": project["id"],
+        "project_slug": slug,
+        "talent_name": payload.name,
+        "talent_email": payload.email.lower(),
+        "talent_phone": payload.phone,
+        "media": [],  # list of {id, category, storage_path, content_type, original_filename, size, created_at}
+        "status": "draft",  # draft | submitted
+        "decision": "pending",  # pending | approved | rejected
+        "created_at": _now(),
+        "submitted_at": None,
+    }
+    await db.submissions.insert_one(doc)
+    token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
+    return {"id": sid, "token": token}
+
+
+@api.post("/public/submissions/{sid}/upload")
+async def submission_upload(
+    sid: str,
+    category: str = Form(...),
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(None),
+):
+    submitter = decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    if category not in SUBMISSION_UPLOAD_CATEGORIES:
+        raise HTTPException(400, "Invalid category")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    if sub.get("status") == "submitted":
+        raise HTTPException(400, "Submission already finalized")
+
+    # Enforce image cap
+    if category == "image":
+        existing = sum(1 for m in sub.get("media", []) if m["category"] == "image")
+        if existing >= MAX_SUBMISSION_IMAGES:
+            raise HTTPException(400, f"Image limit reached ({MAX_SUBMISSION_IMAGES})")
+
+    # Single-slot categories: replace if exists
+    single_slot = {"intro_video", "take_1", "take_2", "take_3"}
+    if category in single_slot:
+        # Remove previous entry in same slot
+        await db.submissions.update_one(
+            {"id": sid}, {"$pull": {"media": {"category": category}}}
+        )
+
+    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    path = f"{APP_NAME}/submissions/{sid}/{uuid.uuid4()}.{ext}"
+    data = await file.read()
+    result = put_object(path, data, file.content_type or "application/octet-stream")
+    media = {
+        "id": str(uuid.uuid4()),
+        "category": category,
+        "storage_path": result["path"],
+        "content_type": file.content_type or "application/octet-stream",
+        "original_filename": file.filename,
+        "size": result.get("size", len(data)),
+        "created_at": _now(),
+    }
+    await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
+    updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return updated
+
+
+@api.delete("/public/submissions/{sid}/media/{mid}")
+async def submission_delete_media(
+    sid: str, mid: str, authorization: Optional[str] = Header(None)
+):
+    submitter = decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    if sub.get("status") == "submitted":
+        raise HTTPException(400, "Submission already finalized")
+    await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"id": mid}}})
+    return {"ok": True}
+
+
+@api.post("/public/submissions/{sid}/finalize")
+async def submission_finalize(sid: str, authorization: Optional[str] = Header(None)):
+    submitter = decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    media = sub.get("media", [])
+    has_intro = any(m["category"] == "intro_video" for m in media)
+    has_take1 = any(m["category"] == "take_1" for m in media)
+    if not has_intro:
+        raise HTTPException(400, "Introduction video is required")
+    if not has_take1:
+        raise HTTPException(400, "Take 1 is required")
+    await db.submissions.update_one(
+        {"id": sid},
+        {"$set": {"status": "submitted", "submitted_at": _now()}},
+    )
+    return {"ok": True}
+
+
+@api.get("/public/submissions/{sid}")
+async def public_submission(sid: str, authorization: Optional[str] = Header(None)):
+    submitter = decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    return sub
+
+
+# ---- Admin review ----
+@api.get("/projects/{pid}/submissions")
+async def list_submissions(pid: str, admin: dict = Depends(current_admin)):
+    subs = await db.submissions.find(
+        {"project_id": pid}, {"_id": 0}
+    ).sort("created_at", -1).to_list(5000)
+    return subs
+
+
+@api.post("/projects/{pid}/submissions/{sid}/decision")
+async def set_decision(
+    pid: str,
+    sid: str,
+    payload: SubmissionDecisionIn,
+    admin: dict = Depends(current_admin),
+):
+    if payload.decision not in SUBMISSION_DECISIONS:
+        raise HTTPException(400, "Invalid decision")
+    res = await db.submissions.update_one(
+        {"id": sid, "project_id": pid},
+        {"$set": {"decision": payload.decision, "decided_at": _now()}},
+    )
+    if not res.matched_count:
+        raise HTTPException(404, "Submission not found")
+    return {"ok": True}
+
+
+@api.delete("/projects/{pid}/submissions/{sid}")
+async def delete_submission(
+    pid: str, sid: str, admin: dict = Depends(current_admin)
+):
+    res = await db.submissions.delete_one({"id": sid, "project_id": pid})
+    if not res.deleted_count:
+        raise HTTPException(404, "Submission not found")
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------

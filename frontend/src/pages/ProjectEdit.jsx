@@ -21,6 +21,7 @@ import {
     Image as ImageIcon,
     Music,
     PlayCircle,
+    Film,
     FolderOpen,
     Plus,
     Copy,
@@ -83,6 +84,7 @@ export default function ProjectEdit() {
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
+    const videoFileRef = useRef();
 
     const loadSubmissions = async (pid) => {
         try {
@@ -172,6 +174,22 @@ export default function ProjectEdit() {
         if (!isEdit) {
             toast.error("Save the project before uploading materials");
             return;
+        }
+        // Early size guard for reference videos (server also enforces)
+        if (category === "video_file") {
+            const MAX = 100 * 1024 * 1024;
+            for (const f of files) {
+                if (f.size > MAX) {
+                    toast.error(
+                        `${f.name} is ${(f.size / 1024 / 1024).toFixed(1)} MB — max 100 MB`,
+                    );
+                    return;
+                }
+                if (!f.type.startsWith("video/")) {
+                    toast.error(`${f.name} is not a video file`);
+                    return;
+                }
+            }
         }
         setUploading(category);
         try {
@@ -414,7 +432,7 @@ export default function ProjectEdit() {
                         </div>
                     </div>
 
-                    <div className="grid md:grid-cols-3 gap-4 mb-8">
+                    <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                         <UploadTile
                             title="Script (PDF)"
                             icon={FileText}
@@ -443,6 +461,17 @@ export default function ProjectEdit() {
                             inputRef={audioRef}
                             uploading={uploading === "audio"}
                             testid="upload-audio"
+                        />
+                        <UploadTile
+                            title="Reference Videos"
+                            icon={Film}
+                            accept="video/mp4,video/quicktime,video/*"
+                            multiple
+                            onPick={(files) => uploadMaterial(files, "video_file")}
+                            inputRef={videoFileRef}
+                            uploading={uploading === "video_file"}
+                            testid="upload-video-file"
+                            hint="Max 100 MB · mp4/mov"
                         />
                     </div>
 
@@ -1207,6 +1236,7 @@ function UploadTile({
     inputRef,
     uploading,
     testid,
+    hint,
 }) {
     return (
         <button
@@ -1225,7 +1255,7 @@ function UploadTile({
             </div>
             <div className="text-sm font-display">{title}</div>
             <div className="text-[10px] tg-mono text-white/40 mt-1">
-                {multiple ? "Multiple allowed" : "Single file"}
+                {hint || (multiple ? "Multiple allowed" : "Single file")}
             </div>
             <input
                 ref={inputRef}

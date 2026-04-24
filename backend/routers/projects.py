@@ -9,6 +9,7 @@ from core import (
     COMMISSION_OPTIONS,
     DEFAULT_VISIBILITY,
     MATERIAL_CATEGORIES,
+    MAX_VIDEO_FILE_BYTES,
     ForwardToLinkIn,
     ProjectIn,
     _now,
@@ -79,19 +80,34 @@ async def add_material(
     admin: dict = Depends(current_admin),
 ):
     if category not in MATERIAL_CATEGORIES:
-        raise HTTPException(400, "Invalid category (script|image|audio)")
+        raise HTTPException(400, "Invalid category (script|image|audio|video_file)")
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Project not found")
+
+    content_type = file.content_type or "application/octet-stream"
+    if category == "video_file" and not content_type.startswith("video/"):
+        raise HTTPException(400, "Reference video must be a video file")
+
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    path = f"{APP_NAME}/projects/{pid}/{uuid.uuid4()}.{ext}"
+    # Segregated storage path for reference videos
+    subdir = "videos" if category == "video_file" else "materials"
+    path = f"{APP_NAME}/projects/{pid}/{subdir}/{uuid.uuid4()}.{ext}"
     data = await file.read()
-    result = put_object(path, data, file.content_type or "application/octet-stream")
+
+    # Enforce size limit for reference videos (100 MB)
+    if category == "video_file" and len(data) > MAX_VIDEO_FILE_BYTES:
+        raise HTTPException(
+            400,
+            f"Reference video too large ({len(data) // (1024 * 1024)} MB). Max {MAX_VIDEO_FILE_BYTES // (1024 * 1024)} MB.",
+        )
+
+    result = put_object(path, data, content_type)
     material = {
         "id": str(uuid.uuid4()),
         "category": category,
         "storage_path": result["path"],
-        "content_type": file.content_type or "application/octet-stream",
+        "content_type": content_type,
         "original_filename": file.filename,
         "size": result.get("size", len(data)),
         "created_at": _now(),

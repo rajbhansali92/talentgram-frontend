@@ -244,7 +244,8 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
 }
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
-MATERIAL_CATEGORIES = {"script", "image", "audio"}
+MATERIAL_CATEGORIES = {"script", "image", "audio", "video_file"}
+MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
 SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take_1", "take_2", "take_3", "image"}
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5

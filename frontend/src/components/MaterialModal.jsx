@@ -104,6 +104,27 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     )}
                 />
 
+                <Group
+                    title="Reference Videos"
+                    items={byCat("video_file")}
+                    onRemove={onRemove}
+                    render={(m) => (
+                        <div className="flex-1 bg-muted p-2 rounded-lg">
+                            <video
+                                src={FILE_URL(m.storage_path)}
+                                controls
+                                preload="metadata"
+                                className="w-full rounded-sm bg-black"
+                            />
+                            {m.original_filename && (
+                                <div className="text-[10px] tg-mono text-muted-foreground mt-1.5 truncate">
+                                    {m.original_filename}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                />
+
                 {videos.length > 0 && (
                     <div className="mb-10">
                         <p className="eyebrow mb-4">Video Links</p>

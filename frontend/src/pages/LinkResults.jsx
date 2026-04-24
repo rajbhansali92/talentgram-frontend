@@ -41,20 +41,15 @@ const ACTION_META = {
 export default function LinkResults() {
     const { id } = useParams();
     const [data, setData] = useState(null);
-    const [talents, setTalents] = useState({});
 
     useEffect(() => {
         (async () => {
-            const [res, tRes] = await Promise.all([
-                adminApi.get(`/links/${id}/results`),
-                adminApi.get(`/talents`),
-            ]);
-            const map = {};
-            tRes.data.forEach((t) => (map[t.id] = t));
-            setTalents(map);
+            const res = await adminApi.get(`/links/${id}/results`);
             setData(res.data);
         })();
     }, [id]);
+
+    const subjects = data?.subjects || {};
 
     const url = data ? `${window.location.origin}/l/${data.link.slug}` : "";
 
@@ -172,7 +167,7 @@ export default function LinkResults() {
                         ) : (
                             <div className="divide-y divide-white/10">
                                 {summary.map((s) => {
-                                    const t = talents[s.talent_id];
+                                    const t = subjects[s.talent_id];
                                     return (
                                         <div
                                             key={s.talent_id}
@@ -185,7 +180,7 @@ export default function LinkResults() {
                                                         {t?.name || s.talent_id}
                                                     </h3>
                                                     <div className="text-[11px] text-white/40 tg-mono mt-1">
-                                                        {t?.location || "—"}
+                                                        {t?.source === "submission" ? "Audition submission" : "Talent"}
                                                     </div>
                                                 </div>
                                                 <div className="flex gap-3 flex-wrap text-xs">
@@ -286,7 +281,7 @@ export default function LinkResults() {
                                                 {d.viewer_name}
                                             </div>
                                             <div className="text-xs text-white/40 tg-mono">
-                                                {talents[d.talent_id]?.name ||
+                                                {subjects[d.talent_id]?.name ||
                                                     d.talent_id}
                                             </div>
                                             <div className="text-[10px] text-white/30 mt-1 tg-mono">

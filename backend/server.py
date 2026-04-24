@@ -199,7 +199,8 @@ DEFAULT_VISIBILITY = {
 class LinkIn(BaseModel):
     title: str  # "Talentgram x Nike" etc
     brand_name: Optional[str] = None
-    talent_ids: List[str]
+    talent_ids: List[str] = Field(default_factory=list)
+    submission_ids: List[str] = Field(default_factory=list)
     visibility: Dict[str, bool] = Field(default_factory=lambda: DEFAULT_VISIBILITY.copy())
     is_public: bool = True
     password: Optional[str] = None  # if private, still need identity gate anyway
@@ -518,6 +519,7 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
         "title": payload.title,
         "brand_name": payload.brand_name,
         "talent_ids": payload.talent_ids,
+        "submission_ids": payload.submission_ids,
         "visibility": vis,
         "is_public": payload.is_public,
         "password": payload.password,
@@ -600,8 +602,36 @@ async def link_results(lid: str, admin: dict = Depends(current_admin)):
     actions = await db.link_actions.find({"link_id": lid}, {"_id": 0}).sort("updated_at", -1).to_list(10000)
     downloads = await db.link_downloads.find({"link_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(10000)
 
-    # Aggregate talent summaries
-    summary: Dict[str, Dict[str, Any]] = {tid: {"talent_id": tid, "shortlist": 0, "interested": 0, "not_for_this": 0, "not_sure": 0, "comments": []} for tid in link.get("talent_ids", [])}
+    # Build subject (talent/submission) registry for name resolution
+    t_ids = link.get("talent_ids", []) or []
+    s_ids = link.get("submission_ids", []) or []
+    subjects: Dict[str, Dict[str, Any]] = {}
+    if t_ids:
+        for t in await db.talents.find({"id": {"$in": t_ids}}, {"_id": 0, "id": 1, "name": 1, "cover_media_id": 1, "media": 1}).to_list(5000):
+            subjects[t["id"]] = {
+                "id": t["id"],
+                "name": t.get("name"),
+                "source": "talent",
+                "cover_media_id": t.get("cover_media_id"),
+                "media": t.get("media", []),
+            }
+    if s_ids:
+        for s in await db.submissions.find({"id": {"$in": s_ids}}, {"_id": 0}).to_list(5000):
+            shape = _submission_to_client_shape(s)
+            subjects[s["id"]] = {
+                "id": s["id"],
+                "name": shape["name"],
+                "source": "submission",
+                "project_id": s.get("project_id"),
+                "cover_media_id": shape.get("cover_media_id"),
+                "media": shape.get("media", []),
+            }
+
+    ordered_ids = t_ids + s_ids
+    summary: Dict[str, Dict[str, Any]] = {
+        tid: {"talent_id": tid, "shortlist": 0, "interested": 0, "not_for_this": 0, "not_sure": 0, "comments": []}
+        for tid in ordered_ids
+    }
     for a in actions:
         tid = a.get("talent_id")
         if tid not in summary:
@@ -622,6 +652,7 @@ async def link_results(lid: str, admin: dict = Depends(current_admin)):
         "actions": actions,
         "downloads": downloads,
         "summary": list(summary.values()),
+        "subjects": subjects,
         "view_count": len(viewers),
         "unique_viewers": len({v["viewer_email"] for v in viewers}),
     }
@@ -726,6 +757,56 @@ def _public_link_view(link: dict) -> dict:
     }
 
 
+def _submission_to_client_shape(sub: dict) -> dict:
+    """Flatten a submission document into the same shape clients expect for a talent.
+    Respects submission-level `field_visibility` (admin's per-field toggles during review).
+    Submissions are NEVER copied into the master `talents` collection — this is a read-side projection."""
+    fd = sub.get("form_data") or {}
+    fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
+
+    # Name assembly
+    fn = (fd.get("first_name") or "").strip()
+    ln = (fd.get("last_name") or "").strip()
+    name = f"{fn} {ln}".strip() or sub.get("talent_name") or "Unnamed"
+
+    # Age
+    age: Optional[int] = None
+    if fv.get("age") and fd.get("age") not in (None, ""):
+        try:
+            age = int(fd["age"])
+        except Exception:
+            age = None
+
+    # Media: image -> portfolio, intro_video -> video, takes excluded entirely
+    media: List[dict] = []
+    cover_mid: Optional[str] = None
+    for m in sub.get("media") or []:
+        cat = m.get("category")
+        if cat == "image":
+            mapped = {**m, "category": "portfolio"}
+            media.append(mapped)
+            if not cover_mid:
+                cover_mid = mapped.get("id")
+        elif cat == "intro_video":
+            media.append({**m, "category": "video"})
+        # take_1/2/3 intentionally dropped — internal review only
+
+    return {
+        "id": sub["id"],  # submission id acts as subject id on link
+        "name": name,
+        "age": age,
+        "height": fd.get("height") if fv.get("height") else None,
+        "location": fd.get("location") if fv.get("location") else None,
+        # Fields not currently collected in the submission form:
+        "ethnicity": None,
+        "instagram_handle": None,
+        "instagram_followers": None,
+        "work_links": [],
+        "cover_media_id": cover_mid,
+        "media": media,
+    }
+
+
 @api.get("/public/links/{slug}")
 async def get_public_link(slug: str, authorization: Optional[str] = Header(None)):
     viewer = decode_viewer(authorization)
@@ -736,17 +817,37 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         raise HTTPException(404, "Link not found")
     visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
 
-    raw_talents = await db.talents.find(
-        {"id": {"$in": link.get("talent_ids", [])}},
-        {"_id": 0, "created_by": 0},
-    ).to_list(5000)
-    order = {tid: i for i, tid in enumerate(link.get("talent_ids", []))}
-    raw_talents.sort(key=lambda t: order.get(t["id"], 999))
+    # Load master-DB talents (legacy/manual picks) AND referenced submissions (audition flow)
+    talent_ids = link.get("talent_ids", []) or []
+    submission_ids = link.get("submission_ids", []) or []
 
-    # Enrich age from dob internally (never exposes dob), then apply strict visibility filter
-    talents = [_filter_talent_for_client(enrich_talent(t), visibility) for t in raw_talents]
+    raw_talents = []
+    if talent_ids:
+        raw_talents = await db.talents.find(
+            {"id": {"$in": talent_ids}},
+            {"_id": 0, "created_by": 0},
+        ).to_list(5000)
 
-    # viewer's existing actions
+    raw_subs = []
+    if submission_ids:
+        raw_subs = await db.submissions.find(
+            {"id": {"$in": submission_ids}},
+            {"_id": 0},
+        ).to_list(5000)
+
+    # Build ordered subjects: talents first (in link order), then submissions (in link order)
+    t_order = {tid: i for i, tid in enumerate(talent_ids)}
+    raw_talents.sort(key=lambda t: t_order.get(t["id"], 999))
+    s_order = {sid: i for i, sid in enumerate(submission_ids)}
+    raw_subs.sort(key=lambda s: s_order.get(s["id"], 999))
+
+    subjects: List[dict] = [enrich_talent(t) for t in raw_talents]
+    subjects.extend(_submission_to_client_shape(s) for s in raw_subs)
+
+    # Apply strict link-level visibility filter (allowlist) to every subject
+    talents = [_filter_talent_for_client(it, visibility) for it in subjects]
+
+    # viewer's existing actions on this link
     actions = await db.link_actions.find({
         "link_id": link["id"],
         "viewer_email": viewer["email"],
@@ -1190,94 +1291,30 @@ async def forward_to_link(
     payload: ForwardToLinkIn,
     admin: dict = Depends(current_admin),
 ):
-    """Create talents from approved submissions + generate a portfolio link."""
+    """Generate a client portfolio link that REFERENCES approved submissions directly.
+    Submissions stay inside the project — they are never copied into the master `talents` collection.
+    This prevents duplicate profiles when the same talent applies to multiple projects."""
     if not payload.submission_ids:
         raise HTTPException(400, "Select at least one submission")
     project = await db.projects.find_one({"id": pid}, {"_id": 0})
     if not project:
         raise HTTPException(404, "Project not found")
 
-    subs = await db.submissions.find(
+    # Validate: every selected submission must exist in this project AND be approved
+    approved = await db.submissions.find(
         {
             "id": {"$in": payload.submission_ids},
             "project_id": pid,
             "decision": "approved",
         },
-        {"_id": 0},
+        {"_id": 0, "id": 1},
     ).to_list(5000)
-    if not subs:
+    approved_ids = {s["id"] for s in approved}
+    if not approved_ids:
         raise HTTPException(400, "No approved submissions match the selection")
 
-    # Preserve original selection order
-    order = {sid: i for i, sid in enumerate(payload.submission_ids)}
-    subs.sort(key=lambda s: order.get(s["id"], 999))
-
-    talent_ids: List[str] = []
-    for sub in subs:
-        tid = str(uuid.uuid4())
-        new_media: List[Dict[str, Any]] = []
-        cover_mid: Optional[str] = None
-        for m in sub.get("media", []):
-            if m["category"] == "image":
-                new_cat = "portfolio"
-            elif m["category"] == "intro_video":
-                new_cat = "video"
-            else:
-                continue  # takes stay on submission only
-            mid = str(uuid.uuid4())
-            new_media.append({
-                "id": mid,
-                "category": new_cat,
-                "storage_path": m["storage_path"],  # re-reference same object — no re-upload
-                "content_type": m["content_type"],
-                "original_filename": m.get("original_filename"),
-                "size": m.get("size", 0),
-                "created_at": _now(),
-            })
-            if new_cat == "portfolio" and not cover_mid:
-                cover_mid = mid
-
-        talent_doc = {
-            "id": tid,
-            "name": (
-                f"{(sub.get('form_data') or {}).get('first_name','')} {(sub.get('form_data') or {}).get('last_name','')}".strip()
-                or sub["talent_name"]
-            ),
-            "age": None,
-            "dob": None,
-            "height": None,
-            "location": None,
-            "ethnicity": None,
-            "gender": None,
-            "instagram_handle": None,
-            "instagram_followers": None,
-            "bio": None,
-            "work_links": [],
-            "cover_media_id": cover_mid,
-            "media": new_media,
-            "source": {
-                "type": "submission",
-                "submission_id": sub["id"],
-                "project_id": pid,
-                "talent_email": sub.get("talent_email"),
-            },
-            "created_at": _now(),
-            "created_by": admin["id"],
-        }
-        # Apply form_data respecting field_visibility
-        fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
-        fd = sub.get("form_data") or {}
-        if fv.get("age") and fd.get("age") not in (None, ""):
-            try:
-                talent_doc["age"] = int(fd["age"])
-            except Exception:
-                pass
-        if fv.get("height"):
-            talent_doc["height"] = fd.get("height") or None
-        if fv.get("location"):
-            talent_doc["location"] = fd.get("location") or None
-        await db.talents.insert_one(talent_doc)
-        talent_ids.append(tid)
+    # Preserve admin's selection order
+    ordered_submission_ids = [sid for sid in payload.submission_ids if sid in approved_ids]
 
     vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
     title = f"Talentgram x {project['brand_name']}"
@@ -1286,7 +1323,8 @@ async def forward_to_link(
         "slug": _slugify(title),
         "title": title,
         "brand_name": project["brand_name"],
-        "talent_ids": talent_ids,
+        "talent_ids": [],
+        "submission_ids": ordered_submission_ids,
         "visibility": vis,
         "is_public": True,
         "password": None,

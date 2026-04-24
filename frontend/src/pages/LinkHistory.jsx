@@ -120,7 +120,7 @@ export default function LinkHistory() {
                                     </div>
                                 </div>
                                 <div className="md:col-span-2 text-sm text-white/70">
-                                    {(l.talent_ids || []).length}
+                                    {(l.talent_ids || []).length + (l.submission_ids || []).length}
                                 </div>
                                 <div className="md:col-span-1 text-sm">
                                     {l.view_count || 0}

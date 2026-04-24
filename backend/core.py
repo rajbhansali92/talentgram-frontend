@@ -303,6 +303,7 @@ class MediaItem(BaseModel):
 
 class TalentIn(BaseModel):
     name: str
+    email: Optional[EmailStr] = None
     age: Optional[int] = None
     dob: Optional[str] = None
     height: Optional[str] = None

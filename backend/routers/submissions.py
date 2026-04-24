@@ -39,6 +39,38 @@ async def public_project(slug: str):
     return project
 
 
+@router.get("/public/prefill")
+async def prefill_for_email(email: str):
+    """Public lookup: if the email matches an approved talent, return safe fields
+    so the audition form can pre-fill. Returns 204-style empty dict if not found.
+
+    Only NON-SENSITIVE fields are exposed (never DOB, gender, bio, or media paths):
+      first_name, last_name, age (computed), height, location, instagram_handle, instagram_followers
+    """
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return {}
+    talent = await db.talents.find_one(
+        {"$or": [{"email": email}, {"source.talent_email": email}]},
+        {"_id": 0, "created_by": 0, "media": 0, "bio": 0, "dob": 0, "gender": 0, "ethnicity": 0, "work_links": 0, "cover_media_id": 0},
+    )
+    if not talent:
+        return {}
+    name = talent.get("name") or ""
+    parts = name.split(" ", 1)
+    first = parts[0] if parts else ""
+    last = parts[1] if len(parts) > 1 else ""
+    return {
+        "first_name": first,
+        "last_name": last,
+        "age": talent.get("age"),
+        "height": talent.get("height"),
+        "location": talent.get("location"),
+        "instagram_handle": talent.get("instagram_handle"),
+        "instagram_followers": talent.get("instagram_followers"),
+    }
+
+
 @router.post("/public/projects/{slug}/submission")
 async def start_submission(slug: str, payload: SubmissionStartIn):
     project = await db.projects.find_one({"slug": slug})

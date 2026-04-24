@@ -262,14 +262,20 @@ async def set_application_decision(
     # On approval, copy into master Talents DB (merge if email already exists)
     if payload.decision == "approved":
         talent = _application_to_talent(app_doc, admin["id"])
-        existing = await db.talents.find_one({"source.talent_email": talent["source"]["talent_email"]})
+        email = talent["email"]
+        # Broad email-based dedup: match any talent whose top-level email OR
+        # source.talent_email matches (covers manual adds, prior applications, and
+        # legacy project-forwarded submissions).
+        existing = await db.talents.find_one(
+            {"$or": [{"email": email}, {"source.talent_email": email}]}
+        )
         if existing:
-            # Merge: add new media, update fields only if they're currently empty
+            # Merge: append new media, fill empty fields, never overwrite
             new_media = existing.get("media", []) + [
                 m for m in talent["media"] if m["id"] not in {x["id"] for x in existing.get("media", [])}
             ]
             update = {"media": new_media}
-            for key in ("age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio"):
+            for key in ("email", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio"):
                 if not existing.get(key) and talent.get(key):
                     update[key] = talent[key]
             if not existing.get("cover_media_id") and talent.get("cover_media_id"):
@@ -320,6 +326,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
     return {
         "id": tid,
         "name": f"{fd.get('first_name','')} {fd.get('last_name','')}".strip() or app_doc.get("talent_name"),
+        "email": app_doc.get("talent_email"),
         "age": age,
         "dob": dob,
         "height": fd.get("height") or None,

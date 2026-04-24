@@ -181,6 +181,37 @@ export default function SubmissionPage() {
         return null;
     };
 
+    // Auto-prefill on email blur — if this email has an approved talent record,
+    // auto-fill known fields so returning talents don't retype everything.
+    const [prefillTried, setPrefillTried] = useState(false);
+    const tryPrefill = async () => {
+        if (saved) return; // already started submission
+        const email = (form.email || "").trim().toLowerCase();
+        if (!email || !email.includes("@") || prefillTried) return;
+        setPrefillTried(true);
+        try {
+            const { data } = await axios.get(
+                `${API}/public/prefill?email=${encodeURIComponent(email)}`,
+            );
+            if (!data || !data.first_name) return;
+            setForm((f) => ({
+                ...f,
+                first_name: f.first_name || data.first_name || "",
+                last_name: f.last_name || data.last_name || "",
+                height: f.height || data.height || "",
+                location: f.location || data.location || "",
+                instagram_handle: f.instagram_handle || data.instagram_handle || "",
+                instagram_followers:
+                    f.instagram_followers || data.instagram_followers || "",
+            }));
+            toast.success(
+                `Welcome back, ${data.first_name} — we auto-filled what we had`,
+            );
+        } catch {
+            // silent
+        }
+    };
+
     const startSubmission = async (e) => {
         e.preventDefault();
         const err = validateForm();
@@ -491,7 +522,10 @@ export default function SubmissionPage() {
                                 onChange={(v) =>
                                     setForm({ ...form, email: v })
                                 }
-                                onBlur={saveForm}
+                                onBlur={() => {
+                                    saveForm();
+                                    tryPrefill();
+                                }}
                                 testid="form-email"
                                 required
                                 disabled={!!saved}

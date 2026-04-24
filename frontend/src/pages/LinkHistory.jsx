@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi } from "@/lib/api";
+import { adminApi, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
 import {
     ExternalLink,
@@ -14,6 +14,8 @@ import {
 export default function LinkHistory() {
     const [links, setLinks] = useState([]);
     const [loading, setLoading] = useState(true);
+    const canDelete = isAdmin();
+    const canCreate = isAdmin();
 
     const load = async () => {
         setLoading(true);

@@ -11,6 +11,8 @@ from core import (
     TalentIn,
     TalentOut,
     _now,
+    _paginate_params,
+    _paginated,
     current_admin,
     current_team_or_admin,
     db,
@@ -40,13 +42,23 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
 @router.get("/talents")
 async def list_talents(
     q: Optional[str] = None,
+    page: Optional[int] = None,
+    size: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {}
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
-    talents = await db.talents.find(query, {"_id": 0, "created_by": 0}).sort("created_at", -1).to_list(2000)
-    return [enrich_talent(t) for t in talents]
+    cursor = db.talents.find(query, {"_id": 0, "created_by": 0}).sort(
+        "created_at", -1
+    )
+    if page is None:
+        talents = await cursor.to_list(2000)
+        return [enrich_talent(t) for t in talents]
+    skip, limit, p, s = _paginate_params(page, size)
+    total = await db.talents.count_documents(query)
+    talents = await cursor.skip(skip).limit(limit).to_list(limit)
+    return _paginated([enrich_talent(t) for t in talents], total, p, s)
 
 
 @router.get("/talents/{tid}")

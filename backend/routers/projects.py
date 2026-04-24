@@ -16,6 +16,8 @@ from core import (
     ProjectIn,
     _clean_budget_lines,
     _now,
+    _paginate_params,
+    _paginated,
     _slugify,
     current_admin,
     current_team_or_admin,
@@ -222,6 +224,15 @@ async def forward_to_link(
         "is_public": True,
         "password": None,
         "notes": f"Forwarded from project: {project['brand_name']}",
+        "created_at": _now(),
+        "created_by": admin["id"],
+    }
+    await db.links.insert_one(link_doc)
+    link_doc.pop("_id", None)
+    link_doc["view_count"] = 0
+    link_doc["unique_viewers"] = 0
+    return link_doc
+d from project: {project['brand_name']}",
         "created_at": _now(),
         "created_by": admin["id"],
     }

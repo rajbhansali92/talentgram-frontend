@@ -2,7 +2,8 @@
 import uuid
 from typing import Dict
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from core import (
     APP_NAME,
@@ -16,6 +17,7 @@ from core import (
     get_object,
     make_token,
     put_object,
+    stream_object,
     verify_password,
 )
 
@@ -97,11 +99,19 @@ async def upload_file(
 
 
 @router.get("/files/{path:path}")
-async def download_file(path: str):
-    """Files are referenced by UUID paths. Public by design for client portfolio viewing."""
-    data, content_type = get_object(path)
-    return Response(
-        content=data,
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=86400"},
+async def download_file(path: str, request: Request):
+    """Stream a file from Emergent Object Store.
+
+    - Supports HTTP Range (required for video seeking).
+    - Never buffers the full file in RAM — yields 256 KB chunks.
+    - Files are referenced by UUID-paths; intentionally public for client portfolio viewing.
+    """
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    iterator, headers, status = stream_object(path, range_header=range_header)
+    headers.setdefault("Cache-Control", "public, max-age=86400")
+    return StreamingResponse(
+        iterator,
+        status_code=status,
+        media_type=headers.get("Content-Type", "application/octet-stream"),
+        headers=headers,
     )

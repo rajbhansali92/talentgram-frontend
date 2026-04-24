@@ -192,6 +192,8 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
 
 
 def get_object(path: str) -> tuple[bytes, str]:
+    """Buffered fetch — kept for small payloads and back-compat. For large
+    media (video), prefer `stream_object` which never loads the full body."""
     key = init_storage()
     if not key:
         raise HTTPException(status_code=503, detail="Storage unavailable")
@@ -204,6 +206,64 @@ def get_object(path: str) -> tuple[bytes, str]:
         raise HTTPException(status_code=404, detail="File not found")
     resp.raise_for_status()
     return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+
+
+def stream_object(path: str, range_header: Optional[str] = None):
+    """Stream a file from Emergent Object Store to the client.
+
+    - Forwards the incoming `Range` header upstream (enables video seeking).
+    - Yields the body in chunks so we never buffer the full file in RAM.
+    - Returns `(iterator, response_headers, status_code)` so the FastAPI
+      layer can wrap the stream in a `StreamingResponse` with the same
+      Content-Type / Content-Range / Content-Length as upstream.
+
+    Response headers we whitelist through: Content-Type, Content-Length,
+    Content-Range, Accept-Ranges, ETag, Last-Modified.
+    """
+    key = init_storage()
+    if not key:
+        raise HTTPException(status_code=503, detail="Storage unavailable")
+
+    upstream_headers = {"X-Storage-Key": key}
+    if range_header:
+        upstream_headers["Range"] = range_header
+
+    resp = requests.get(
+        f"{STORAGE_URL}/objects/{path}",
+        headers=upstream_headers,
+        stream=True,
+        timeout=600,
+    )
+    if resp.status_code == 404:
+        resp.close()
+        raise HTTPException(status_code=404, detail="File not found")
+    resp.raise_for_status()
+
+    passthrough = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower()
+        in (
+            "content-type",
+            "content-length",
+            "content-range",
+            "accept-ranges",
+            "etag",
+            "last-modified",
+        )
+    }
+    # Ensure the client knows seeking is supported even if upstream omits it.
+    passthrough.setdefault("Accept-Ranges", "bytes")
+
+    def _iter():
+        try:
+            for chunk in resp.iter_content(chunk_size=1024 * 256):  # 256 KB
+                if chunk:
+                    yield chunk
+        finally:
+            resp.close()
+
+    return _iter(), passthrough, resp.status_code
 
 
 # --------------------------------------------------------------------------
@@ -264,6 +324,22 @@ async def seed_admin() -> None:
         await db.talents.create_index("email")
     except Exception as e:
         logger.warning(f"talents email index: {e}")
+
+    # P0 production indexes — 6 collections.
+    # Each is idempotent; create_index is a no-op if already present.
+    p0_indexes = [
+        ("submissions", [("project_id", 1), ("created_at", -1)], {}),
+        ("submissions", [("talent_email", 1), ("project_id", 1)], {}),
+        ("links", [("slug", 1)], {"unique": True, "name": "slug_unique"}),
+        ("link_views", [("link_id", 1), ("created_at", -1)], {}),
+        ("link_actions", [("link_id", 1), ("viewer_email", 1)], {}),
+        ("projects", [("slug", 1)], {"unique": True, "name": "proj_slug_unique"}),
+    ]
+    for coll, keys, opts in p0_indexes:
+        try:
+            await db[coll].create_index(keys, **opts)
+        except Exception as e:
+            logger.warning(f"{coll} index {keys}: {e}")
 
     legacy = await db.admins.find_one({"email": ADMIN_EMAIL}) if "admins" in await db.list_collection_names() else None
     existing = await db.users.find_one({"email": ADMIN_EMAIL})
@@ -854,6 +930,29 @@ def _submission_to_client_shape(sub: dict) -> dict:
                 out["custom_answers"] = filtered
 
     return out
+
+
+def _paginate_params(page, size):
+    """Normalise + cap `?page=&size=` query params.
+
+    Returns `(skip, limit, page, size)` where:
+    - page is 0-indexed
+    - size is clamped to [1, 200]
+    - skip = page * size
+    """
+    p = max(0, int(page or 0))
+    s = max(1, min(200, int(size or 50)))
+    return p * s, s, p, s
+
+
+def _paginated(items, total, page, size) -> dict:
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "has_more": (page + 1) * size < total,
+    }
 
 
 def _public_project(project: dict) -> dict:

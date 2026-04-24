@@ -49,10 +49,10 @@ export default function LinkResults() {
                 adminApi.get(`/links/${id}/results`),
                 adminApi.get(`/talents`),
             ]);
-            setData(res.data);
             const map = {};
             tRes.data.forEach((t) => (map[t.id] = t));
             setTalents(map);
+            setData(res.data);
         })();
     }, [id]);
 

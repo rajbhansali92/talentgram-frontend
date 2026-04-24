@@ -3,6 +3,7 @@ import React from "react";
 export const DEFAULT_VISIBILITY = {
     portfolio: true,
     intro_video: true,
+    takes: true,
     instagram: true,
     instagram_followers: true,
     age: true,
@@ -17,6 +18,7 @@ export const DEFAULT_VISIBILITY = {
 export const VIS_ITEMS = [
     { key: "portfolio", label: "Portfolio Images" },
     { key: "intro_video", label: "Introduction Video" },
+    { key: "takes", label: "Audition Takes" },
     { key: "instagram", label: "Instagram (clickable)" },
     { key: "instagram_followers", label: "Instagram Followers" },
     { key: "age", label: "Age" },

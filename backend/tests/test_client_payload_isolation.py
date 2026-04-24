@@ -77,9 +77,35 @@ def test_submission_shape_excludes_admin_form_data():
     shape = _submission_to_client_shape(_submission_with_admin_data())
     leaks = set(shape.keys()) & FORBIDDEN_KEYS
     assert not leaks, f"Admin-internal keys leaked: {leaks}"
-    # Takes must be dropped entirely
+    # Takes are now included in the client shape (gated downstream by visibility.takes)
     cats = [m.get("category") for m in shape["media"]]
-    assert "take_1" not in cats and "take_2" not in cats and "take_3" not in cats
+    assert "take_1" in cats, "take_1 should be carried through the shape"
+
+
+def test_takes_are_ordered_and_gated_by_visibility():
+    sub = _submission_with_admin_data()
+    # Add take_2 + take_3 out of order to verify ordering
+    sub["media"].insert(0, {"id": "m4", "category": "take_3", "storage_path": "t3.mp4",
+                             "content_type": "video/mp4", "size": 100, "created_at": "t"})
+    sub["media"].insert(0, {"id": "m5", "category": "take_2", "storage_path": "t2.mp4",
+                             "content_type": "video/mp4", "size": 100, "created_at": "t"})
+    shape = _submission_to_client_shape(sub)
+    # Order must be intro → take_1 → take_2 → take_3 → portfolio images
+    cats = [m["category"] for m in shape["media"]]
+    take_idx = [i for i, c in enumerate(cats) if c.startswith("take_")]
+    assert [cats[i] for i in take_idx] == ["take_1", "take_2", "take_3"]
+
+    # With takes off, all take_* dropped
+    vis_off = {**DEFAULT_VISIBILITY, "takes": False}
+    filtered = _filter_talent_for_client(shape, vis_off)
+    assert not any(m["category"].startswith("take_") for m in filtered["media"])
+
+    # With takes on, all present
+    vis_on = {**DEFAULT_VISIBILITY, "takes": True}
+    filtered = _filter_talent_for_client(shape, vis_on)
+    assert [m["category"] for m in filtered["media"] if m["category"].startswith("take_")] == [
+        "take_1", "take_2", "take_3",
+    ]
 
 
 def test_final_payload_is_allowlist_only():

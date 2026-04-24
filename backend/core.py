@@ -220,6 +220,7 @@ async def seed_admin() -> None:
 DEFAULT_VISIBILITY: Dict[str, bool] = {
     "portfolio": True,
     "intro_video": True,
+    "takes": True,
     "instagram": True,
     "instagram_followers": True,
     "age": True,
@@ -407,7 +408,14 @@ def _public_media(m: dict) -> dict:
 def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict:
     """STRICT allowlist: client receives only fields explicitly enabled via visibility
     AND only fields that appear in CLIENT_ALLOWED_FIELDS. Admin-only data (availability,
-    budget, custom_answers, competitive_brand, etc.) is structurally blocked from leaking."""
+    budget, custom_answers, competitive_brand, etc.) is structurally blocked from leaking.
+
+    Media rules:
+      - portfolio images: gated by visibility.portfolio
+      - intro video (category="video"): gated by visibility.intro_video
+      - audition takes (category="take_1"/"take_2"/"take_3"): gated by visibility.takes
+    Ordering is preserved from the upstream shape.
+    """
     v = visibility or {}
     filtered_media: List[dict] = []
     cover_mid: Optional[str] = None
@@ -418,6 +426,8 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
             if not cover_mid and talent.get("cover_media_id") == m.get("id"):
                 cover_mid = m["id"]
         elif cat == "video" and v.get("intro_video"):
+            filtered_media.append(_public_media(m))
+        elif cat in ("take_1", "take_2", "take_3") and v.get("takes", True):
             filtered_media.append(_public_media(m))
     if v.get("portfolio") and not cover_mid:
         for m in filtered_media:
@@ -480,15 +490,28 @@ def _submission_to_client_shape(sub: dict) -> dict:
 
     media: List[dict] = []
     cover_mid: Optional[str] = None
+    # Preserve deterministic order: intro first, takes 1→2→3, then images
+    intro_items: List[dict] = []
+    take_items: Dict[str, dict] = {}
+    image_items: List[dict] = []
     for m in sub.get("media") or []:
         cat = m.get("category")
         if cat == "image":
             mapped = {**m, "category": "portfolio"}
-            media.append(mapped)
+            image_items.append(mapped)
             if not cover_mid:
                 cover_mid = mapped.get("id")
         elif cat == "intro_video":
-            media.append({**m, "category": "video"})
+            intro_items.append({**m, "category": "video"})
+        elif cat in ("take_1", "take_2", "take_3"):
+            # Keep original take_N category so client can label them
+            take_items[cat] = m
+    # Deterministic order
+    media.extend(intro_items)
+    for key in ("take_1", "take_2", "take_3"):
+        if key in take_items:
+            media.append(take_items[key])
+    media.extend(image_items)
 
     return {
         "id": sub["id"],

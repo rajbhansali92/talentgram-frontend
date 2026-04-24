@@ -365,12 +365,14 @@ function TalentDetail({
     logDownload,
 }) {
     const vis = link.visibility || {};
-    const images = (talent.media || []).filter((m) =>
-        m.content_type?.startsWith("image/"),
-    );
-    const videos = (talent.media || []).filter((m) =>
-        m.content_type?.startsWith("video/"),
-    );
+    // Split media by explicit category so intro video, audition takes, and portfolio
+    // images are each rendered in their own section. Ordering comes from the backend.
+    const mediaAll = talent.media || [];
+    const images = mediaAll.filter((m) => m.category === "portfolio");
+    const intro = mediaAll.find((m) => m.category === "video") || null;
+    const takes = ["take_1", "take_2", "take_3"]
+        .map((k) => mediaAll.find((m) => m.category === k))
+        .filter(Boolean);
     const [idx, setIdx] = useState(0);
 
     const prev = () => setIdx((i) => (i - 1 + images.length) % images.length);
@@ -464,14 +466,43 @@ function TalentDetail({
                             </div>
                         )}
 
-                        {vis.intro_video && videos.length > 0 && (
+                        {vis.intro_video && intro && (
                             <div className="mt-8">
                                 <p className="eyebrow mb-3">Introduction</p>
                                 <video
-                                    src={FILE_URL(videos[0].storage_path)}
+                                    src={FILE_URL(intro.storage_path)}
                                     controls
-                                    className="w-full border border-white/10 bg-black"
+                                    preload="metadata"
+                                    className="w-full border border-white/10 bg-black rounded-sm"
+                                    data-testid="client-intro-video"
                                 />
+                            </div>
+                        )}
+
+                        {vis.takes !== false && takes.length > 0 && (
+                            <div className="mt-8" data-testid="client-takes-section">
+                                <p className="eyebrow mb-3">Audition Takes</p>
+                                <div className="grid md:grid-cols-2 gap-4">
+                                    {takes.map((t) => {
+                                        const n = t.category.split("_")[1];
+                                        return (
+                                            <div
+                                                key={t.id}
+                                                data-testid={`client-${t.category}`}
+                                            >
+                                                <p className="text-[11px] text-white/50 mb-2 tg-mono">
+                                                    Take {n}
+                                                </p>
+                                                <video
+                                                    src={FILE_URL(t.storage_path)}
+                                                    controls
+                                                    preload="metadata"
+                                                    className="w-full border border-white/10 bg-black rounded-sm"
+                                                />
+                                            </div>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         )}
                     </div>

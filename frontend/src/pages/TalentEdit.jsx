@@ -1,7 +1,14 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL } from "@/lib/api";
 import { toast } from "sonner";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
 import {
     ArrowLeft,
     Upload,
@@ -16,6 +23,7 @@ import {
 const emptyTalent = {
     name: "",
     age: "",
+    dob: "",
     height: "",
     location: "",
     ethnicity: "",
@@ -25,6 +33,30 @@ const emptyTalent = {
     bio: "",
     work_links: [],
 };
+
+// 3'0" through 6'7"
+const HEIGHT_OPTIONS = (() => {
+    const out = [];
+    for (let ft = 3; ft <= 6; ft++) {
+        const maxIn = ft === 6 ? 7 : 11;
+        for (let inch = 0; inch <= maxIn; inch++) {
+            out.push(`${ft}'${inch}"`);
+        }
+    }
+    return out;
+})();
+
+function calcAge(dob) {
+    if (!dob) return null;
+    const [y, m, d] = dob.split("-").map((n) => parseInt(n, 10));
+    if (!y || !m || !d) return null;
+    const today = new Date();
+    let age = today.getFullYear() - y;
+    const mm = today.getMonth() + 1;
+    const dd = today.getDate();
+    if (mm < m || (mm === m && dd < d)) age -= 1;
+    return age >= 0 && age <= 120 ? age : null;
+}
 
 function Field({ label, value, onChange, type = "text", ...rest }) {
     return (
@@ -75,7 +107,12 @@ export default function TalentEdit() {
         try {
             const payload = {
                 ...talent,
-                age: talent.age ? parseInt(talent.age, 10) : null,
+                dob: talent.dob || null,
+                age: talent.dob
+                    ? calcAge(talent.dob)
+                    : talent.age
+                      ? parseInt(talent.age, 10)
+                      : null,
                 work_links: (talent.work_links || []).filter(Boolean),
             };
             if (isEdit) {
@@ -92,6 +129,11 @@ export default function TalentEdit() {
             setSaving(false);
         }
     };
+
+    const computedAge = useMemo(
+        () => calcAge(talent.dob) ?? (talent.age || null),
+        [talent.dob, talent.age],
+    );
 
     const deleteTalent = async () => {
         if (!isEdit) return;
@@ -209,23 +251,107 @@ export default function TalentEdit() {
                         value={talent.name}
                         onChange={(v) => setTalent({ ...talent, name: v })}
                     />
-                    <Field
-                        label="Age"
-                        type="number"
-                        value={talent.age}
-                        onChange={(v) => setTalent({ ...talent, age: v })}
-                    />
-                    <Field
-                        label="Gender"
-                        value={talent.gender}
-                        onChange={(v) => setTalent({ ...talent, gender: v })}
-                    />
-                    <Field
-                        label="Height"
-                        value={talent.height}
-                        onChange={(v) => setTalent({ ...talent, height: v })}
-                        placeholder="e.g. 5'9"
-                    />
+
+                    {/* DOB + auto Age (admin-only) */}
+                    <label className="block" data-testid="field-dob">
+                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                            Date of Birth
+                        </span>
+                        <input
+                            type="date"
+                            value={talent.dob || ""}
+                            onChange={(e) =>
+                                setTalent({ ...talent, dob: e.target.value })
+                            }
+                            max={new Date().toISOString().split("T")[0]}
+                            data-testid="dob-input"
+                            className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm [color-scheme:dark]"
+                        />
+                    </label>
+                    <div data-testid="field-age-auto">
+                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                            Age (auto)
+                        </span>
+                        <div className="mt-2 border-b border-white/15 py-2.5 text-sm flex items-center justify-between">
+                            <span
+                                data-testid="computed-age"
+                                className="font-display text-base"
+                            >
+                                {computedAge ?? "—"}
+                            </span>
+                            <span className="text-[10px] text-white/40 tg-mono">
+                                {talent.dob
+                                    ? "auto-computed"
+                                    : "set DOB to auto-calc"}
+                            </span>
+                        </div>
+                    </div>
+
+                    {/* Gender pills */}
+                    <div data-testid="field-gender">
+                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                            Gender
+                        </span>
+                        <div className="mt-2 flex gap-2">
+                            {["Male", "Female"].map((g) => {
+                                const active = talent.gender === g;
+                                return (
+                                    <button
+                                        key={g}
+                                        type="button"
+                                        onClick={() =>
+                                            setTalent({
+                                                ...talent,
+                                                gender: active ? "" : g,
+                                            })
+                                        }
+                                        data-testid={`gender-${g.toLowerCase()}-btn`}
+                                        className={`flex-1 px-4 py-2.5 rounded-full text-sm border transition-all ${
+                                            active
+                                                ? "bg-white text-black border-white"
+                                                : "border-white/20 hover:border-white/50 text-white/80"
+                                        }`}
+                                    >
+                                        {g}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* Height dropdown */}
+                    <div data-testid="field-height">
+                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                            Height
+                        </span>
+                        <div className="mt-2">
+                            <Select
+                                value={talent.height || ""}
+                                onValueChange={(v) =>
+                                    setTalent({ ...talent, height: v })
+                                }
+                            >
+                                <SelectTrigger
+                                    data-testid="height-select-trigger"
+                                    className="bg-transparent border-0 border-b border-white/15 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-2.5"
+                                >
+                                    <SelectValue placeholder="Select height" />
+                                </SelectTrigger>
+                                <SelectContent className="max-h-72">
+                                    {HEIGHT_OPTIONS.map((h) => (
+                                        <SelectItem
+                                            key={h}
+                                            value={h}
+                                            data-testid={`height-option-${h}`}
+                                        >
+                                            {h}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                    </div>
+
                     <Field
                         label="Location"
                         value={talent.location}

@@ -163,6 +163,7 @@ class MediaItem(BaseModel):
 class TalentIn(BaseModel):
     name: str
     age: Optional[int] = None
+    dob: Optional[str] = None  # ISO "YYYY-MM-DD"; if present, age is derived
     height: Optional[str] = None
     location: Optional[str] = None
     ethnicity: Optional[str] = None
@@ -235,6 +236,31 @@ class DownloadIn(BaseModel):
 # --------------------------------------------------------------------------
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def compute_age(dob: Optional[str]) -> Optional[int]:
+    """Compute age from ISO date string 'YYYY-MM-DD'. Returns None if invalid."""
+    if not dob:
+        return None
+    try:
+        y, m, d = [int(x) for x in dob.split("-")[:3]]
+        today = datetime.now(timezone.utc).date()
+        age = today.year - y - (1 if (today.month, today.day) < (m, d) else 0)
+        return age if 0 <= age <= 120 else None
+    except Exception:
+        return None
+
+
+def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
+    """If dob is set, always derive age from it (overrides any stored age)."""
+    if not doc:
+        return doc
+    dob = doc.get("dob")
+    if dob:
+        computed = compute_age(dob)
+        if computed is not None:
+            doc["age"] = computed
+    return doc
 
 
 def _slugify(title: str) -> str:
@@ -322,7 +348,7 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_admin))
     await db.talents.insert_one(doc)
     doc.pop("_id", None)
     doc.pop("created_by", None)
-    return doc
+    return enrich_talent(doc)
 
 
 @api.get("/talents")
@@ -334,7 +360,7 @@ async def list_talents(
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
     talents = await db.talents.find(query, {"_id": 0, "created_by": 0}).sort("created_at", -1).to_list(2000)
-    return talents
+    return [enrich_talent(t) for t in talents]
 
 
 @api.get("/talents/{tid}")
@@ -342,7 +368,7 @@ async def get_talent(tid: str, admin: dict = Depends(current_admin)):
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     if not t:
         raise HTTPException(404, "Talent not found")
-    return t
+    return enrich_talent(t)
 
 
 @api.put("/talents/{tid}", response_model=TalentOut)
@@ -352,7 +378,7 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
-    return t
+    return enrich_talent(t)
 
 
 @api.delete("/talents/{tid}")
@@ -395,7 +421,7 @@ async def add_media(
     if not talent.get("cover_media_id") and category in {"indian", "western", "portfolio"}:
         await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": media["id"]}})
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
-    return t
+    return enrich_talent(t)
 
 
 @api.delete("/talents/{tid}/media/{mid}")
@@ -587,6 +613,10 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     # preserve original order
     order = {tid: i for i, tid in enumerate(link.get("talent_ids", []))}
     talents.sort(key=lambda t: order.get(t["id"], 999))
+    # Enrich with computed age and STRIP dob — clients must never see DOB
+    for t in talents:
+        enrich_talent(t)
+        t.pop("dob", None)
 
     # viewer's existing actions
     actions = await db.link_actions.find({

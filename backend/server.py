@@ -698,6 +698,25 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
     return {"token": token}
 
 
+# STRICT client allowlist — any subject field MUST be in this set to reach the client.
+# Admin-internal fields (availability, budget, custom_answers, competitive_brand, notes,
+# dob, gender, bio, source, created_at, created_by, email, phone) are structurally
+# blocked — they can NEVER be added accidentally.
+CLIENT_ALLOWED_FIELDS = {
+    "id",
+    "name",
+    "age",
+    "height",
+    "location",
+    "ethnicity",
+    "instagram_handle",
+    "instagram_followers",
+    "work_links",
+    "cover_media_id",
+    "media",
+}
+
+
 def _public_media(m: dict) -> dict:
     """Strip internal scope metadata (project_id / submission_id / talent_id / scope) before sending to client."""
     return {
@@ -712,8 +731,9 @@ def _public_media(m: dict) -> dict:
 
 
 def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict:
-    """STRICT allowlist: client receives only fields explicitly enabled via visibility.
-    No raw talent document is ever returned. Fields not toggled on are never included."""
+    """STRICT allowlist: client receives only fields explicitly enabled via visibility
+    AND only fields that appear in CLIENT_ALLOWED_FIELDS. Admin-only data (availability,
+    budget, custom_answers, competitive_brand, etc.) is structurally blocked from leaking."""
     v = visibility or {}
     # Filter media strictly by visibility: portfolio → images, intro_video → video
     filtered_media: List[dict] = []
@@ -756,9 +776,13 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
     # Work links
     if v.get("work_links") and talent.get("work_links"):
         out["work_links"] = talent["work_links"]
-    # NEVER included: dob, gender, bio, source, created_at, created_by, instagram_handle
-    # unless toggled above. Fields such as gender/bio are internal-only for now.
-    return out
+    # NEVER included: dob, gender, bio, source, created_at, created_by, email, phone,
+    # availability, budget, custom_answers, competitive_brand, field_visibility, form_data,
+    # project_id, submission_id. These are admin-internal and must never reach clients.
+
+    # Final defensive sweep: even if future code accidentally sets a key here, it cannot
+    # reach the client unless listed in CLIENT_ALLOWED_FIELDS.
+    return {k: v2 for k, v2 in out.items() if k in CLIENT_ALLOWED_FIELDS}
 
 
 def _public_link_view(link: dict) -> dict:

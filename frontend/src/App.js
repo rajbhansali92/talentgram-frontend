@@ -14,6 +14,7 @@ import LinkGenerator from "@/pages/LinkGenerator";
 import LinkResults from "@/pages/LinkResults";
 import ClientView from "@/pages/ClientView";
 import SubmissionPage from "@/pages/SubmissionPage";
+import ApplicationPage from "@/pages/ApplicationPage";
 import Landing from "@/pages/Landing";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
@@ -64,6 +65,7 @@ function App() {
                     </Route>
                     <Route path="/l/:slug" element={<ClientView />} />
                     <Route path="/submit/:slug" element={<SubmissionPage />} />
+                    <Route path="/apply" element={<ApplicationPage />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
             </BrowserRouter>

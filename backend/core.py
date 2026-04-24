@@ -254,6 +254,12 @@ MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected"}
 
+# Open talent applications (project-independent signups)
+APPLICATION_UPLOAD_CATEGORIES = {"intro_video", "image"}
+MAX_APPLICATION_IMAGES = 8
+MIN_APPLICATION_IMAGES = 5
+APPLICATION_DECISIONS = SUBMISSION_DECISIONS
+
 # STRICT client allowlist — any subject field MUST be in this set to reach the client.
 CLIENT_ALLOWED_FIELDS = {
     "id",
@@ -391,6 +397,16 @@ class SubmissionDecisionIn(BaseModel):
 class ForwardToLinkIn(BaseModel):
     submission_ids: List[str]
     visibility: Dict[str, bool] = Field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------
+# Open talent applications (project-independent)
+# --------------------------------------------------------------------------
+class ApplicationStartIn(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    phone: Optional[str] = None
 
 
 # --------------------------------------------------------------------------

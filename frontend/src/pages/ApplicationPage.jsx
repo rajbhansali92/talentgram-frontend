@@ -1,0 +1,708 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { FILE_URL } from "@/lib/api";
+import Logo from "@/components/Logo";
+import ThemeToggle from "@/components/ThemeToggle";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
+import {
+    Upload,
+    Video,
+    Camera,
+    Check,
+    Trash2,
+    Loader2,
+    X,
+    Sparkles,
+    ArrowRight,
+    Mail,
+} from "lucide-react";
+
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const MAX_IMAGES = 8;
+const MIN_IMAGES = 5;
+const LS_KEY = "tg_application";
+
+const HEIGHT_OPTIONS = (() => {
+    const out = [];
+    for (let ft = 3; ft <= 6; ft++) {
+        const maxIn = ft === 6 ? 7 : 11;
+        for (let inch = 0; inch <= maxIn; inch++) out.push(`${ft}'${inch}"`);
+    }
+    return out;
+})();
+
+const FOLLOWER_TIERS = [
+    "< 1K",
+    "1K – 5K",
+    "5K – 10K",
+    "10K – 50K",
+    "50K – 100K",
+    "100K – 500K",
+    "500K – 1M",
+    "1M+",
+];
+
+const GENDER_OPTIONS = [
+    { key: "female", label: "Female" },
+    { key: "male", label: "Male" },
+    { key: "non_binary", label: "Non-binary" },
+    { key: "prefer_not_say", label: "Prefer not to say" },
+];
+
+function calcAge(dob) {
+    if (!dob) return null;
+    const [y, m, d] = dob.split("-").map((n) => parseInt(n, 10));
+    if (!y || !m || !d) return null;
+    const today = new Date();
+    let age = today.getFullYear() - y;
+    if (today.getMonth() + 1 < m || (today.getMonth() + 1 === m && today.getDate() < d))
+        age -= 1;
+    return age >= 0 && age <= 120 ? age : null;
+}
+
+export default function ApplicationPage() {
+    // Flow: identity gate → sections 1-4 → submitted
+    const [started, setStarted] = useState(false);
+    const [aid, setAid] = useState(null);
+    const [token, setToken] = useState(null);
+    const [finalized, setFinalized] = useState(false);
+    const [basics, setBasics] = useState({
+        first_name: "",
+        last_name: "",
+        email: "",
+        phone: "",
+    });
+    const [form, setForm] = useState({
+        dob: "",
+        age: "",
+        height: "",
+        gender: "",
+        location: "",
+        instagram_handle: "",
+        instagram_followers: "",
+        bio: "",
+    });
+    const [media, setMedia] = useState([]);
+    const [uploading, setUploading] = useState(null);
+    const [saving, setSaving] = useState(false);
+    const imgRef = useRef();
+    const videoRef = useRef();
+
+    // Restore local draft
+    useEffect(() => {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return;
+        try {
+            const saved = JSON.parse(raw);
+            if (saved.aid && saved.token) {
+                setAid(saved.aid);
+                setToken(saved.token);
+                setStarted(true);
+                setBasics(saved.basics || basics);
+                setForm(saved.form || form);
+                (async () => {
+                    try {
+                        const { data } = await axios.get(
+                            `${API}/public/apply/${saved.aid}`,
+                            { headers: { Authorization: `Bearer ${saved.token}` } },
+                        );
+                        setForm((f) => ({ ...f, ...(data.form_data || {}) }));
+                        setMedia(data.media || []);
+                        if (data.status === "submitted") setFinalized(true);
+                    } catch {
+                        // expired/invalid token — reset
+                        localStorage.removeItem(LS_KEY);
+                        setStarted(false);
+                        setAid(null);
+                        setToken(null);
+                    }
+                })();
+            }
+        } catch {
+            localStorage.removeItem(LS_KEY);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const saveLocal = (patch = {}) => {
+        localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ aid, token, basics, form, ...patch }),
+        );
+    };
+
+    const computedAge = useMemo(
+        () => calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null),
+        [form.dob, form.age],
+    );
+
+    const startApplication = async () => {
+        const { first_name, last_name, email } = basics;
+        if (!first_name.trim() || !last_name.trim() || !email.trim()) {
+            toast.error("First name, last name, and email are required");
+            return;
+        }
+        setSaving(true);
+        try {
+            const { data } = await axios.post(`${API}/public/apply`, basics);
+            setAid(data.id);
+            setToken(data.token);
+            setStarted(true);
+            if (data.resumed) toast.success("Welcome back — your application is resumed");
+            localStorage.setItem(
+                LS_KEY,
+                JSON.stringify({ aid: data.id, token: data.token, basics, form }),
+            );
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to start");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // Autosave form_data (debounced) once started
+    useEffect(() => {
+        if (!started || !aid || !token) return;
+        const id = setTimeout(async () => {
+            try {
+                await axios.put(
+                    `${API}/public/apply/${aid}`,
+                    { form_data: form },
+                    { headers: { Authorization: `Bearer ${token}` } },
+                );
+                saveLocal();
+            } catch {
+                // ignore; next attempt will retry
+            }
+        }, 800);
+        return () => clearTimeout(id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [form, started, aid, token]);
+
+    const upload = async (files, category) => {
+        if (!files || !files.length) return;
+        if (category === "image") {
+            const existing = media.filter((m) => m.category === "image").length;
+            const remaining = MAX_IMAGES - existing;
+            if (remaining <= 0) {
+                toast.error(`Max ${MAX_IMAGES} images`);
+                return;
+            }
+            files = Array.from(files).slice(0, remaining);
+        }
+        setUploading(category);
+        try {
+            for (const file of files) {
+                const fd = new FormData();
+                fd.append("file", file);
+                fd.append("category", category);
+                const { data } = await axios.post(
+                    `${API}/public/apply/${aid}/upload`,
+                    fd,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${token}`,
+                            "Content-Type": "multipart/form-data",
+                        },
+                    },
+                );
+                setMedia(data.media || []);
+            }
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Upload failed");
+        } finally {
+            setUploading(null);
+        }
+    };
+
+    const removeMedia = async (mid) => {
+        try {
+            await axios.delete(`${API}/public/apply/${aid}/media/${mid}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            setMedia((m) => m.filter((x) => x.id !== mid));
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to remove");
+        }
+    };
+
+    const finalize = async () => {
+        setSaving(true);
+        try {
+            // Final sync of form_data
+            await axios.put(
+                `${API}/public/apply/${aid}`,
+                { form_data: form },
+                { headers: { Authorization: `Bearer ${token}` } },
+            );
+            await axios.post(
+                `${API}/public/apply/${aid}/finalize`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } },
+            );
+            setFinalized(true);
+            localStorage.removeItem(LS_KEY);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Submission failed");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const images = media.filter((m) => m.category === "image");
+    const intro = media.find((m) => m.category === "intro_video");
+
+    // --- Identity gate -----------------------------------------------------
+    if (!started) {
+        return (
+            <div
+                className="min-h-screen bg-[#0c0c0c] text-white"
+                data-testid="application-identity-page"
+            >
+                <Header />
+                <div className="max-w-xl mx-auto px-6 py-16 md:py-24">
+                    <p className="eyebrow mb-3">Talent Application</p>
+                    <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-4">
+                        Apply to join Talentgram
+                    </h1>
+                    <p className="text-white/60 text-sm mb-10 leading-relaxed">
+                        Submit your portfolio once — get considered for every
+                        brand, film, and campaign we cast. Takes about 5 minutes.
+                    </p>
+                    <div className="space-y-5">
+                        <Row
+                            label="First Name *"
+                            value={basics.first_name}
+                            onChange={(v) => setBasics({ ...basics, first_name: v })}
+                            testid="apply-first-name"
+                        />
+                        <Row
+                            label="Last Name *"
+                            value={basics.last_name}
+                            onChange={(v) => setBasics({ ...basics, last_name: v })}
+                            testid="apply-last-name"
+                        />
+                        <Row
+                            label="Email *"
+                            type="email"
+                            value={basics.email}
+                            onChange={(v) => setBasics({ ...basics, email: v })}
+                            testid="apply-email"
+                            hint="Used as your unique identifier — we'll resume from where you stop"
+                        />
+                        <Row
+                            label="Phone (optional)"
+                            value={basics.phone}
+                            onChange={(v) => setBasics({ ...basics, phone: v })}
+                            testid="apply-phone"
+                        />
+                    </div>
+                    <button
+                        onClick={startApplication}
+                        disabled={saving}
+                        data-testid="apply-start-btn"
+                        className="mt-10 inline-flex items-center gap-2 bg-white text-black px-6 py-3.5 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40"
+                    >
+                        {saving ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <ArrowRight className="w-4 h-4" />
+                        )}
+                        Continue
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    // --- Finalized ----------------------------------------------------------
+    if (finalized) {
+        return (
+            <div
+                className="min-h-screen bg-[#0c0c0c] text-white flex flex-col"
+                data-testid="application-success-page"
+            >
+                <Header />
+                <div className="flex-1 flex items-center justify-center p-6">
+                    <div className="max-w-md text-center">
+                        <div className="w-14 h-14 rounded-full bg-[#34C759]/20 text-[#34C759] inline-flex items-center justify-center mb-6">
+                            <Check className="w-6 h-6" />
+                        </div>
+                        <p className="eyebrow mb-3">Submitted</p>
+                        <h1 className="font-display text-3xl md:text-4xl tracking-tight mb-4">
+                            Thank you, {basics.first_name}
+                        </h1>
+                        <p className="text-white/60 text-sm leading-relaxed mb-6">
+                            Your application has been received. Our team
+                            reviews every profile. If shortlisted, we'll reach
+                            out to{" "}
+                            <span className="text-white tg-mono">
+                                {basics.email}
+                            </span>
+                            .
+                        </p>
+                        <div className="inline-flex items-center gap-2 text-xs text-white/50 tg-mono">
+                            <Mail className="w-3 h-3" />
+                            Check your inbox for updates.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // --- Main form ---------------------------------------------------------
+    return (
+        <div
+            className="min-h-screen bg-[#0c0c0c] text-white"
+            data-testid="application-form-page"
+        >
+            <Header />
+            <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
+                <p className="eyebrow mb-3">Application · {basics.email}</p>
+                <h1 className="font-display text-3xl md:text-5xl tracking-tight mb-8">
+                    Your Profile
+                </h1>
+
+                {/* Section 2 — Profile Details */}
+                <Section title="Profile Details" index="01">
+                    <div className="grid md:grid-cols-2 gap-5">
+                        <Row
+                            label="Date of Birth *"
+                            type="date"
+                            value={form.dob}
+                            onChange={(v) => setForm({ ...form, dob: v })}
+                            testid="form-dob"
+                        />
+                        <div>
+                            <Label>
+                                Age {form.dob ? "(auto)" : ""}
+                            </Label>
+                            <div className="mt-2 py-2.5 text-sm tg-mono text-white/70 border-b border-white/15">
+                                {computedAge ?? "—"}
+                            </div>
+                        </div>
+
+                        <div>
+                            <Label>Height *</Label>
+                            <Select
+                                value={form.height}
+                                onValueChange={(v) =>
+                                    setForm({ ...form, height: v })
+                                }
+                            >
+                                <SelectTrigger
+                                    className="mt-2 bg-transparent border-0 border-b border-white/15 rounded-none px-0 h-auto py-2.5 text-sm"
+                                    data-testid="form-height"
+                                >
+                                    <SelectValue placeholder="Select height" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {HEIGHT_OPTIONS.map((h) => (
+                                        <SelectItem key={h} value={h}>
+                                            {h}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+
+                        <div>
+                            <Label>Current Location *</Label>
+                            <input
+                                value={form.location}
+                                onChange={(e) =>
+                                    setForm({ ...form, location: e.target.value })
+                                }
+                                placeholder="City, Country"
+                                data-testid="form-location"
+                                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                            />
+                        </div>
+
+                        <div className="md:col-span-2">
+                            <Label>Gender *</Label>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                {GENDER_OPTIONS.map((g) => (
+                                    <button
+                                        key={g.key}
+                                        type="button"
+                                        onClick={() =>
+                                            setForm({ ...form, gender: g.key })
+                                        }
+                                        data-testid={`form-gender-${g.key}`}
+                                        className={`px-4 py-2 rounded-full border text-xs tracking-widest uppercase transition-all ${
+                                            form.gender === g.key
+                                                ? "border-white bg-white text-black"
+                                                : "border-white/20 hover:border-white/50"
+                                        }`}
+                                    >
+                                        {g.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </Section>
+
+                {/* Section 3 — Professional */}
+                <Section title="Professional Details" index="02">
+                    <div className="grid md:grid-cols-2 gap-5">
+                        <div>
+                            <Label>Instagram Handle</Label>
+                            <input
+                                value={form.instagram_handle}
+                                onChange={(e) =>
+                                    setForm({
+                                        ...form,
+                                        instagram_handle: e.target.value,
+                                    })
+                                }
+                                placeholder="@yourhandle"
+                                data-testid="form-instagram"
+                                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                            />
+                        </div>
+                        <div>
+                            <Label>Instagram Followers</Label>
+                            <Select
+                                value={form.instagram_followers}
+                                onValueChange={(v) =>
+                                    setForm({ ...form, instagram_followers: v })
+                                }
+                            >
+                                <SelectTrigger
+                                    className="mt-2 bg-transparent border-0 border-b border-white/15 rounded-none px-0 h-auto py-2.5 text-sm"
+                                    data-testid="form-followers"
+                                >
+                                    <SelectValue placeholder="Select range" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {FOLLOWER_TIERS.map((t) => (
+                                        <SelectItem key={t} value={t}>
+                                            {t}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                        <div className="md:col-span-2">
+                            <Label>Short Bio</Label>
+                            <textarea
+                                value={form.bio}
+                                onChange={(e) =>
+                                    setForm({ ...form, bio: e.target.value })
+                                }
+                                rows={4}
+                                placeholder="A few lines about yourself — experience, strengths, what you're looking for."
+                                data-testid="form-bio"
+                                className="mt-2 w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
+                            />
+                        </div>
+                    </div>
+                </Section>
+
+                {/* Section 4 — Media */}
+                <Section title="Media" index="03">
+                    <div className="space-y-6">
+                        <div>
+                            <div className="flex items-center justify-between mb-3">
+                                <p className="text-sm text-white/80">
+                                    Introduction Video *
+                                </p>
+                                {intro && (
+                                    <button
+                                        onClick={() => removeMedia(intro.id)}
+                                        className="text-[10px] tg-mono text-white/50 hover:text-[#FF3B30]"
+                                    >
+                                        Replace
+                                    </button>
+                                )}
+                            </div>
+                            <p className="text-xs text-white/40 mb-3">
+                                Please provide your most recent professional
+                                introduction video (without contact info).
+                            </p>
+                            {intro ? (
+                                <video
+                                    src={FILE_URL(intro.storage_path)}
+                                    controls
+                                    preload="metadata"
+                                    className="w-full max-w-lg border border-white/10 bg-black rounded-sm"
+                                    data-testid="apply-intro-preview"
+                                />
+                            ) : (
+                                <button
+                                    onClick={() => videoRef.current?.click()}
+                                    data-testid="apply-intro-upload-btn"
+                                    disabled={uploading === "intro_video"}
+                                    className="w-full max-w-lg border border-dashed border-white/20 hover:border-white/50 py-10 flex flex-col items-center gap-2 text-sm text-white/60"
+                                >
+                                    {uploading === "intro_video" ? (
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                    ) : (
+                                        <Video className="w-5 h-5" />
+                                    )}
+                                    <span>Upload video</span>
+                                </button>
+                            )}
+                            <input
+                                ref={videoRef}
+                                type="file"
+                                accept="video/*"
+                                className="hidden"
+                                onChange={(e) =>
+                                    upload(e.target.files, "intro_video")
+                                }
+                            />
+                        </div>
+
+                        <div>
+                            <div className="flex items-center justify-between mb-3">
+                                <p className="text-sm text-white/80">
+                                    Profile Images * ({images.length}/
+                                    {MAX_IMAGES})
+                                </p>
+                                {images.length < MAX_IMAGES && (
+                                    <button
+                                        onClick={() => imgRef.current?.click()}
+                                        data-testid="apply-image-upload-btn"
+                                        disabled={uploading === "image"}
+                                        className="inline-flex items-center gap-1.5 text-xs border border-white/15 hover:border-white px-3 py-1.5"
+                                    >
+                                        {uploading === "image" ? (
+                                            <Loader2 className="w-3 h-3 animate-spin" />
+                                        ) : (
+                                            <Upload className="w-3 h-3" />
+                                        )}
+                                        Add
+                                    </button>
+                                )}
+                            </div>
+                            <p className="text-xs text-white/40 mb-3">
+                                Upload {MIN_IMAGES}–{MAX_IMAGES}{" "}
+                                high-resolution images aligned with your
+                                portfolio.
+                            </p>
+                            <input
+                                ref={imgRef}
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                className="hidden"
+                                onChange={(e) => upload(e.target.files, "image")}
+                            />
+                            {images.length === 0 ? (
+                                <button
+                                    onClick={() => imgRef.current?.click()}
+                                    className="w-full border border-dashed border-white/20 hover:border-white/50 py-10 flex flex-col items-center gap-2 text-sm text-white/60"
+                                >
+                                    <Camera className="w-5 h-5" />
+                                    <span>Upload images</span>
+                                </button>
+                            ) : (
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                                    {images.map((m) => (
+                                        <div
+                                            key={m.id}
+                                            className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
+                                        >
+                                            <img
+                                                src={FILE_URL(m.storage_path)}
+                                                alt=""
+                                                loading="lazy"
+                                                className="w-full h-full object-cover"
+                                            />
+                                            <button
+                                                onClick={() => removeMedia(m.id)}
+                                                className="absolute top-2 right-2 w-7 h-7 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#FF3B30]"
+                                            >
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </Section>
+
+                <button
+                    onClick={finalize}
+                    disabled={saving}
+                    data-testid="apply-submit-btn"
+                    className="mt-6 w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40 inline-flex items-center justify-center gap-2"
+                >
+                    {saving ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                        <Sparkles className="w-4 h-4" />
+                    )}
+                    Submit Application
+                </button>
+                <p className="text-[11px] text-white/40 tg-mono text-center mt-3">
+                    We'll auto-save as you go — feel free to come back and
+                    finish later.
+                </p>
+            </div>
+        </div>
+    );
+}
+
+function Header() {
+    return (
+        <header className="flex items-center justify-between px-6 py-5 border-b border-white/10">
+            <Logo className="h-8" />
+            <ThemeToggle />
+        </header>
+    );
+}
+
+function Section({ title, index, children }) {
+    return (
+        <section className="mb-10 border border-white/10 p-6 md:p-8">
+            <div className="flex items-center gap-3 mb-6">
+                <span className="text-[10px] tg-mono text-white/40">
+                    {index}
+                </span>
+                <p className="eyebrow">{title}</p>
+            </div>
+            {children}
+        </section>
+    );
+}
+
+function Label({ children }) {
+    return (
+        <label className="text-[11px] text-white/50 tracking-widest uppercase">
+            {children}
+        </label>
+    );
+}
+
+function Row({ label, value, onChange, type = "text", testid, hint }) {
+    return (
+        <div>
+            <Label>{label}</Label>
+            <input
+                type={type}
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                data-testid={testid}
+                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+            />
+            {hint && (
+                <p className="text-[10px] text-white/40 tg-mono mt-1.5">
+                    {hint}
+                </p>
+            )}
+        </div>
+    );
+}

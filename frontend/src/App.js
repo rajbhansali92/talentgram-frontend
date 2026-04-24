@@ -15,6 +15,7 @@ import LinkResults from "@/pages/LinkResults";
 import ClientView from "@/pages/ClientView";
 import SubmissionPage from "@/pages/SubmissionPage";
 import ApplicationPage from "@/pages/ApplicationPage";
+import Applications from "@/pages/Applications";
 import Landing from "@/pages/Landing";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
@@ -49,6 +50,7 @@ function App() {
                         <Route path="talents" element={<TalentList />} />
                         <Route path="talents/new" element={<TalentEdit />} />
                         <Route path="talents/:id" element={<TalentEdit />} />
+                        <Route path="applications" element={<Applications />} />
                         <Route path="projects" element={<ProjectList />} />
                         <Route path="projects/new" element={<ProjectEdit />} />
                         <Route path="projects/:id" element={<ProjectEdit />} />

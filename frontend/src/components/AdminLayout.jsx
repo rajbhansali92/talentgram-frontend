@@ -3,11 +3,12 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
-import { LayoutDashboard, Users, Link2, LogOut, Clapperboard } from "lucide-react";
+import { LayoutDashboard, Users, Link2, LogOut, Clapperboard, UserPlus } from "lucide-react";
 
 const navItems = [
     { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
     { to: "/admin/talents", label: "Talents", icon: Users },
+    { to: "/admin/applications", label: "Applications", icon: UserPlus },
     { to: "/admin/projects", label: "Projects", icon: Clapperboard },
     { to: "/admin/links", label: "Links", icon: Link2 },
 ];

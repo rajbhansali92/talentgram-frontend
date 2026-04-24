@@ -1,7 +1,8 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import ThemeToggle from "@/components/ThemeToggle";
+import Logo from "@/components/Logo";
 
 export default function Landing() {
     return (
@@ -20,17 +21,7 @@ export default function Landing() {
 
             <div className="relative z-10 min-h-screen flex flex-col">
                 <header className="px-6 md:px-12 py-6 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-sm bg-white flex items-center justify-center">
-                            <Sparkles
-                                className="w-4 h-4 text-black"
-                                strokeWidth={1.5}
-                            />
-                        </div>
-                        <span className="font-display text-xl tracking-tight">
-                            Talentgram
-                        </span>
-                    </div>
+                    <Logo size="md" />
                     <div className="flex items-center gap-3">
                     <Link
                         to="/admin/login"

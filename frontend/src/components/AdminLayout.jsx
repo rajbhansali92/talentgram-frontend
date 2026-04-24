@@ -2,14 +2,8 @@ import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
-import {
-    LayoutDashboard,
-    Users,
-    Link2,
-    LogOut,
-    Plus,
-    Sparkles,
-} from "lucide-react";
+import Logo from "@/components/Logo";
+import { LayoutDashboard, Users, Link2, LogOut } from "lucide-react";
 
 const navItems = [
     { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
@@ -34,18 +28,8 @@ export default function AdminLayout() {
                 data-testid="admin-sidebar"
             >
                 <div className="px-6 py-7 border-b border-white/10">
-                    <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-sm bg-white flex items-center justify-center">
-                            <Sparkles
-                                className="w-4 h-4 text-black"
-                                strokeWidth={1.5}
-                            />
-                        </div>
-                        <span className="font-display text-xl tracking-tight">
-                            Talentgram
-                        </span>
-                    </div>
-                    <p className="eyebrow mt-3">Portfolio Engine</p>
+                    <Logo size="md" />
+                    <p className="eyebrow mt-4 text-center">Portfolio Engine</p>
                 </div>
                 <nav className="flex-1 p-3 space-y-1">
                     {navItems.map((it) => (
@@ -92,15 +76,7 @@ export default function AdminLayout() {
 
             {/* Mobile top bar */}
             <div className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur-xl px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                    <div className="w-6 h-6 rounded-sm bg-white flex items-center justify-center">
-                        <Sparkles
-                            className="w-3 h-3 text-black"
-                            strokeWidth={1.5}
-                        />
-                    </div>
-                    <span className="font-display text-base">Talentgram</span>
-                </div>
+                <Logo size="sm" />
                 <button
                     onClick={logout}
                     data-testid="admin-logout-mobile-btn"

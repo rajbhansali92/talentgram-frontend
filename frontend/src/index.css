@@ -50,9 +50,9 @@ h2,
 h3,
 h4,
 h5 {
-    font-family: "Outfit", ui-sans-serif, system-ui, sans-serif;
-    letter-spacing: -0.02em;
-    font-weight: 400;
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    letter-spacing: -0.005em;
+    font-weight: 500;
 }
 
 code {
@@ -120,11 +120,18 @@ code {
 
 /* Typography helpers */
 .font-display {
-    font-family: "Outfit", sans-serif;
-    letter-spacing: -0.03em;
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    letter-spacing: -0.005em;
+    font-weight: 500;
 }
 .font-body {
     font-family: "Manrope", sans-serif;
+}
+.font-logo {
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
 }
 .tg-mono {
     font-family:

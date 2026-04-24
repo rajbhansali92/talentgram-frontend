@@ -3,7 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { adminApi, saveAdminSession } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
-import { Sparkles, Loader2 } from "lucide-react";
+import Logo from "@/components/Logo";
+import { Loader2 } from "lucide-react";
 
 export default function AdminLogin() {
     const [email, setEmail] = useState("admin@talentgram.com");
@@ -46,17 +47,7 @@ export default function AdminLogin() {
                 />
                 <div className="absolute inset-0 bg-gradient-to-br from-black/40 to-black/80" />
                 <div className="relative h-full flex flex-col justify-between p-12 text-white">
-                    <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-sm bg-white flex items-center justify-center">
-                            <Sparkles
-                                className="w-4 h-4 text-black"
-                                strokeWidth={1.5}
-                            />
-                        </div>
-                        <span className="font-display text-xl tracking-tight">
-                            Talentgram
-                        </span>
-                    </div>
+                    <Logo size="md" />
                     <div>
                         <p className="eyebrow mb-4">Client Review System</p>
                         <h2 className="font-display text-4xl lg:text-5xl leading-tight tracking-tight">

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import { viewerApi, FILE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
+import Logo from "@/components/Logo";
 import axios from "axios";
 import { toast } from "sonner";
 import {
@@ -165,16 +166,8 @@ export default function ClientView() {
                         className="w-full max-w-md bg-black/60 backdrop-blur-xl border border-white/10 p-8 md:p-10 tg-fade-up"
                         data-testid="identity-gate-form"
                     >
-                        <div className="flex items-center gap-2 mb-8">
-                            <div className="w-6 h-6 rounded-sm bg-white flex items-center justify-center">
-                                <Sparkles
-                                    className="w-3.5 h-3.5 text-black"
-                                    strokeWidth={1.5}
-                                />
-                            </div>
-                            <span className="font-display tracking-tight">
-                                Talentgram
-                            </span>
+                        <div className="flex justify-center mb-8">
+                            <Logo size="md" />
                         </div>
                         <p className="eyebrow mb-3">Curated Portfolio</p>
                         <h1 className="font-display text-3xl tracking-tight mb-3">

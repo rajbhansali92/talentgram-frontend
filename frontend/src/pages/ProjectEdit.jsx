@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL } from "@/lib/api";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
+import ForwardToLinkModal from "@/components/ForwardToLinkModal";
 import {
     Select,
     SelectContent,
@@ -28,6 +29,7 @@ import {
     XCircle,
     Clock,
     ExternalLink,
+    Sparkles,
 } from "lucide-react";
 
 const COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"];
@@ -75,6 +77,7 @@ export default function ProjectEdit() {
     const [showMaterialModal, setShowMaterialModal] = useState(false);
     const [submissions, setSubmissions] = useState([]);
     const [reviewingSid, setReviewingSid] = useState(null);
+    const [showForwardModal, setShowForwardModal] = useState(false);
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
@@ -543,7 +546,7 @@ export default function ProjectEdit() {
                     className="border border-white/10 mt-6"
                     data-testid="submissions-review-section"
                 >
-                    <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                    <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between gap-3 flex-wrap">
                         <div>
                             <p className="eyebrow">Submissions</p>
                             <p className="text-xs text-white/40 mt-1">
@@ -562,6 +565,21 @@ export default function ProjectEdit() {
                                 rejected
                             </p>
                         </div>
+                        <button
+                            onClick={() => setShowForwardModal(true)}
+                            disabled={
+                                submissions.filter(
+                                    (s) =>
+                                        s.decision === "approved" &&
+                                        s.status === "submitted",
+                                ).length === 0
+                            }
+                            data-testid="create-client-link-btn"
+                            className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-white text-black rounded-sm hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                            <Sparkles className="w-3.5 h-3.5" /> Create Client
+                            Link from Approved
+                        </button>
                     </div>
                     {submissions.length === 0 ? (
                         <div className="p-8 text-center text-white/40 text-sm">
@@ -599,6 +617,19 @@ export default function ProjectEdit() {
                     submission={submissions.find((s) => s.id === reviewingSid)}
                     onClose={() => setReviewingSid(null)}
                     onDecision={(d) => setDecision(reviewingSid, d)}
+                />
+            )}
+
+            {/* Forward to client link modal */}
+            {showForwardModal && (
+                <ForwardToLinkModal
+                    project={project}
+                    submissions={submissions}
+                    onClose={() => setShowForwardModal(false)}
+                    onDone={(link) => {
+                        setShowForwardModal(false);
+                        nav(`/admin/links/${link.id}/results`);
+                    }}
                 />
             )}
         </div>

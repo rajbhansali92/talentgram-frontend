@@ -263,6 +263,11 @@ class SubmissionDecisionIn(BaseModel):
     decision: str  # pending | approved | rejected
 
 
+class ForwardToLinkIn(BaseModel):
+    submission_ids: List[str]
+    visibility: Dict[str, bool] = Field(default_factory=dict)
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -1004,6 +1009,108 @@ async def delete_submission(
     if not res.deleted_count:
         raise HTTPException(404, "Submission not found")
     return {"ok": True}
+
+
+@api.post("/projects/{pid}/forward-to-link")
+async def forward_to_link(
+    pid: str,
+    payload: ForwardToLinkIn,
+    admin: dict = Depends(current_admin),
+):
+    """Create talents from approved submissions + generate a portfolio link."""
+    if not payload.submission_ids:
+        raise HTTPException(400, "Select at least one submission")
+    project = await db.projects.find_one({"id": pid}, {"_id": 0})
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    subs = await db.submissions.find(
+        {
+            "id": {"$in": payload.submission_ids},
+            "project_id": pid,
+            "decision": "approved",
+        },
+        {"_id": 0},
+    ).to_list(5000)
+    if not subs:
+        raise HTTPException(400, "No approved submissions match the selection")
+
+    # Preserve original selection order
+    order = {sid: i for i, sid in enumerate(payload.submission_ids)}
+    subs.sort(key=lambda s: order.get(s["id"], 999))
+
+    talent_ids: List[str] = []
+    for sub in subs:
+        tid = str(uuid.uuid4())
+        new_media: List[Dict[str, Any]] = []
+        cover_mid: Optional[str] = None
+        for m in sub.get("media", []):
+            if m["category"] == "image":
+                new_cat = "portfolio"
+            elif m["category"] == "intro_video":
+                new_cat = "video"
+            else:
+                continue  # takes stay on submission only
+            mid = str(uuid.uuid4())
+            new_media.append({
+                "id": mid,
+                "category": new_cat,
+                "storage_path": m["storage_path"],  # re-reference same object — no re-upload
+                "content_type": m["content_type"],
+                "original_filename": m.get("original_filename"),
+                "size": m.get("size", 0),
+                "created_at": _now(),
+            })
+            if new_cat == "portfolio" and not cover_mid:
+                cover_mid = mid
+
+        talent_doc = {
+            "id": tid,
+            "name": sub["talent_name"],
+            "age": None,
+            "dob": None,
+            "height": None,
+            "location": None,
+            "ethnicity": None,
+            "gender": None,
+            "instagram_handle": None,
+            "instagram_followers": None,
+            "bio": None,
+            "work_links": [],
+            "cover_media_id": cover_mid,
+            "media": new_media,
+            "source": {
+                "type": "submission",
+                "submission_id": sub["id"],
+                "project_id": pid,
+                "talent_email": sub.get("talent_email"),
+            },
+            "created_at": _now(),
+            "created_by": admin["id"],
+        }
+        await db.talents.insert_one(talent_doc)
+        talent_ids.append(tid)
+
+    vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
+    title = f"Talentgram x {project['brand_name']}"
+    link_doc = {
+        "id": str(uuid.uuid4()),
+        "slug": _slugify(title),
+        "title": title,
+        "brand_name": project["brand_name"],
+        "talent_ids": talent_ids,
+        "visibility": vis,
+        "is_public": True,
+        "password": None,
+        "notes": f"Forwarded from project: {project['brand_name']}",
+        "created_at": _now(),
+        "created_by": admin["id"],
+    }
+    await db.links.insert_one(link_doc)
+    link_doc.pop("_id", None)
+    link_doc["view_count"] = 0
+    link_doc["unique_viewers"] = 0
+    return link_doc
 
 
 # --------------------------------------------------------------------------

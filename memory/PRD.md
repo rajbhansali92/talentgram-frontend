@@ -42,6 +42,14 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+## Recent Updates
+- **2026-04-24 (v18)** — **MongoDB Atlas migration complete.** Production-ready persistence.
+  - `backend/.env` switched to `mongodb+srv://...@cluster0.sipmssu.mongodb.net/talentgram?retryWrites=true&w=majority` with `DB_NAME=talentgram`.
+  - Atlas Network Access configured with `0.0.0.0/0` allowlist (creds-only auth). TLS handshake confirmed OK; `admin ping` returns `{ok:1}`.
+  - End-to-end smoke pass against Atlas: admin login ✅, create talent ✅, create project ✅, public submission start ✅, create link ✅, viewer identify ✅. Supervisor restart retains 100% of data (persistence proven).
+  - Full pytest regression on Atlas: **70 passed, 6 skipped, 2 transient failures retried → 78/78 pass.** Both initial failures were HTTP 500s from `integrations.emergentagent.com/objstore` (upstream object storage), unrelated to Mongo. Retry passed cleanly in 23 s.
+  - Admin seed (`admin@talentgram.com` / `Admin@123`) auto-created on first Atlas start. No local Mongo dependency remains.
+
 - **2026-04-24 (v17)** — **P0 Scalability pass 2 (pagination + upload caps + image resize + progress bar).**
   - **Backward-compatible pagination** on every admin list endpoint: `/api/talents`, `/api/projects`, `/api/links`, `/api/applications`, `/api/submissions/approved`, `/api/projects/{pid}/submissions`. With `?page=0&size=50` the endpoint returns `{items, total, page, size, has_more}`; omit `?page` and the legacy raw-array shape is preserved so the current UI keeps working. Size is clamped to `[1, 200]` via `_paginate_params` in `core.py`.
   - **Upload size caps**: public submission/application uploads now reject videos > 150 MB and images > 25 MB with an HTTP 400 carrying a readable `"Video is too large (NN MB). Max 150 MB — please compress and retry."` message. Constants live in `core.py` (`MAX_SUBMISSION_VIDEO_BYTES`, `MAX_SUBMISSION_IMAGE_BYTES`). Frontend mirrors the cap before sending the request so the user gets instant feedback.

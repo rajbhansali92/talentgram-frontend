@@ -516,13 +516,26 @@ async def set_cover(tid: str, mid: str, admin: dict = Depends(current_admin)):
 @api.post("/links", response_model=LinkOut)
 async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
     vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
+    # Strip empty ids, deduplicate while preserving order
+    def _clean(ids: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for i in ids or []:
+            if i and i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+    talent_ids = _clean(payload.talent_ids)
+    submission_ids = _clean(payload.submission_ids)
+    if not talent_ids and not submission_ids:
+        raise HTTPException(400, "Select at least one talent or submission")
     doc = {
         "id": str(uuid.uuid4()),
         "slug": _slugify(payload.title),
         "title": payload.title,
         "brand_name": payload.brand_name,
-        "talent_ids": payload.talent_ids,
-        "submission_ids": payload.submission_ids,
+        "talent_ids": talent_ids,
+        "submission_ids": submission_ids,
         "visibility": vis,
         "is_public": payload.is_public,
         "password": payload.password,
@@ -560,8 +573,22 @@ async def get_link(lid: str, admin: dict = Depends(current_admin)):
 @api.put("/links/{lid}", response_model=LinkOut)
 async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_admin)):
     vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
+
+    def _clean(ids: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for i in ids or []:
+            if i and i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+
     update = payload.model_dump()
     update["visibility"] = vis
+    update["talent_ids"] = _clean(payload.talent_ids)
+    update["submission_ids"] = _clean(payload.submission_ids)
+    if not update["talent_ids"] and not update["submission_ids"]:
+        raise HTTPException(400, "Select at least one talent or submission")
     res = await db.links.update_one({"id": lid}, {"$set": update})
     if not res.matched_count:
         raise HTTPException(404, "Link not found")
@@ -1270,6 +1297,31 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
 
 
 # ---- Admin review ----
+@api.get("/submissions/approved")
+async def list_approved_submissions(admin: dict = Depends(current_admin)):
+    """All approved submissions across every project (admin convenience for Link picker)."""
+    subs = await db.submissions.find(
+        {"decision": "approved"},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+    projects = await db.projects.find({}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(2000)
+    pmap = {p["id"]: p.get("brand_name") for p in projects}
+    # Attach project brand + preview image/cover for UI
+    out: List[Dict[str, Any]] = []
+    for s in subs:
+        shape = _submission_to_client_shape(s)
+        out.append({
+            "id": s["id"],
+            "talent_name": shape["name"],
+            "project_id": s.get("project_id"),
+            "project_brand": pmap.get(s.get("project_id")),
+            "cover_media_id": shape.get("cover_media_id"),
+            "media": shape.get("media"),
+            "created_at": s.get("created_at"),
+        })
+    return out
+
+
 @api.get("/projects/{pid}/submissions")
 async def list_submissions(pid: str, admin: dict = Depends(current_admin)):
     subs = await db.submissions.find(

@@ -8,6 +8,8 @@ import {
     Check,
     Image as ImageIcon,
     Loader2,
+    Users,
+    Film,
 } from "lucide-react";
 
 const VIS_ITEMS = [
@@ -44,7 +46,10 @@ export default function LinkGenerator() {
     const isEdit = Boolean(id);
 
     const [talents, setTalents] = useState([]);
-    const [selected, setSelected] = useState(new Set());
+    const [submissions, setSubmissions] = useState([]);
+    const [selectedTalents, setSelectedTalents] = useState(new Set());
+    const [selectedSubs, setSelectedSubs] = useState(new Set());
+    const [tab, setTab] = useState("talents"); // talents | submissions
     const [q, setQ] = useState("");
     const [title, setTitle] = useState("Talentgram x ");
     const [brand, setBrand] = useState("");
@@ -55,43 +60,70 @@ export default function LinkGenerator() {
 
     useEffect(() => {
         (async () => {
-            const { data } = await adminApi.get("/talents");
-            setTalents(data);
+            const [tRes, sRes] = await Promise.all([
+                adminApi.get("/talents"),
+                adminApi.get("/submissions/approved"),
+            ]);
+            setTalents(tRes.data);
+            setSubmissions(sRes.data);
         })();
         if (isEdit) {
             (async () => {
                 const { data } = await adminApi.get(`/links/${id}`);
                 setTitle(data.title);
                 setBrand(data.brand_name || "");
-                setSelected(new Set(data.talent_ids));
+                setSelectedTalents(new Set(data.talent_ids || []));
+                setSelectedSubs(new Set(data.submission_ids || []));
                 setVisibility({ ...DEFAULT_VIS, ...(data.visibility || {}) });
                 setIsPublic(data.is_public);
                 setNotes(data.notes || "");
+                // Auto-switch to submissions tab if link is submission-driven
+                if ((data.submission_ids || []).length && !(data.talent_ids || []).length) {
+                    setTab("submissions");
+                }
             })();
         }
     }, [id, isEdit]);
 
-    const filtered = useMemo(() => {
+    const filteredTalents = useMemo(() => {
         if (!q) return talents;
         return talents.filter((t) =>
             t.name.toLowerCase().includes(q.toLowerCase()),
         );
     }, [q, talents]);
 
-    const toggle = (tid) => {
-        const next = new Set(selected);
+    const filteredSubs = useMemo(() => {
+        if (!q) return submissions;
+        const lc = q.toLowerCase();
+        return submissions.filter(
+            (s) =>
+                s.talent_name?.toLowerCase().includes(lc) ||
+                s.project_brand?.toLowerCase().includes(lc),
+        );
+    }, [q, submissions]);
+
+    const toggleTalent = (tid) => {
+        const next = new Set(selectedTalents);
         if (next.has(tid)) next.delete(tid);
         else next.add(tid);
-        setSelected(next);
+        setSelectedTalents(next);
     };
+    const toggleSub = (sid) => {
+        const next = new Set(selectedSubs);
+        if (next.has(sid)) next.delete(sid);
+        else next.add(sid);
+        setSelectedSubs(next);
+    };
+
+    const totalSelected = selectedTalents.size + selectedSubs.size;
 
     const submit = async () => {
         if (!title.trim() || title.trim() === "Talentgram x") {
             toast.error("Please provide a title like 'Talentgram x Nike'");
             return;
         }
-        if (selected.size === 0) {
-            toast.error("Select at least one talent");
+        if (totalSelected === 0) {
+            toast.error("Select at least one talent or submission");
             return;
         }
         setSaving(true);
@@ -99,7 +131,8 @@ export default function LinkGenerator() {
             const payload = {
                 title: title.trim(),
                 brand_name: brand || null,
-                talent_ids: Array.from(selected),
+                talent_ids: Array.from(selectedTalents),
+                submission_ids: Array.from(selectedSubs),
                 visibility,
                 is_public: isPublic,
                 notes,
@@ -233,13 +266,15 @@ export default function LinkGenerator() {
                     </button>
                 </div>
 
-                {/* Right: Talent Selector */}
+                {/* Right: Subject Picker (Talents + Submissions) */}
                 <div className="lg:col-span-2 border border-white/10 p-6 min-h-[480px]">
-                    <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+                    <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
                         <div>
-                            <p className="eyebrow">Select Talents</p>
+                            <p className="eyebrow">Curate Subjects</p>
                             <p className="text-xs text-white/40 mt-1">
-                                {selected.size} selected
+                                {totalSelected} selected ·{" "}
+                                {selectedTalents.size} talents +{" "}
+                                {selectedSubs.size} submissions
                             </p>
                         </div>
                         <div className="relative">
@@ -248,43 +283,158 @@ export default function LinkGenerator() {
                                 value={q}
                                 onChange={(e) => setQ(e.target.value)}
                                 placeholder="Search..."
-                                data-testid="talent-select-search"
+                                data-testid="subject-select-search"
                                 className="bg-transparent border-b border-white/15 focus:border-white outline-none py-2 pl-7 text-sm w-56"
                             />
                         </div>
                     </div>
 
-                    {filtered.length === 0 ? (
+                    {/* Tab switcher */}
+                    <div className="flex gap-1 border-b border-white/10 mb-5">
+                        <button
+                            type="button"
+                            onClick={() => setTab("talents")}
+                            data-testid="tab-talents"
+                            className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs tracking-widest uppercase transition-all border-b-2 -mb-px ${
+                                tab === "talents"
+                                    ? "border-white text-white"
+                                    : "border-transparent text-white/50 hover:text-white/80"
+                            }`}
+                        >
+                            <Users className="w-3.5 h-3.5" />
+                            Talents
+                            <span className="tg-mono text-[10px] text-white/40">
+                                {talents.length}
+                            </span>
+                            {selectedTalents.size > 0 && (
+                                <span className="tg-mono text-[10px] bg-white text-black px-1.5 py-0.5 rounded-sm">
+                                    {selectedTalents.size}
+                                </span>
+                            )}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setTab("submissions")}
+                            data-testid="tab-submissions"
+                            className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs tracking-widest uppercase transition-all border-b-2 -mb-px ${
+                                tab === "submissions"
+                                    ? "border-white text-white"
+                                    : "border-transparent text-white/50 hover:text-white/80"
+                            }`}
+                        >
+                            <Film className="w-3.5 h-3.5" />
+                            Auditions
+                            <span className="tg-mono text-[10px] text-white/40">
+                                {submissions.length}
+                            </span>
+                            {selectedSubs.size > 0 && (
+                                <span className="tg-mono text-[10px] bg-[#34C759] text-black px-1.5 py-0.5 rounded-sm">
+                                    {selectedSubs.size}
+                                </span>
+                            )}
+                        </button>
+                    </div>
+
+                    {tab === "talents" ? (
+                        filteredTalents.length === 0 ? (
+                            <div className="text-white/40 text-sm py-10 text-center">
+                                No talents found.{" "}
+                                <Link
+                                    to="/admin/talents/new"
+                                    className="underline hover:text-white"
+                                >
+                                    Add talents first
+                                </Link>
+                                .
+                            </div>
+                        ) : (
+                            <div
+                                className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+                                data-testid="talent-select-grid"
+                            >
+                                {filteredTalents.map((t) => {
+                                    const cover =
+                                        (t.media || []).find(
+                                            (m) => m.id === t.cover_media_id,
+                                        ) ||
+                                        (t.media || []).find((m) =>
+                                            m.content_type?.startsWith(
+                                                "image/",
+                                            ),
+                                        );
+                                    const active = selectedTalents.has(t.id);
+                                    return (
+                                        <button
+                                            key={t.id}
+                                            onClick={() => toggleTalent(t.id)}
+                                            data-testid={`select-talent-${t.id}`}
+                                            className={`relative group text-left border transition-all ${active ? "border-white" : "border-white/10 hover:border-white/30"}`}
+                                        >
+                                            <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
+                                                {cover ? (
+                                                    <img
+                                                        src={FILE_URL(
+                                                            cover.storage_path,
+                                                        )}
+                                                        alt={t.name}
+                                                        className="w-full h-full object-cover"
+                                                    />
+                                                ) : (
+                                                    <div className="w-full h-full flex items-center justify-center text-white/20">
+                                                        <ImageIcon className="w-6 h-6" />
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="p-2.5">
+                                                <div className="text-sm font-display truncate">
+                                                    {t.name}
+                                                </div>
+                                                <div className="text-[10px] text-white/40 tg-mono truncate">
+                                                    {t.location || "—"}
+                                                </div>
+                                            </div>
+                                            {active && (
+                                                <div className="absolute top-2 right-2 w-6 h-6 bg-white text-black flex items-center justify-center rounded-sm">
+                                                    <Check className="w-3.5 h-3.5" />
+                                                </div>
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )
+                    ) : filteredSubs.length === 0 ? (
                         <div className="text-white/40 text-sm py-10 text-center">
-                            No talents found.{" "}
+                            No approved submissions yet. Approve submissions
+                            from{" "}
                             <Link
-                                to="/admin/talents/new"
+                                to="/admin/projects"
                                 className="underline hover:text-white"
                             >
-                                Add talents first
-                            </Link>
-                            .
+                                a project
+                            </Link>{" "}
+                            to use them here.
                         </div>
                     ) : (
                         <div
                             className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
-                            data-testid="talent-select-grid"
+                            data-testid="submission-select-grid"
                         >
-                            {filtered.map((t) => {
+                            {filteredSubs.map((s) => {
                                 const cover =
-                                    (t.media || []).find(
-                                        (m) => m.id === t.cover_media_id,
+                                    (s.media || []).find(
+                                        (m) => m.id === s.cover_media_id,
                                     ) ||
-                                    (t.media || []).find((m) =>
-                                        m.content_type?.startsWith("image/"),
+                                    (s.media || []).find(
+                                        (m) => m.category === "portfolio",
                                     );
-                                const active = selected.has(t.id);
+                                const active = selectedSubs.has(s.id);
                                 return (
                                     <button
-                                        key={t.id}
-                                        onClick={() => toggle(t.id)}
-                                        data-testid={`select-talent-${t.id}`}
-                                        className={`relative group text-left border transition-all ${active ? "border-white" : "border-white/10 hover:border-white/30"}`}
+                                        key={s.id}
+                                        onClick={() => toggleSub(s.id)}
+                                        data-testid={`select-submission-${s.id}`}
+                                        className={`relative group text-left border transition-all ${active ? "border-[#34C759]" : "border-white/10 hover:border-white/30"}`}
                                     >
                                         <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
                                             {cover ? (
@@ -292,7 +442,7 @@ export default function LinkGenerator() {
                                                     src={FILE_URL(
                                                         cover.storage_path,
                                                     )}
-                                                    alt={t.name}
+                                                    alt={s.talent_name}
                                                     className="w-full h-full object-cover"
                                                 />
                                             ) : (
@@ -300,17 +450,20 @@ export default function LinkGenerator() {
                                                     <ImageIcon className="w-6 h-6" />
                                                 </div>
                                             )}
+                                            <div className="absolute top-2 left-2 text-[9px] tg-mono tracking-widest uppercase bg-[#34C759]/90 text-black px-2 py-0.5 rounded-sm">
+                                                Audition
+                                            </div>
                                         </div>
                                         <div className="p-2.5">
                                             <div className="text-sm font-display truncate">
-                                                {t.name}
+                                                {s.talent_name}
                                             </div>
                                             <div className="text-[10px] text-white/40 tg-mono truncate">
-                                                {t.location || "—"}
+                                                {s.project_brand || "—"}
                                             </div>
                                         </div>
                                         {active && (
-                                            <div className="absolute top-2 right-2 w-6 h-6 bg-white text-black flex items-center justify-center rounded-sm">
+                                            <div className="absolute top-2 right-2 w-6 h-6 bg-[#34C759] text-black flex items-center justify-center rounded-sm">
                                                 <Check className="w-3.5 h-3.5" />
                                             </div>
                                         )}

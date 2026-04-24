@@ -1,12 +1,18 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, FILE_URL } from "@/lib/api";
-import { Search, Plus, Image as ImageIcon } from "lucide-react";
+import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
+import { Search, Plus, Image as ImageIcon, Check } from "lucide-react";
+import { toast } from "sonner";
+import BulkSelectBar from "@/components/BulkSelectBar";
+import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 
 export default function TalentList() {
     const [talents, setTalents] = useState([]);
     const [q, setQ] = useState("");
     const [loading, setLoading] = useState(true);
+    const [selected, setSelected] = useState(new Set());
+    const [confirmOpen, setConfirmOpen] = useState(false);
+    const canBulkDelete = isAdmin();
 
     const load = async (qq = "") => {
         setLoading(true);
@@ -26,6 +32,44 @@ export default function TalentList() {
         const t = setTimeout(() => load(q), 250);
         return () => clearTimeout(t);
     }, [q]);
+
+    const toggle = (id) => {
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const clear = () => setSelected(new Set());
+    const selectAll = () => setSelected(new Set(talents.map((t) => t.id)));
+
+    const bulkDelete = async () => {
+        const ids = Array.from(selected);
+        try {
+            const res = await adminApi.post("/talents/bulk-delete", { ids });
+             
+            console.info("[bulk-delete talents]", ids, res?.data);
+            toast.success(
+                `Deleted ${res.data.deleted} talent${res.data.deleted === 1 ? "" : "s"}${res.data.missing ? ` (${res.data.missing} already gone)` : ""}`,
+            );
+            clear();
+            setConfirmOpen(false);
+            load(q);
+        } catch (err) {
+             
+            console.error("[bulk-delete talents] failed", err?.response?.data || err);
+            toast.error(
+                err?.response?.data?.detail ||
+                    err?.message ||
+                    "Bulk delete failed",
+            );
+            throw err;
+        }
+    };
+
+    const isSelectionMode = selected.size > 0;
 
     return (
         <div
@@ -78,7 +122,7 @@ export default function TalentList() {
                 </div>
             ) : (
                 <div
-                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6"
+                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6 pb-20"
                     data-testid="talents-grid"
                 >
                     {talents.map((t) => {
@@ -92,43 +136,109 @@ export default function TalentList() {
                                     m.category !== "video" &&
                                     m.content_type?.startsWith("image/"),
                             );
+                        const checked = selected.has(t.id);
+                        const goesToDetail = !isSelectionMode;
                         return (
-                            <Link
+                            <div
                                 key={t.id}
-                                to={`/admin/talents/${t.id}`}
                                 data-testid={`talent-card-${t.id}`}
-                                className="group relative border border-white/10 hover:border-white/30 transition-all tg-fade-up"
+                                className={`group relative border transition-all tg-fade-up ${checked ? "border-white" : "border-white/10 hover:border-white/30"}`}
                             >
-                                <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
-                                    {anyImg ? (
-                                        <img
-                                            src={FILE_URL(anyImg.storage_path)}
-                                            alt={t.name}
-                                            className="w-full h-full object-cover group-hover:scale-[1.02] transition-all duration-500"
+                                {canBulkDelete && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            toggle(t.id);
+                                        }}
+                                        aria-label={
+                                            checked ? "Deselect" : "Select"
+                                        }
+                                        data-testid={`talent-check-${t.id}`}
+                                        className={`absolute top-2 left-2 z-10 w-6 h-6 rounded-sm border flex items-center justify-center transition-all ${checked ? "bg-white border-white text-black" : "bg-black/60 border-white/40 text-transparent group-hover:text-white/60 opacity-0 group-hover:opacity-100"} ${isSelectionMode ? "opacity-100" : ""}`}
+                                    >
+                                        {checked && (
+                                            <Check className="w-3.5 h-3.5" />
+                                        )}
+                                    </button>
+                                )}
+                                {goesToDetail ? (
+                                    <Link
+                                        to={`/admin/talents/${t.id}`}
+                                        className="block"
+                                    >
+                                        <Inner
+                                            t={t}
+                                            anyImg={anyImg}
                                         />
-                                    ) : (
-                                        <div className="w-full h-full flex items-center justify-center text-white/20">
-                                            <ImageIcon
-                                                className="w-8 h-8"
-                                                strokeWidth={1}
-                                            />
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="p-4">
-                                    <div className="font-display text-lg tracking-tight">
-                                        {t.name}
-                                    </div>
-                                    <div className="text-[11px] text-white/40 mt-1 tg-mono">
-                                        {t.location ? t.location + " · " : ""}
-                                        {(t.media || []).length} assets
-                                    </div>
-                                </div>
-                            </Link>
+                                    </Link>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => toggle(t.id)}
+                                        className="block w-full text-left"
+                                    >
+                                        <Inner t={t} anyImg={anyImg} />
+                                    </button>
+                                )}
+                            </div>
                         );
                     })}
                 </div>
             )}
+
+            {canBulkDelete && (
+                <BulkSelectBar
+                    count={selected.size}
+                    total={talents.length}
+                    allSelected={selected.size === talents.length}
+                    onSelectAll={selectAll}
+                    onClear={clear}
+                    onDelete={() => setConfirmOpen(true)}
+                    labelSingular="talent"
+                    labelPlural="talents"
+                    testid="talents-bulk-bar"
+                />
+            )}
+            <ConfirmDeleteDialog
+                open={confirmOpen}
+                title={`Delete ${selected.size} talent${selected.size === 1 ? "" : "s"}?`}
+                description="This permanently removes the selected talent records and all their portfolio media. Submissions attached to these talents remain (they live on the project). This cannot be undone."
+                confirmLabel={`Delete ${selected.size}`}
+                typeToConfirm="DELETE"
+                onCancel={() => setConfirmOpen(false)}
+                onConfirm={bulkDelete}
+                testid="talents-bulk-confirm"
+            />
         </div>
+    );
+}
+
+function Inner({ t, anyImg }) {
+    return (
+        <>
+            <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
+                {anyImg ? (
+                    <img
+                        src={FILE_URL(anyImg.storage_path)}
+                        alt={t.name}
+                        className="w-full h-full object-cover group-hover:scale-[1.02] transition-all duration-500"
+                    />
+                ) : (
+                    <div className="w-full h-full flex items-center justify-center text-white/20">
+                        <ImageIcon className="w-8 h-8" strokeWidth={1} />
+                    </div>
+                )}
+            </div>
+            <div className="p-4">
+                <div className="font-display text-lg tracking-tight">
+                    {t.name}
+                </div>
+                <div className="text-[11px] text-white/40 mt-1 tg-mono">
+                    {t.location ? t.location + " · " : ""}
+                    {(t.media || []).length} assets
+                </div>
+            </div>
+        </>
     );
 }

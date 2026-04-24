@@ -532,6 +532,11 @@ class ApplicationStartIn(BaseModel):
     phone: Optional[str] = None
 
 
+class BulkDeleteIn(BaseModel):
+    """Payload for bulk-delete endpoints across talents / projects / links."""
+    ids: List[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------
 # User management (role-based access control)
 # --------------------------------------------------------------------------

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from core import (
     ActionIn,
+    BulkDeleteIn,
     DEFAULT_VISIBILITY,
     DownloadIn,
     IdentifyIn,
@@ -102,6 +103,38 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
     link["view_count"] = await db.link_views.count_documents({"link_id": lid})
     link["unique_viewers"] = len(await db.link_views.distinct("viewer_email", {"link_id": lid}))
     return link
+
+
+@router.post("/links/bulk-delete")
+async def bulk_delete_links(
+    payload: BulkDeleteIn, admin: dict = Depends(current_admin)
+):
+    ids = [i for i in (payload.ids or []) if i]
+    if not ids:
+        raise HTTPException(400, "No ids provided")
+    logger.info(
+        "BULK DELETE /links by admin=%s count=%d ids=%s",
+        admin.get("email"), len(ids), ids[:10],
+    )
+    res = await db.links.delete_many({"id": {"$in": ids}})
+    v = await db.link_views.delete_many({"link_id": {"$in": ids}})
+    a = await db.link_actions.delete_many({"link_id": {"$in": ids}})
+    d = await db.link_downloads.delete_many({"link_id": {"$in": ids}})
+    logger.info(
+        "BULK DELETE /links by admin=%s removed=%d views=%d actions=%d downloads=%d",
+        admin.get("email"), res.deleted_count, v.deleted_count, a.deleted_count, d.deleted_count,
+    )
+    return {
+        "ok": True,
+        "requested": len(ids),
+        "deleted": res.deleted_count,
+        "missing": len(ids) - res.deleted_count,
+        "cascaded": {
+            "views": v.deleted_count,
+            "actions": a.deleted_count,
+            "downloads": d.deleted_count,
+        },
+    }
 
 
 @router.delete("/links/{lid}")

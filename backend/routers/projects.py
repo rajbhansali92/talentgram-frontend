@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from core import (
     APP_NAME,
+    BulkDeleteIn,
     COMMISSION_OPTIONS,
     DEFAULT_VISIBILITY,
     MATERIAL_CATEGORIES,
@@ -71,6 +72,32 @@ async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(cur
         raise HTTPException(404, "Project not found")
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
     return p
+
+
+@router.post("/projects/bulk-delete")
+async def bulk_delete_projects(
+    payload: BulkDeleteIn, admin: dict = Depends(current_admin)
+):
+    ids = [i for i in (payload.ids or []) if i]
+    if not ids:
+        raise HTTPException(400, "No ids provided")
+    logger.info(
+        "BULK DELETE /projects by admin=%s count=%d ids=%s",
+        admin.get("email"), len(ids), ids[:10],
+    )
+    res = await db.projects.delete_many({"id": {"$in": ids}})
+    sub_res = await db.submissions.delete_many({"project_id": {"$in": ids}})
+    logger.info(
+        "BULK DELETE /projects by admin=%s removed=%d submissions_cascade=%d",
+        admin.get("email"), res.deleted_count, sub_res.deleted_count,
+    )
+    return {
+        "ok": True,
+        "requested": len(ids),
+        "deleted": res.deleted_count,
+        "missing": len(ids) - res.deleted_count,
+        "cascaded_submissions": sub_res.deleted_count,
+    }
 
 
 @router.delete("/projects/{pid}")

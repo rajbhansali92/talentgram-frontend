@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from core import (
     APP_NAME,
+    BulkDeleteIn,
     TalentIn,
     TalentOut,
     _now,
@@ -64,6 +65,30 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
         raise HTTPException(404, "Talent not found")
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     return enrich_talent(t)
+
+
+@router.post("/talents/bulk-delete")
+async def bulk_delete_talents(
+    payload: BulkDeleteIn, admin: dict = Depends(current_admin)
+):
+    ids = [i for i in (payload.ids or []) if i]
+    if not ids:
+        raise HTTPException(400, "No ids provided")
+    logger.info(
+        "BULK DELETE /talents by admin=%s count=%d ids=%s",
+        admin.get("email"), len(ids), ids[:10],
+    )
+    res = await db.talents.delete_many({"id": {"$in": ids}})
+    logger.info(
+        "BULK DELETE /talents by admin=%s removed=%d (of %d requested)",
+        admin.get("email"), res.deleted_count, len(ids),
+    )
+    return {
+        "ok": True,
+        "requested": len(ids),
+        "deleted": res.deleted_count,
+        "missing": len(ids) - res.deleted_count,
+    }
 
 
 @router.delete("/talents/{tid}")

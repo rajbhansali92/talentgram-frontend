@@ -1,28 +1,71 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi } from "@/lib/api";
+import { adminApi, isAdmin } from "@/lib/api";
 import {
     Plus,
     Clapperboard,
     Calendar,
     IndianRupee,
     Briefcase,
+    Check,
 } from "lucide-react";
+import { toast } from "sonner";
+import BulkSelectBar from "@/components/BulkSelectBar";
+import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 
 export default function ProjectList() {
     const [projects, setProjects] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [selected, setSelected] = useState(new Set());
+    const [confirmOpen, setConfirmOpen] = useState(false);
+    const canBulkDelete = isAdmin();
+
+    const load = async () => {
+        setLoading(true);
+        try {
+            const { data } = await adminApi.get("/projects");
+            setProjects(data);
+        } finally {
+            setLoading(false);
+        }
+    };
 
     useEffect(() => {
-        (async () => {
-            try {
-                const { data } = await adminApi.get("/projects");
-                setProjects(data);
-            } finally {
-                setLoading(false);
-            }
-        })();
+        load();
     }, []);
+
+    const toggle = (id) => {
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+    const clear = () => setSelected(new Set());
+    const selectAll = () => setSelected(new Set(projects.map((p) => p.id)));
+
+    const bulkDelete = async () => {
+        const ids = Array.from(selected);
+        try {
+            const res = await adminApi.post("/projects/bulk-delete", { ids });
+             
+            console.info("[bulk-delete projects]", ids, res?.data);
+            toast.success(
+                `Deleted ${res.data.deleted} project${res.data.deleted === 1 ? "" : "s"}${res.data.cascaded_submissions ? ` (+${res.data.cascaded_submissions} submissions)` : ""}`,
+            );
+            clear();
+            setConfirmOpen(false);
+            load();
+        } catch (err) {
+             
+            console.error("[bulk-delete projects] failed", err?.response?.data || err);
+            toast.error(err?.response?.data?.detail || "Bulk delete failed");
+            throw err;
+        }
+    };
+
+    const isSelectionMode = selected.size > 0;
 
     return (
         <div
@@ -62,56 +105,116 @@ export default function ProjectList() {
                     </Link>
                 </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-                    {projects.map((p) => (
-                        <Link
-                            key={p.id}
-                            to={`/admin/projects/${p.id}`}
-                            data-testid={`project-card-${p.id}`}
-                            className="group border border-white/10 hover:border-white/30 p-6 transition-all tg-fade-up"
-                        >
-                            <div className="flex items-start justify-between mb-4">
-                                <Clapperboard
-                                    className="w-5 h-5 text-white/40"
-                                    strokeWidth={1.5}
-                                />
-                                <span className="text-[10px] tg-mono text-white/40">
-                                    {p.materials?.length || 0} materials
-                                </span>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6 pb-20">
+                    {projects.map((p) => {
+                        const checked = selected.has(p.id);
+                        const goesToDetail = !isSelectionMode;
+                        return (
+                            <div
+                                key={p.id}
+                                data-testid={`project-card-${p.id}`}
+                                className={`group relative border transition-all tg-fade-up ${checked ? "border-white" : "border-white/10 hover:border-white/30"}`}
+                            >
+                                {canBulkDelete && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            toggle(p.id);
+                                        }}
+                                        aria-label={
+                                            checked ? "Deselect" : "Select"
+                                        }
+                                        data-testid={`project-check-${p.id}`}
+                                        className={`absolute top-2 left-2 z-10 w-6 h-6 rounded-sm border flex items-center justify-center transition-all ${checked ? "bg-white border-white text-black" : "bg-black/60 border-white/40 text-transparent group-hover:text-white/60 opacity-0 group-hover:opacity-100"} ${isSelectionMode ? "opacity-100" : ""}`}
+                                    >
+                                        {checked && (
+                                            <Check className="w-3.5 h-3.5" />
+                                        )}
+                                    </button>
+                                )}
+                                {goesToDetail ? (
+                                    <Link
+                                        to={`/admin/projects/${p.id}`}
+                                        className="block p-6"
+                                    >
+                                        <Inner p={p} />
+                                    </Link>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => toggle(p.id)}
+                                        className="block w-full p-6 text-left"
+                                    >
+                                        <Inner p={p} />
+                                    </button>
+                                )}
                             </div>
-                            <h3 className="font-display text-2xl tracking-tight mb-1">
-                                {p.brand_name}
-                            </h3>
-                            {p.character && (
-                                <p className="text-xs text-white/50 tg-mono mb-4">
-                                    {p.character}
-                                </p>
-                            )}
-                            <div className="mt-5 space-y-2 text-xs text-white/60">
-                                {p.shoot_dates && (
-                                    <Row
-                                        icon={Calendar}
-                                        label={p.shoot_dates}
-                                    />
-                                )}
-                                {p.budget_per_day && (
-                                    <Row
-                                        icon={IndianRupee}
-                                        label={`${p.budget_per_day}${p.commission_percent ? ` · ${p.commission_percent} comm.` : ""}`}
-                                    />
-                                )}
-                                {p.director && (
-                                    <Row
-                                        icon={Briefcase}
-                                        label={`Dir. ${p.director}`}
-                                    />
-                                )}
-                            </div>
-                        </Link>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
+
+            {canBulkDelete && (
+                <BulkSelectBar
+                    count={selected.size}
+                    total={projects.length}
+                    allSelected={selected.size === projects.length}
+                    onSelectAll={selectAll}
+                    onClear={clear}
+                    onDelete={() => setConfirmOpen(true)}
+                    labelSingular="project"
+                    labelPlural="projects"
+                    testid="projects-bulk-bar"
+                />
+            )}
+            <ConfirmDeleteDialog
+                open={confirmOpen}
+                title={`Delete ${selected.size} project${selected.size === 1 ? "" : "s"}?`}
+                description="This permanently removes the selected projects and all their submissions. Client links that already reference these projects keep their snapshots. This cannot be undone."
+                confirmLabel={`Delete ${selected.size}`}
+                typeToConfirm="DELETE"
+                onCancel={() => setConfirmOpen(false)}
+                onConfirm={bulkDelete}
+                testid="projects-bulk-confirm"
+            />
         </div>
+    );
+}
+
+function Inner({ p }) {
+    return (
+        <>
+            <div className="flex items-start justify-between mb-4">
+                <Clapperboard
+                    className="w-5 h-5 text-white/40"
+                    strokeWidth={1.5}
+                />
+                <span className="text-[10px] tg-mono text-white/40">
+                    {p.materials?.length || 0} materials
+                </span>
+            </div>
+            <h3 className="font-display text-2xl tracking-tight mb-1">
+                {p.brand_name}
+            </h3>
+            {p.character && (
+                <p className="text-xs text-white/50 tg-mono mb-4">
+                    {p.character}
+                </p>
+            )}
+            <div className="mt-5 space-y-2 text-xs text-white/60">
+                {p.shoot_dates && <Row icon={Calendar} label={p.shoot_dates} />}
+                {p.budget_per_day && (
+                    <Row
+                        icon={IndianRupee}
+                        label={`${p.budget_per_day}${p.commission_percent ? ` · ${p.commission_percent} comm.` : ""}`}
+                    />
+                )}
+                {p.director && (
+                    <Row icon={Briefcase} label={`Dir. ${p.director}`} />
+                )}
+            </div>
+        </>
     );
 }
 

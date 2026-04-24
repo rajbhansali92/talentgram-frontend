@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
+import BulkSelectBar from "@/components/BulkSelectBar";
 import {
     ExternalLink,
     Copy,
@@ -10,14 +11,47 @@ import {
     MessageCircle,
     Plus,
     Files,
+    Check,
 } from "lucide-react";
 
 export default function LinkHistory() {
     const [links, setLinks] = useState([]);
     const [loading, setLoading] = useState(true);
     const [pendingDelete, setPendingDelete] = useState(null);
+    const [selected, setSelected] = useState(new Set());
+    const [bulkConfirm, setBulkConfirm] = useState(false);
     const canDelete = isAdmin();
     const canCreate = isAdmin();
+
+    const toggle = (id) =>
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    const clearSel = () => setSelected(new Set());
+    const selectAll = () => setSelected(new Set(links.map((l) => l.id)));
+
+    const bulkDelete = async () => {
+        const ids = Array.from(selected);
+        try {
+            const res = await adminApi.post("/links/bulk-delete", { ids });
+             
+            console.info("[bulk-delete links]", ids, res?.data);
+            toast.success(
+                `Deleted ${res.data.deleted} link${res.data.deleted === 1 ? "" : "s"}`,
+            );
+            clearSel();
+            setBulkConfirm(false);
+            load();
+        } catch (err) {
+             
+            console.error("[bulk-delete links] failed", err?.response?.data || err);
+            toast.error(err?.response?.data?.detail || "Bulk delete failed");
+            throw err;
+        }
+    };
 
     const load = async () => {
         setLoading(true);
@@ -114,20 +148,58 @@ export default function LinkHistory() {
             ) : (
                 <div className="border border-white/10">
                     <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-3 border-b border-white/10 text-[10px] tracking-widest uppercase text-white/40">
-                        <div className="col-span-5">Title</div>
+                        <div className="col-span-5 flex items-center gap-3">
+                            {canDelete && (
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        selected.size === links.length
+                                            ? clearSel()
+                                            : selectAll()
+                                    }
+                                    aria-label="Toggle select all"
+                                    data-testid="link-select-all"
+                                    className={`w-4 h-4 rounded-sm border flex items-center justify-center ${selected.size === links.length && links.length > 0 ? "bg-white border-white text-black" : "border-white/40"}`}
+                                >
+                                    {selected.size === links.length &&
+                                        links.length > 0 && (
+                                            <Check className="w-3 h-3" />
+                                        )}
+                                </button>
+                            )}
+                            Title
+                        </div>
                         <div className="col-span-2">Talents</div>
                         <div className="col-span-1">Views</div>
                         <div className="col-span-1">Unique</div>
                         <div className="col-span-3 text-right">Actions</div>
                     </div>
-                    <div className="divide-y divide-white/10">
+                    <div className="divide-y divide-white/10 pb-20">
                         {links.map((l) => (
                             <div
                                 key={l.id}
                                 data-testid={`link-row-${l.id}`}
-                                className="grid md:grid-cols-12 gap-4 items-center px-6 py-5 hover:bg-white/[0.02]"
+                                className={`grid md:grid-cols-12 gap-4 items-center px-6 py-5 hover:bg-white/[0.02] ${selected.has(l.id) ? "bg-white/[0.04]" : ""}`}
                             >
-                                <div className="md:col-span-5">
+                                <div className="md:col-span-5 flex items-start gap-3">
+                                    {canDelete && (
+                                        <button
+                                            type="button"
+                                            onClick={() => toggle(l.id)}
+                                            aria-label={
+                                                selected.has(l.id)
+                                                    ? "Deselect"
+                                                    : "Select"
+                                            }
+                                            data-testid={`link-check-${l.id}`}
+                                            className={`mt-1 shrink-0 w-4 h-4 rounded-sm border flex items-center justify-center ${selected.has(l.id) ? "bg-white border-white text-black" : "border-white/30 hover:border-white/60"}`}
+                                        >
+                                            {selected.has(l.id) && (
+                                                <Check className="w-3 h-3" />
+                                            )}
+                                        </button>
+                                    )}
+                                    <div className="min-w-0">
                                     <Link
                                         to={`/admin/links/${l.id}/results`}
                                         className="font-display text-xl hover:text-white"
@@ -157,6 +229,7 @@ export default function LinkHistory() {
                                                 </span>
                                             );
                                         })()}
+                                    </div>
                                     </div>
                                 </div>
                                 <div className="md:col-span-2 text-sm text-white/70">
@@ -228,6 +301,29 @@ export default function LinkHistory() {
                 confirmLabel="Delete link"
                 onCancel={() => setPendingDelete(null)}
                 onConfirm={() => del(pendingDelete.id)}
+            />
+            {canDelete && (
+                <BulkSelectBar
+                    count={selected.size}
+                    total={links.length}
+                    allSelected={selected.size === links.length}
+                    onSelectAll={selectAll}
+                    onClear={clearSel}
+                    onDelete={() => setBulkConfirm(true)}
+                    labelSingular="link"
+                    labelPlural="links"
+                    testid="links-bulk-bar"
+                />
+            )}
+            <ConfirmDeleteDialog
+                open={bulkConfirm}
+                title={`Delete ${selected.size} link${selected.size === 1 ? "" : "s"}?`}
+                description="This permanently removes the selected links and all their views, actions, downloads and client comments. This cannot be undone."
+                confirmLabel={`Delete ${selected.size}`}
+                typeToConfirm="DELETE"
+                onCancel={() => setBulkConfirm(false)}
+                onConfirm={bulkDelete}
+                testid="links-bulk-confirm"
             />
         </div>
     );

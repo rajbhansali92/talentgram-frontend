@@ -5,7 +5,10 @@ import { toast } from "sonner";
 import {
     Select,
     SelectContent,
+    SelectGroup,
     SelectItem,
+    SelectLabel,
+    SelectSeparator,
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
@@ -57,6 +60,25 @@ function calcAge(dob) {
     if (mm < m || (mm === m && dd < d)) age -= 1;
     return age >= 0 && age <= 120 ? age : null;
 }
+
+const FOLLOWER_TIERS = [
+    {
+        label: "Early Range",
+        items: ["1K+", "10K+", "25K+", "50K+", "75K+", "100K+"],
+    },
+    {
+        label: "Mid Range",
+        items: ["150K+", "200K+", "300K+", "400K+", "500K+", "750K+", "1M+"],
+    },
+    {
+        label: "High Range",
+        items: ["2M+", "3M+", "4M+", "5M+", "7M+", "10M+"],
+    },
+    {
+        label: "Premium Influencer",
+        items: ["15M+", "20M+", "25M+", "30M+", "40M+", "50M+"],
+    },
+];
 
 function Field({ label, value, onChange, type = "text", ...rest }) {
     return (
@@ -370,14 +392,50 @@ export default function TalentEdit() {
                         }
                         placeholder="@username"
                     />
-                    <Field
-                        label="Instagram Followers"
-                        value={talent.instagram_followers}
-                        onChange={(v) =>
-                            setTalent({ ...talent, instagram_followers: v })
-                        }
-                        placeholder="e.g. 125K"
-                    />
+                    <div data-testid="field-followers">
+                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                            Instagram Followers
+                        </span>
+                        <div className="mt-2">
+                            <Select
+                                value={talent.instagram_followers || ""}
+                                onValueChange={(v) =>
+                                    setTalent({
+                                        ...talent,
+                                        instagram_followers: v,
+                                    })
+                                }
+                            >
+                                <SelectTrigger
+                                    data-testid="followers-select-trigger"
+                                    className="bg-transparent border-0 border-b border-white/15 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-2.5"
+                                >
+                                    <SelectValue placeholder="Select range" />
+                                </SelectTrigger>
+                                <SelectContent className="max-h-80">
+                                    {FOLLOWER_TIERS.map((tier, i) => (
+                                        <React.Fragment key={tier.label}>
+                                            {i > 0 && <SelectSeparator />}
+                                            <SelectGroup>
+                                                <SelectLabel className="text-[10px] tracking-[0.2em] uppercase text-muted-foreground font-medium px-2 py-2">
+                                                    {tier.label}
+                                                </SelectLabel>
+                                                {tier.items.map((it) => (
+                                                    <SelectItem
+                                                        key={it}
+                                                        value={it}
+                                                        data-testid={`followers-option-${it}`}
+                                                    >
+                                                        {it}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectGroup>
+                                        </React.Fragment>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                    </div>
                 </div>
                 <div className="mt-6">
                     <span className="text-[11px] text-white/50 tracking-widest uppercase">

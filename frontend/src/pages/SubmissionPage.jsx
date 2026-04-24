@@ -441,6 +441,26 @@ export default function SubmissionPage() {
         form.budget.status &&
         (form.budget.status !== "custom" || form.budget.value.trim());
 
+    // Specific, actionable checklist of what's still missing — shown under
+    // the Submit button so talents never guess why it's disabled.
+    const missing = [];
+    if (!form.first_name) missing.push("First name");
+    if (!form.last_name) missing.push("Last name");
+    if (!form.height) missing.push("Height");
+    if (!form.location) missing.push("Current location");
+    if (!form.availability.status) missing.push("Availability (Yes / No)");
+    else if (form.availability.status === "no" && !form.availability.note.trim())
+        missing.push("Availability note");
+    if (!form.budget.status) missing.push("Budget (Accept / Custom)");
+    else if (form.budget.status === "custom" && !form.budget.value.trim())
+        missing.push("Budget amount");
+    if (!intro) missing.push("Introduction video");
+    if (takes.length === 0) missing.push("At least 1 audition take");
+    if (images.length < MIN_IMAGES)
+        missing.push(
+            `${MIN_IMAGES - images.length} more image${MIN_IMAGES - images.length > 1 ? "s" : ""} (${images.length}/${MIN_IMAGES} min)`,
+        );
+
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED state — offer a "Refine my submission" path
     if (isSubmitted && !editMode) {

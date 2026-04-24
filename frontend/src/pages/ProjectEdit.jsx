@@ -857,8 +857,13 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     const mediaCounts = {
         intro: (s.media || []).filter((m) => m.category === "intro_video")
             .length,
-        takes: (s.media || []).filter((m) => m.category?.startsWith("take_"))
-            .length,
+        takes: (s.media || []).filter(
+            (m) =>
+                m.category === "take" ||
+                m.category === "take_1" ||
+                m.category === "take_2" ||
+                m.category === "take_3",
+        ).length,
         images: (s.media || []).filter((m) => m.category === "image").length,
     };
     return (
@@ -1209,30 +1214,50 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                 )}
                 <section className="mb-10" data-testid="review-takes-section">
                     <p className="eyebrow mb-3">Audition Takes</p>
-                    <div className="grid md:grid-cols-2 gap-4">
-                        {["take_1", "take_2", "take_3"].map((key) => {
-                            const t = media.find((m) => m.category === key);
-                            const label = `Take ${key.split("_")[1]}`;
+                    {(() => {
+                        // Merge new `take` media with legacy `take_1/2/3`;
+                        // legacy entries get auto-labelled "Take N".
+                        const takes = media
+                            .filter(
+                                (m) =>
+                                    m.category === "take" ||
+                                    m.category === "take_1" ||
+                                    m.category === "take_2" ||
+                                    m.category === "take_3",
+                            )
+                            .map((m) => {
+                                if (m.category === "take") return m;
+                                const n = m.category.replace("take_", "");
+                                return { ...m, label: m.label || `Take ${n}` };
+                            });
+                        if (takes.length === 0) {
                             return (
-                                <div key={key} data-testid={`review-${key}`}>
-                                    <p className="text-xs text-muted-foreground mb-2 tg-mono">
-                                        {label}
-                                    </p>
-                                    {t ? (
+                                <div className="max-w-3xl border border-dashed border-border bg-muted/40 aspect-video flex items-center justify-center text-muted-foreground text-xs tg-mono rounded-lg">
+                                    Not submitted
+                                </div>
+                            );
+                        }
+                        return (
+                            <div className="grid md:grid-cols-2 gap-4">
+                                {takes.map((t, i) => (
+                                    <div
+                                        key={t.id}
+                                        data-testid={`review-take-${i}`}
+                                    >
+                                        <p className="text-xs text-muted-foreground mb-2 tg-mono truncate">
+                                            {t.label || `Take ${i + 1}`}
+                                        </p>
                                         <video
                                             src={FILE_URL(t.storage_path)}
                                             controls
+                                            preload="metadata"
                                             className="w-full border border-border bg-muted rounded-lg"
                                         />
-                                    ) : (
-                                        <div className="w-full border border-dashed border-border bg-muted/40 aspect-video flex items-center justify-center text-muted-foreground text-xs tg-mono rounded-lg">
-                                            Not submitted
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
-                    </div>
+                                    </div>
+                                ))}
+                            </div>
+                        );
+                    })()}
                 </section>
                 {images.length > 0 && (
                     <section className="mb-10">

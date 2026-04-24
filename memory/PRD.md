@@ -27,6 +27,20 @@ Build a production-grade client-review system for Talentgram (talent agency). Co
 - ✅ Mobile-responsive dark UI (Obsidian/Pearl palette, Outfit + Manrope fonts)
 - ✅ Testing: 100% backend pytest + 100% frontend Playwright E2E
 
+## Architecture — Flow-Driven (not DB-Driven)
+
+```
+Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
+   form_data             field_visibility       curated_view
+   scoped media          link.visibility        strict allowlist
+                         link.submission_ids
+```
+
+- **Submission layer** — raw talent input; stays inside `submissions` collection, bound to `project_id`
+- **Admin layer** — reviews, edits form_data, toggles per-field visibility, approves/rejects. Never copies data elsewhere.
+- **Curated view layer** — `link.submission_ids` is the *source reference*; `link.visibility` is the *curation rule*. Nothing is denormalised.
+- **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
+
 ## Recent Updates
 - **2026-04-24 (v4)** — Hardened client payload with a structural allowlist. Added `CLIENT_ALLOWED_FIELDS` constant in `server.py`; `_filter_talent_for_client` applies it as a final defensive sweep so admin-internal data (`availability`, `budget`, `custom_answers`, `competitive_brand`, `form_data`, `field_visibility`, `dob`, `gender`, `bio`, `email`, `phone`, `source`, `notes`, etc.) can never leak to clients — even if future code accidentally adds a new key. Regression tests in `/app/backend/tests/test_client_payload_isolation.py` (4 passing) lock in the invariant.
 - **2026-04-24 (v3)** — Media scoping is now explicit. Every uploaded media dict carries a `scope` marker + origin ids: submission media → `scope="submission"` with `submission_id` + `project_id`; project material → `scope="project_material"` with `project_id`; talent media → `scope="talent_portfolio"` with `talent_id`. Before leaving the API to the client, a `_public_media()` sanitizer strips scope markers so clients never see internal origin metadata.

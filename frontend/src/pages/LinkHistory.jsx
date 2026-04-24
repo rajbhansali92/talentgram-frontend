@@ -115,8 +115,29 @@ export default function LinkHistory() {
                                     >
                                         {l.title}
                                     </Link>
-                                    <div className="text-[11px] text-white/40 mt-1 tg-mono truncate">
-                                        /l/{l.slug}
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <div className="text-[11px] text-white/40 tg-mono truncate">
+                                            /l/{l.slug}
+                                        </div>
+                                        {(() => {
+                                            const hasSubs = (l.submission_ids || []).length > 0;
+                                            const hasTalents = (l.talent_ids || []).length > 0;
+                                            const label = hasSubs && hasTalents ? "Mixed"
+                                                : hasSubs ? "Audition"
+                                                : "Manual";
+                                            const cls = hasSubs && hasTalents ? "border-white/30 text-white/70"
+                                                : hasSubs ? "border-[#34C759]/40 text-[#34C759]"
+                                                : "border-white/15 text-white/50";
+                                            return (
+                                                <span
+                                                    data-testid={`link-source-${l.id}`}
+                                                    className={`text-[9px] tracking-widest uppercase border px-2 py-0.5 rounded-sm ${cls}`}
+                                                    title="Curation source: Audition = submission-driven, Manual = picked from talent DB"
+                                                >
+                                                    {label}
+                                                </span>
+                                            );
+                                        })()}
                                     </div>
                                 </div>
                                 <div className="md:col-span-2 text-sm text-white/70">

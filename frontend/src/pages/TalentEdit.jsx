@@ -26,6 +26,23 @@ const emptyTalent = {
     work_links: [],
 };
 
+function Field({ label, value, onChange, type = "text", ...rest }) {
+    return (
+        <label className="block">
+            <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                {label}
+            </span>
+            <input
+                type={type}
+                value={value || ""}
+                onChange={(e) => onChange(e.target.value)}
+                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                {...rest}
+            />
+        </label>
+    );
+}
+
 export default function TalentEdit() {
     const { id } = useParams();
     const nav = useNavigate();
@@ -138,21 +155,6 @@ export default function TalentEdit() {
 
     const mediaBy = (cat) =>
         (talent.media || []).filter((m) => m.category === cat);
-
-    const Field = ({ label, value, onChange, type = "text", ...rest }) => (
-        <label className="block">
-            <span className="text-[11px] text-white/50 tracking-widest uppercase">
-                {label}
-            </span>
-            <input
-                type={type}
-                value={value || ""}
-                onChange={(e) => onChange(e.target.value)}
-                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
-                {...rest}
-            />
-        </label>
-    );
 
     return (
         <div

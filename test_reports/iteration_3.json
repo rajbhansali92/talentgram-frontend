@@ -1,0 +1,45 @@
+{
+  "summary": "Regression tested the Casting Review architecture overhaul (Takes→Intro→Images ordering, renamable takes, retest/re-upload flow, competitive_brand + custom_answers visibility gating). Unit suite (test_casting_review.py + test_client_payload_isolation.py) — 18/18 PASS. New live-API integration suite (test_casting_review_live.py) — 9/10 PASS; 1 FAIL exposes a real contract bug: the admin edit endpoint Pydantic model rejects the per-question custom_answers visibility dict. Frontend admin UI loads (login → projects/overview render), and SubmissionPage.jsx is correctly wired with TakeRow, AddTakeSlot, patchTakeLabel, and data-testid='refine-submission-btn' for the retest CTA.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/projects/{pid}/submissions/{sid}",
+        "issue": "AdminSubmissionEditIn.field_visibility is typed Dict[str, bool] — rejects per-question custom_answers dict shape ({Q1: false, Q2: true}) with 422. Backend _submission_to_client_shape already handles per-question dicts, so the bug is only in the API input model. Spec explicitly requires this shape.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_casting_review.py",
+    "/app/backend/tests/test_casting_review_live.py",
+    "/app/backend/tests/test_client_payload_isolation.py",
+    "/app/test_reports/pytest/pytest_casting_review_live.xml"
+  ],
+  "action_items": [
+    "Relax AdminSubmissionEditIn.field_visibility type in /app/backend/core.py from Optional[Dict[str, bool]] to Optional[Dict[str, Any]] (or a Union[bool, Dict[str, bool]] value type) so the admin can persist the per-question custom_answers visibility dict — the rest of the pipeline already supports it (_submission_to_client_shape line 824 handles both bool and dict). Re-run /app/backend/tests/test_casting_review_live.py::test_public_link_custom_answers_modes after the fix."
+  ],
+  "critical_code_review_comments": [
+    "core.py line 500: AdminSubmissionEditIn.field_visibility typed too strictly — blocks documented per-question custom_answers feature.",
+    "_submission_to_client_shape take-ordering uses a closure (_take_sort_key) that re-scans raw_media for every comparison — O(n^2) per submission. Fine at 5 takes max, but document or precompute the legacy-category index.",
+    "submission_upload: when a legacy take_1/2/3 fills a single-slot, the $pull happens BEFORE the $push in the same update — atomic. Good.",
+    "submission_delete_media does not 404 when mid is missing (just silently no-ops). Consider matching the PATCH semantics and returning 404 for consistency.",
+    "Re-upload flips status→'updated' for ANY submission in ('submitted','updated'), including 'image' uploads after finalize. That matches the spec ('any post-submit mutation'), but be aware an admin approving then a talent adding an image resets the decision — make sure the admin UI surfaces 'decision reset' messaging.",
+    "No max-label-length validation in submission_update_media — could accept arbitrarily long strings. Low risk but worth a 200-char cap."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_casting_review_live.py"
+  ],
+  "success_rate": {"backend": "93% (27/28 — 18/18 unit + 9/10 live)", "frontend": "admin UI smoke OK (login + projects render)"},
+  "test_credentials": "admin@talentgram.com / Admin@123 (admin); raj@test.com / RajPass123! (team). Both confirmed working.",
+  "seed_data_creation": "Test fixtures created and cleaned up: TEST_Casting_* projects, TEST_Link_* links, test_*@ex.com submissions. Post-run cleanup confirmed: 5 test links + 10 test submissions deleted. No leftover state.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: `cd /app/backend && pytest tests/test_casting_review.py tests/test_casting_review_live.py tests/test_client_payload_isolation.py -v`. test_casting_review_live.py hits the live preview backend and creates throwaway projects+links+submissions (cleanup is inline on project fixture but links teardown is implicit — re-run cleanup script in iteration_3 if re-testing repeatedly). The one failing test (test_public_link_custom_answers_modes) will pass once AdminSubmissionEditIn.field_visibility accepts a dict value type. The fixture `_prep_submission_for_link` uses tiny dummy mp4/jpg (safe for storage).",
+  "rca of the issue": "The backend core layer supports the per-question custom_answers visibility contract end-to-end (DEFAULT_FIELD_VISIBILITY, _submission_to_client_shape with isinstance(ca_vis, dict) branch at core.py:824, CLIENT_ALLOWED_FIELDS allowlist). However, the *input* Pydantic model AdminSubmissionEditIn on core.py:500 constrains field_visibility to Dict[str, bool], so the admin cannot actually persist the dict shape through PUT /api/projects/{pid}/submissions/{sid}. Reproduction: login as admin → PUT /api/projects/{pid}/submissions/{sid} with body {\"field_visibility\": {\"custom_answers\": {\"Q1\": true}}} → 422 bool_type. Fix: change Optional[Dict[str, bool]] to Optional[Dict[str, Any]] (preferred — matches loose-value semantics already used elsewhere in the codebase). No DB migration needed."
+}

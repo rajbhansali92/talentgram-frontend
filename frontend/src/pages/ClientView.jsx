@@ -404,14 +404,14 @@ function TalentDetail({
     logDownload,
 }) {
     const vis = link.visibility || {};
-    // Split media by explicit category so intro video, audition takes, and portfolio
-    // images are each rendered in their own section. Ordering comes from the backend.
+    // Split media by explicit category. Backend normalises all takes (new +
+    // legacy) to category="take" + label, preserves intro as "video" and
+    // images as "portfolio". Order is also enforced backend-side, but we
+    // pick buckets here for independent section rendering.
     const mediaAll = talent.media || [];
     const images = mediaAll.filter((m) => m.category === "portfolio");
     const intro = mediaAll.find((m) => m.category === "video") || null;
-    const takes = ["take_1", "take_2", "take_3"]
-        .map((k) => mediaAll.find((m) => m.category === k))
-        .filter(Boolean);
+    const takes = mediaAll.filter((m) => m.category === "take");
     const [idx, setIdx] = useState(0);
 
     const prev = () => setIdx((i) => (i - 1 + images.length) % images.length);
@@ -442,8 +442,54 @@ function TalentDetail({
 
             <div className="max-w-[1400px] mx-auto px-6 md:px-12 py-12">
                 <div className="grid lg:grid-cols-5 gap-8 lg:gap-12">
-                    {/* Main slider */}
+                    {/* Left column — strict display order: TAKES → INTRO → IMAGES */}
                     <div className="lg:col-span-3">
+                        {/* AUDITION TAKES — FIRST PRIORITY per product spec */}
+                        {vis.takes !== false && takes.length > 0 && (
+                            <div
+                                className="mb-8"
+                                data-testid="client-takes-section"
+                            >
+                                <p className="eyebrow mb-3">Audition Takes</p>
+                                <div className="grid md:grid-cols-2 gap-4">
+                                    {takes.map((t, i) => (
+                                        <div
+                                            key={t.id}
+                                            data-testid={`client-take-${i}`}
+                                        >
+                                            <p className="text-[11px] text-white/60 mb-2 tg-mono truncate">
+                                                {t.label || `Take ${i + 1}`}
+                                            </p>
+                                            <video
+                                                src={FILE_URL(t.storage_path)}
+                                                controls
+                                                preload="metadata"
+                                                className="w-full border border-white/10 bg-black rounded-sm"
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* INTRODUCTION VIDEO */}
+                        {vis.intro_video && intro && (
+                            <div className="mb-8">
+                                <p className="eyebrow mb-3">Introduction</p>
+                                <video
+                                    src={FILE_URL(intro.storage_path)}
+                                    controls
+                                    preload="metadata"
+                                    className="w-full border border-white/10 bg-black rounded-sm"
+                                    data-testid="client-intro-video"
+                                />
+                            </div>
+                        )}
+
+                        {/* PORTFOLIO IMAGES (slider) */}
+                        {images.length > 0 && (
+                            <p className="eyebrow mb-3">Portfolio</p>
+                        )}
                         {images.length > 0 ? (
                             <div className="relative bg-[#0a0a0a] aspect-[3/4] border border-white/10 overflow-hidden">
                                 <img
@@ -504,46 +550,6 @@ function TalentDetail({
                                 ))}
                             </div>
                         )}
-
-                        {vis.intro_video && intro && (
-                            <div className="mt-8">
-                                <p className="eyebrow mb-3">Introduction</p>
-                                <video
-                                    src={FILE_URL(intro.storage_path)}
-                                    controls
-                                    preload="metadata"
-                                    className="w-full border border-white/10 bg-black rounded-sm"
-                                    data-testid="client-intro-video"
-                                />
-                            </div>
-                        )}
-
-                        {vis.takes !== false && takes.length > 0 && (
-                            <div className="mt-8" data-testid="client-takes-section">
-                                <p className="eyebrow mb-3">Audition Takes</p>
-                                <div className="grid md:grid-cols-2 gap-4">
-                                    {takes.map((t) => {
-                                        const n = t.category.split("_")[1];
-                                        return (
-                                            <div
-                                                key={t.id}
-                                                data-testid={`client-${t.category}`}
-                                            >
-                                                <p className="text-[11px] text-white/50 mb-2 tg-mono">
-                                                    Take {n}
-                                                </p>
-                                                <video
-                                                    src={FILE_URL(t.storage_path)}
-                                                    controls
-                                                    preload="metadata"
-                                                    className="w-full border border-white/10 bg-black rounded-sm"
-                                                />
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        )}
                     </div>
 
                     {/* Info */}
@@ -575,9 +581,10 @@ function TalentDetail({
                                 )}
                         </div>
 
-                        {/* Availability & Budget — admin-controlled final values */}
+                        {/* Availability & Budget & Competitive Brand — admin-controlled final values */}
                         {((vis.availability !== false && talent.availability) ||
-                            (vis.budget && talent.budget)) && (
+                            (vis.budget && talent.budget) ||
+                            talent.competitive_brand) && (
                             <div
                                 className="mb-8 border border-white/10 p-4 space-y-4"
                                 data-testid="client-details-section"
@@ -627,6 +634,39 @@ function TalentDetail({
                                         </p>
                                     </div>
                                 )}
+                                {talent.competitive_brand && (
+                                    <div data-testid="client-competitive-brand">
+                                        <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+                                            Competitive Brand
+                                        </p>
+                                        <p className="text-sm text-white/90">
+                                            {talent.competitive_brand}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Custom questions & answers — admin-filtered per-question */}
+                        {(talent.custom_answers || []).length > 0 && (
+                            <div
+                                className="mb-8 border border-white/10 p-4 space-y-3"
+                                data-testid="client-custom-answers"
+                            >
+                                <p className="eyebrow">Additional Details</p>
+                                {talent.custom_answers.map((qa, i) => (
+                                    <div
+                                        key={`${qa.question}-${i}`}
+                                        data-testid={`custom-qa-${i}`}
+                                    >
+                                        <p className="text-[10px] tracking-widest uppercase text-white/40 mb-0.5">
+                                            {qa.question}
+                                        </p>
+                                        <p className="text-sm text-white/90 whitespace-pre-wrap">
+                                            {qa.answer}
+                                        </p>
+                                    </div>
+                                ))}
                             </div>
                         )}
 

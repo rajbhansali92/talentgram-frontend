@@ -340,10 +340,18 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
 MATERIAL_CATEGORIES = {"script", "image", "audio", "video_file"}
 MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
-SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take_1", "take_2", "take_3", "image"}
+# Submission media slots
+#   intro_video      — single slot
+#   take             — NEW renamable takes, up to MAX_SUBMISSION_TAKES (carries `label`)
+#   take_1/take_2/take_3 — LEGACY fixed slots (read-only back-compat; auto-labelled "Take N")
+#   image            — portfolio images (MIN/MAX_SUBMISSION_IMAGES bounds)
+SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3", "image"}
+LEGACY_TAKE_CATEGORIES = {"take_1", "take_2", "take_3"}
+MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected"}
+SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 
 # Open talent applications (project-independent signups)
 APPLICATION_UPLOAD_CATEGORIES = {"intro_video", "image"}
@@ -362,8 +370,10 @@ CLIENT_ALLOWED_FIELDS = {
     "instagram_handle",
     "instagram_followers",
     "work_links",
-    "availability",  # structured: {status: "yes"|"no", note?: str}
-    "budget",        # structured: {status: "accept"|"custom", value?: str}
+    "availability",        # structured: {status: "yes"|"no", note?: str}
+    "budget",              # structured: {status: "accept"|"custom", value?: str}
+    "competitive_brand",   # plain string, gated by field_visibility.competitive_brand
+    "custom_answers",      # [{"question": str, "answer": str}] — gated per-question
     "cover_media_id",
     "media",
 }
@@ -622,6 +632,13 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
                 cover_mid = m["id"]
         elif cat == "video" and v.get("intro_video"):
             filtered_media.append(_public_media(m))
+        elif cat == "take" and v.get("takes", True):
+            # New renamable takes — preserve `label` through the public sanitizer
+            pm = _public_media(m)
+            lbl = (m.get("label") or "").strip()
+            if lbl:
+                pm["label"] = lbl
+            filtered_media.append(pm)
         elif cat in ("take_1", "take_2", "take_3") and v.get("takes", True):
             filtered_media.append(_public_media(m))
     if v.get("portfolio") and not cover_mid:
@@ -665,6 +682,13 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
                 "status": b.get("status"),
                 "value": (b.get("value") or "").strip() or None,
             }
+    # Competitive brand — already gated by per-submission field_visibility in
+    # _submission_to_client_shape; we just pass it through here.
+    if talent.get("competitive_brand"):
+        out["competitive_brand"] = talent["competitive_brand"]
+    # Custom answers — same deal (per-question visibility already applied).
+    if talent.get("custom_answers"):
+        out["custom_answers"] = talent["custom_answers"]
     # Final defensive sweep
     return {k: v2 for k, v2 in out.items() if k in CLIENT_ALLOWED_FIELDS}
 
@@ -682,8 +706,20 @@ def _public_link_view(link: dict) -> dict:
 
 
 def _submission_to_client_shape(sub: dict) -> dict:
-    """Flatten a submission document into the shape clients expect for a talent.
-    Respects submission-level field_visibility; takes are always dropped."""
+    """Flatten a submission document into the shape clients expect.
+
+    Order rules (strict, see product spec):
+      1. Audition takes — renamable via `media.label`; legacy `take_1/2/3`
+         auto-map to label "Take 1/2/3". Max 5 takes.
+      2. Introduction video
+      3. Portfolio images
+
+    Field rules:
+      - Respects per-submission `field_visibility` for demographic + structured
+        fields (availability, budget, competitive_brand, custom_answers).
+      - `custom_answers` visibility can be a bool (all-or-nothing) OR a dict
+        `{question_label: bool}` for per-question control.
+    """
     fd = sub.get("form_data") or {}
     fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
 
@@ -698,13 +734,29 @@ def _submission_to_client_shape(sub: dict) -> dict:
         except Exception:
             age = None
 
+    # Media buckets
     media: List[dict] = []
     cover_mid: Optional[str] = None
-    # Preserve deterministic order: intro first, takes 1→2→3, then images
     intro_items: List[dict] = []
-    take_items: Dict[str, dict] = {}
+    take_items: List[dict] = []       # ordered list of normalised take dicts
     image_items: List[dict] = []
-    for m in sub.get("media") or []:
+
+    def _take_label(m: dict) -> str:
+        lbl = (m.get("label") or "").strip()
+        if lbl:
+            return lbl
+        cat = m.get("category")
+        if cat == "take_1":
+            return "Take 1"
+        if cat == "take_2":
+            return "Take 2"
+        if cat == "take_3":
+            return "Take 3"
+        return "Take"
+
+    # Sort legacy takes by category (take_1→take_2→take_3); new `take` items by created_at
+    raw_media = sub.get("media") or []
+    for m in raw_media:
         cat = m.get("category")
         if cat == "image":
             mapped = {**m, "category": "portfolio"}
@@ -713,17 +765,35 @@ def _submission_to_client_shape(sub: dict) -> dict:
                 cover_mid = mapped.get("id")
         elif cat == "intro_video":
             intro_items.append({**m, "category": "video"})
-        elif cat in ("take_1", "take_2", "take_3"):
-            # Keep original take_N category so client can label them
-            take_items[cat] = m
-    # Deterministic order
+        elif cat in LEGACY_TAKE_CATEGORIES or cat == "take":
+            take_items.append({
+                **m,
+                "category": "take",
+                "label": _take_label(m),
+            })
+
+    # Deterministic order inside takes: legacy first (take_1/2/3), then new takes by created_at
+    def _take_sort_key(m: dict):
+        orig = m.get("original_category") or m.get("category") or ""
+        # Pull original legacy ordering hint
+        raw_cat = next(
+            (rm.get("category") for rm in raw_media if rm.get("id") == m.get("id")),
+            "take",
+        )
+        legacy_order = {"take_1": 0, "take_2": 1, "take_3": 2}
+        return (
+            legacy_order.get(raw_cat, 10),
+            m.get("created_at") or "",
+        )
+
+    take_items.sort(key=_take_sort_key)
+
+    # ORDER: takes → intro → images
+    media.extend(take_items)
     media.extend(intro_items)
-    for key in ("take_1", "take_2", "take_3"):
-        if key in take_items:
-            media.append(take_items[key])
     media.extend(image_items)
 
-    return {
+    out: Dict[str, Any] = {
         "id": sub["id"],
         "name": name,
         "age": age,
@@ -738,6 +808,31 @@ def _submission_to_client_shape(sub: dict) -> dict:
         "cover_media_id": cover_mid,
         "media": media,
     }
+
+    # Competitive brand — only when explicitly enabled.
+    if fv.get("competitive_brand"):
+        cb = (fd.get("competitive_brand") or "").strip()
+        if cb:
+            out["competitive_brand"] = cb
+
+    # Custom answers — support both bool and per-question dict shapes.
+    raw_answers = fd.get("custom_answers") or {}
+    if isinstance(raw_answers, dict) and raw_answers:
+        ca_vis = fv.get("custom_answers")
+        if ca_vis:
+            filtered: List[Dict[str, str]] = []
+            for q, a in raw_answers.items():
+                if isinstance(ca_vis, dict):
+                    if not ca_vis.get(q):
+                        continue
+                # else (bool True) — include all non-empty answers
+                ans = str(a or "").strip()
+                if ans:
+                    filtered.append({"question": str(q), "answer": ans})
+            if filtered:
+                out["custom_answers"] = filtered
+
+    return out
 
 
 def _public_project(project: dict) -> dict:

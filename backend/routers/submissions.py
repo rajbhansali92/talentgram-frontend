@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Uploa
 from core import (
     APP_NAME,
     DEFAULT_FIELD_VISIBILITY,
+    LEGACY_TAKE_CATEGORIES,
     MAX_SUBMISSION_IMAGES,
+    MAX_SUBMISSION_TAKES,
     MIN_SUBMISSION_IMAGES,
     SUBMISSION_DECISIONS,
     SUBMISSION_UPLOAD_CATEGORIES,
@@ -74,16 +76,38 @@ async def prefill_for_email(email: str):
 
 @router.post("/public/projects/{slug}/submission")
 async def start_submission(slug: str, payload: SubmissionStartIn):
+    """Start OR resume a submission.
+
+    If a submission already exists for (project, email), returns a fresh token
+    that unlocks edits — this is the retest / re-upload entry point. The
+    decision is NOT reset here; only `finalize` flips it back to pending.
+    """
     project = await db.projects.find_one({"slug": slug})
     if not project:
         raise HTTPException(404, "Project not found")
+    email = payload.email.lower().strip()
+
+    existing = await db.submissions.find_one({
+        "project_id": project["id"],
+        "talent_email": email,
+    })
+    if existing:
+        sid = existing["id"]
+        token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
+        return {
+            "id": sid,
+            "token": token,
+            "resumed": True,
+            "status": existing.get("status", "draft"),
+        }
+
     sid = str(uuid.uuid4())
     doc = {
         "id": sid,
         "project_id": project["id"],
         "project_slug": slug,
         "talent_name": payload.name,
-        "talent_email": payload.email.lower(),
+        "talent_email": email,
         "talent_phone": payload.phone,
         "form_data": payload.form_data or {},
         "field_visibility": {**DEFAULT_FIELD_VISIBILITY},
@@ -95,7 +119,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
     }
     await db.submissions.insert_one(doc)
     token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
-    return {"id": sid, "token": token}
+    return {"id": sid, "token": token, "resumed": False, "status": "draft"}
 
 
 @router.put("/public/submissions/{sid}")
@@ -110,8 +134,6 @@ async def submission_update(
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
-    if sub.get("status") == "submitted":
-        raise HTTPException(400, "Submission already finalized")
     update: Dict[str, Any] = {}
     if payload.form_data is not None:
         update["form_data"] = {**(sub.get("form_data") or {}), **payload.form_data}
@@ -129,6 +151,7 @@ async def submission_update(
 async def submission_upload(
     sid: str,
     category: str = Form(...),
+    label: Optional[str] = Form(None),
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(None),
 ):
@@ -140,14 +163,25 @@ async def submission_upload(
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
-    if sub.get("status") == "submitted":
-        raise HTTPException(400, "Submission already finalized")
 
     if category == "image":
         existing = sum(1 for m in sub.get("media", []) if m["category"] == "image")
         if existing >= MAX_SUBMISSION_IMAGES:
             raise HTTPException(400, f"Image limit reached ({MAX_SUBMISSION_IMAGES})")
 
+    if category == "take":
+        existing_takes = sum(
+            1
+            for m in sub.get("media", [])
+            if m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
+        )
+        if existing_takes >= MAX_SUBMISSION_TAKES:
+            raise HTTPException(
+                400,
+                f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another",
+            )
+
+    # Single-slot replacement: intro video + legacy fixed takes
     single_slot = {"intro_video", "take_1", "take_2", "take_3"}
     if category in single_slot:
         await db.submissions.update_one(
@@ -170,7 +204,48 @@ async def submission_upload(
         "submission_id": sid,
         "project_id": sub["project_id"],
     }
-    await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
+    if category == "take":
+        media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
+
+    patch: Dict[str, Any] = {"$push": {"media": media}}
+    # Re-upload after finalize flips status back to "updated" and decision → pending
+    if sub.get("status") in ("submitted", "updated"):
+        patch["$set"] = {
+            "status": "updated",
+            "decision": "pending",
+            "updated_at": _now(),
+        }
+    await db.submissions.update_one({"id": sid}, patch)
+    updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return updated
+
+
+@router.patch("/public/submissions/{sid}/media/{mid}")
+async def submission_update_media(
+    sid: str,
+    mid: str,
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(None),
+):
+    """Patch a take's label. Only `take` media supports this today."""
+    submitter = decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    target = next((m for m in (sub.get("media") or []) if m.get("id") == mid), None)
+    if not target:
+        raise HTTPException(404, "Media not found")
+    if target.get("category") != "take":
+        raise HTTPException(400, "Only renamable takes can be patched")
+    new_label = (payload.get("label") or "").strip()
+    if not new_label:
+        raise HTTPException(400, "Label cannot be empty")
+    await db.submissions.update_one(
+        {"id": sid, "media.id": mid},
+        {"$set": {"media.$.label": new_label}},
+    )
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return updated
 
@@ -185,9 +260,14 @@ async def submission_delete_media(
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
-    if sub.get("status") == "submitted":
-        raise HTTPException(400, "Submission already finalized")
-    await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"id": mid}}})
+    patch: Dict[str, Any] = {"$pull": {"media": {"id": mid}}}
+    if sub.get("status") in ("submitted", "updated"):
+        patch["$set"] = {
+            "status": "updated",
+            "decision": "pending",
+            "updated_at": _now(),
+        }
+    await db.submissions.update_one({"id": sid}, patch)
     return {"ok": True}
 
 
@@ -221,19 +301,30 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         raise HTTPException(400, "Please enter your expected budget")
     media = sub.get("media", [])
     has_intro = any(m["category"] == "intro_video" for m in media)
-    has_take1 = any(m["category"] == "take_1" for m in media)
+    has_any_take = any(
+        m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
+        for m in media
+    )
     img_count = sum(1 for m in media if m["category"] == "image")
     if not has_intro:
         raise HTTPException(400, "Introduction video is required")
-    if not has_take1:
-        raise HTTPException(400, "Take 1 is required")
+    if not has_any_take:
+        raise HTTPException(400, "At least one audition take is required")
     if img_count < MIN_SUBMISSION_IMAGES:
         raise HTTPException(400, f"At least {MIN_SUBMISSION_IMAGES} images are required (you have {img_count})")
-    await db.submissions.update_one(
-        {"id": sid},
-        {"$set": {"status": "submitted", "submitted_at": _now()}},
-    )
-    return {"ok": True}
+
+    # First-time finalize vs retest finalize
+    is_retest = sub.get("status") in ("submitted", "updated")
+    new_status = "updated" if is_retest else "submitted"
+    patch: Dict[str, Any] = {
+        "status": new_status,
+        "submitted_at": sub.get("submitted_at") or _now(),
+    }
+    if is_retest:
+        patch["decision"] = "pending"
+        patch["updated_at"] = _now()
+    await db.submissions.update_one({"id": sid}, {"$set": patch})
+    return {"ok": True, "status": new_status, "resubmitted": is_retest}
 
 
 @router.get("/public/submissions/{sid}")

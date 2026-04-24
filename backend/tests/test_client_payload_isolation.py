@@ -99,9 +99,11 @@ def test_submission_shape_excludes_admin_form_data():
     shape = _submission_to_client_shape(_submission_with_admin_data())
     leaks = set(shape.keys()) & FORBIDDEN_KEYS
     assert not leaks, f"Admin-internal keys leaked: {leaks}"
-    # Takes are now included in the client shape (gated downstream by visibility.takes)
+    # All takes normalised to category="take"; legacy take_N auto-labelled "Take N"
     cats = [m.get("category") for m in shape["media"]]
-    assert "take_1" in cats, "take_1 should be carried through the shape"
+    assert "take" in cats, "at least one take should be carried through the shape"
+    takes = [m for m in shape["media"] if m.get("category") == "take"]
+    assert takes[0]["label"] == "Take 1"
 
 
 def test_takes_are_ordered_and_gated_by_visibility():
@@ -112,22 +114,27 @@ def test_takes_are_ordered_and_gated_by_visibility():
     sub["media"].insert(0, {"id": "m5", "category": "take_2", "storage_path": "t2.mp4",
                              "content_type": "video/mp4", "size": 100, "created_at": "t"})
     shape = _submission_to_client_shape(sub)
-    # Order must be intro → take_1 → take_2 → take_3 → portfolio images
+    # New contract: ORDER = takes → intro → images; legacy takes labelled Take 1/2/3
     cats = [m["category"] for m in shape["media"]]
-    take_idx = [i for i, c in enumerate(cats) if c.startswith("take_")]
-    assert [cats[i] for i in take_idx] == ["take_1", "take_2", "take_3"]
+    take_cats = [c for c in cats if c == "take"]
+    assert len(take_cats) == 3, f"expected 3 takes, got {cats}"
+    # Takes must appear before intro (category="video") and portfolio
+    first_intro = next((i for i, c in enumerate(cats) if c == "video"), -1)
+    first_take = next((i for i, c in enumerate(cats) if c == "take"), -1)
+    assert first_take < first_intro, f"takes must come before intro: {cats}"
+    labels = [m["label"] for m in shape["media"] if m["category"] == "take"]
+    assert labels == ["Take 1", "Take 2", "Take 3"]
 
-    # With takes off, all take_* dropped
+    # With takes off, all takes dropped
     vis_off = {**DEFAULT_VISIBILITY, "takes": False}
     filtered = _filter_talent_for_client(shape, vis_off)
-    assert not any(m["category"].startswith("take_") for m in filtered["media"])
+    assert not any(m["category"] == "take" for m in filtered["media"])
 
     # With takes on, all present
     vis_on = {**DEFAULT_VISIBILITY, "takes": True}
     filtered = _filter_talent_for_client(shape, vis_on)
-    assert [m["category"] for m in filtered["media"] if m["category"].startswith("take_")] == [
-        "take_1", "take_2", "take_3",
-    ]
+    kept = [m for m in filtered["media"] if m["category"] == "take"]
+    assert [m["label"] for m in kept] == ["Take 1", "Take 2", "Take 3"]
 
 
 def test_final_payload_is_allowlist_only():

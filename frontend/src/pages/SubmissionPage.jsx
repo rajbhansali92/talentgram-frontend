@@ -23,6 +23,7 @@ import {
     Loader2,
     X,
     Sparkles,
+    Plus,
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -87,11 +88,11 @@ export default function SubmissionPage() {
     const [submission, setSubmission] = useState(null);
     const [uploading, setUploading] = useState(null);
     const [finalizing, setFinalizing] = useState(false);
+    const [editMode, setEditMode] = useState(false);
 
     const introRef = useRef();
     const take1Ref = useRef();
-    const take2Ref = useRef();
-    const take3Ref = useRef();
+    const newTakeRef = useRef();
     const imagesRef = useRef();
 
     // Load project
@@ -274,12 +275,13 @@ export default function SubmissionPage() {
         } catch {}
     };
 
-    const uploadFile = async (file, category) => {
-        setUploading(category);
+    const uploadFile = async (file, category, label = null) => {
+        setUploading(label ? `${category}:${label}` : category);
         try {
             const fd = new FormData();
             fd.append("file", file);
             fd.append("category", category);
+            if (label) fd.append("label", label);
             const { data } = await axios.post(
                 `${API}/public/submissions/${saved.id}/upload`,
                 fd,
@@ -296,6 +298,19 @@ export default function SubmissionPage() {
             toast.error(err?.response?.data?.detail || "Upload failed");
         } finally {
             setUploading(null);
+        }
+    };
+
+    const patchTakeLabel = async (mid, label) => {
+        try {
+            const { data } = await axios.patch(
+                `${API}/public/submissions/${saved.id}/media/${mid}`,
+                { label },
+                authCfg,
+            );
+            setSubmission(data);
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "Could not rename");
         }
     };
 
@@ -391,15 +406,30 @@ export default function SubmissionPage() {
     }
 
     const media = submission?.media || [];
-    const mediaIn = (c) => media.find((m) => m.category === c);
     const images = media.filter((m) => m.category === "image");
-    const takes = [1, 2, 3].map((i) => mediaIn(`take_${i}`));
-    const intro = mediaIn("intro_video");
-    const isSubmitted = submission?.status === "submitted";
+    const intro = media.find((m) => m.category === "intro_video");
+    // Renamable takes: new `take` category + legacy `take_1/2/3` (auto-labelled)
+    const takes = media
+        .filter(
+            (m) =>
+                m.category === "take" ||
+                m.category === "take_1" ||
+                m.category === "take_2" ||
+                m.category === "take_3",
+        )
+        .map((m) => {
+            if (m.category === "take") return m;
+            const n = m.category.replace("take_", "");
+            return { ...m, _legacy: true, label: m.label || `Take ${n}` };
+        });
+    const MAX_TAKES = 5;
+    const canAddTake = takes.length < MAX_TAKES;
+    const isSubmitted =
+        submission?.status === "submitted" || submission?.status === "updated";
 
     const readyToSubmit =
         intro &&
-        takes[0] &&
+        takes.length > 0 &&
         images.length >= MIN_IMAGES &&
         form.first_name &&
         form.last_name &&
@@ -412,24 +442,40 @@ export default function SubmissionPage() {
         (form.budget.status !== "custom" || form.budget.value.trim());
 
     // ---------------------------------------------------------------
-    if (isSubmitted) {
+    // SUBMITTED / UPDATED state — offer a "Refine my submission" path
+    if (isSubmitted && !editMode) {
+        const statusLabel =
+            submission?.status === "updated" ? "Resubmitted" : "Submitted";
         return (
             <div className="min-h-screen bg-[#050505] text-white flex items-center justify-center p-6 relative">
-                <div className="absolute top-5 right-5"><ThemeToggle /></div>
+                <div className="absolute top-5 right-5">
+                    <ThemeToggle />
+                </div>
                 <div className="max-w-lg w-full text-center tg-fade-up">
                     <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
                         <Check className="w-6 h-6" />
                     </div>
-                    <p className="eyebrow mb-3">Submitted</p>
+                    <p className="eyebrow mb-3">{statusLabel}</p>
                     <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-5">
-                        Thank you, {form.first_name || submission.talent_name.split(" ")[0]}.
+                        Thank you,{" "}
+                        {form.first_name || submission.talent_name?.split(" ")[0]}.
                     </h1>
-                    <p className="text-white/60 text-sm md:text-base leading-relaxed">
+                    <p className="text-white/60 text-sm md:text-base leading-relaxed mb-8">
                         Your audition for{" "}
-                        <span className="text-white">{project.brand_name}</span>{" "}
+                        <span className="text-white">
+                            {project.brand_name}
+                        </span>{" "}
                         has been received. The Talentgram team will review and
                         reach out if you're shortlisted.
                     </p>
+                    <button
+                        type="button"
+                        onClick={() => setEditMode(true)}
+                        data-testid="refine-submission-btn"
+                        className="text-xs tg-mono text-white/60 hover:text-white underline underline-offset-4"
+                    >
+                        Want to refine or replace a take? Update your submission →
+                    </button>
                 </div>
             </div>
         );
@@ -894,35 +940,51 @@ export default function SubmissionPage() {
                             testid="upload-intro"
                         />
 
-                        <div className="mb-8">
-                            <p className="eyebrow mb-3">Audition Takes</p>
-                            <UploadSlot
-                                title="Take 1" required icon={Video}
-                                accept="video/*" inputRef={take1Ref}
-                                onPick={(f) => uploadFile(f[0], "take_1")}
-                                uploading={uploading === "take_1"}
-                                media={takes[0]}
-                                onRemove={(m) => removeMedia(m.id)}
-                                testid="upload-take-1" compact
-                            />
-                            <UploadSlot
-                                title="Take 2 (optional)" icon={Video}
-                                accept="video/*" inputRef={take2Ref}
-                                onPick={(f) => uploadFile(f[0], "take_2")}
-                                uploading={uploading === "take_2"}
-                                media={takes[1]}
-                                onRemove={(m) => removeMedia(m.id)}
-                                testid="upload-take-2" compact
-                            />
-                            <UploadSlot
-                                title="Take 3 (optional)" icon={Video}
-                                accept="video/*" inputRef={take3Ref}
-                                onPick={(f) => uploadFile(f[0], "take_3")}
-                                uploading={uploading === "take_3"}
-                                media={takes[2]}
-                                onRemove={(m) => removeMedia(m.id)}
-                                testid="upload-take-3" compact
-                            />
+                        <div className="mb-8" data-testid="takes-section">
+                            <div className="flex items-center justify-between mb-3">
+                                <p className="eyebrow">
+                                    Audition Takes{" "}
+                                    <span className="text-white/40">
+                                        (up to {MAX_TAKES})
+                                    </span>
+                                </p>
+                                <span
+                                    className="text-xs tg-mono text-white/50"
+                                    data-testid="takes-counter"
+                                >
+                                    {takes.length}/{MAX_TAKES}
+                                </span>
+                            </div>
+                            <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                                Upload each take as a separate video and label
+                                it (e.g., "Scene 1", "Closeup emotional"). At
+                                least one take is required.
+                            </p>
+
+                            {takes.map((t, i) => (
+                                <TakeRow
+                                    key={t.id}
+                                    index={i + 1}
+                                    media={t}
+                                    canRename={!t._legacy}
+                                    onRename={(lbl) =>
+                                        patchTakeLabel(t.id, lbl)
+                                    }
+                                    onRemove={() => removeMedia(t.id)}
+                                />
+                            ))}
+
+                            {canAddTake && (
+                                <AddTakeSlot
+                                    number={takes.length + 1}
+                                    required={takes.length === 0}
+                                    uploading={uploading}
+                                    onPick={(file, label) =>
+                                        uploadFile(file, "take", label)
+                                    }
+                                    inputRef={newTakeRef}
+                                />
+                            )}
                         </div>
 
                         <div className="mb-10" data-testid="images-upload-section">
@@ -1197,3 +1259,123 @@ function UploadSlot({
         </div>
     );
 }
+
+// --------------------------------------------------------------------------
+// Renamable take row (existing take) — supports inline label edit + remove
+// --------------------------------------------------------------------------
+function TakeRow({ index, media, canRename, onRename, onRemove }) {
+    const [label, setLabel] = useState(media.label || `Take ${index}`);
+    const [dirty, setDirty] = useState(false);
+
+    useEffect(() => {
+        setLabel(media.label || `Take ${index}`);
+        setDirty(false);
+    }, [media.label, media.id, index]);
+
+    const save = () => {
+        const val = (label || "").trim();
+        if (!val) return;
+        if (val !== (media.label || "")) onRename(val);
+        setDirty(false);
+    };
+
+    return (
+        <div
+            className="border border-white/10 p-3 flex items-center gap-3 mb-3"
+            data-testid={`take-row-${index}`}
+        >
+            <Video className="w-4 h-4 text-white/60 shrink-0" />
+            <div className="flex-1 min-w-0">
+                {canRename ? (
+                    <input
+                        value={label}
+                        onChange={(e) => {
+                            setLabel(e.target.value);
+                            setDirty(true);
+                        }}
+                        onBlur={save}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                                e.preventDefault();
+                                e.currentTarget.blur();
+                            }
+                        }}
+                        placeholder={`Take ${index}`}
+                        className={`bg-transparent outline-none text-sm w-full py-1.5 border-b ${dirty ? "border-white/40" : "border-transparent"} focus:border-white/60`}
+                        data-testid={`take-label-${index}`}
+                    />
+                ) : (
+                    <div className="text-sm text-white/80 py-1.5">
+                        {label}
+                        <span className="ml-2 text-[10px] text-white/30 tg-mono">
+                            (legacy)
+                        </span>
+                    </div>
+                )}
+                <div className="text-[10px] tg-mono text-white/40 truncate">
+                    {media.original_filename || "file"}
+                </div>
+            </div>
+            <button
+                type="button"
+                onClick={onRemove}
+                className="text-xs text-white/40 hover:text-[#FF3B30]"
+                data-testid={`take-remove-${index}`}
+            >
+                Remove
+            </button>
+        </div>
+    );
+}
+
+// --------------------------------------------------------------------------
+// Add-a-new-take slot — user picks a file, we upload with the label they type
+// (falls back to "Take N" if empty).
+// --------------------------------------------------------------------------
+function AddTakeSlot({ number, required, uploading, onPick, inputRef }) {
+    const [label, setLabel] = useState("");
+    const busy = uploading && uploading.startsWith("take");
+    const fallback = `Take ${number}`;
+
+    return (
+        <div
+            className="border border-dashed border-white/15 p-3 flex items-center gap-2"
+            data-testid={`add-take-${number}`}
+        >
+            <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder={`${fallback} — add a label (e.g. Scene 1)`}
+                className="flex-1 bg-transparent outline-none text-sm py-1.5 border-b border-white/10 focus:border-white/40"
+                data-testid={`new-take-label-${number}`}
+            />
+            <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                disabled={busy}
+                className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 rounded-sm inline-flex items-center gap-1 disabled:opacity-40"
+                data-testid={`new-take-upload-${number}`}
+            >
+                {busy ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                    <Plus className="w-3 h-3" />
+                )}
+                Upload {required && <span className="text-[#FF3B30]">*</span>}
+            </button>
+            <input
+                ref={inputRef}
+                type="file"
+                accept="video/*"
+                className="hidden"
+                onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onPick(f, (label || "").trim() || fallback);
+                    e.target.value = "";
+                    setLabel("");
+                }}
+            />
+        </div>
+    );
+}
+

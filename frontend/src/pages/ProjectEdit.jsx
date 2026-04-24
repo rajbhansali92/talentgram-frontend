@@ -46,6 +46,8 @@ const empty = {
     production_house: "",
     additional_details: "",
     video_links: [],
+    competitive_brand_enabled: false,
+    custom_questions: [],
 };
 
 function TextField({ label, value, onChange, type = "text", ...rest }) {
@@ -207,6 +209,20 @@ export default function ProjectEdit() {
             video_links: [...(project.video_links || []), v],
         });
         setVideoInput("");
+    };
+
+    const [cqInput, setCqInput] = useState("");
+    const addCustomQuestion = () => {
+        const q = cqInput.trim();
+        if (!q) return;
+        setProject({
+            ...project,
+            custom_questions: [
+                ...(project.custom_questions || []),
+                { id: crypto.randomUUID(), question: q, type: "text" },
+            ],
+        });
+        setCqInput("");
     };
 
     const materialsCount = (project.materials || []).length + (project.video_links || []).length;
@@ -494,6 +510,99 @@ export default function ProjectEdit() {
                 </p>
             )}
 
+            {/* Submission Form Configuration */}
+            {isEdit && (
+                <section
+                    className="border border-white/10 p-6 md:p-8 mt-6"
+                    data-testid="form-config-section"
+                >
+                    <p className="eyebrow mb-6">Submission Form Configuration</p>
+                    <label className="flex items-center justify-between cursor-pointer mb-6">
+                        <div>
+                            <div className="text-sm text-white/80">
+                                Ask "Competitive Brand" field
+                            </div>
+                            <div className="text-xs text-white/40 mt-1">
+                                When enabled, talents must declare any brand
+                                conflicts
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() =>
+                                setProject({
+                                    ...project,
+                                    competitive_brand_enabled:
+                                        !project.competitive_brand_enabled,
+                                })
+                            }
+                            data-testid="toggle-competitive-brand"
+                            className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${project.competitive_brand_enabled ? "bg-white" : "bg-white/15"}`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${project.competitive_brand_enabled ? "translate-x-5 bg-black" : "bg-white"}`}
+                            />
+                        </button>
+                    </label>
+
+                    <div className="border-t border-white/10 pt-6">
+                        <p className="text-sm text-white/80 mb-1">
+                            Custom Questions
+                        </p>
+                        <p className="text-xs text-white/40 mb-4">
+                            Ask project-specific questions. Shown on the talent
+                            submission form.
+                        </p>
+                        <div className="space-y-2 mb-3">
+                            {(project.custom_questions || []).map((q, i) => (
+                                <div
+                                    key={q.id}
+                                    className="flex items-center gap-2 border-b border-white/10 pb-2"
+                                    data-testid={`cq-row-${i}`}
+                                >
+                                    <span className="text-sm text-white/75 flex-1 truncate">
+                                        {q.question}
+                                    </span>
+                                    <button
+                                        onClick={() =>
+                                            setProject({
+                                                ...project,
+                                                custom_questions:
+                                                    project.custom_questions.filter(
+                                                        (_, j) => j !== i,
+                                                    ),
+                                            })
+                                        }
+                                        className="text-white/40 hover:text-[var(--tg-danger)]"
+                                    >
+                                        <X className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="flex gap-2">
+                            <input
+                                value={cqInput}
+                                onChange={(e) => setCqInput(e.target.value)}
+                                placeholder="e.g. Can you ride a bike?"
+                                data-testid="cq-input"
+                                className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                            />
+                            <button
+                                onClick={addCustomQuestion}
+                                data-testid="cq-add-btn"
+                                className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm inline-flex items-center gap-1"
+                            >
+                                <Plus className="w-3 h-3" /> Add
+                            </button>
+                        </div>
+                        <p className="text-[10px] text-white/30 mt-3 tg-mono">
+                            Save project to apply changes
+                        </p>
+                    </div>
+                </section>
+            )}
+
             {/* Share submission link */}
             {isEdit && (
                 <section
@@ -614,9 +723,20 @@ export default function ProjectEdit() {
             {/* Submission review modal */}
             {reviewingSid && (
                 <SubmissionReviewModal
-                    submission={submissions.find((s) => s.id === reviewingSid)}
+                    submission={(() => {
+                        const s = submissions.find((x) => x.id === reviewingSid);
+                        return s
+                            ? {
+                                  ...s,
+                                  project_custom_questions:
+                                      project.custom_questions || [],
+                              }
+                            : null;
+                    })()}
+                    projectId={id}
                     onClose={() => setReviewingSid(null)}
                     onDecision={(d) => setDecision(reviewingSid, d)}
+                    onChanged={() => loadSubmissions(id)}
                 />
             )}
 
@@ -717,7 +837,10 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     );
 }
 
-function SubmissionReviewModal({ submission, onClose, onDecision }) {
+function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
+    const [form, setForm] = useState(submission?.form_data || {});
+    const [fv, setFv] = useState(submission?.field_visibility || {});
+    const [saving, setSaving] = useState(false);
     if (!submission) return null;
     const media = submission.media || [];
     const intro = media.find((m) => m.category === "intro_video");
@@ -725,6 +848,34 @@ function SubmissionReviewModal({ submission, onClose, onDecision }) {
         .map((k) => media.find((m) => m.category === k))
         .filter(Boolean);
     const images = media.filter((m) => m.category === "image");
+
+    const save = async () => {
+        setSaving(true);
+        try {
+            await adminApi.put(
+                `/projects/${projectId}/submissions/${submission.id}`,
+                { form_data: form, field_visibility: fv },
+            );
+            toast.success("Updated");
+            onChanged?.();
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Save failed");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const FIELDS = [
+        { key: "first_name", label: "First Name" },
+        { key: "last_name", label: "Last Name" },
+        { key: "age", label: "Age", type: "number" },
+        { key: "height", label: "Height" },
+        { key: "location", label: "Location" },
+        { key: "competitive_brand", label: "Competitive Brand" },
+        { key: "availability", label: "Availability" },
+        { key: "budget", label: "Budget" },
+    ];
+
     return (
         <div
             className="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl overflow-y-auto"
@@ -748,6 +899,103 @@ function SubmissionReviewModal({ submission, onClose, onDecision }) {
                         : ""}
                 </p>
 
+                {/* Editable form data with per-field visibility toggles */}
+                <section
+                    className="mb-10 border border-white/10 p-5 md:p-6"
+                    data-testid="review-form-data-section"
+                >
+                    <div className="flex items-center justify-between mb-5">
+                        <p className="eyebrow">Talent Details</p>
+                        <span className="text-[10px] tg-mono text-white/40">
+                            Toggle per-field to control client visibility
+                        </span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6">
+                        {FIELDS.map((f) => (
+                            <div
+                                key={f.key}
+                                className="flex items-start gap-3"
+                            >
+                                <div className="flex-1 min-w-0">
+                                    <label className="text-[11px] text-white/50 tracking-widest uppercase">
+                                        {f.label}
+                                    </label>
+                                    <input
+                                        type={f.type || "text"}
+                                        value={form[f.key] ?? ""}
+                                        onChange={(e) =>
+                                            setForm({
+                                                ...form,
+                                                [f.key]: e.target.value,
+                                            })
+                                        }
+                                        data-testid={`review-field-${f.key}`}
+                                        className="mt-1 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                    />
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFv({
+                                            ...fv,
+                                            [f.key]: !fv[f.key],
+                                        })
+                                    }
+                                    data-testid={`review-fv-${f.key}`}
+                                    title={
+                                        fv[f.key]
+                                            ? "Visible to client"
+                                            : "Hidden from client"
+                                    }
+                                    className={`mt-5 w-10 h-5 rounded-full relative transition-all shrink-0 ${fv[f.key] ? "bg-white" : "bg-white/15"}`}
+                                >
+                                    <span
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv[f.key] ? "translate-x-5 bg-black" : "bg-white"}`}
+                                    />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+
+                    {Array.isArray(submission.project_custom_questions) &&
+                        submission.project_custom_questions.length > 0 && (
+                            <div className="border-t border-white/10 pt-5">
+                                <p className="eyebrow mb-3">
+                                    Custom Answers
+                                </p>
+                                {submission.project_custom_questions.map(
+                                    (q) => (
+                                        <div
+                                            key={q.id}
+                                            className="mb-3 text-sm"
+                                        >
+                                            <div className="text-white/60 text-xs mb-1">
+                                                {q.question}
+                                            </div>
+                                            <div className="text-white/90">
+                                                {(form.custom_answers || {})[
+                                                    q.id
+                                                ] || "—"}
+                                            </div>
+                                        </div>
+                                    ),
+                                )}
+                            </div>
+                        )}
+
+                    <button
+                        onClick={save}
+                        disabled={saving}
+                        data-testid="review-save-btn"
+                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-white text-black rounded-sm text-xs font-medium hover:opacity-90"
+                    >
+                        {saving && (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                        )}
+                        Save changes
+                    </button>
+                </section>
+
                 {intro && (
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
@@ -762,7 +1010,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision }) {
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Audition Takes</p>
                         <div className="grid md:grid-cols-2 gap-4">
-                            {takes.map((t, i) => (
+                            {takes.map((t) => (
                                 <div key={t.id}>
                                     <p className="text-xs text-white/50 mb-2 tg-mono">
                                         Take {t.category.split("_")[1]}

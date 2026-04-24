@@ -244,6 +244,8 @@ class ProjectIn(BaseModel):
     production_house: Optional[str] = None
     additional_details: Optional[str] = None
     video_links: List[str] = Field(default_factory=list)
+    competitive_brand_enabled: bool = False
+    custom_questions: List[Dict[str, Any]] = Field(default_factory=list)  # [{id, question, type}]
 
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
@@ -257,6 +259,16 @@ class SubmissionStartIn(BaseModel):
     name: str
     email: EmailStr
     phone: Optional[str] = None
+    form_data: Optional[Dict[str, Any]] = None
+
+
+class SubmissionUpdateIn(BaseModel):
+    form_data: Optional[Dict[str, Any]] = None
+
+
+class AdminSubmissionEditIn(BaseModel):
+    form_data: Optional[Dict[str, Any]] = None
+    field_visibility: Optional[Dict[str, bool]] = None
 
 
 class SubmissionDecisionIn(BaseModel):
@@ -266,6 +278,23 @@ class SubmissionDecisionIn(BaseModel):
 class ForwardToLinkIn(BaseModel):
     submission_ids: List[str]
     visibility: Dict[str, bool] = Field(default_factory=dict)
+
+
+# Default form-field visibility when forwarding to client
+DEFAULT_FIELD_VISIBILITY = {
+    "first_name": True,
+    "last_name": True,
+    "age": True,
+    "height": True,
+    "location": True,
+    "competitive_brand": False,  # internal by default
+    "availability": False,  # internal by default
+    "budget": False,  # internal by default
+    "custom_answers": False,  # internal by default
+}
+
+
+MIN_SUBMISSION_IMAGES = 5
 
 
 # --------------------------------------------------------------------------
@@ -864,15 +893,45 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "talent_name": payload.name,
         "talent_email": payload.email.lower(),
         "talent_phone": payload.phone,
-        "media": [],  # list of {id, category, storage_path, content_type, original_filename, size, created_at}
-        "status": "draft",  # draft | submitted
-        "decision": "pending",  # pending | approved | rejected
+        "form_data": payload.form_data or {},
+        "field_visibility": {**DEFAULT_FIELD_VISIBILITY},
+        "media": [],
+        "status": "draft",
+        "decision": "pending",
         "created_at": _now(),
         "submitted_at": None,
     }
     await db.submissions.insert_one(doc)
     token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
     return {"id": sid, "token": token}
+
+
+@api.put("/public/submissions/{sid}")
+async def submission_update(
+    sid: str,
+    payload: SubmissionUpdateIn,
+    authorization: Optional[str] = Header(None),
+):
+    submitter = decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    if sub.get("status") == "submitted":
+        raise HTTPException(400, "Submission already finalized")
+    update: Dict[str, Any] = {}
+    if payload.form_data is not None:
+        update["form_data"] = {**(sub.get("form_data") or {}), **payload.form_data}
+        # Keep talent_name synced with first+last if provided
+        fn = payload.form_data.get("first_name") or update["form_data"].get("first_name")
+        ln = payload.form_data.get("last_name") or update["form_data"].get("last_name")
+        if fn or ln:
+            update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or sub.get("talent_name")
+    if update:
+        await db.submissions.update_one({"id": sid}, {"$set": update})
+    updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return updated
 
 
 @api.post("/public/submissions/{sid}/upload")
@@ -949,13 +1008,20 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
+    form = sub.get("form_data") or {}
+    for field in ("first_name", "last_name", "height", "location"):
+        if not (form.get(field) or "").strip():
+            raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
     media = sub.get("media", [])
     has_intro = any(m["category"] == "intro_video" for m in media)
     has_take1 = any(m["category"] == "take_1" for m in media)
+    img_count = sum(1 for m in media if m["category"] == "image")
     if not has_intro:
         raise HTTPException(400, "Introduction video is required")
     if not has_take1:
         raise HTTPException(400, "Take 1 is required")
+    if img_count < MIN_SUBMISSION_IMAGES:
+        raise HTTPException(400, f"At least {MIN_SUBMISSION_IMAGES} images are required (you have {img_count})")
     await db.submissions.update_one(
         {"id": sid},
         {"$set": {"status": "submitted", "submitted_at": _now()}},
@@ -999,6 +1065,33 @@ async def set_decision(
     if not res.matched_count:
         raise HTTPException(404, "Submission not found")
     return {"ok": True}
+
+
+@api.put("/projects/{pid}/submissions/{sid}")
+async def admin_edit_submission(
+    pid: str,
+    sid: str,
+    payload: AdminSubmissionEditIn,
+    admin: dict = Depends(current_admin),
+):
+    """Admin can edit form_data and toggle per-field visibility for the client view."""
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    update: Dict[str, Any] = {}
+    if payload.form_data is not None:
+        update["form_data"] = {**(sub.get("form_data") or {}), **payload.form_data}
+        fn = update["form_data"].get("first_name") or sub.get("form_data", {}).get("first_name")
+        ln = update["form_data"].get("last_name") or sub.get("form_data", {}).get("last_name")
+        if fn or ln:
+            update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or sub.get("talent_name")
+    if payload.field_visibility is not None:
+        current_fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
+        update["field_visibility"] = {**current_fv, **payload.field_visibility}
+    if update:
+        await db.submissions.update_one({"id": sid}, {"$set": update})
+    out = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return out
 
 
 @api.delete("/projects/{pid}/submissions/{sid}")
@@ -1066,7 +1159,10 @@ async def forward_to_link(
 
         talent_doc = {
             "id": tid,
-            "name": sub["talent_name"],
+            "name": (
+                f"{(sub.get('form_data') or {}).get('first_name','')} {(sub.get('form_data') or {}).get('last_name','')}".strip()
+                or sub["talent_name"]
+            ),
             "age": None,
             "dob": None,
             "height": None,
@@ -1088,6 +1184,18 @@ async def forward_to_link(
             "created_at": _now(),
             "created_by": admin["id"],
         }
+        # Apply form_data respecting field_visibility
+        fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
+        fd = sub.get("form_data") or {}
+        if fv.get("age") and fd.get("age") not in (None, ""):
+            try:
+                talent_doc["age"] = int(fd["age"])
+            except Exception:
+                pass
+        if fv.get("height"):
+            talent_doc["height"] = fd.get("height") or None
+        if fv.get("location"):
+            talent_doc["location"] = fd.get("location") or None
         await db.talents.insert_one(talent_doc)
         talent_ids.append(tid)
 

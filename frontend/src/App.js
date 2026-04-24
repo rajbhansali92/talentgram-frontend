@@ -7,6 +7,8 @@ import AdminLayout from "@/components/AdminLayout";
 import Dashboard from "@/pages/Dashboard";
 import TalentList from "@/pages/TalentList";
 import TalentEdit from "@/pages/TalentEdit";
+import ProjectList from "@/pages/ProjectList";
+import ProjectEdit from "@/pages/ProjectEdit";
 import LinkHistory from "@/pages/LinkHistory";
 import LinkGenerator from "@/pages/LinkGenerator";
 import LinkResults from "@/pages/LinkResults";
@@ -45,6 +47,9 @@ function App() {
                         <Route path="talents" element={<TalentList />} />
                         <Route path="talents/new" element={<TalentEdit />} />
                         <Route path="talents/:id" element={<TalentEdit />} />
+                        <Route path="projects" element={<ProjectList />} />
+                        <Route path="projects/new" element={<ProjectEdit />} />
+                        <Route path="projects/:id" element={<ProjectEdit />} />
                         <Route path="links" element={<LinkHistory />} />
                         <Route path="links/new" element={<LinkGenerator />} />
                         <Route

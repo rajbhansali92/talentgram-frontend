@@ -231,6 +231,25 @@ class DownloadIn(BaseModel):
     media_id: str
 
 
+# ---- Projects (audition engine) ----
+class ProjectIn(BaseModel):
+    brand_name: str
+    brand_link: Optional[str] = None
+    character: Optional[str] = None
+    shoot_dates: Optional[str] = None
+    budget_per_day: Optional[str] = None
+    commission_percent: Optional[str] = None  # e.g. "15%"
+    medium_usage: Optional[str] = None
+    director: Optional[str] = None
+    production_house: Optional[str] = None
+    additional_details: Optional[str] = None
+    video_links: List[str] = Field(default_factory=list)
+
+
+COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
+MATERIAL_CATEGORIES = {"script", "image", "audio"}
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -689,6 +708,102 @@ async def log_download(
         "created_at": _now(),
     })
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Project routes (Audition Engine — Part 1: Project Creation)
+# --------------------------------------------------------------------------
+@api.post("/projects")
+async def create_project(payload: ProjectIn, admin: dict = Depends(current_admin)):
+    if payload.commission_percent and payload.commission_percent not in COMMISSION_OPTIONS:
+        raise HTTPException(400, "Invalid commission_percent")
+    doc = payload.model_dump()
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "slug": _slugify(payload.brand_name),
+        "materials": [],  # list of MaterialItem
+        "created_at": _now(),
+        "created_by": admin["id"],
+    })
+    await db.projects.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/projects")
+async def list_projects(admin: dict = Depends(current_admin)):
+    items = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return items
+
+
+@api.get("/projects/{pid}")
+async def get_project(pid: str, admin: dict = Depends(current_admin)):
+    p = await db.projects.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Project not found")
+    return p
+
+
+@api.put("/projects/{pid}")
+async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(current_admin)):
+    if payload.commission_percent and payload.commission_percent not in COMMISSION_OPTIONS:
+        raise HTTPException(400, "Invalid commission_percent")
+    res = await db.projects.update_one({"id": pid}, {"$set": payload.model_dump()})
+    if not res.matched_count:
+        raise HTTPException(404, "Project not found")
+    p = await db.projects.find_one({"id": pid}, {"_id": 0})
+    return p
+
+
+@api.delete("/projects/{pid}")
+async def delete_project(pid: str, admin: dict = Depends(current_admin)):
+    res = await db.projects.delete_one({"id": pid})
+    if not res.deleted_count:
+        raise HTTPException(404, "Project not found")
+    return {"ok": True}
+
+
+@api.post("/projects/{pid}/material")
+async def add_material(
+    pid: str,
+    category: str = Form(...),
+    file: UploadFile = File(...),
+    admin: dict = Depends(current_admin),
+):
+    if category not in MATERIAL_CATEGORIES:
+        raise HTTPException(400, "Invalid category (script|image|audio)")
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Project not found")
+    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    path = f"{APP_NAME}/projects/{pid}/{uuid.uuid4()}.{ext}"
+    data = await file.read()
+    result = put_object(path, data, file.content_type or "application/octet-stream")
+    material = {
+        "id": str(uuid.uuid4()),
+        "category": category,
+        "storage_path": result["path"],
+        "content_type": file.content_type or "application/octet-stream",
+        "original_filename": file.filename,
+        "size": result.get("size", len(data)),
+        "created_at": _now(),
+    }
+    await db.projects.update_one({"id": pid}, {"$push": {"materials": material}})
+    p = await db.projects.find_one({"id": pid}, {"_id": 0})
+    return p
+
+
+@api.delete("/projects/{pid}/material/{mid}")
+async def delete_material(pid: str, mid: str, admin: dict = Depends(current_admin)):
+    res = await db.projects.update_one({"id": pid}, {"$pull": {"materials": {"id": mid}}})
+    if not res.modified_count:
+        raise HTTPException(404, "Material not found")
+    return {"ok": True}
+
+
+@api.get("/projects/meta/commission-options")
+async def commission_options(admin: dict = Depends(current_admin)):
+    return {"options": COMMISSION_OPTIONS}
 
 
 # --------------------------------------------------------------------------

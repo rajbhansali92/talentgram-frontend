@@ -227,6 +227,8 @@ DEFAULT_VISIBILITY: Dict[str, bool] = {
     "height": True,
     "location": True,
     "ethnicity": True,
+    "availability": True,
+    "budget": False,
     "work_links": True,
     "budget_form": False,
     "download": False,
@@ -239,7 +241,7 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     "height": True,
     "location": True,
     "competitive_brand": False,
-    "availability": False,
+    "availability": True,
     "budget": False,
     "custom_answers": False,
 }
@@ -263,6 +265,8 @@ CLIENT_ALLOWED_FIELDS = {
     "instagram_handle",
     "instagram_followers",
     "work_links",
+    "availability",  # structured: {status: "yes"|"no", note?: str}
+    "budget",        # structured: {status: "accept"|"custom", value?: str}
     "cover_media_id",
     "media",
 }
@@ -455,6 +459,21 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
         out["instagram_followers"] = talent["instagram_followers"]
     if v.get("work_links") and talent.get("work_links"):
         out["work_links"] = talent["work_links"]
+    # Availability & budget (structured objects)
+    if v.get("availability") and talent.get("availability"):
+        a = talent["availability"]
+        if isinstance(a, dict) and a.get("status"):
+            out["availability"] = {
+                "status": a.get("status"),
+                "note": (a.get("note") or "").strip() or None,
+            }
+    if v.get("budget") and talent.get("budget"):
+        b = talent["budget"]
+        if isinstance(b, dict) and b.get("status"):
+            out["budget"] = {
+                "status": b.get("status"),
+                "value": (b.get("value") or "").strip() or None,
+            }
     # Final defensive sweep
     return {k: v2 for k, v2 in out.items() if k in CLIENT_ALLOWED_FIELDS}
 
@@ -523,6 +542,8 @@ def _submission_to_client_shape(sub: dict) -> dict:
         "instagram_handle": None,
         "instagram_followers": None,
         "work_links": [],
+        "availability": (fd.get("availability") if fv.get("availability") else None),
+        "budget": (fd.get("budget") if fv.get("budget") else None),
         "cover_media_id": cover_mid,
         "media": media,
     }

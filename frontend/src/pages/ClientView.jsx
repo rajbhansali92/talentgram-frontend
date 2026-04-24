@@ -536,6 +536,61 @@ function TalentDetail({
                                 )}
                         </div>
 
+                        {/* Availability & Budget — admin-controlled final values */}
+                        {((vis.availability !== false && talent.availability) ||
+                            (vis.budget && talent.budget)) && (
+                            <div
+                                className="mb-8 border border-white/10 p-4 space-y-4"
+                                data-testid="client-details-section"
+                            >
+                                {vis.availability !== false &&
+                                    talent.availability && (
+                                        <div data-testid="client-availability">
+                                            <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+                                                Availability
+                                            </p>
+                                            <p className="text-sm">
+                                                <span
+                                                    className={`inline-block px-2 py-0.5 mr-2 text-[10px] tg-mono uppercase rounded-sm ${talent.availability.status === "yes" ? "bg-[#34C759]/15 text-[#34C759]" : "bg-[#FF3B30]/15 text-[#FF3B30]"}`}
+                                                >
+                                                    {talent.availability.status === "yes"
+                                                        ? "Available"
+                                                        : "Not Available"}
+                                                </span>
+                                                {talent.availability.note && (
+                                                    <span className="text-white/70">
+                                                        {talent.availability.note}
+                                                    </span>
+                                                )}
+                                            </p>
+                                        </div>
+                                    )}
+                                {vis.budget && talent.budget && (
+                                    <div data-testid="client-budget">
+                                        <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+                                            Budget
+                                        </p>
+                                        <p className="text-sm">
+                                            {talent.budget.status === "accept" ? (
+                                                <span className="inline-block px-2 py-0.5 text-[10px] tg-mono uppercase rounded-sm bg-[#34C759]/15 text-[#34C759]">
+                                                    Accepts proposed budget
+                                                </span>
+                                            ) : (
+                                                <>
+                                                    <span className="inline-block px-2 py-0.5 mr-2 text-[10px] tg-mono uppercase rounded-sm bg-white/10 text-white/70">
+                                                        Custom
+                                                    </span>
+                                                    <span className="text-white/90">
+                                                        {talent.budget.value || "—"}
+                                                    </span>
+                                                </>
+                                            )}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         <div className="flex gap-3 mb-8 flex-wrap">
                             {vis.instagram && talent.instagram_handle && (
                                 <a

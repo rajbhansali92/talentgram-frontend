@@ -23,7 +23,7 @@ from core import (  # noqa: E402
 
 
 FORBIDDEN_KEYS = {
-    "availability", "budget", "custom_answers", "competitive_brand",
+    "custom_answers", "competitive_brand",
     "form_data", "field_visibility",
     "dob", "gender", "bio", "source",
     "notes", "password", "created_by",
@@ -71,6 +71,28 @@ def _submission_with_admin_data():
              "scope": "submission", "project_id": "proj-1", "submission_id": "sub-1"},
         ],
     }
+
+
+def test_availability_and_budget_flow_to_client_when_enabled():
+    sub = _submission_with_admin_data()
+    # Admin has toggled availability + budget visible
+    sub["field_visibility"] = {**sub["field_visibility"], "availability": True, "budget": True}
+    shape = _submission_to_client_shape(sub)
+    assert shape["availability"] == {"status": "yes", "note": "free all month"}
+    assert shape["budget"] == {"status": "custom", "value": "INR 25,000/day"}
+
+    vis_on = {**DEFAULT_VISIBILITY, "availability": True, "budget": True}
+    filtered = _filter_talent_for_client(shape, vis_on)
+    assert filtered["availability"]["status"] == "yes"
+    assert filtered["availability"]["note"] == "free all month"
+    assert filtered["budget"]["status"] == "custom"
+    assert filtered["budget"]["value"] == "INR 25,000/day"
+
+    # Turning off link-level visibility removes the fields entirely
+    vis_off = {**DEFAULT_VISIBILITY, "availability": False, "budget": False}
+    filtered2 = _filter_talent_for_client(shape, vis_off)
+    assert "availability" not in filtered2
+    assert "budget" not in filtered2
 
 
 def test_submission_shape_excludes_admin_form_data():

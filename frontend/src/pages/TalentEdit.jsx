@@ -456,7 +456,7 @@ export default function TalentEdit() {
                     </span>
                     <div className="mt-2 space-y-2">
                         {(talent.work_links || []).map((w, i) => (
-                            <div key={i} className="flex items-center gap-2">
+                            <div key={w} className="flex items-center gap-2">
                                 <span className="text-sm text-white/70 flex-1 truncate tg-mono">
                                     {w}
                                 </span>

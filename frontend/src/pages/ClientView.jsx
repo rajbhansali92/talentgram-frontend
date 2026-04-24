@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import { viewerApi, FILE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -42,7 +42,7 @@ export default function ClientView() {
     const [activeTalent, setActiveTalent] = useState(null);
     const [commentDrafts, setCommentDrafts] = useState({});
 
-    const loadData = async () => {
+    const loadData = useCallback(async () => {
         try {
             const { data } = await axios.get(`${API}/public/links/${slug}`, {
                 headers: {
@@ -57,11 +57,11 @@ export default function ClientView() {
                 toast.error("Failed to load portfolio");
             }
         }
-    };
+    }, [slug]);
 
     useEffect(() => {
         if (identified) loadData();
-    }, [identified]);
+    }, [identified, loadData]);
 
     const identify = async (e) => {
         e.preventDefault();
@@ -610,9 +610,9 @@ function TalentDetail({
                                 <div className="mb-8">
                                     <p className="eyebrow mb-3">Work</p>
                                     <div className="space-y-2">
-                                        {talent.work_links.map((w, i) => (
+                                        {talent.work_links.map((w) => (
                                             <a
-                                                key={i}
+                                                key={w}
                                                 href={w}
                                                 target="_blank"
                                                 rel="noreferrer"

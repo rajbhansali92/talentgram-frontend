@@ -129,9 +129,9 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     <div className="mb-10">
                         <p className="eyebrow mb-4">Video Links</p>
                         <div className="space-y-2">
-                            {videos.map((v, i) => (
+                            {videos.map((v) => (
                                 <a
-                                    key={i}
+                                    key={v}
                                     href={v}
                                     target="_blank"
                                     rel="noreferrer"

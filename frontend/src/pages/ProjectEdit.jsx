@@ -484,7 +484,7 @@ export default function ProjectEdit() {
                         <div className="space-y-2 mb-3">
                             {(project.video_links || []).map((v, i) => (
                                 <div
-                                    key={i}
+                                    key={v}
                                     className="flex items-center gap-2 border-b border-white/10 pb-2"
                                 >
                                     <a

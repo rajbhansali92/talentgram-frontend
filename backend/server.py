@@ -6,12 +6,40 @@ storage, utils, constants, models, visibility filters) live in `core.py`.
 import os
 
 from fastapi import APIRouter, FastAPI
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from core import init_storage, mongo_client, seed_admin
 from routers import applications, auth, links, projects, submissions, talents
 
 app = FastAPI(title="Talentgram Portfolio Engine")
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Defense-in-depth headers to reduce XSS/clickjacking blast radius.
+
+    Notes:
+    - CSP is deliberately permissive for the API (no HTML rendered here). The
+      React SPA is served by its own host; this middleware hardens direct
+      backend responses (JSON + media streams).
+    - `frame-ancestors 'none'` blocks clickjacking of any JSON response.
+    """
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "geolocation=(), microphone=(), camera=()",
+        )
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        )
+        return response
+
 
 # Health / meta
 _meta = APIRouter(prefix="/api")
@@ -31,6 +59,7 @@ app.include_router(projects.router)
 app.include_router(submissions.router)
 app.include_router(applications.router)
 
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,

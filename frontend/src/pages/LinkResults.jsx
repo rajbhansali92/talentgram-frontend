@@ -208,7 +208,7 @@ export default function LinkResults() {
                                                 <div className="mt-4 space-y-2">
                                                     {s.comments.map((c, i) => (
                                                         <div
-                                                            key={i}
+                                                            key={`${c.viewer_email}-${c.updated_at || i}`}
                                                             className="border-l-2 border-white/20 pl-3 text-sm"
                                                         >
                                                             <div className="text-white/80">

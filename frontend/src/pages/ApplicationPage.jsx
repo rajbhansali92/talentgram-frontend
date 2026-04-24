@@ -28,6 +28,9 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
 const MIN_IMAGES = 5;
 const LS_KEY = "tg_application";
+// Draft expiry: local data (token + PII) is wiped after 30 days even if
+// the user never finalises — defense-in-depth against stale tokens / stale PII.
+const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const HEIGHT_OPTIONS = (() => {
     const out = [];
@@ -101,6 +104,11 @@ export default function ApplicationPage() {
         if (!raw) return;
         try {
             const saved = JSON.parse(raw);
+            // TTL guard — purge stale drafts (tokens + PII) after DRAFT_TTL_MS.
+            if (saved.savedAt && Date.now() - saved.savedAt > DRAFT_TTL_MS) {
+                localStorage.removeItem(LS_KEY);
+                return;
+            }
             if (saved.aid && saved.token) {
                 setAid(saved.aid);
                 setToken(saved.token);
@@ -134,7 +142,14 @@ export default function ApplicationPage() {
     const saveLocal = (patch = {}) => {
         localStorage.setItem(
             LS_KEY,
-            JSON.stringify({ aid, token, basics, form, ...patch }),
+            JSON.stringify({
+                aid,
+                token,
+                basics,
+                form,
+                ...patch,
+                savedAt: Date.now(),
+            }),
         );
     };
 
@@ -158,7 +173,13 @@ export default function ApplicationPage() {
             if (data.resumed) toast.success("Welcome back — your application is resumed");
             localStorage.setItem(
                 LS_KEY,
-                JSON.stringify({ aid: data.id, token: data.token, basics, form }),
+                JSON.stringify({
+                    aid: data.id,
+                    token: data.token,
+                    basics,
+                    form,
+                    savedAt: Date.now(),
+                }),
             );
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to start");

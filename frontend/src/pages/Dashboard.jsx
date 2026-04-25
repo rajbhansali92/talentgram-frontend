@@ -1,7 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { Link } from "react-router-dom";
-import { Users, Link2, Eye, MousePointerClick, ArrowRight } from "lucide-react";
+import {
+    Users,
+    Link2,
+    Eye,
+    MousePointerClick,
+    ArrowRight,
+    Copy,
+    Send,
+    UserPlus,
+} from "lucide-react";
+import { toast } from "sonner";
 import DriveBackupCard from "@/components/DriveBackupCard";
 
 export default function Dashboard() {
@@ -102,6 +112,8 @@ export default function Dashboard() {
 
             <DriveBackupCard />
 
+            <OnboardingLinkCard />
+
             <div className="border border-white/10">
                 <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
                     <p className="eyebrow">Recent Links</p>
@@ -159,6 +171,94 @@ export default function Dashboard() {
                         ))}
                     </div>
                 )}
+            </div>
+        </div>
+    );
+}
+
+/**
+ * OnboardingLinkCard
+ * --------------------
+ * Surfaces the public Talent Application URL (`/apply`) with one-tap copy +
+ * WhatsApp share. The team uses this to invite new talent into the open-call
+ * funnel without hand-typing or emailing the URL each time.
+ *
+ * The link is intentionally project-independent — applicants self-onboard,
+ * an admin reviews on `/admin/applications`, and approval merges into the
+ * unified talent identity (Phase 0 dedup).
+ */
+function OnboardingLinkCard() {
+    const url = `${window.location.origin}/apply`;
+
+    const copy = async () => {
+        try {
+            await navigator.clipboard.writeText(url);
+            toast.success("Application link copied");
+        } catch {
+            toast.error("Couldn't copy — long-press the URL to copy manually");
+        }
+    };
+
+    const share = () => {
+        const msg = encodeURIComponent(
+            `Hi! Apply to join Talentgram — share your portfolio with us:\n${url}`,
+        );
+        window.open(`https://wa.me/?text=${msg}`, "_blank");
+    };
+
+    return (
+        <div
+            data-testid="onboarding-link-card"
+            className="border border-white/10 mb-6 p-6 md:p-7 flex flex-col md:flex-row md:items-center gap-5 md:gap-6"
+        >
+            <div className="flex items-start gap-4 min-w-0 flex-1">
+                <div className="hidden md:flex shrink-0 w-11 h-11 items-center justify-center border border-white/15 rounded-sm">
+                    <UserPlus
+                        className="w-4 h-4 text-white/70"
+                        strokeWidth={1.5}
+                    />
+                </div>
+                <div className="min-w-0">
+                    <p className="eyebrow mb-2">Public Application Link</p>
+                    <h3 className="font-display text-xl md:text-2xl tracking-tight mb-1">
+                        Invite new talent
+                    </h3>
+                    <p className="text-xs text-white/50 mb-2">
+                        Share this link with anyone who wants to join Talentgram
+                        — they self-onboard and you review on{" "}
+                        <Link
+                            to="/admin/applications"
+                            className="underline underline-offset-2 hover:text-white"
+                        >
+                            Applications
+                        </Link>
+                        .
+                    </p>
+                    <code
+                        data-testid="onboarding-link-url"
+                        className="block text-[11px] md:text-xs tg-mono text-white/70 truncate bg-white/5 border border-white/10 rounded-sm px-2.5 py-1.5"
+                    >
+                        {url}
+                    </code>
+                </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+                <button
+                    type="button"
+                    onClick={copy}
+                    data-testid="onboarding-copy-btn"
+                    className="inline-flex items-center justify-center gap-2 bg-white text-black px-4 py-2.5 rounded-sm text-xs tracking-wide hover:opacity-90 active:scale-[0.97] transition-all min-h-[44px] flex-1 md:flex-none"
+                >
+                    <Copy className="w-3.5 h-3.5" /> Copy
+                </button>
+                <button
+                    type="button"
+                    onClick={share}
+                    data-testid="onboarding-whatsapp-btn"
+                    className="inline-flex items-center justify-center gap-2 border border-white/20 hover:border-white px-4 py-2.5 rounded-sm text-xs tracking-wide active:scale-[0.97] transition-all min-h-[44px] flex-1 md:flex-none"
+                >
+                    <Send className="w-3.5 h-3.5" /> WhatsApp
+                </button>
             </div>
         </div>
     );

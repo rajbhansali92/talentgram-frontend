@@ -74,9 +74,12 @@ export default function NotificationBell() {
                 setCount((c) => Math.max(0, c - 1));
             }
         } catch {}
+        const type = n?.type || "";
         const pid = n?.payload?.project_id;
         const sid = n?.payload?.submission_id;
-        if (pid && sid) {
+        if (type.startsWith("client_feedback") || type.startsWith("feedback_")) {
+            nav("/admin/feedback");
+        } else if (pid && sid) {
             nav(`/admin/projects/${pid}?sub=${sid}`);
         } else if (pid) {
             nav(`/admin/projects/${pid}`);

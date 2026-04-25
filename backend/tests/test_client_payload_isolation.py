@@ -28,7 +28,11 @@ FORBIDDEN_KEYS = {
     "dob", "gender", "bio", "source",
     "notes", "password", "created_by",
     "email", "phone", "talent_email", "talent_phone",
-    "project_id", "submission_id", "scope",
+    "scope",
+    # Note: `submission_id` and `project_id` are intentionally surfaced
+    # post-M6 to support the moderated client→talent feedback relay. They
+    # are non-PII opaque identifiers and only meaningful when round-tripped
+    # back to `/public/links/{slug}/feedback`. See `CLIENT_ALLOWED_FIELDS`.
 }
 
 

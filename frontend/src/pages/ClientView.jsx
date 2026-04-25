@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { viewerApi, FILE_URL, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
+import FeedbackComposer from "@/components/FeedbackComposer";
 import axios from "axios";
 import { toast } from "sonner";
 import {
@@ -863,6 +864,21 @@ function TalentDetail({
                                     Save comment
                                 </button>
                             </div>
+
+                            {/* Moderated feedback relay — only available for
+                                submission-backed cards (the submission_id +
+                                project_id come from `_submission_to_client_shape`). */}
+                            {talent.submission_id && talent.project_id && (
+                                <FeedbackComposer
+                                    slug={slug}
+                                    token={getViewerToken(slug)}
+                                    talent={talent}
+                                    submission={{
+                                        id: talent.submission_id,
+                                        project_id: talent.project_id,
+                                    }}
+                                />
+                            )}
                         </div>
                     </div>
                 </div>

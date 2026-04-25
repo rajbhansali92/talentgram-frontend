@@ -552,6 +552,11 @@ CLIENT_ALLOWED_FIELDS = {
     "custom_answers",      # [{"question": str, "answer": str}] — gated per-question
     "cover_media_id",
     "media",
+    # IDs needed for the moderated client→talent feedback relay. These are
+    # NOT sensitive — they're foreign keys clients must round-trip back when
+    # POSTing feedback. Empty/None for pure talent-share (M1) cards.
+    "submission_id",
+    "project_id",
 }
 
 
@@ -1038,6 +1043,8 @@ def _submission_to_client_shape(sub: dict) -> dict:
 
     out: Dict[str, Any] = {
         "id": sub["id"],
+        "submission_id": sub["id"],
+        "project_id": sub.get("project_id"),
         "name": name,
         "age": age,
         "height": fd.get("height") if fv.get("height") else None,

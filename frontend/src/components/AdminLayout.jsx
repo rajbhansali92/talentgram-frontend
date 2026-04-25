@@ -5,7 +5,7 @@ import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import NotificationBell from "@/components/NotificationBell";
-import { LayoutDashboard, Users, Link2, LogOut, Clapperboard, UserPlus, Shield, KeyRound } from "lucide-react";
+import { LayoutDashboard, Users, Link2, LogOut, Clapperboard, UserPlus, Shield, KeyRound, MessageSquare } from "lucide-react";
 
 const baseNav = [
     { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
@@ -13,6 +13,7 @@ const baseNav = [
     { to: "/admin/applications", label: "Applications", icon: UserPlus },
     { to: "/admin/projects", label: "Projects", icon: Clapperboard },
     { to: "/admin/links", label: "Links", icon: Link2 },
+    { to: "/admin/feedback", label: "Feedback", icon: MessageSquare },
 ];
 
 const adminOnlyNav = [

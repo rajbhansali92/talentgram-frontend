@@ -24,6 +24,8 @@ import {
     X,
     Sparkles,
     Plus,
+    Mic,
+    MessageSquare,
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -496,36 +498,64 @@ export default function SubmissionPage() {
     if (isSubmitted && !editMode) {
         const statusLabel =
             submission?.status === "updated" ? "Resubmitted" : "Submitted";
+        const feedback = submission?.client_feedback || [];
         return (
-            <div className="min-h-screen bg-[#050505] text-white flex items-center justify-center p-6 relative">
+            <div className="min-h-screen bg-[#050505] text-white relative">
                 <div className="absolute top-5 right-5">
                     <ThemeToggle />
                 </div>
-                <div className="max-w-lg w-full text-center tg-fade-up">
-                    <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
-                        <Check className="w-6 h-6" />
+                <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
+                    <div className="text-center">
+                        <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
+                            <Check className="w-6 h-6" />
+                        </div>
+                        <p className="eyebrow mb-3">{statusLabel}</p>
+                        <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-5">
+                            Thank you,{" "}
+                            {form.first_name || submission.talent_name?.split(" ")[0]}.
+                        </h1>
+                        <p className="text-white/60 text-sm md:text-base leading-relaxed mb-8">
+                            Your audition for{" "}
+                            <span className="text-white">
+                                {project.brand_name}
+                            </span>{" "}
+                            has been received. The Talentgram team will review and
+                            reach out if you're shortlisted.
+                        </p>
+                        <button
+                            type="button"
+                            onClick={() => setEditMode(true)}
+                            data-testid="refine-submission-btn"
+                            className="text-xs tg-mono text-white/60 hover:text-white underline underline-offset-4"
+                        >
+                            Want to refine or replace a take? Update your submission →
+                        </button>
                     </div>
-                    <p className="eyebrow mb-3">{statusLabel}</p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-5">
-                        Thank you,{" "}
-                        {form.first_name || submission.talent_name?.split(" ")[0]}.
-                    </h1>
-                    <p className="text-white/60 text-sm md:text-base leading-relaxed mb-8">
-                        Your audition for{" "}
-                        <span className="text-white">
-                            {project.brand_name}
-                        </span>{" "}
-                        has been received. The Talentgram team will review and
-                        reach out if you're shortlisted.
-                    </p>
-                    <button
-                        type="button"
-                        onClick={() => setEditMode(true)}
-                        data-testid="refine-submission-btn"
-                        className="text-xs tg-mono text-white/60 hover:text-white underline underline-offset-4"
+
+                    {/* Client Feedback inbox — only approved+shared rows ever appear
+                        here. The relay is mediated by the team, so notes the talent
+                        sees have been reviewed. Order is approval-time ascending. */}
+                    <section
+                        className="mt-14"
+                        data-testid="talent-feedback-section"
                     >
-                        Want to refine or replace a take? Update your submission →
-                    </button>
+                        <p className="eyebrow mb-3">Client Feedback</p>
+                        {feedback.length === 0 ? (
+                            <div
+                                className="border border-white/10 rounded-sm p-5 text-sm text-white/50"
+                                data-testid="talent-feedback-empty"
+                            >
+                                No feedback yet — the team will share notes here
+                                once a client responds.
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {feedback.map((f) => (
+                                    <FeedbackRow key={f.id} fb={f} />
+                                ))}
+                            </div>
+                        )}
+                    </section>
                 </div>
             </div>
         );
@@ -1458,4 +1488,55 @@ function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef 
         </div>
     );
 }
+
+function FeedbackRow({ fb }) {
+    const isVoice = fb.type === "voice";
+    return (
+        <div
+            className="border border-white/10 bg-white/[0.02] p-4 rounded-sm"
+            data-testid={`talent-feedback-${fb.id}`}
+        >
+            <div className="flex items-center justify-between gap-3 mb-2">
+                <span className="inline-flex items-center gap-1.5 text-[10px] tracking-widest uppercase text-white/50">
+                    {isVoice ? (
+                        <Mic className="w-3 h-3" />
+                    ) : (
+                        <MessageSquare className="w-3 h-3" />
+                    )}
+                    {isVoice ? "Voice" : "Text"}
+                </span>
+                <span className="text-[10px] tg-mono text-white/40">
+                    Received {timeAgo(fb.approved_at || fb.created_at)}
+                </span>
+            </div>
+            {isVoice ? (
+                <audio
+                    src={FILE_URL(fb.content_url)}
+                    controls
+                    className="w-full"
+                    data-testid={`talent-feedback-audio-${fb.id}`}
+                />
+            ) : (
+                <p
+                    className="text-sm text-white/85 whitespace-pre-wrap"
+                    data-testid={`talent-feedback-text-${fb.id}`}
+                >
+                    {fb.text}
+                </p>
+            )}
+        </div>
+    );
+}
+
+function timeAgo(iso) {
+    if (!iso) return "";
+    const ts = new Date(iso).getTime();
+    if (Number.isNaN(ts)) return "";
+    const diff = (Date.now() - ts) / 1000;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+}
+
 

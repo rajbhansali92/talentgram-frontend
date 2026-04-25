@@ -62,18 +62,29 @@ def _flow() -> Flow:
 @router.get("/oauth/start")
 async def oauth_start(_: dict = Depends(require_role("admin"))):
     """Return the consent URL the admin must visit. `prompt=consent` forces
-    a fresh refresh_token even if the user previously authorised."""
+    a fresh refresh_token even if the user previously authorised.
+
+    google-auth-oauthlib >=1.0 automatically attaches PKCE (code_challenge)
+    to the auth URL. The matching `code_verifier` lives on the Flow instance
+    after `authorization_url(...)` is called — we MUST persist it alongside
+    the CSRF state so the callback's fresh Flow can replay the same verifier
+    when exchanging the auth code for tokens. Otherwise Google returns
+    `invalid_grant: Missing code verifier`.
+    """
     flow = _flow()
     authorization_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
     )
-    # Persist the state for CSRF protection — single value is enough for this
-    # single-admin flow; if multi-admin needed, key by user.id.
+    code_verifier = getattr(flow, "code_verifier", None)
     await db.drive_oauth_state.update_one(
         {"_id": "primary"},
-        {"$set": {"state": state, "created_at": datetime.now(timezone.utc).isoformat()}},
+        {"$set": {
+            "state": state,
+            "code_verifier": code_verifier,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }},
         upsert=True,
     )
     return {"authorization_url": authorization_url}
@@ -98,6 +109,11 @@ async def oauth_callback(
         return HTMLResponse(_html_message(False, "Invalid state — please retry"), status_code=400)
 
     flow = _flow()
+    # Replay the PKCE code_verifier captured during oauth_start. Without
+    # this, Google returns `invalid_grant: Missing code verifier`.
+    code_verifier = stored.get("code_verifier")
+    if code_verifier:
+        flow.code_verifier = code_verifier
     try:
         flow.fetch_token(code=code)
     except Exception as e:

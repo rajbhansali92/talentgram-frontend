@@ -42,8 +42,20 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
     vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
     talent_ids = _clean_ids(payload.talent_ids)
     submission_ids = _clean_ids(payload.submission_ids)
-    if not talent_ids and not submission_ids:
+    auto_pull = bool(payload.auto_pull)
+    auto_project_id = (payload.auto_project_id or None) if auto_pull else None
+    if auto_pull:
+        if not auto_project_id:
+            raise HTTPException(400, "auto_project_id is required when auto_pull is enabled")
+        proj = await db.projects.find_one({"id": auto_project_id}, {"_id": 0, "id": 1})
+        if not proj:
+            raise HTTPException(400, "auto_project_id does not match any project")
+    elif not talent_ids and not submission_ids:
         raise HTTPException(400, "Select at least one talent or submission")
+    # Constrain talent_field_visibility to the talent_ids attached to the link
+    # so we don't accumulate stale entries when admins edit talent lists.
+    raw_tfv = payload.talent_field_visibility or {}
+    tfv = {tid: dict(raw_tfv[tid]) for tid in raw_tfv if tid in talent_ids and isinstance(raw_tfv[tid], dict)}
     doc = {
         "id": str(uuid.uuid4()),
         "slug": _slugify(payload.title),
@@ -51,6 +63,9 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
         "brand_name": payload.brand_name,
         "talent_ids": talent_ids,
         "submission_ids": submission_ids,
+        "talent_field_visibility": tfv,
+        "auto_pull": auto_pull,
+        "auto_project_id": auto_project_id,
         "visibility": vis,
         "is_public": payload.is_public,
         "password": payload.password,
@@ -124,8 +139,22 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
     update["visibility"] = vis
     update["talent_ids"] = _clean_ids(payload.talent_ids)
     update["submission_ids"] = _clean_ids(payload.submission_ids)
-    if not update["talent_ids"] and not update["submission_ids"]:
+    update["auto_pull"] = bool(payload.auto_pull)
+    update["auto_project_id"] = (payload.auto_project_id or None) if update["auto_pull"] else None
+    if update["auto_pull"]:
+        if not update["auto_project_id"]:
+            raise HTTPException(400, "auto_project_id is required when auto_pull is enabled")
+        proj = await db.projects.find_one({"id": update["auto_project_id"]}, {"_id": 0, "id": 1})
+        if not proj:
+            raise HTTPException(400, "auto_project_id does not match any project")
+    elif not update["talent_ids"] and not update["submission_ids"]:
         raise HTTPException(400, "Select at least one talent or submission")
+    raw_tfv = update.get("talent_field_visibility") or {}
+    update["talent_field_visibility"] = {
+        tid: dict(raw_tfv[tid])
+        for tid in raw_tfv
+        if tid in update["talent_ids"] and isinstance(raw_tfv[tid], dict)
+    }
     override = _clean_budget_lines(update.get("client_budget_override"))
     update["client_budget_override"] = override if override else None
     res = await db.links.update_one({"id": lid}, {"$set": update})
@@ -316,9 +345,26 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     if not link:
         raise HTTPException(404, "Link not found")
     visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
+    talent_field_visibility = link.get("talent_field_visibility") or {}
 
     talent_ids = link.get("talent_ids", []) or []
     submission_ids = link.get("submission_ids", []) or []
+
+    # Auto-pull mode: ignore the curated submission_ids and return ALL
+    # currently-approved submissions for the linked project. Lets new
+    # approvals appear automatically without re-curating the link.
+    if link.get("auto_pull") and link.get("auto_project_id"):
+        auto_pid = link["auto_project_id"]
+        auto_subs = await db.submissions.find(
+            {"project_id": auto_pid, "decision": "approved"},
+            {"_id": 0},
+        ).sort("created_at", -1).to_list(5000)
+        # Effective list — order is "newest first" so the freshest approvals
+        # bubble to the top of the client view automatically.
+        submission_ids = [s["id"] for s in auto_subs]
+        raw_subs = auto_subs
+    else:
+        raw_subs = []
 
     raw_talents: List[dict] = []
     if talent_ids:
@@ -327,22 +373,35 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
             {"_id": 0, "created_by": 0},
         ).to_list(5000)
 
-    raw_subs: List[dict] = []
-    if submission_ids:
-        raw_subs = await db.submissions.find(
-            {"id": {"$in": submission_ids}},
-            {"_id": 0},
-        ).to_list(5000)
+    if not (link.get("auto_pull") and link.get("auto_project_id")):
+        if submission_ids:
+            raw_subs = await db.submissions.find(
+                {"id": {"$in": submission_ids}},
+                {"_id": 0},
+            ).to_list(5000)
 
     t_order = {tid: i for i, tid in enumerate(talent_ids)}
     raw_talents.sort(key=lambda t: t_order.get(t["id"], 999))
-    s_order = {sid: i for i, sid in enumerate(submission_ids)}
-    raw_subs.sort(key=lambda s: s_order.get(s["id"], 999))
+    if not link.get("auto_pull"):
+        s_order = {sid: i for i, sid in enumerate(submission_ids)}
+        raw_subs.sort(key=lambda s: s_order.get(s["id"], 999))
 
-    subjects: List[dict] = [enrich_talent(t) for t in raw_talents]
-    subjects.extend(_submission_to_client_shape(s) for s in raw_subs)
-
-    talents = [_filter_talent_for_client(it, visibility) for it in subjects]
+    # Apply per-talent field-visibility overrides for individual share links.
+    # If an entry exists in `talent_field_visibility[talent_id]`, it OVERRIDES
+    # the link-level visibility for that talent only. Other talents fall back
+    # to the link-level visibility as before.
+    talents: List[dict] = []
+    enriched_talents = [enrich_talent(t) for t in raw_talents]
+    for t in enriched_talents:
+        per_t = talent_field_visibility.get(t["id"])
+        eff_vis = {**visibility, **per_t} if per_t else visibility
+        talents.append(_filter_talent_for_client(t, eff_vis))
+    for s in raw_subs:
+        # Submission objects already carry their own field_visibility; the
+        # link-level visibility is applied as the outer envelope (kept the
+        # existing behaviour to avoid breaking M2 semantics).
+        shape = _submission_to_client_shape(s)
+        talents.append(_filter_talent_for_client(shape, visibility))
 
     # Client-facing project budget (gated by visibility.budget)
     project_budget: List[Dict[str, Any]] = []

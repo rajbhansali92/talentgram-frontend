@@ -17,6 +17,7 @@ import SubmissionPage from "@/pages/SubmissionPage";
 import ApplicationPage from "@/pages/ApplicationPage";
 import Applications from "@/pages/Applications";
 import UserManagement from "@/pages/UserManagement";
+import NotificationsPage from "@/pages/NotificationsPage";
 import SignupPage from "@/pages/SignupPage";
 import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
@@ -69,6 +70,7 @@ function App() {
                             element={<LinkGenerator />}
                         />
                         <Route path="users" element={<UserManagement />} />
+                        <Route path="notifications" element={<NotificationsPage />} />
                     </Route>
                     <Route path="/l/:slug" element={<ClientView />} />
                     <Route path="/submit/:slug" element={<SubmissionPage />} />

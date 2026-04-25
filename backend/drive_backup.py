@@ -74,6 +74,7 @@ _service = None
 _service_mode: Optional[str] = None  # 'user_oauth' | 'service_account'
 _service_lock = threading.Lock()
 _db_for_oauth = None  # Set on startup; used for refresh-token persistence
+_main_loop: Optional[asyncio.AbstractEventLoop] = None  # Set on startup so worker threads can schedule mongo reads
 
 # Serialised upload queue — max 1 worker (googleapiclient HTTP not thread-safe)
 _upload_queue: Optional[asyncio.Queue] = None
@@ -103,9 +104,14 @@ def oauth_configured() -> bool:
 
 def attach_db(db) -> None:
     """Server bootstrap calls this so the OAuth token-refresh path can
-    persist refreshed access tokens back to Mongo."""
-    global _db_for_oauth
+    persist refreshed access tokens back to Mongo. Also captures the main
+    asyncio loop ref so worker threads can schedule mongo reads."""
+    global _db_for_oauth, _main_loop
     _db_for_oauth = db
+    try:
+        _main_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _main_loop = None
 
 
 def _build_user_credentials(doc: dict) -> UserCredentials:
@@ -123,22 +129,18 @@ def _refresh_user_credentials_sync(creds: UserCredentials) -> UserCredentials:
     """Refresh an expired access token using the long-lived refresh token.
     Persists the new access_token + expiry back to Mongo (best-effort)."""
     creds.refresh(GoogleAuthRequest())
-    if _db_for_oauth is not None:
+    if _db_for_oauth is not None and _main_loop is not None:
+        async def _persist():
+            await _db_for_oauth.drive_oauth.update_one(
+                {"_id": "primary"},
+                {"$set": {
+                    "access_token": creds.token,
+                    "expiry": creds.expiry.isoformat() if creds.expiry else None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            )
         try:
-            # Motor is async; schedule the write on the running loop if any.
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    _db_for_oauth.drive_oauth.update_one(
-                        {"_id": "primary"},
-                        {"$set": {
-                            "access_token": creds.token,
-                            "expiry": creds.expiry.isoformat() if creds.expiry else None,
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        }},
-                    ),
-                    loop,
-                )
+            asyncio.run_coroutine_threadsafe(_persist(), _main_loop)
         except Exception as e:
             logger.debug("OAuth refresh persist skipped: %s", e)
     return creds
@@ -164,22 +166,20 @@ def _get_service():
 
         # Try user OAuth first.
         oauth_doc = None
-        if oauth_configured() and _db_for_oauth is not None:
-            # Synchronous Mongo read via the same Motor client by going
-            # through asyncio.run_coroutine_threadsafe (we're called from
-            # the upload worker thread, not the event loop thread).
+        if oauth_configured() and _db_for_oauth is not None and _main_loop is not None:
+            # Worker threads can't await Motor coroutines; schedule the read
+            # on the main asyncio loop and block until it returns. We wrap
+            # the find_one in a tiny coroutine so `run_coroutine_threadsafe`
+            # gets an awaitable (Motor returns a non-awaitable Future-like).
+            async def _lookup():
+                return await _db_for_oauth.drive_oauth.find_one(
+                    {"_id": "primary"}, {"_id": 0}
+                )
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    fut = asyncio.run_coroutine_threadsafe(
-                        _db_for_oauth.drive_oauth.find_one(
-                            {"_id": "primary"}, {"_id": 0}
-                        ),
-                        loop,
-                    )
-                    oauth_doc = fut.result(timeout=10)
+                fut = asyncio.run_coroutine_threadsafe(_lookup(), _main_loop)
+                oauth_doc = fut.result(timeout=10)
             except Exception as e:
-                logger.debug("OAuth doc lookup failed: %s", e)
+                logger.warning("OAuth doc lookup failed: %s", e)
 
         if oauth_doc and oauth_doc.get("refresh_token"):
             creds = _build_user_credentials(oauth_doc)

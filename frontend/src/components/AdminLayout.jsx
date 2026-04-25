@@ -4,6 +4,7 @@ import { clearAdminSession, getAdmin } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
+import NotificationBell from "@/components/NotificationBell";
 import { LayoutDashboard, Users, Link2, LogOut, Clapperboard, UserPlus, Shield, KeyRound } from "lucide-react";
 
 const baseNav = [
@@ -39,7 +40,10 @@ export default function AdminLayout() {
                 data-testid="admin-sidebar"
             >
                 <div className="px-6 py-7 border-b border-white/10">
-                    <Logo size="md" />
+                    <div className="flex items-start justify-between gap-2">
+                        <Logo size="md" />
+                        <NotificationBell />
+                    </div>
                     <p className="eyebrow mt-4 text-center">Portfolio Engine</p>
                 </div>
                 <nav className="flex-1 p-3 space-y-1">
@@ -105,6 +109,7 @@ export default function AdminLayout() {
             <div className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur-xl px-4 py-3 flex items-center justify-between">
                 <Logo size="sm" />
                 <div className="flex items-center gap-2">
+                    <NotificationBell />
                     <button
                         onClick={() => setPwOpen(true)}
                         data-testid="admin-change-password-mobile-btn"

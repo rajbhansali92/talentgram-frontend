@@ -38,6 +38,7 @@ from drive_backup import (
     enqueue_drive_upload,
     submission_folder_url,
 )
+from notifications import fanout as notify_fanout
 
 router = APIRouter(prefix="/api", tags=["submissions"])
 
@@ -249,14 +250,44 @@ async def submission_upload(
 
     patch: Dict[str, Any] = {"$push": {"media": media}}
     # Re-upload after finalize flips status back to "updated" and decision → pending
-    if sub.get("status") in ("submitted", "updated"):
-        patch["$set"] = {
+    was_finalized = sub.get("status") in ("submitted", "updated")
+    re_approval = True
+    if was_finalized:
+        proj = await db.projects.find_one(
+            {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1, "brand_name": 1}
+        )
+        re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
+        set_patch = {
             "status": "updated",
-            "decision": "pending",
             "updated_at": _now(),
         }
+        if re_approval:
+            set_patch["decision"] = "pending"
+        patch["$set"] = set_patch
     await db.submissions.update_one({"id": sid}, patch)
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+
+    # Notify admins on retake — but only when the submission was already
+    # finalized (uploads during the initial flow are too noisy).
+    if was_finalized:
+        project = await db.projects.find_one(
+            {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}
+        )
+        brand = (project or {}).get("brand_name") or "Project"
+        talent_name = sub.get("talent_name") or sub.get("talent_email") or "A talent"
+        cat_label = (
+            "intro video" if category == "intro_video"
+            else "audition take" if category == "take"
+            else "image"
+        )
+        await notify_fanout(
+            db,
+            type="submission_retake",
+            title=f"{talent_name} uploaded a new {cat_label}",
+            body=(f"{brand} — submission moved back to pending."
+                  if re_approval else f"{brand} — added to existing decision."),
+            payload={"submission_id": sid, "project_id": sub["project_id"], "category": category},
+        )
 
     # ------------------------------------------------------------------
     # Secondary backup → Google Drive (best-effort, non-blocking).
@@ -373,8 +404,14 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         "status": new_status,
         "submitted_at": sub.get("submitted_at") or _now(),
     }
+    re_approval = True
     if is_retest:
-        patch["decision"] = "pending"
+        proj = await db.projects.find_one(
+            {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1}
+        )
+        re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
+        if re_approval:
+            patch["decision"] = "pending"
         patch["updated_at"] = _now()
 
     # ------------------------------------------------------------------
@@ -424,6 +461,29 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         patch["talent_id"] = talent_doc["id"]
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
+
+    # Fan out an admin notification — first-time finalize vs retest variant.
+    project = await db.projects.find_one(
+        {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}
+    )
+    brand = (project or {}).get("brand_name") or sub.get("project_slug") or "Project"
+    talent_name = sub.get("talent_name") or sub.get("talent_email") or "A talent"
+    if is_retest:
+        await notify_fanout(
+            db,
+            type="submission_updated",
+            title=f"{talent_name} updated their submission",
+            body=f"{brand} — back to pending review.",
+            payload={"submission_id": sid, "project_id": sub["project_id"]},
+        )
+    else:
+        await notify_fanout(
+            db,
+            type="submission_new",
+            title=f"New submission from {talent_name}",
+            body=f"{brand} — awaiting your review.",
+            payload={"submission_id": sid, "project_id": sub["project_id"]},
+        )
     return {
         "ok": True,
         "status": new_status,
@@ -510,11 +570,19 @@ async def list_approved_submissions(
 @router.get("/projects/{pid}/submissions")
 async def list_submissions(
     pid: str,
+    decision: Optional[str] = None,
+    status: Optional[str] = None,
     page: Optional[int] = None,
     size: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
-    query = {"project_id": pid}
+    query: Dict[str, Any] = {"project_id": pid}
+    if decision:
+        if decision not in SUBMISSION_DECISIONS:
+            raise HTTPException(400, "Invalid decision filter")
+        query["decision"] = decision
+    if status:
+        query["status"] = status
     cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1)
     if page is None:
         return await cursor.to_list(5000)
@@ -533,12 +601,29 @@ async def set_decision(
 ):
     if payload.decision not in SUBMISSION_DECISIONS:
         raise HTTPException(400, "Invalid decision")
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    prev = sub.get("decision")
     res = await db.submissions.update_one(
         {"id": sid, "project_id": pid},
         {"$set": {"decision": payload.decision, "decided_at": _now()}},
     )
     if not res.matched_count:
         raise HTTPException(404, "Submission not found")
+    # Fanout — only when the decision actually changes (avoid noise on idempotent calls)
+    if prev != payload.decision:
+        project = await db.projects.find_one({"id": pid}, {"_id": 0, "brand_name": 1})
+        brand = (project or {}).get("brand_name") or "Project"
+        talent_name = sub.get("talent_name") or sub.get("talent_email") or "Submission"
+        await notify_fanout(
+            db,
+            type="submission_decision",
+            title=f"{talent_name} marked as {payload.decision}",
+            body=f"{brand}",
+            payload={"submission_id": sid, "project_id": pid, "decision": payload.decision},
+            actor_id=admin.get("id"),
+        )
     return {"ok": True}
 
 

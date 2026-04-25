@@ -519,7 +519,7 @@ MAX_SUBMISSION_VIDEO_BYTES = 150 * 1024 * 1024
 MAX_SUBMISSION_IMAGE_BYTES = 25 * 1024 * 1024
 # Target width when generating the display-optimised JPEG copy.
 IMAGE_RESIZE_MAX_WIDTH = 1600
-SUBMISSION_DECISIONS = {"pending", "approved", "rejected"}
+SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 
 # Open talent applications (project-independent signups)
@@ -596,9 +596,21 @@ class TalentOut(TalentIn):
 class LinkIn(BaseModel):
     title: str
     brand_name: Optional[str] = None
+    # Manual-curation lists. For "auto_pull" showcase links these stay
+    # empty and the resolver derives the membership from project_id.
     talent_ids: List[str] = Field(default_factory=list)
     submission_ids: List[str] = Field(default_factory=list)
     visibility: Dict[str, bool] = Field(default_factory=lambda: DEFAULT_VISIBILITY.copy())
+    # Per-talent field-visibility map for individual talent-share links.
+    # Shape: { talent_id: { name: bool, age: bool, height: bool, instagram: bool,
+    #          instagram_followers: bool, images: bool, intro_video: bool, ... } }
+    # Empty/missing entries fall back to the link-level `visibility` map.
+    talent_field_visibility: Dict[str, Dict[str, bool]] = Field(default_factory=dict)
+    # Auto-pull mode: when enabled, the resolver IGNORES `submission_ids` and
+    # returns all currently-approved submissions for `auto_project_id`. New
+    # approvals show up automatically without re-curating the link.
+    auto_pull: bool = False
+    auto_project_id: Optional[str] = None
     is_public: bool = True
     password: Optional[str] = None
     notes: Optional[str] = None
@@ -651,6 +663,10 @@ class ProjectIn(BaseModel):
     # client_budget  — shown to clients on the link view (gated by visibility.budget)
     talent_budget: List[Dict[str, str]] = Field(default_factory=list)
     client_budget: List[Dict[str, str]] = Field(default_factory=list)
+    # When True (default), retake/edit after a final submit moves the
+    # submission back to "pending" decision so admins re-review. When False,
+    # the prior decision (approved/rejected/hold) is preserved silently.
+    require_reapproval_on_edit: bool = True
 
 
 class SubmissionStartIn(BaseModel):

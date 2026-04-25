@@ -34,6 +34,7 @@ import {
     ExternalLink,
     Sparkles,
     Cloud,
+    PauseCircle,
 } from "lucide-react";
 
 const COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"];
@@ -54,6 +55,7 @@ const empty = {
     custom_questions: [],
     talent_budget: [],
     client_budget: [],
+    require_reapproval_on_edit: true,
 };
 
 function TextField({ label, value, onChange, type = "text", ...rest }) {
@@ -626,6 +628,28 @@ export default function ProjectEdit() {
                     <label className="flex items-center justify-between cursor-pointer mb-6">
                         <div>
                             <div className="text-sm text-white/80">
+                                Re-approval required on edit
+                            </div>
+                            <div className="text-[11px] text-white/40 tg-mono mt-0.5">
+                                When ON, any retake or form edit after a decision moves the submission back to Pending. Turn OFF to silently keep the existing decision.
+                            </div>
+                        </div>
+                        <input
+                            type="checkbox"
+                            checked={project.require_reapproval_on_edit !== false}
+                            onChange={(e) =>
+                                setProject({
+                                    ...project,
+                                    require_reapproval_on_edit: e.target.checked,
+                                })
+                            }
+                            data-testid="require-reapproval-toggle"
+                            className="w-5 h-5 accent-white"
+                        />
+                    </label>
+                    <label className="flex items-center justify-between cursor-pointer mb-6">
+                        <div>
+                            <div className="text-sm text-white/80">
                                 Ask "Competitive Brand" field
                             </div>
                             <div className="text-xs text-white/40 mt-1">
@@ -882,7 +906,9 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
             label: "Rejected",
             color: "text-[#FF3B30]",
         },
+        hold: { icon: PauseCircle, label: "Hold", color: "text-[#c9a961]" },
     }[s.decision || "pending"];
+    const isUpdated = s.status === "updated";
     const mediaCounts = {
         intro: (s.media || []).filter((m) => m.category === "intro_video")
             .length,
@@ -910,6 +936,15 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     >
                         <meta.icon className="w-3 h-3" /> {meta.label}
                     </span>
+                    {isUpdated && (
+                        <span
+                            className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-amber-300/80 border border-amber-300/30 px-1.5 py-0.5 rounded-sm"
+                            data-testid={`updated-badge-${s.id}`}
+                            title="Talent updated this submission after the previous decision"
+                        >
+                            Updated
+                        </span>
+                    )}
                     {s.status === "draft" && (
                         <span className="text-[10px] tracking-widest uppercase text-white/30">
                             · Draft
@@ -937,13 +972,23 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     onClick={() => onDecision("approved")}
                     className="text-xs px-3 py-2 border border-white/15 hover:border-[#34C759] hover:text-[#34C759] rounded-sm"
                     data-testid={`approve-${s.id}`}
+                    title="Approve"
                 >
                     <Check className="w-3.5 h-3.5" />
+                </button>
+                <button
+                    onClick={() => onDecision("hold")}
+                    className="text-xs px-3 py-2 border border-white/15 hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm"
+                    data-testid={`hold-${s.id}`}
+                    title="Hold"
+                >
+                    <PauseCircle className="w-3.5 h-3.5" />
                 </button>
                 <button
                     onClick={() => onDecision("rejected")}
                     className="text-xs px-3 py-2 border border-white/15 hover:border-[#FF3B30] hover:text-[#FF3B30] rounded-sm"
                     data-testid={`reject-${s.id}`}
+                    title="Reject"
                 >
                     <XCircle className="w-3.5 h-3.5" />
                 </button>
@@ -951,6 +996,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     <button
                         onClick={onDelete}
                         className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 text-white/50 rounded-sm"
+                        title="Delete"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -1381,7 +1427,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                     </section>
                 )}
 
-                <div className="sticky bottom-4 flex gap-2 justify-end">
+                <div className="sticky bottom-4 flex gap-2 justify-end flex-wrap">
                     <button
                         onClick={() => {
                             onDecision("approved");
@@ -1391,6 +1437,16 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#34C759] text-black rounded-sm text-xs font-medium"
                     >
                         <Check className="w-3.5 h-3.5" /> Approve — Forward
+                    </button>
+                    <button
+                        onClick={() => {
+                            onDecision("hold");
+                            onClose();
+                        }}
+                        data-testid="review-hold-btn"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-sm text-xs font-medium"
+                    >
+                        <PauseCircle className="w-3.5 h-3.5" /> Hold
                     </button>
                     <button
                         onClick={() => {

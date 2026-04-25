@@ -13,7 +13,19 @@ from starlette.middleware.cors import CORSMiddleware
 
 from core import db, get_object, init_storage, mongo_client, seed_admin
 from drive_backup import attach_db, drive_enabled, retry_pending_uploads, start_drive_worker
-from routers import applications, auth, drive_admin, links, password, projects, submissions, talents, users
+from notifications import ensure_indexes as ensure_notifications_indexes
+from routers import (
+    applications,
+    auth,
+    drive_admin,
+    links,
+    notifications as notifications_router,
+    password,
+    projects,
+    submissions,
+    talents,
+    users,
+)
 
 app = FastAPI(title="Talentgram Portfolio Engine")
 logger = logging.getLogger(__name__)
@@ -65,6 +77,7 @@ app.include_router(applications.router)
 app.include_router(users.router)
 app.include_router(password.router)
 app.include_router(drive_admin.router)
+app.include_router(notifications_router.router)
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
@@ -80,6 +93,7 @@ app.add_middleware(
 async def on_startup():
     await seed_admin()
     init_storage()
+    await ensure_notifications_indexes(db)
     if drive_enabled():
         logger.info("Google Drive backup ENABLED — starting retry worker")
         attach_db(db)

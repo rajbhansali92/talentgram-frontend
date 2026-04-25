@@ -42,6 +42,19 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v26)** — **Sprint 2: Mobile-First Submission Wizard.** The highest-ROI mobile change in the system.
+  - **3-step wizard on `<md`** (`SubmissionPage.jsx` + `index.css`): Step 1 Profile → Step 2 Brief / Questions → Step 3 Uploads. Implemented as a CSS-driven view (`data-mobile-step` on root + `data-step` markers on every block). **Desktop layout completely unchanged** — the same single-page form renders for `md+`.
+  - **Stepbar UI** (`wizard-stepbar`): tappable step pills with check-state for completed steps + thin gold progress bar, all sticky under the header.
+  - **Sticky bottom action bar** (`wizard-bottom-bar`): "Back / Continue to Brief / Continue to Uploads" — always one-thumb away, never hidden under keyboard.
+  - **Per-step validation** (`validateStep1`, `validateStep2`) — narrower than the full form so users can advance partial; full validation runs at finalise time.
+  - **Camera-first uploads**: every upload slot now has a mobile-only "Record / From library" pair that uses `capture="user"` (intro + takes) or `capture="environment"` (photos). Desktop keeps the single dashed-button.
+  - **Resilient uploads** with auto-retry + exponential backoff (1s / 2s / 4s, 3 attempts) inside `uploadFile()`. Network blips no longer wipe the upload — and a per-slot `Retry` button surfaces only when all attempts fail (`retryQueue` state). True chunked/resumable-from-offset upload (tus-js-client) deferred to P1; this slim approach already covers ~80% of real-world transient drops without backend changes.
+  - **Mobile keyboard hygiene**: `inputMode` (email/tel/numeric), `enterKeyHint="next"`, `autoComplete` per field type — keyboard now suggests appropriately (.com row on email, numpad on phone) and the next-field affordance flows correctly.
+  - **Draft persistence** (`tg_draft_{slug}` localStorage) — debounced 400 ms, restored on mount. Refresh / app-switch never loses typed answers, even before the talent record is created on the backend.
+  - **Auto-jump to Uploads**: once the backend submission record exists (`saved`), mobile users land directly on Step 3 instead of re-walking profile.
+  - **Tap targets**: every wizard control + camera/library button is `min-h-[44px]` with `active:scale-[0.97] transition-transform` for tactile feedback.
+  - **Verified on iPhone 12 viewport (390×844)**: invalid-fields blocks advance with a toast, valid-fields advances cleanly, sticky chrome stays one-thumb away, custom-questions render only on Step 2.
+
 - **2026-04-25 (v25)** — **Sprint 1: Mobile Critical Fixes shipped.** Production hardening from the Mobile UX Audit.
   - **C1 — Brand on mobile login** (`AdminLogin.jsx`): mobile-only `BrandHero` block above the form (`md:hidden`) so the logo never disappears on phones.
   - **C2 — Notification dropdown overflow** (`NotificationBell.jsx`): mobile renders as a full-width sheet (`fixed left-2 right-2 top-[60px]`) with a tappable backdrop + Close button; desktop keeps the corner popover.

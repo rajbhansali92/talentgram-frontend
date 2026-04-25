@@ -32,6 +32,7 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
 const MIN_IMAGES = 5;
 const LS_KEY = (slug) => `tg_submission_${slug}`;
+const LS_DRAFT_KEY = (slug) => `tg_draft_${slug}`;
 
 const HEIGHT_OPTIONS = (() => {
     const out = [];
@@ -62,6 +63,17 @@ function readSaved(slug) {
     }
 }
 
+// Draft form persistence — survives a refresh / app-switch on mobile so
+// users never lose what they've typed even before the talent record is
+// created on the backend.
+function readDraft(slug) {
+    try {
+        return JSON.parse(localStorage.getItem(LS_DRAFT_KEY(slug)) || "null");
+    } catch {
+        return null;
+    }
+}
+
 export default function SubmissionPage() {
     const { slug } = useParams();
     const [project, setProject] = useState(null);
@@ -69,21 +81,25 @@ export default function SubmissionPage() {
     const [saved, setSaved] = useState(() => readSaved(slug));
     const [showMaterial, setShowMaterial] = useState(false);
 
-    // Full form
-    const [form, setForm] = useState({
-        first_name: "",
-        last_name: "",
-        email: "",
-        phone: "",
-        dob: "",
-        age: "",
-        height: "",
-        location: "",
-        competitive_brand: "",
-        availability: { status: "", note: "" },
-        budget: { status: "", value: "" },
-        commission: "",
-        custom_answers: {},
+    // Full form (with draft restoration from localStorage)
+    const [form, setForm] = useState(() => {
+        const draft = readDraft(slug);
+        const base = {
+            first_name: "",
+            last_name: "",
+            email: "",
+            phone: "",
+            dob: "",
+            age: "",
+            height: "",
+            location: "",
+            competitive_brand: "",
+            availability: { status: "", note: "" },
+            budget: { status: "", value: "" },
+            commission: "",
+            custom_answers: {},
+        };
+        return draft ? { ...base, ...draft } : base;
     });
     const [starting, setStarting] = useState(false);
 
@@ -93,10 +109,21 @@ export default function SubmissionPage() {
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
+    // Mobile-only 3-step wizard state. Desktop ignores this entirely (the
+    // markup is unchanged for `md+`; we just toggle visibility classes for
+    // `<md`). Step transitions auto-validate the relevant fields and persist
+    // a draft on every advance.
+    //   1 = Profile  · 2 = Brief / Questions  · 3 = Uploads
+    const [mobileStep, setMobileStep] = useState(1);
+    // Upload retry queue: per-slot pending file with attempt counter so a
+    // transient network drop doesn't lose the file selection.
+    const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
+
     const introRef = useRef();
     const take1Ref = useRef();
     const newTakeRef = useRef();
     const imagesRef = useRef();
+    const cameraImagesRef = useRef(); // mobile camera-first photo capture
 
     // Load project
     useEffect(() => {
@@ -183,6 +210,123 @@ export default function SubmissionPage() {
         if (form.budget.status === "custom" && !form.budget.value.trim())
             return "Please enter your expected budget";
         return null;
+    };
+
+    // Mobile wizard step validators — narrower than the full form so users
+    // can advance after completing only the current step's fields.
+    const validateStep1 = () => {
+        if (!form.first_name.trim()) return "First name is required";
+        if (!form.last_name.trim()) return "Last name is required";
+        if (!form.email.trim()) return "Email is required";
+        if (!form.height) return "Height is required";
+        if (!form.location.trim()) return "Current location is required";
+        return null;
+    };
+    const validateStep2 = () => {
+        if (!form.availability.status) return "Please confirm your availability";
+        if (form.availability.status === "no" && !form.availability.note.trim())
+            return "Please share your alternate availability";
+        if (!form.budget.status) return "Please confirm the budget";
+        if (form.budget.status === "custom" && !form.budget.value.trim())
+            return "Please enter your expected budget";
+        return null;
+    };
+
+    // Auto-scroll to top whenever step changes so the user always sees the
+    // step heading first instead of mid-form.
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+    }, [mobileStep]);
+
+    // Persist a debounced draft of the form so a refresh / app-switch never
+    // loses progress before the talent record is created on the backend.
+    useEffect(() => {
+        const t = setTimeout(() => {
+            try {
+                localStorage.setItem(LS_DRAFT_KEY(slug), JSON.stringify(form));
+            } catch {}
+        }, 400);
+        return () => clearTimeout(t);
+    }, [form, slug]);
+
+    // Auto-jump to step 3 once we have a backend submission record (i.e.
+    // the talent has finished steps 1+2). Keeps mobile users from
+    // re-seeing the profile step on a return visit.
+    useEffect(() => {
+        if (saved && mobileStep < 3) setMobileStep(3);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [saved]);
+
+    const goToStep = async (n) => {
+        if (n === mobileStep) return;
+        // Forward navigation must validate; backward is free.
+        if (n > mobileStep) {
+            if (mobileStep === 1) {
+                const err = validateStep1();
+                if (err) {
+                    toast.error(err);
+                    return;
+                }
+                // Persist draft on every advance so a refresh / app-switch
+                // never loses progress (combined with backend upsert).
+                await saveForm();
+            } else if (mobileStep === 2) {
+                const err = validateStep2();
+                if (err) {
+                    toast.error(err);
+                    return;
+                }
+                if (!saved) {
+                    // First time crossing from step 2 → 3 finalises the
+                    // talent-details and creates the submission shell.
+                    const ok = await startSubmissionDirect();
+                    if (!ok) return;
+                } else {
+                    await saveForm();
+                }
+            }
+        }
+        setMobileStep(n);
+    };
+    // Convenience wrapper that returns a boolean (vs the form-handler version).
+    const startSubmissionDirect = async () => {
+        const err = validateForm();
+        if (err) {
+            toast.error(err);
+            return false;
+        }
+        setStarting(true);
+        try {
+            const { data } = await axios.post(
+                `${API}/public/projects/${slug}/submission`,
+                {
+                    name: `${form.first_name} ${form.last_name}`.trim(),
+                    email: form.email.trim().toLowerCase(),
+                    phone: form.phone || null,
+                    age: computedAge != null ? String(computedAge) : form.age || null,
+                    height: form.height,
+                    location: form.location,
+                    competitive_brand: form.competitive_brand || null,
+                    availability: form.availability,
+                    budget: form.budget,
+                    custom_answers: form.custom_answers,
+                    commission_percent: form.commission || null,
+                },
+            );
+            const next = { id: data.id, token: data.token };
+            localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
+            setSaved(next);
+            setSubmission(data);
+            toast.success("Profile saved — let's add your audition takes");
+            return true;
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Could not save profile");
+            return false;
+        } finally {
+            setStarting(false);
+        }
     };
 
     // Auto-prefill on email blur — if this email has an approved talent record,
@@ -286,34 +430,78 @@ export default function SubmissionPage() {
             toast.error(`File too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
             return;
         }
-        setUploading(label ? `${category}:${label}` : category);
+        const slotKey = label ? `${category}:${label}` : category;
+        setUploading(slotKey);
         setUploadPct(0);
-        try {
-            const fd = new FormData();
-            fd.append("file", file);
-            fd.append("category", category);
-            if (label) fd.append("label", label);
-            const { data } = await axios.post(
-                `${API}/public/submissions/${saved.id}/upload`,
-                fd,
-                {
-                    ...authCfg,
-                    headers: {
-                        ...authCfg.headers,
-                        "Content-Type": "multipart/form-data",
+        // Persist the pending file in retryQueue so reload + retry button work.
+        setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size } }));
+
+        // Auto-retry loop with exponential backoff (3 attempts, 1s/2s/4s).
+        // Solves transient mobile-network disconnects without backend changes.
+        // True resumable-from-offset upload is a P1 follow-up.
+        const MAX_ATTEMPTS = 3;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                const fd = new FormData();
+                fd.append("file", file);
+                fd.append("category", category);
+                if (label) fd.append("label", label);
+                const { data } = await axios.post(
+                    `${API}/public/submissions/${saved.id}/upload`,
+                    fd,
+                    {
+                        ...authCfg,
+                        headers: {
+                            ...authCfg.headers,
+                            "Content-Type": "multipart/form-data",
+                        },
+                        timeout: 0, // no per-request timeout — let mobile networks breathe
+                        onUploadProgress: (e) => {
+                            if (e.total) setUploadPct(Math.round((e.loaded / e.total) * 100));
+                        },
                     },
-                    onUploadProgress: (e) => {
-                        if (e.total) setUploadPct(Math.round((e.loaded / e.total) * 100));
-                    },
-                },
-            );
-            setSubmission(data);
-        } catch (err) {
-            toast.error(err?.response?.data?.detail || "Upload failed");
-        } finally {
-            setUploading(null);
-            setUploadPct(0);
+                );
+                setSubmission(data);
+                setRetryQueue((q) => {
+                    const n = { ...q }; delete n[slotKey]; return n;
+                });
+                setUploading(null);
+                setUploadPct(0);
+                if (attempt > 1) toast.success(`Recovered after ${attempt} attempts`);
+                return;
+            } catch (err) {
+                lastErr = err;
+                const isNetwork = !err?.response; // axios sets `response` on HTTP errors only
+                if (!isNetwork || attempt === MAX_ATTEMPTS) break;
+                // Exponential backoff: 1s, 2s, 4s
+                const wait = 1000 * Math.pow(2, attempt - 1);
+                toast.message(`Network blip — retrying in ${wait / 1000}s (attempt ${attempt}/${MAX_ATTEMPTS})`);
+                setRetryQueue((q) => ({
+                    ...q,
+                    [slotKey]: { ...(q[slotKey] || {}), attempt },
+                }));
+                await new Promise((r) => setTimeout(r, wait));
+            }
         }
+        // Failed after retries — keep entry in retryQueue so user can tap "Retry".
+        setRetryQueue((q) => ({
+            ...q,
+            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file },
+        }));
+        setUploading(null);
+        setUploadPct(0);
+        toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
+    };
+
+    // Manual retry for a slot whose auto-retries exhausted.
+    const retryUpload = async (slotKey) => {
+        const entry = retryQueue[slotKey];
+        if (!entry?.file) {
+            toast.error("Re-select the file to retry");
+            return;
+        }
+        await uploadFile(entry.file, entry.category, entry.label);
     };
 
     const patchTakeLabel = async (mid, label) => {
@@ -411,6 +599,9 @@ export default function SubmissionPage() {
                 authCfg,
             );
             setSubmission(data);
+            // Once the user finalises, clear the local draft — the
+            // canonical state lives on the backend now.
+            try { localStorage.removeItem(LS_DRAFT_KEY(slug)); } catch {}
             toast.success("Submitted — the team will review soon");
         } catch (err) {
             toast.error(
@@ -562,17 +753,56 @@ export default function SubmissionPage() {
     }
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page">
+        <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
             <header className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-white/10">
                 <div className="max-w-3xl mx-auto px-5 py-4 flex items-center justify-between">
                     <Logo size="sm" />
                     <ThemeToggle size="sm" />
                 </div>
+                {/* Mobile-only 3-step indicator. Desktop renders the full
+                    form vertically (this bar is hidden via md:hidden). */}
+                <div
+                    className="md:hidden border-t border-white/10 bg-black/70"
+                    data-testid="wizard-stepbar"
+                >
+                    <div className="max-w-3xl mx-auto px-5 py-3 flex items-center gap-3">
+                        {[1, 2, 3].map((n, i) => {
+                            const labels = ["Profile", "Brief", "Uploads"];
+                            const reached = mobileStep >= n;
+                            const active = mobileStep === n;
+                            return (
+                                <button
+                                    key={n}
+                                    type="button"
+                                    onClick={() => goToStep(n)}
+                                    data-testid={`wizard-step-${n}`}
+                                    className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-90" : "opacity-40"}`}
+                                >
+                                    <span
+                                        className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] tg-mono shrink-0 ${active ? "bg-white text-black" : reached ? "bg-white/20 text-white border border-white/40" : "border border-white/20 text-white/50"}`}
+                                    >
+                                        {reached && !active ? <Check className="w-3 h-3" /> : n}
+                                    </span>
+                                    <span className={`text-[11px] tracking-widest uppercase ${active ? "text-white" : "text-white/60"}`}>
+                                        {labels[i]}
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div className="h-0.5 bg-white/5">
+                        <div
+                            className="h-full bg-white transition-all duration-300"
+                            style={{ width: `${(mobileStep - 1) * 50}%` }}
+                            data-testid="wizard-progress-bar"
+                        />
+                    </div>
+                </div>
             </header>
 
             <div className="max-w-3xl mx-auto px-5 py-8 md:py-14">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-10" data-testid="project-info-section">
+                <section className="mb-10" data-testid="project-info-section" data-step="1">
                     <p className="eyebrow mb-3">Audition Brief</p>
                     <h1 className="font-display text-3xl md:text-5xl tracking-tight mb-6">
                         Talentgram × {project.brand_name}
@@ -610,17 +840,18 @@ export default function SubmissionPage() {
                 <section
                     className="border-t border-white/10 pt-10 mb-10"
                     data-testid="talent-details-section"
+                    data-step="1-2"
                 >
-                    <p className="eyebrow mb-3">Talent Details</p>
-                    <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-2">
+                    <p className="eyebrow mb-3" data-step="1">Talent Details</p>
+                    <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-2" data-step="1">
                         Your profile.
                     </h2>
-                    <p className="text-sm text-white/50 mb-8">
+                    <p className="text-sm text-white/50 mb-8" data-step="1">
                         All fields are required unless marked optional.
                     </p>
 
                     <form onSubmit={startSubmission} className="space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6" data-step="1">
                             <FormField
                                 label="First Name *"
                                 value={form.first_name}
@@ -766,6 +997,7 @@ export default function SubmissionPage() {
                         <div
                             className="border-t border-white/10 pt-7"
                             data-testid="availability-block"
+                            data-step="2"
                         >
                             <p className="eyebrow mb-2">
                                 Availability{" "}
@@ -832,6 +1064,7 @@ export default function SubmissionPage() {
                         <div
                             className="border-t border-white/10 pt-7"
                             data-testid="budget-block"
+                            data-step="2"
                         >
                             <p className="eyebrow mb-4">
                                 Budget{" "}
@@ -942,7 +1175,7 @@ export default function SubmissionPage() {
                         </div>
 
                         {project.medium_usage && (
-                            <div className="border-t border-white/10 pt-7">
+                            <div className="border-t border-white/10 pt-7" data-step="2">
                                 <p className="eyebrow mb-3">Medium / Usage</p>
                                 <p className="text-sm text-white/80">
                                     {project.medium_usage}
@@ -951,7 +1184,7 @@ export default function SubmissionPage() {
                         )}
 
                         {(project.custom_questions || []).length > 0 && (
-                            <div className="border-t border-white/10 pt-6 space-y-5">
+                            <div className="border-t border-white/10 pt-6 space-y-5" data-step="2">
                                 <p className="eyebrow">Additional Questions</p>
                                 {project.custom_questions.map((q) => (
                                     <FormField
@@ -984,7 +1217,7 @@ export default function SubmissionPage() {
                                 type="submit"
                                 disabled={starting}
                                 data-testid="start-submission-btn"
-                                className="w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 inline-flex items-center justify-center gap-2 min-h-[52px]"
+                                className="hidden md:inline-flex w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 items-center justify-center gap-2 min-h-[52px]"
                             >
                                 {starting && (
                                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -1000,6 +1233,7 @@ export default function SubmissionPage() {
                     <section
                         className="border-t border-white/10 pt-10"
                         data-testid="uploads-section"
+                        data-step="3"
                     >
                         <p className="eyebrow mb-3">Uploads</p>
                         <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-8">
@@ -1019,6 +1253,9 @@ export default function SubmissionPage() {
                             media={intro}
                             onRemove={(m) => removeMedia(m.id)}
                             testid="upload-intro"
+                            cameraCapture="user"
+                            failed={Boolean(retryQueue["intro_video"]?.failed)}
+                            onRetry={() => retryUpload("intro_video")}
                         />
 
                         <div className="mb-8" data-testid="takes-section">
@@ -1155,6 +1392,42 @@ export default function SubmissionPage() {
                                     e.target.value = "";
                                 }}
                             />
+                            {/* Mobile-only camera-first action — quick add of
+                                a single shot from the rear camera. The +
+                                tile in the grid still opens the full library
+                                picker (multiple). */}
+                            <input
+                                ref={cameraImagesRef}
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                className="hidden"
+                                onChange={(e) => {
+                                    if (e.target.files?.length)
+                                        uploadImages(e.target.files);
+                                    e.target.value = "";
+                                }}
+                            />
+                            <div className="md:hidden grid grid-cols-2 gap-2 mt-2">
+                                <button
+                                    type="button"
+                                    onClick={() => cameraImagesRef.current?.click()}
+                                    disabled={uploading === "image" || images.length >= MAX_IMAGES}
+                                    data-testid="add-image-camera-btn"
+                                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
+                                >
+                                    <Camera className="w-3.5 h-3.5" /> Take photo
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => imagesRef.current?.click()}
+                                    disabled={uploading === "image" || images.length >= MAX_IMAGES}
+                                    data-testid="add-image-library-btn"
+                                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
+                                >
+                                    <FolderOpen className="w-3.5 h-3.5" /> From library
+                                </button>
+                            </div>
                         </div>
 
                         <div className="sticky bottom-4">
@@ -1187,6 +1460,38 @@ export default function SubmissionPage() {
                     project={project}
                     onClose={() => setShowMaterial(false)}
                 />
+            )}
+
+            {/* Mobile-only sticky bottom action bar for steps 1 & 2.
+                Step 3 uses the in-section "Submit Audition" sticky button. */}
+            {mobileStep < 3 && (
+                <div
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3"
+                    data-testid="wizard-bottom-bar"
+                >
+                    <div className="flex items-center gap-2 max-w-3xl mx-auto">
+                        {mobileStep > 1 && (
+                            <button
+                                type="button"
+                                onClick={() => goToStep(mobileStep - 1)}
+                                data-testid="wizard-back-btn"
+                                className="px-4 py-3 border border-white/20 text-white/70 rounded-sm text-sm min-h-[48px] active:scale-[0.97] transition-transform"
+                            >
+                                Back
+                            </button>
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => goToStep(mobileStep + 1)}
+                            disabled={starting}
+                            data-testid="wizard-next-btn"
+                            className="flex-1 bg-white text-black py-3 rounded-sm text-sm font-medium hover:opacity-90 inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-50"
+                        >
+                            {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                            {mobileStep === 1 ? "Continue to Brief" : "Continue to Uploads"}
+                        </button>
+                    </div>
+                </div>
             )}
         </div>
     );
@@ -1233,6 +1538,23 @@ function FormField({
                 placeholder={placeholder}
                 max={max}
                 disabled={disabled}
+                inputMode={
+                    type === "email"
+                        ? "email"
+                        : type === "tel"
+                          ? "tel"
+                          : type === "number"
+                            ? "numeric"
+                            : undefined
+                }
+                enterKeyHint="next"
+                autoComplete={
+                    type === "email"
+                        ? "email"
+                        : type === "tel"
+                          ? "tel"
+                          : undefined
+                }
                 data-testid={testid}
                 className={`mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base disabled:text-white/50 ${className}`}
             />
@@ -1259,8 +1581,13 @@ function UploadSlot({
     onRemove,
     testid,
     compact,
+    cameraCapture, // "user" | "environment" — shows a camera-first option on mobile
+    onRetry,       // optional: shown when this slot has a failed retry queue entry
+    failed,
 }) {
     const hasFile = Boolean(media);
+    const cameraRef = useRef(null);
+    const isVideo = (accept || "").includes("video");
     return (
         <div className={compact ? "mb-3" : "mb-8"}>
             {!compact && (
@@ -1305,48 +1632,89 @@ function UploadSlot({
                     </div>
                     <button
                         onClick={() => onRemove(media)}
-                        className="text-white/50 hover:text-[#FF3B30] p-1"
+                        className="text-white/50 hover:text-[#FF3B30] p-1 min-w-[44px] min-h-[44px] flex items-center justify-center"
                     >
                         <Trash2 className="w-4 h-4" />
                     </button>
                 </div>
             ) : (
-                <button
-                    onClick={() => inputRef.current?.click()}
-                    disabled={uploading}
-                    data-testid={`${testid}-btn`}
-                    className="w-full border border-dashed border-white/20 hover:border-white/50 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all relative overflow-hidden"
-                >
-                    {uploading && typeof uploadPct === "number" && uploadPct > 0 && (
-                        <span
-                            aria-hidden
-                            className="absolute inset-y-0 left-0 bg-white/10 transition-[width]"
-                            style={{ width: `${uploadPct}%` }}
-                        />
+                <>
+                    {/* Mobile: camera-first dual buttons. Desktop: single
+                        upload trigger. The camera input carries `capture`
+                        which makes iOS/Android jump straight into the
+                        recorder UI. */}
+                    {cameraCapture && (
+                        <div className="md:hidden grid grid-cols-2 gap-2 mb-2">
+                            <button
+                                type="button"
+                                onClick={() => cameraRef.current?.click()}
+                                disabled={uploading}
+                                data-testid={`${testid}-camera-btn`}
+                                className="border border-white/20 hover:border-white p-3.5 text-sm rounded-sm flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-transform"
+                            >
+                                <Camera className="w-4 h-4" />
+                                {isVideo ? "Record" : "Take photo"}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => inputRef.current?.click()}
+                                disabled={uploading}
+                                data-testid={`${testid}-library-btn`}
+                                className="border border-white/20 hover:border-white p-3.5 text-sm rounded-sm flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-transform"
+                            >
+                                <FolderOpen className="w-4 h-4" />
+                                From library
+                            </button>
+                        </div>
                     )}
-                    {uploading ? (
-                        <Loader2 className="w-4 h-4 animate-spin relative" />
-                    ) : (
-                        <Upload className="w-4 h-4 text-white/60 relative" />
-                    )}
-                    {compact ? (
-                        <span className="text-sm flex-1 relative">
-                            <span className="font-display mr-2">
-                                {title}
-                                {required && (
-                                    <span className="text-[#FF3B30]"> *</span>
-                                )}
+                    <button
+                        onClick={() => inputRef.current?.click()}
+                        disabled={uploading}
+                        data-testid={`${testid}-btn`}
+                        className={`w-full border border-dashed border-white/20 hover:border-white/50 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all relative overflow-hidden ${cameraCapture ? "hidden md:flex" : ""}`}
+                    >
+                        {uploading && typeof uploadPct === "number" && uploadPct > 0 && (
+                            <span
+                                aria-hidden
+                                className="absolute inset-y-0 left-0 bg-white/10 transition-[width]"
+                                style={{ width: `${uploadPct}%` }}
+                            />
+                        )}
+                        {uploading ? (
+                            <Loader2 className="w-4 h-4 animate-spin relative" />
+                        ) : (
+                            <Upload className="w-4 h-4 text-white/60 relative" />
+                        )}
+                        {compact ? (
+                            <span className="text-sm flex-1 relative">
+                                <span className="font-display mr-2">
+                                    {title}
+                                    {required && (
+                                        <span className="text-[#FF3B30]"> *</span>
+                                    )}
+                                </span>
+                                <span className="text-white/40 text-xs">
+                                    {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
+                                </span>
                             </span>
-                            <span className="text-white/40 text-xs">
+                        ) : (
+                            <span className="text-sm text-white/70 relative">
                                 {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
                             </span>
-                        </span>
-                    ) : (
-                        <span className="text-sm text-white/70 relative">
-                            {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
-                        </span>
+                        )}
+                    </button>
+                    {failed && onRetry && (
+                        <button
+                            type="button"
+                            onClick={onRetry}
+                            data-testid={`${testid}-retry-btn`}
+                            className="mt-2 w-full text-xs px-4 py-2.5 border border-[#FF3B30]/40 text-[#FF3B30] hover:bg-[#FF3B30]/10 rounded-sm inline-flex items-center justify-center gap-2 min-h-[44px]"
+                        >
+                            <Loader2 className="w-3.5 h-3.5" />
+                            Upload failed — Retry
+                        </button>
                     )}
-                </button>
+                </>
             )}
             <input
                 ref={inputRef}
@@ -1358,6 +1726,19 @@ function UploadSlot({
                     e.target.value = "";
                 }}
             />
+            {cameraCapture && (
+                <input
+                    ref={cameraRef}
+                    type="file"
+                    accept={accept}
+                    capture={cameraCapture}
+                    className="hidden"
+                    onChange={(e) => {
+                        if (e.target.files?.length) onPick(e.target.files);
+                        e.target.value = "";
+                    }}
+                />
+            )}
         </div>
     );
 }
@@ -1436,12 +1817,15 @@ function TakeRow({ index, media, canRename, onRename, onRemove }) {
 // --------------------------------------------------------------------------
 function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef }) {
     const [label, setLabel] = useState("");
+    const cameraRef = useRef(null);
     const busy = uploading && uploading.startsWith("take");
     const fallback = `Take ${number}`;
+    const triggerLib = () => inputRef.current?.click();
+    const triggerCam = () => cameraRef.current?.click();
 
     return (
         <div
-            className="border border-dashed border-white/15 p-3 flex items-center gap-2 relative overflow-hidden"
+            className="border border-dashed border-white/15 p-3 relative overflow-hidden"
             data-testid={`add-take-${number}`}
         >
             {busy && typeof uploadPct === "number" && uploadPct > 0 && (
@@ -1451,32 +1835,66 @@ function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef 
                     style={{ width: `${uploadPct}%` }}
                 />
             )}
-            <input
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder={`${fallback} — add a label (e.g. Scene 1)`}
-                className="relative flex-1 bg-transparent outline-none text-sm py-1.5 border-b border-white/10 focus:border-white/40"
-                data-testid={`new-take-label-${number}`}
-            />
-            <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                disabled={busy}
-                className="relative text-xs px-3 py-2 border border-white/15 hover:border-white/40 rounded-sm inline-flex items-center gap-1 disabled:opacity-40"
-                data-testid={`new-take-upload-${number}`}
-            >
-                {busy ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                ) : (
-                    <Plus className="w-3 h-3" />
-                )}
-                {busy && uploadPct ? `${uploadPct}%` : "Upload"}
-                {required && <span className="text-[#FF3B30]">*</span>}
-            </button>
+            <div className="flex items-center gap-2 relative">
+                <input
+                    value={label}
+                    onChange={(e) => setLabel(e.target.value)}
+                    placeholder={`${fallback} — add a label`}
+                    className="flex-1 bg-transparent outline-none text-sm py-1.5 border-b border-white/10 focus:border-white/40"
+                    enterKeyHint="done"
+                    data-testid={`new-take-label-${number}`}
+                />
+                <button
+                    type="button"
+                    onClick={triggerLib}
+                    disabled={busy}
+                    className="hidden md:inline-flex relative text-xs px-3 py-2 border border-white/15 hover:border-white/40 rounded-sm items-center gap-1 disabled:opacity-40 min-h-[44px]"
+                    data-testid={`new-take-upload-${number}`}
+                >
+                    {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                    {busy && uploadPct ? `${uploadPct}%` : "Upload"}
+                    {required && <span className="text-[#FF3B30]">*</span>}
+                </button>
+            </div>
+            {/* Mobile-only camera-first dual buttons */}
+            <div className="md:hidden grid grid-cols-2 gap-2 mt-2 relative">
+                <button
+                    type="button"
+                    onClick={triggerCam}
+                    disabled={busy}
+                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform"
+                    data-testid={`new-take-camera-${number}`}
+                >
+                    <Camera className="w-3.5 h-3.5" /> Record
+                </button>
+                <button
+                    type="button"
+                    onClick={triggerLib}
+                    disabled={busy}
+                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform"
+                    data-testid={`new-take-library-${number}`}
+                >
+                    <FolderOpen className="w-3.5 h-3.5" /> Library
+                    {required && <span className="text-[#FF3B30]">*</span>}
+                </button>
+            </div>
             <input
                 ref={inputRef}
                 type="file"
                 accept="video/*"
+                className="hidden"
+                onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onPick(f, (label || "").trim() || fallback);
+                    e.target.value = "";
+                    setLabel("");
+                }}
+            />
+            <input
+                ref={cameraRef}
+                type="file"
+                accept="video/*"
+                capture="user"
                 className="hidden"
                 onChange={(e) => {
                     const f = e.target.files?.[0];

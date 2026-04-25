@@ -180,6 +180,24 @@ html.light .tg-grain::before {
 [data-testid="client-view-tabs"]::-webkit-scrollbar,
 [data-testid="mobile-nav-strip"]::-webkit-scrollbar { display: none; }
 
+/* Mobile-only 3-step submission wizard. Active step's children are visible;
+   others are hidden. Desktop (md+) ignores all of this and renders vertically.
+   `[data-step="1-2"]` containers are wrappers that participate in either
+   step 1 or 2 — their CHILDREN carry the actual `data-step` so we never
+   hide structural wrappers (and break layout). */
+@media (max-width: 767.98px) {
+    [data-mobile-step="1"] [data-step="2"],
+    [data-mobile-step="1"] [data-step="3"] { display: none !important; }
+    [data-mobile-step="2"] [data-step="1"],
+    [data-mobile-step="2"] [data-step="3"] { display: none !important; }
+    [data-mobile-step="3"] [data-step="1"],
+    [data-mobile-step="3"] [data-step="2"] { display: none !important; }
+    /* Reserve room for the sticky bottom action bar so the last form field
+       is never hidden behind it. */
+    [data-testid="submission-page"] main,
+    [data-testid="submission-page"] > div:last-of-type { padding-bottom: 96px; }
+}
+
 @keyframes tgFadeUp {
     from {
         opacity: 0;

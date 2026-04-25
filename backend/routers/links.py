@@ -13,6 +13,7 @@ from core import (
     IdentifyIn,
     LinkIn,
     LinkOut,
+    SeenIn,
     _clean_budget_lines,
     _clean_ids,
     _filter_talent_for_client,
@@ -56,6 +57,12 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
     # so we don't accumulate stale entries when admins edit talent lists.
     raw_tfv = payload.talent_field_visibility or {}
     tfv = {tid: dict(raw_tfv[tid]) for tid in raw_tfv if tid in talent_ids and isinstance(raw_tfv[tid], dict)}
+    now_iso = _now()
+    # Track when each subject was first added to this link. Drives "new since
+    # last visit" detection on the client view (M1/M3 manual links). For M2
+    # auto-pull links the resolver derives `added_at` from the submission's
+    # decided_at/created_at instead — this map stays empty there.
+    subject_added_at = {sid: now_iso for sid in (talent_ids + submission_ids)}
     doc = {
         "id": str(uuid.uuid4()),
         "slug": _slugify(payload.title),
@@ -63,6 +70,7 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
         "brand_name": payload.brand_name,
         "talent_ids": talent_ids,
         "submission_ids": submission_ids,
+        "subject_added_at": subject_added_at,
         "talent_field_visibility": tfv,
         "auto_pull": auto_pull,
         "auto_project_id": auto_project_id,
@@ -73,7 +81,7 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
         "client_budget_override": _clean_budget_lines(payload.client_budget_override)
         if payload.client_budget_override
         else None,
-        "created_at": _now(),
+        "created_at": now_iso,
         "created_by": admin["id"],
     }
     await db.links.insert_one(doc)
@@ -154,6 +162,14 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
         tid: dict(raw_tfv[tid])
         for tid in raw_tfv
         if tid in update["talent_ids"] and isinstance(raw_tfv[tid], dict)
+    }
+    # Preserve existing subject_added_at entries; stamp newly-added subjects with `now`.
+    existing_link = await db.links.find_one({"id": lid}, {"_id": 0, "subject_added_at": 1})
+    prev_added = (existing_link or {}).get("subject_added_at") or {}
+    now_iso = _now()
+    keep_ids = set(update["talent_ids"]) | set(update["submission_ids"])
+    update["subject_added_at"] = {
+        sid: prev_added.get(sid, now_iso) for sid in keep_ids
     }
     override = _clean_budget_lines(update.get("client_budget_override"))
     update["client_budget_override"] = override if override else None
@@ -318,22 +334,73 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
     if not link:
         raise HTTPException(404, "Link not found")
     viewer_id = str(uuid.uuid4())
+    email = payload.email.lower()
+    now = _now()
     await db.link_views.insert_one({
         "id": viewer_id,
         "link_id": link["id"],
         "slug": slug,
-        "viewer_email": payload.email.lower(),
+        "viewer_email": email,
         "viewer_name": payload.name,
-        "created_at": _now(),
+        "created_at": now,
     })
+    # Rotate visit timestamps so "what's new since last time" can be computed.
+    # First identify in this link → prev_visit_at stays None.
+    state = await db.client_states.find_one(
+        {"link_id": link["id"], "viewer_email": email}, {"_id": 0}
+    )
+    if state:
+        await db.client_states.update_one(
+            {"link_id": link["id"], "viewer_email": email},
+            {"$set": {
+                "prev_visit_at": state.get("last_visit_at"),
+                "last_visit_at": now,
+                "updated_at": now,
+            }},
+        )
+    else:
+        await db.client_states.insert_one({
+            "link_id": link["id"],
+            "viewer_email": email,
+            "viewer_name": payload.name,
+            "seen_talent_ids": [],
+            "prev_visit_at": None,
+            "last_visit_at": now,
+            "updated_at": now,
+            "created_at": now,
+        })
     token = make_token({
         "role": "viewer",
         "slug": slug,
-        "email": payload.email.lower(),
+        "email": email,
         "name": payload.name,
         "viewer_id": viewer_id,
     }, days=7)
     return {"token": token}
+
+
+@router.post("/public/links/{slug}/seen")
+async def mark_seen(
+    slug: str,
+    payload: SeenIn,
+    authorization: Optional[str] = Header(None),
+):
+    """Mark a talent as viewed by the current client. Idempotent ($addToSet)."""
+    viewer = decode_viewer(authorization)
+    if not viewer or viewer.get("slug") != slug:
+        raise HTTPException(401, "Identity required")
+    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1})
+    if not link:
+        raise HTTPException(404, "Link not found")
+    await db.client_states.update_one(
+        {"link_id": link["id"], "viewer_email": viewer["email"]},
+        {
+            "$addToSet": {"seen_talent_ids": payload.talent_id},
+            "$set": {"updated_at": _now()},
+        },
+        upsert=True,
+    )
+    return {"ok": True}
 
 
 @router.get("/public/links/{slug}")
@@ -442,12 +509,34 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         "link_id": link["id"],
         "viewer_email": viewer["email"],
     }, {"_id": 0}).to_list(5000)
+    # Client viewing-intelligence state — seen list + visit timestamps so the
+    # frontend can render Pending / Seen / New / Shortlisted tabs.
+    state = await db.client_states.find_one(
+        {"link_id": link["id"], "viewer_email": viewer["email"]}, {"_id": 0}
+    ) or {}
+    client_state = {
+        "seen_talent_ids": state.get("seen_talent_ids", []),
+        "last_visit_at": state.get("last_visit_at"),
+        "prev_visit_at": state.get("prev_visit_at"),
+    }
+    # Per-subject added_at: for manual links read from `link.subject_added_at`;
+    # for auto-pull the resolver derives it from submission decided_at/created_at
+    # so freshly-approved submissions surface as "New" automatically.
+    subject_added_at: Dict[str, str] = dict(link.get("subject_added_at") or {})
+    if link.get("auto_pull"):
+        for s in raw_subs:
+            sid = s["id"]
+            subject_added_at[sid] = (
+                s.get("decided_at") or s.get("submitted_at") or s.get("created_at") or link.get("created_at")
+            )
     return {
         "link": _public_link_view(link),
         "talents": talents,
         "actions": actions,
         "project_budget": project_budget,
         "viewer": {"email": viewer["email"], "name": viewer["name"]},
+        "client_state": client_state,
+        "subject_added_at": subject_added_at,
     }
 
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { viewerApi, FILE_URL, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -20,6 +20,10 @@ import {
     Sparkles,
     Loader2,
     MessageSquare,
+    Eye,
+    Heart,
+    Layers,
+    Clock,
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -29,6 +33,16 @@ const ACTIONS = [
     { key: "interested", label: "Interested", icon: ThumbsUp, color: "#34C759" },
     { key: "not_for_this", label: "Not for this", icon: XCircle, color: "#FF3B30" },
     { key: "not_sure", label: "Not sure", icon: HelpCircle, color: "#9CA3AF" },
+];
+
+// Tabs for the Client Viewing Intelligence System.
+// `All` is default; `New` filters subjects added after viewer's previous visit.
+const TABS = [
+    { key: "all", label: "All", icon: Layers },
+    { key: "pending", label: "Pending", icon: Clock },
+    { key: "seen", label: "Seen", icon: Eye },
+    { key: "shortlisted", label: "Shortlisted", icon: Heart },
+    { key: "new", label: "New", icon: Sparkles },
 ];
 
 export default function ClientView() {
@@ -41,6 +55,11 @@ export default function ClientView() {
     const [data, setData] = useState(null);
     const [activeTalent, setActiveTalent] = useState(null);
     const [commentDrafts, setCommentDrafts] = useState({});
+    // Client viewing-intelligence state. `seenIds` is local-augmented from
+    // server `client_state.seen_talent_ids`; `activeTab` toggles between
+    // All / Pending / Seen / Shortlisted / New buckets.
+    const [seenIds, setSeenIds] = useState(new Set());
+    const [activeTab, setActiveTab] = useState("all");
 
     const loadData = useCallback(async () => {
         try {
@@ -50,6 +69,7 @@ export default function ClientView() {
                 },
             });
             setData(data);
+            setSeenIds(new Set(data?.client_state?.seen_talent_ids || []));
         } catch (e) {
             if (e?.response?.status === 401) {
                 setIdentified(false);
@@ -143,6 +163,35 @@ export default function ClientView() {
         } catch {}
     };
 
+    // Mark a subject as "seen" — fires from IntersectionObserver (5s in
+    // viewport) AND from opening the detail overlay. Optimistic locally,
+    // best-effort on server (silent failure is fine).
+    const markSeen = useCallback(
+        async (talentId) => {
+            if (!talentId) return;
+            setSeenIds((prev) => {
+                if (prev.has(talentId)) return prev;
+                const n = new Set(prev);
+                n.add(talentId);
+                return n;
+            });
+            try {
+                await axios.post(
+                    `${API}/public/links/${slug}/seen`,
+                    { talent_id: talentId },
+                    {
+                        headers: {
+                            Authorization: `Bearer ${getViewerToken(slug)}`,
+                        },
+                    },
+                );
+            } catch {
+                // Silent — local state still tracks visually for this session
+            }
+        },
+        [slug],
+    );
+
     // ---------------- Identity Gate ----------------
     if (!identified) {
         return (
@@ -230,6 +279,28 @@ export default function ClientView() {
     const { link, talents, viewer } = data;
     const vis = link.visibility || {};
     const projectBudget = data.project_budget || [];
+    const subjectAddedAt = data.subject_added_at || {};
+    const prevVisitAt = data?.client_state?.prev_visit_at || null;
+
+    // Compute per-tab membership ONCE so chips show live counts.
+    const isShortlisted = (id) => viewerActions[id]?.action === "shortlist";
+    const isNew = (id) => {
+        if (!prevVisitAt) return false; // first-ever visit → nothing is "new"
+        const t = subjectAddedAt[id];
+        if (!t) return false;
+        return new Date(t).getTime() > new Date(prevVisitAt).getTime();
+    };
+    const buckets = {
+        all: talents,
+        pending: talents.filter((t) => !seenIds.has(t.id)),
+        seen: talents.filter((t) => seenIds.has(t.id)),
+        shortlisted: talents.filter((t) => isShortlisted(t.id)),
+        new: talents.filter((t) => isNew(t.id)),
+    };
+    const filteredTalents = buckets[activeTab] || talents;
+    const seenCount = buckets.seen.length;
+    const totalCount = talents.length;
+    const reviewedPct = totalCount === 0 ? 0 : Math.round((seenCount / totalCount) * 100);
 
     return (
         <div className="min-h-screen bg-[#050505] text-white" data-testid="client-view-page">
@@ -252,7 +323,7 @@ export default function ClientView() {
 
             {/* Grid */}
             <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-10 md:py-16">
-                <div className="mb-10 flex items-center justify-between flex-wrap gap-3">
+                <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
                     <div>
                         <p className="eyebrow mb-2">{talents.length} Talents</p>
                         <h2 className="font-display text-3xl md:text-5xl tracking-tight">
@@ -263,6 +334,58 @@ export default function ClientView() {
                         Tap any card to view the full portfolio. Actions and
                         comments are saved instantly.
                     </p>
+                </div>
+
+                {/* Progress bar — "X of Y reviewed" */}
+                <div
+                    className="mb-6 flex items-center gap-4"
+                    data-testid="review-progress"
+                >
+                    <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                        <div
+                            className="h-full bg-white transition-all duration-500"
+                            style={{ width: `${reviewedPct}%` }}
+                            data-testid="review-progress-bar"
+                        />
+                    </div>
+                    <div
+                        className="text-[11px] tg-mono text-white/60 shrink-0"
+                        data-testid="review-progress-label"
+                    >
+                        {seenCount} of {totalCount} reviewed
+                    </div>
+                </div>
+
+                {/* Tabs — Client Viewing Intelligence */}
+                <div
+                    className="mb-8 flex items-center gap-2 flex-wrap border-b border-white/10 pb-3"
+                    data-testid="client-view-tabs"
+                >
+                    {TABS.map((tab) => {
+                        const count = buckets[tab.key].length;
+                        const active = activeTab === tab.key;
+                        return (
+                            <button
+                                key={tab.key}
+                                type="button"
+                                onClick={() => setActiveTab(tab.key)}
+                                data-testid={`client-tab-${tab.key}`}
+                                className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-sm text-[11px] tracking-widest uppercase transition-all border ${
+                                    active
+                                        ? "bg-white text-black border-white"
+                                        : "border-white/15 text-white/60 hover:text-white hover:border-white/40"
+                                }`}
+                            >
+                                <tab.icon className="w-3.5 h-3.5" />
+                                {tab.label}
+                                <span
+                                    className={`tg-mono text-[10px] ${active ? "text-black/60" : "text-white/40"}`}
+                                >
+                                    {count}
+                                </span>
+                            </button>
+                        );
+                    })}
                 </div>
 
                 {projectBudget.length > 0 && (
@@ -307,59 +430,37 @@ export default function ClientView() {
                     className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6"
                     data-testid="client-talents-grid"
                 >
-                    {talents.map((t, i) => {
-                        const cover =
-                            (t.media || []).find(
-                                (m) => m.id === t.cover_media_id,
-                            ) ||
-                            (t.media || []).find((m) =>
-                                m.content_type?.startsWith("image/"),
-                            );
-                        const act = viewerActions[t.id]?.action;
-                        return (
-                            <button
+                    {filteredTalents.length === 0 ? (
+                        <div
+                            className="col-span-full text-center py-16 text-white/40 text-sm"
+                            data-testid="client-tab-empty"
+                        >
+                            {activeTab === "new" && "Nothing new since your last visit."}
+                            {activeTab === "shortlisted" &&
+                                "No shortlists yet — open a card and tap Shortlist to add one."}
+                            {activeTab === "seen" && "You haven't reviewed any talents yet."}
+                            {activeTab === "pending" &&
+                                "You've reviewed everyone — nice work."}
+                            {activeTab === "all" && "No talents on this link."}
+                        </div>
+                    ) : (
+                        filteredTalents.map((t, i) => (
+                            <TalentCard
                                 key={t.id}
-                                onClick={() => setActiveTalent(t)}
-                                data-testid={`client-talent-${t.id}`}
-                                style={{ animationDelay: `${i * 40}ms` }}
-                                className="group relative text-left tg-fade-up"
-                            >
-                                <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10 group-hover:border-white/30 transition-all">
-                                    {cover ? (
-                                        <img
-                                            src={IMAGE_URL(cover)}
-                                            alt={t.name}
-                                            loading="lazy"
-                                            className="w-full h-full object-cover group-hover:scale-[1.03] transition-all duration-700"
-                                        />
-                                    ) : (
-                                        <div className="w-full h-full flex items-center justify-center text-white/20">
-                                            <Sparkles className="w-8 h-8" />
-                                        </div>
-                                    )}
-                                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/40 to-transparent p-4">
-                                        <div className="font-display text-lg md:text-xl tracking-tight">
-                                            {t.name}
-                                        </div>
-                                        <div className="text-[11px] text-white/50 tg-mono mt-1">
-                                            {vis.location && t.location
-                                                ? t.location
-                                                : ""}
-                                        </div>
-                                    </div>
-                                    {act && (
-                                        <div className="absolute top-2 left-2 bg-white text-black px-2 py-1 text-[10px] tracking-widest uppercase">
-                                            {
-                                                ACTIONS.find(
-                                                    (a) => a.key === act,
-                                                )?.label
-                                            }
-                                        </div>
-                                    )}
-                                </div>
-                            </button>
-                        );
-                    })}
+                                talent={t}
+                                index={i}
+                                vis={vis}
+                                action={viewerActions[t.id]?.action}
+                                seen={seenIds.has(t.id)}
+                                isNew={isNew(t.id)}
+                                onOpen={() => {
+                                    setActiveTalent(t);
+                                    markSeen(t.id);
+                                }}
+                                onSeen={() => markSeen(t.id)}
+                            />
+                        ))
+                    )}
                 </div>
             </div>
 
@@ -767,6 +868,125 @@ function TalentDetail({
                 </div>
             </div>
         </div>
+    );
+}
+
+function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen }) {
+    const ref = useRef(null);
+    const timerRef = useRef(null);
+
+    const cover =
+        (talent.media || []).find((m) => m.id === talent.cover_media_id) ||
+        (talent.media || []).find((m) =>
+            m.content_type?.startsWith("image/"),
+        );
+    const isShortlisted = action === "shortlist";
+
+    useEffect(() => {
+        if (seen || !ref.current) return;
+        const node = ref.current;
+        const observer = new IntersectionObserver(
+            (entries) => {
+                entries.forEach((entry) => {
+                    if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+                        // 5s of >= 50% visibility → mark seen.
+                        if (!timerRef.current) {
+                            timerRef.current = setTimeout(() => {
+                                onSeen();
+                                timerRef.current = null;
+                            }, 5000);
+                        }
+                    } else if (timerRef.current) {
+                        clearTimeout(timerRef.current);
+                        timerRef.current = null;
+                    }
+                });
+            },
+            { threshold: [0, 0.5, 1] },
+        );
+        observer.observe(node);
+        return () => {
+            if (timerRef.current) clearTimeout(timerRef.current);
+            observer.disconnect();
+        };
+    }, [seen, onSeen]);
+
+    return (
+        <button
+            ref={ref}
+            onClick={onOpen}
+            data-testid={`client-talent-${talent.id}`}
+            data-seen={seen ? "true" : "false"}
+            data-new={isNew ? "true" : "false"}
+            style={{ animationDelay: `${index * 40}ms` }}
+            className="group relative text-left tg-fade-up"
+        >
+            <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10 group-hover:border-white/30 transition-all relative">
+                {cover ? (
+                    <img
+                        src={IMAGE_URL(cover)}
+                        alt={talent.name}
+                        loading="lazy"
+                        className="w-full h-full object-cover group-hover:scale-[1.03] transition-all duration-700"
+                    />
+                ) : (
+                    <div className="w-full h-full flex items-center justify-center text-white/20">
+                        <Sparkles className="w-8 h-8" />
+                    </div>
+                )}
+                {/* Seen overlay — subtle desaturation cue */}
+                {seen && (
+                    <div className="absolute inset-0 bg-black/35 pointer-events-none" />
+                )}
+
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/40 to-transparent p-4">
+                    <div className="font-display text-lg md:text-xl tracking-tight">
+                        {talent.name}
+                    </div>
+                    <div className="text-[11px] text-white/50 tg-mono mt-1">
+                        {vis.location && talent.location ? talent.location : ""}
+                    </div>
+                </div>
+
+                {/* Status pills row (top-left) */}
+                <div className="absolute top-2 left-2 flex flex-col gap-1.5 items-start">
+                    {isNew && (
+                        <span
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-[#c9a961] text-black text-[10px] tracking-widest uppercase rounded-sm"
+                            data-testid={`badge-new-${talent.id}`}
+                        >
+                            <Sparkles className="w-3 h-3" />
+                            New
+                        </span>
+                    )}
+                    {isShortlisted && (
+                        <span
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-[#FF3366] text-white text-[10px] tracking-widest uppercase rounded-sm"
+                            data-testid={`badge-shortlisted-${talent.id}`}
+                        >
+                            <Heart className="w-3 h-3 fill-current" />
+                            Shortlisted
+                        </span>
+                    )}
+                    {action && action !== "shortlist" && (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-white text-black text-[10px] tracking-widest uppercase rounded-sm">
+                            {ACTIONS.find((a) => a.key === action)?.label}
+                        </span>
+                    )}
+                </div>
+
+                {/* Seen indicator (top-right) */}
+                {seen && (
+                    <span
+                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-black/70 border border-white/20 text-white/80 text-[10px] tracking-widest uppercase rounded-sm"
+                        data-testid={`badge-seen-${talent.id}`}
+                    >
+                        <Eye className="w-3 h-3" />
+                        Seen
+                    </span>
+                )}
+            </div>
+        </button>
     );
 }
 

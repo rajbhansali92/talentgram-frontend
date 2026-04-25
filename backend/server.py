@@ -94,6 +94,10 @@ async def on_startup():
     await seed_admin()
     init_storage()
     await ensure_notifications_indexes(db)
+    # client_states (M5 client viewing-intelligence) — fast lookup per (link, viewer).
+    await db.client_states.create_index(
+        [("link_id", 1), ("viewer_email", 1)], unique=True
+    )
     if drive_enabled():
         logger.info("Google Drive backup ENABLED — starting retry worker")
         attach_db(db)

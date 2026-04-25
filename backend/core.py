@@ -633,6 +633,10 @@ class IdentifyIn(BaseModel):
     email: EmailStr
 
 
+class SeenIn(BaseModel):
+    talent_id: str
+
+
 class ActionIn(BaseModel):
     talent_id: str
     action: Optional[str] = None  # shortlist | interested | not_for_this | not_sure | null

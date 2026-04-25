@@ -116,25 +116,42 @@ export default function NotificationBell() {
             </button>
 
             {open && (
-                <div
-                    className="absolute right-0 top-full mt-2 w-[320px] md:w-[360px] z-50 bg-[#0a0a0a] border border-white/10 shadow-2xl"
-                    data-testid="notification-dropdown"
-                >
-                    <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-                        <p className="eyebrow">Notifications</p>
-                        {count > 0 && (
-                            <button
-                                onClick={markAll}
-                                className="text-[10px] text-white/50 hover:text-white tg-mono inline-flex items-center gap-1"
-                                data-testid="mark-all-read-btn"
-                            >
-                                <Check className="w-3 h-3" />
-                                Mark all read
-                            </button>
-                        )}
-                    </div>
+                <>
+                    {/* Mobile-only backdrop sheet — full width, taps outside dismiss. */}
+                    <div
+                        className="md:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-sm"
+                        onClick={() => setOpen(false)}
+                        aria-hidden="true"
+                    />
+                    <div
+                        className="fixed left-2 right-2 top-[60px] mt-0 md:absolute md:left-auto md:right-0 md:top-full md:mt-2 md:w-[360px] z-50 bg-[#0a0a0a] border border-white/10 shadow-2xl max-h-[calc(100vh-80px)] overflow-hidden flex flex-col"
+                        data-testid="notification-dropdown"
+                    >
+                        <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between shrink-0">
+                            <p className="eyebrow">Notifications</p>
+                            <div className="flex items-center gap-2">
+                                {count > 0 && (
+                                    <button
+                                        onClick={markAll}
+                                        className="text-[10px] text-white/50 hover:text-white tg-mono inline-flex items-center gap-1 px-2 py-1"
+                                        data-testid="mark-all-read-btn"
+                                    >
+                                        <Check className="w-3 h-3" />
+                                        Mark all read
+                                    </button>
+                                )}
+                                <button
+                                    onClick={() => setOpen(false)}
+                                    className="md:hidden text-[10px] text-white/50 hover:text-white tg-mono px-2 py-1"
+                                    data-testid="notification-close-btn"
+                                    aria-label="Close notifications"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
 
-                    <div className="max-h-[420px] overflow-y-auto">
+                        <div className="flex-1 max-h-[420px] overflow-y-auto">
                         {loading ? (
                             <div className="p-6 text-center text-white/40 text-xs inline-flex items-center gap-2 justify-center w-full">
                                 <Loader2 className="w-3 h-3 animate-spin" />
@@ -178,15 +195,16 @@ export default function NotificationBell() {
                         )}
                     </div>
 
-                    <Link
-                        to="/admin/notifications"
-                        onClick={() => setOpen(false)}
-                        className="block text-center text-[11px] tg-mono text-white/60 hover:text-white py-3 border-t border-white/5"
-                        data-testid="see-all-notifications-link"
-                    >
-                        See all notifications
-                    </Link>
-                </div>
+                        <Link
+                            to="/admin/notifications"
+                            onClick={() => setOpen(false)}
+                            className="block text-center text-[11px] tg-mono text-white/60 hover:text-white py-3 border-t border-white/5 shrink-0"
+                            data-testid="see-all-notifications-link"
+                        >
+                            See all notifications
+                        </Link>
+                    </div>
+                </>
             )}
         </div>
     );

@@ -173,6 +173,13 @@ html.light .tg-grain::before {
     border-radius: 999px;
 }
 
+/* Hide scrollbars on horizontal-scroll mobile chrome (tab strips, nav).
+   Track stays scrollable, just visually clean. */
+.tg-noscrollbar::-webkit-scrollbar { display: none; }
+.tg-noscrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+[data-testid="client-view-tabs"]::-webkit-scrollbar,
+[data-testid="mobile-nav-strip"]::-webkit-scrollbar { display: none; }
+
 @keyframes tgFadeUp {
     from {
         opacity: 0;

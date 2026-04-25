@@ -305,26 +305,43 @@ export default function ClientView() {
 
     return (
         <div className="min-h-screen bg-[#050505] text-white" data-testid="client-view-page">
-            {/* Header */}
-            <header className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-white/10">
-                <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-5 flex items-center justify-between gap-4">
-                    <div>
-                        <p className="eyebrow">Curated Review</p>
-                        <h1 className="font-display text-xl md:text-2xl tracking-tight mt-1">
-                            {link.title}
-                        </h1>
+            {/* Header — on mobile we collapse the page heading + progress
+                bar into the sticky chrome to maximise above-the-fold cards.
+                Desktop keeps the verbose layout below. */}
+            <header className="sticky top-0 z-30 bg-black/85 backdrop-blur-xl border-b border-white/10">
+                <div className="max-w-[1600px] mx-auto px-4 md:px-12 py-3 md:py-5">
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                            <p className="eyebrow hidden md:block">Curated Review</p>
+                            <h1 className="font-display text-base md:text-2xl tracking-tight mt-0 md:mt-1 truncate">
+                                {link.title}
+                            </h1>
+                            <p className="text-[10px] md:hidden text-white/50 tg-mono mt-0.5 truncate">
+                                {viewer.name} · {seenCount}/{totalCount} reviewed
+                            </p>
+                        </div>
+                        <div className="hidden md:block text-right">
+                            <p className="text-xs text-white/50">Viewing as</p>
+                            <p className="text-sm font-medium">{viewer.name}</p>
+                        </div>
+                        <ThemeToggle />
                     </div>
-                    <div className="text-right">
-                        <p className="text-xs text-white/50">Viewing as</p>
-                        <p className="text-sm font-medium">{viewer.name}</p>
+                    {/* Mobile-only sticky progress bar — replaces the verbose
+                        below-fold card so cards are visible immediately. */}
+                    <div className="md:hidden mt-2 h-1 bg-white/10 rounded-full overflow-hidden">
+                        <div
+                            className="h-full bg-white transition-all duration-500"
+                            style={{ width: `${reviewedPct}%` }}
+                            data-testid="review-progress-bar-mobile"
+                        />
                     </div>
-                    <ThemeToggle />
                 </div>
             </header>
 
             {/* Grid */}
-            <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-10 md:py-16">
-                <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
+            <div className="max-w-[1600px] mx-auto px-4 md:px-12 py-5 md:py-16">
+                {/* Verbose page heading — desktop only; mobile has it in the header */}
+                <div className="hidden md:flex mb-6 items-center justify-between flex-wrap gap-3">
                     <div>
                         <p className="eyebrow mb-2">{talents.length} Talents</p>
                         <h2 className="font-display text-3xl md:text-5xl tracking-tight">
@@ -337,9 +354,9 @@ export default function ClientView() {
                     </p>
                 </div>
 
-                {/* Progress bar — "X of Y reviewed" */}
+                {/* Desktop progress bar (mobile uses sticky variant in header) */}
                 <div
-                    className="mb-6 flex items-center gap-4"
+                    className="mb-6 hidden md:flex items-center gap-4"
                     data-testid="review-progress"
                 >
                     <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
@@ -357,9 +374,11 @@ export default function ClientView() {
                     </div>
                 </div>
 
-                {/* Tabs — Client Viewing Intelligence */}
+                {/* Tabs — Client Viewing Intelligence. Mobile = horizontal scroll
+                    so tabs never wrap to a second row eating vertical space. */}
                 <div
-                    className="mb-8 flex items-center gap-2 flex-wrap border-b border-white/10 pb-3"
+                    className="mb-5 md:mb-8 -mx-4 md:mx-0 px-4 md:px-0 flex items-center gap-2 overflow-x-auto md:flex-wrap whitespace-nowrap border-b border-white/10 pb-3"
+                    style={{ scrollbarWidth: "none" }}
                     data-testid="client-view-tabs"
                 >
                     {TABS.map((tab) => {
@@ -371,7 +390,7 @@ export default function ClientView() {
                                 type="button"
                                 onClick={() => setActiveTab(tab.key)}
                                 data-testid={`client-tab-${tab.key}`}
-                                className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-sm text-[11px] tracking-widest uppercase transition-all border ${
+                                className={`inline-flex items-center gap-1.5 px-3 md:px-3.5 py-2 rounded-sm text-[11px] tracking-widest uppercase transition-all border shrink-0 active:scale-[0.97] ${
                                     active
                                         ? "bg-white text-black border-white"
                                         : "border-white/15 text-white/60 hover:text-white hover:border-white/40"

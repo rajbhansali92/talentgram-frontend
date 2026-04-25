@@ -131,17 +131,21 @@ export default function AdminLayout() {
             </div>
 
             <main className="flex-1 min-w-0 md:pt-0 pt-14">
-                <div className="md:hidden flex gap-1 border-b border-white/10 px-2 bg-[#080808]">
+                <div
+                    className="md:hidden flex gap-0 border-b border-white/10 bg-[#080808] overflow-x-auto whitespace-nowrap"
+                    style={{ scrollbarWidth: "none" }}
+                    data-testid="mobile-nav-strip"
+                >
                     {navItems.map((it) => (
                         <NavLink
                             key={it.to}
                             to={it.to}
                             end={it.end}
                             className={({ isActive }) =>
-                                `flex-1 text-center py-3 text-xs transition-all ${
+                                `inline-flex items-center justify-center px-5 py-3 text-xs transition-all min-h-[44px] shrink-0 ${
                                     isActive
                                         ? "text-white border-b-2 border-white"
-                                        : "text-white/50"
+                                        : "text-white/55 border-b-2 border-transparent active:text-white"
                                 }`
                             }
                         >

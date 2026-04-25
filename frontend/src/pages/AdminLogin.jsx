@@ -57,6 +57,15 @@ export default function AdminLogin() {
                     className="w-full max-w-sm tg-fade-up"
                     data-testid="admin-login-form"
                 >
+                    {/* Mobile-only brand block — desktop has the dark left rail.
+                        Keeps brand continuity on phones where the rail is hidden. */}
+                    <div
+                        className="md:hidden flex flex-col items-center text-center mb-10"
+                        data-testid="admin-login-mobile-brand"
+                    >
+                        <BrandHero size="md" />
+                    </div>
+
                     <p className="eyebrow mb-6">Admin Access</p>
                     <h1 className="font-display text-3xl md:text-4xl tracking-tight mb-10">
                         Sign in to Talentgram.

@@ -30,7 +30,9 @@ function App() {
         <div className="App tg-grain">
             <Toaster
                 theme="dark"
-                position="top-right"
+                position="top-center"
+                offset={16}
+                mobileOffset={64}
                 toastOptions={{
                     style: {
                         background: "#0c0c0c",

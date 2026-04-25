@@ -42,6 +42,14 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v25)** — **Sprint 1: Mobile Critical Fixes shipped.** Production hardening from the Mobile UX Audit.
+  - **C1 — Brand on mobile login** (`AdminLogin.jsx`): mobile-only `BrandHero` block above the form (`md:hidden`) so the logo never disappears on phones.
+  - **C2 — Notification dropdown overflow** (`NotificationBell.jsx`): mobile renders as a full-width sheet (`fixed left-2 right-2 top-[60px]`) with a tappable backdrop + Close button; desktop keeps the corner popover.
+  - **H1 — Client View above-the-fold** (`ClientView.jsx`): mobile collapses the page heading + viewer + progress into a compact sticky header (~80 px). Verbose H2 / desktop progress bar moved to `hidden md:flex`. Tabs now horizontally scroll instead of wrapping. Result: **first talent card now appears at y≈166 (was ≈300)** on iPhone 12 viewport — 45% more content above the fold.
+  - **H4 — Admin mobile nav** (`AdminLayout.jsx`): scrolling tab strip (`overflow-x-auto whitespace-nowrap`), no `flex-1` squash, full label visibility, `min-h-[44px]` tap targets.
+  - **M3 — Toast positioning** (`App.js`): `position="top-center"` with `mobileOffset={64}` so toasts no longer collide with the sticky header.
+  - **Bonus** — `BrandHero` now responsive (110 px logo `<sm`, 140 px `sm-md`, 220 px `md+`) so iPhone SE no longer pushes CTAs below the fold. New `.tg-noscrollbar` utility for clean horizontal-scroll surfaces.
+
 - **2026-04-25 (v24)** — **Brand-first Landing & Admin Login.** Removed all marketing copy on the public-facing surfaces; the logo IS the hero now.
   - **`BrandHero.jsx`** — new shared component: centred logo, hairline divider, dual-line tagline `WE SCOUT · WE MANAGE` / `INDIA | UAE`. Sizes: `lg` (Landing, ~220 px logo) and `md` (Admin Login left rail, ~140 px). `inverted` prop forces white logo + white text on always-dark surfaces (admin-login left panel) regardless of the active theme.
   - **`Logo.jsx`** — new `forceVariant` prop ("white" | "black") so consumers can override the auto-theme swap when the surrounding panel has a fixed colour.

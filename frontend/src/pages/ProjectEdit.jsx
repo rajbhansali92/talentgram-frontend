@@ -89,6 +89,7 @@ export default function ProjectEdit() {
     const [submissions, setSubmissions] = useState([]);
     const [reviewingSid, setReviewingSid] = useState(null);
     const [showForwardModal, setShowForwardModal] = useState(false);
+    const [submissionFilter, setSubmissionFilter] = useState("all"); // all | pending | approved | rejected | hold | updated
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
@@ -827,17 +828,66 @@ export default function ProjectEdit() {
                             talents.
                         </div>
                     ) : (
-                        <div className="divide-y divide-white/10">
-                            {submissions.map((s) => (
-                                <SubmissionRow
-                                    key={s.id}
-                                    submission={s}
-                                    onOpen={() => setReviewingSid(s.id)}
-                                    onDecision={(d) => setDecision(s.id, d)}
-                                    onDelete={isAdminRole ? () => deleteSubmission(s.id) : null}
-                                />
-                            ))}
-                        </div>
+                        <>
+                            <div
+                                className="px-6 py-3 border-b border-white/10 flex items-center gap-2 flex-wrap"
+                                data-testid="submission-filters"
+                            >
+                                {[
+                                    { key: "all", label: "All", count: submissions.length },
+                                    { key: "pending", label: "Pending", count: submissions.filter((s) => (s.decision || "pending") === "pending").length },
+                                    { key: "approved", label: "Approved", count: submissions.filter((s) => s.decision === "approved").length },
+                                    { key: "hold", label: "Hold", count: submissions.filter((s) => s.decision === "hold").length },
+                                    { key: "rejected", label: "Rejected", count: submissions.filter((s) => s.decision === "rejected").length },
+                                    { key: "updated", label: "Updated", count: submissions.filter((s) => s.status === "updated").length },
+                                ].map((f) => {
+                                    const active = submissionFilter === f.key;
+                                    return (
+                                        <button
+                                            key={f.key}
+                                            type="button"
+                                            onClick={() => setSubmissionFilter(f.key)}
+                                            data-testid={`filter-chip-${f.key}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-all ${active ? "border-white bg-white text-black" : "border-white/15 text-white/60 hover:border-white/40 hover:text-white"}`}
+                                        >
+                                            {f.label}
+                                            <span className={`ml-2 tg-mono ${active ? "text-black/60" : "text-white/40"}`}>
+                                                {f.count}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            <div className="divide-y divide-white/10">
+                                {submissions
+                                    .filter((s) => {
+                                        if (submissionFilter === "all") return true;
+                                        if (submissionFilter === "updated") return s.status === "updated";
+                                        return (s.decision || "pending") === submissionFilter;
+                                    })
+                                    .map((s) => (
+                                        <SubmissionRow
+                                            key={s.id}
+                                            submission={s}
+                                            onOpen={() => setReviewingSid(s.id)}
+                                            onDecision={(d) => setDecision(s.id, d)}
+                                            onDelete={isAdminRole ? () => deleteSubmission(s.id) : null}
+                                        />
+                                    ))}
+                                {submissions.filter((s) => {
+                                    if (submissionFilter === "all") return true;
+                                    if (submissionFilter === "updated") return s.status === "updated";
+                                    return (s.decision || "pending") === submissionFilter;
+                                }).length === 0 && (
+                                    <div
+                                        className="p-8 text-center text-white/30 text-sm"
+                                        data-testid="filter-empty-state"
+                                    >
+                                        No submissions match this filter.
+                                    </div>
+                                )}
+                            </div>
+                        </>
                     )}
                 </section>
             )}

@@ -42,7 +42,16 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
-## Recent Updates
+- **2026-04-25 (v20)** — **Phase 1 + 4 spec + Drive backup + 3-mode Link Generator UI.**
+  - **Google Drive backup** via User OAuth + PKCE running on a non-blocking asyncio worker (`drive_backup.py`). Submissions backed up post-S3 with retry queue. Strict naming convention: `{brand}/{submission_id}/...`. UI: `DriveBackupCard` shows connection status + folder link.
+  - **In-app notifications**: `notifications` collection + `routers/notifications.py` + `NotificationBell` (sidebar + mobile) + `/admin/notifications` page. Fanout on submission_new / submission_updated / submission_retake / submission_decision.
+  - **Phase 1 — Per-link talent_field_visibility**: Link admin can override link-level visibility per talent (M1). UI added in v20: gear icon on selected talent → modal with ON / OFF / INHERIT toggles per field.
+  - **Phase 1 — auto-pull (M2)**: link.auto_pull + auto_project_id resolves the curated submission list at read time so newly-approved submissions appear automatically.
+  - **Phase 4 — Hold + require_reapproval_on_edit**: `hold` is a first-class decision state alongside approved/rejected/pending. Project-level toggle `require_reapproval_on_edit` (default ON) controls whether retakes flip the decision back to pending or silently keep it.
+  - **3-mode Link Generator UI** (`LinkGenerator.jsx`): entry-screen mode picker → M1 Individual Talent Share · M2 Project Showcase · M3 Submission/Audition Link. Each mode locks its own picker (talents grid, project cards, or approved-submission grid) and posts a clean payload.
+  - **Submission filter chips** on `/admin/projects/{id}`: All · Pending · Approved · Hold · Rejected · Updated with live counts.
+  - **Tests**: 108/108 backend pytest passing on Atlas.
+
 - **2026-04-24 (v19)** — **Secure Change Password + admin-only Reset Password flows.** Production-grade auth recovery.
   - **Change Password** (`POST /api/auth/change-password`): authenticated; verifies current with bcrypt; new password policy = min 8 chars + at least 1 number or special character; rejects same-as-current; on success bumps `token_version` which kills every existing JWT for that user. Modal accessible from `AdminLayout` sidebar + mobile top bar; logs the user out post-change and bounces them to `/admin/login`.
   - **JWT invalidation via `tv` claim**: `make_token` callers embed `tv = user.token_version`; `current_user` dependency compares token `tv` vs stored value — mismatch → `401 "Session expired"`. Stateless, no allowlist, instant global logout.
@@ -68,7 +77,7 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
   - **ClientView tweak**: images now go through `IMAGE_URL(media)` (new helper in `lib/api.js`) which prefers `resized_storage_path` when present; downloads still grab the original.
   - **Tests**: 67 existing pytests + 7 new (`test_scale_p0.py`) + 4 new (`test_scale_p0_extra.py` added by testing agent) = **78 passing / 0 failing**. Pagination back-compat + size caps + resize contract are all locked in.
 
-## Recent Updates
+## Older Updates
 - **2026-04-24 (v16)** — **Casting Review Architecture Overhaul.** Strict new contract:
   - **Client view order**: TAKES → INTRO → IMAGES (enforced in both `_submission_to_client_shape` and `ClientView` left column).
   - **Renamable takes**: new media category `take` with `label` field; MAX_SUBMISSION_TAKES=5. Legacy `take_1/2/3` still accepted on upload but auto-mapped to `{category:"take", label:"Take N"}` on read for back-compat. New `PATCH /api/public/submissions/{sid}/media/{mid}` renames existing takes. Submission page renders a dynamic `TakeRow` per take (inline label edit) + an `AddTakeSlot` for the next slot (hidden at 5).

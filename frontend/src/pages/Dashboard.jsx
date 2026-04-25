@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { Link } from "react-router-dom";
 import { Users, Link2, Eye, MousePointerClick, ArrowRight } from "lucide-react";
+import DriveBackupCard from "@/components/DriveBackupCard";
 
 export default function Dashboard() {
     const [stats, setStats] = useState({
@@ -98,6 +99,8 @@ export default function Dashboard() {
                     </div>
                 ))}
             </div>
+
+            <DriveBackupCard />
 
             <div className="border border-white/10">
                 <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">

@@ -39,9 +39,12 @@ import logging
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as UserCredentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
@@ -53,6 +56,9 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 SA_KEY_PATH = os.environ.get("GOOGLE_DRIVE_SA_KEY_PATH")
 PARENT_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_PARENT_FOLDER_ID")
+OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 ROOT_FOLDER_NAME = "Talentgram"
@@ -65,7 +71,9 @@ ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 _folder_cache: Dict[tuple, str] = {}
 _folder_lock = threading.Lock()
 _service = None
+_service_mode: Optional[str] = None  # 'user_oauth' | 'service_account'
 _service_lock = threading.Lock()
+_db_for_oauth = None  # Set on startup; used for refresh-token persistence
 
 # Serialised upload queue — max 1 worker (googleapiclient HTTP not thread-safe)
 _upload_queue: Optional[asyncio.Queue] = None
@@ -73,26 +81,146 @@ _worker_task: Optional[asyncio.Task] = None
 
 
 def drive_enabled() -> bool:
-    """Drive backup is opt-in: only runs if both env vars are set AND the
-    SA key file exists. Lets the app boot cleanly without Drive credentials."""
-    return bool(SA_KEY_PATH and PARENT_FOLDER_ID and os.path.exists(SA_KEY_PATH))
+    """Drive backup is opt-in: only runs if a parent folder is configured AND
+    we have at least one usable auth path (user OAuth via stored refresh
+    token OR service account JSON). Lets the app boot cleanly without Drive
+    credentials."""
+    if not PARENT_FOLDER_ID:
+        return False
+    if SA_KEY_PATH and os.path.exists(SA_KEY_PATH):
+        return True
+    if OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET:
+        return True
+    return False
+
+
+def oauth_configured() -> bool:
+    """Are the OAuth Client credentials present? (does NOT mean a user has
+    consented yet — that requires `_load_user_credentials` to find a
+    refresh token in Mongo)."""
+    return bool(OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET and OAUTH_REDIRECT_URI)
+
+
+def attach_db(db) -> None:
+    """Server bootstrap calls this so the OAuth token-refresh path can
+    persist refreshed access tokens back to Mongo."""
+    global _db_for_oauth
+    _db_for_oauth = db
+
+
+def _build_user_credentials(doc: dict) -> UserCredentials:
+    return UserCredentials(
+        token=doc.get("access_token"),
+        refresh_token=doc.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=OAUTH_CLIENT_ID,
+        client_secret=OAUTH_CLIENT_SECRET,
+        scopes=doc.get("scopes") or SCOPES,
+    )
+
+
+def _refresh_user_credentials_sync(creds: UserCredentials) -> UserCredentials:
+    """Refresh an expired access token using the long-lived refresh token.
+    Persists the new access_token + expiry back to Mongo (best-effort)."""
+    creds.refresh(GoogleAuthRequest())
+    if _db_for_oauth is not None:
+        try:
+            # Motor is async; schedule the write on the running loop if any.
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    _db_for_oauth.drive_oauth.update_one(
+                        {"_id": "primary"},
+                        {"$set": {
+                            "access_token": creds.token,
+                            "expiry": creds.expiry.isoformat() if creds.expiry else None,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }},
+                    ),
+                    loop,
+                )
+        except Exception as e:
+            logger.debug("OAuth refresh persist skipped: %s", e)
+    return creds
 
 
 def _get_service():
-    """Lazy-build the Drive service client. Auto-refresh is handled by
-    google-auth under the hood."""
-    global _service
+    """Lazy-build the Drive service client.
+
+    Strategy:
+      1. If a `drive_oauth` doc exists with a refresh_token → user OAuth.
+         (User-owned drive, real quota, the path that ACTUALLY uploads files.)
+      2. Otherwise fall back to service account.
+         (Service accounts can create folders but cannot upload files
+         outside of a Shared Drive — see Google's storage-quota docs.)
+    Cached for the process lifetime; cleared via `clear_drive_service()`.
+    """
+    global _service, _service_mode
     if _service is not None:
         return _service
     with _service_lock:
         if _service is not None:
             return _service
-        creds = service_account.Credentials.from_service_account_file(
-            SA_KEY_PATH, scopes=SCOPES
-        )
-        _service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        logger.info("Google Drive service client initialised")
-    return _service
+
+        # Try user OAuth first.
+        oauth_doc = None
+        if oauth_configured() and _db_for_oauth is not None:
+            # Synchronous Mongo read via the same Motor client by going
+            # through asyncio.run_coroutine_threadsafe (we're called from
+            # the upload worker thread, not the event loop thread).
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(
+                        _db_for_oauth.drive_oauth.find_one(
+                            {"_id": "primary"}, {"_id": 0}
+                        ),
+                        loop,
+                    )
+                    oauth_doc = fut.result(timeout=10)
+            except Exception as e:
+                logger.debug("OAuth doc lookup failed: %s", e)
+
+        if oauth_doc and oauth_doc.get("refresh_token"):
+            creds = _build_user_credentials(oauth_doc)
+            if not creds.valid:
+                try:
+                    creds = _refresh_user_credentials_sync(creds)
+                except Exception as e:
+                    logger.warning("OAuth token refresh failed, falling back to SA: %s", e)
+                    creds = None
+            if creds:
+                _service = build("drive", "v3", credentials=creds, cache_discovery=False)
+                _service_mode = "user_oauth"
+                logger.info(
+                    "Google Drive client initialised (user OAuth as %s)",
+                    oauth_doc.get("connected_email", "unknown"),
+                )
+                return _service
+
+        # Fallback: service account. Folders work; files generally do NOT
+        # without a Shared Drive — but we still allow folder lookups.
+        if SA_KEY_PATH and os.path.exists(SA_KEY_PATH):
+            sa_creds = service_account.Credentials.from_service_account_file(
+                SA_KEY_PATH, scopes=SCOPES
+            )
+            _service = build("drive", "v3", credentials=sa_creds, cache_discovery=False)
+            _service_mode = "service_account"
+            logger.info("Google Drive client initialised (service account fallback)")
+            return _service
+
+        raise RuntimeError("No usable Drive credentials available")
+
+
+def clear_drive_service() -> None:
+    """Force the next call to `_get_service` to rebuild — used after the
+    user (re-)connects OAuth so we don't keep using stale SA credentials."""
+    global _service, _service_mode, _folder_cache
+    with _service_lock:
+        _service = None
+        _service_mode = None
+    with _folder_lock:
+        _folder_cache.clear()
 
 
 # --------------------------------------------------------------------------

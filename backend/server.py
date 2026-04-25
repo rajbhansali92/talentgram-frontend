@@ -12,8 +12,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from core import db, get_object, init_storage, mongo_client, seed_admin
-from drive_backup import drive_enabled, retry_pending_uploads, start_drive_worker
-from routers import applications, auth, links, password, projects, submissions, talents, users
+from drive_backup import attach_db, drive_enabled, retry_pending_uploads, start_drive_worker
+from routers import applications, auth, drive_admin, links, password, projects, submissions, talents, users
 
 app = FastAPI(title="Talentgram Portfolio Engine")
 logger = logging.getLogger(__name__)
@@ -64,6 +64,7 @@ app.include_router(submissions.router)
 app.include_router(applications.router)
 app.include_router(users.router)
 app.include_router(password.router)
+app.include_router(drive_admin.router)
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
@@ -81,6 +82,7 @@ async def on_startup():
     init_storage()
     if drive_enabled():
         logger.info("Google Drive backup ENABLED — starting retry worker")
+        attach_db(db)
         start_drive_worker()
         asyncio.create_task(_drive_retry_loop())
     else:

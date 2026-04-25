@@ -42,6 +42,7 @@ from core import (
     put_object,
     resize_image_bytes,
 )
+from drive_backup import drive_enabled, enqueue_drive_upload
 
 router = APIRouter(prefix="/api", tags=["applications"])
 
@@ -202,7 +203,14 @@ async def upload_application_media(
             media["resized_storage_path"] = r2["path"]
             media["resized_size"] = len(resized)
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
-    return await db.applications.find_one({"id": aid}, {"_id": 0})
+    updated = await db.applications.find_one({"id": aid}, {"_id": 0})
+
+    # Drive secondary backup — applications don't have a brand, use a stable bucket.
+    if drive_enabled():
+        media["scope"] = "application"
+        enqueue_drive_upload(db, media, updated, "_Applications", data)
+
+    return updated
 
 
 @router.delete("/public/apply/{aid}/media/{mid}")

@@ -33,6 +33,11 @@ from core import (
     put_object,
     resize_image_bytes,
 )
+from drive_backup import (
+    drive_enabled,
+    enqueue_drive_upload,
+    submission_folder_url,
+)
 
 router = APIRouter(prefix="/api", tags=["submissions"])
 
@@ -252,6 +257,19 @@ async def submission_upload(
         }
     await db.submissions.update_one({"id": sid}, patch)
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+
+    # ------------------------------------------------------------------
+    # Secondary backup → Google Drive (best-effort, non-blocking).
+    # Spawns a detached asyncio task; failures are logged and queued for
+    # retry. NEVER affects the primary upload result returned above.
+    # ------------------------------------------------------------------
+    if drive_enabled():
+        project = await db.projects.find_one(
+            {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}
+        )
+        brand = (project or {}).get("brand_name") or sub.get("project_slug") or "Unknown"
+        enqueue_drive_upload(db, media, updated, brand, data)
+
     return updated
 
 
@@ -428,6 +446,31 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
 # --------------------------------------------------------------------------
 # Admin review
 # --------------------------------------------------------------------------
+@router.get("/submissions/{sid}/drive")
+async def submission_drive_link(
+    sid: str, admin: dict = Depends(current_team_or_admin)
+):
+    """Return the Google Drive folder URL for a submission (admin only).
+
+    Lazily creates the folder path if it doesn't yet exist — useful for
+    submissions that have only synced partially. Returns 404 if Drive
+    backup is disabled.
+    """
+    if not drive_enabled():
+        raise HTTPException(404, "Google Drive backup is not configured")
+    sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    project = await db.projects.find_one(
+        {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}
+    )
+    brand = (project or {}).get("brand_name") or "Unknown"
+    url = submission_folder_url(brand, sid)
+    if not url:
+        raise HTTPException(503, "Drive folder lookup failed")
+    return {"url": url, "brand": brand, "submission_id": sid}
+
+
 @router.get("/submissions/approved")
 async def list_approved_submissions(
     page: Optional[int] = None,

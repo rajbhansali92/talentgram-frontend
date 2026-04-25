@@ -3,16 +3,20 @@
 All route logic lives in `routers/`. Shared primitives (config, DB, security,
 storage, utils, constants, models, visibility filters) live in `core.py`.
 """
+import asyncio
+import logging
 import os
 
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
-from core import init_storage, mongo_client, seed_admin
+from core import db, get_object, init_storage, mongo_client, seed_admin
+from drive_backup import drive_enabled, retry_pending_uploads, start_drive_worker
 from routers import applications, auth, links, password, projects, submissions, talents, users
 
 app = FastAPI(title="Talentgram Portfolio Engine")
+logger = logging.getLogger(__name__)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -75,6 +79,25 @@ app.add_middleware(
 async def on_startup():
     await seed_admin()
     init_storage()
+    if drive_enabled():
+        logger.info("Google Drive backup ENABLED — starting retry worker")
+        start_drive_worker()
+        asyncio.create_task(_drive_retry_loop())
+    else:
+        logger.info("Google Drive backup DISABLED (env vars not set)")
+
+
+async def _drive_retry_loop():
+    """Periodic background task — retries any failed Drive uploads every
+    5 minutes. In-process, single-instance — safe given current deployment
+    topology. If the queue is empty the call is essentially a no-op."""
+    await asyncio.sleep(60)  # let the app finish booting before first sweep
+    while True:
+        try:
+            await retry_pending_uploads(db, get_object)
+        except Exception as e:
+            logger.warning("drive retry loop error: %s", e)
+        await asyncio.sleep(5 * 60)
 
 
 @app.on_event("shutdown")

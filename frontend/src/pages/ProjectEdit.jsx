@@ -33,6 +33,7 @@ import {
     Clock,
     ExternalLink,
     Sparkles,
+    Cloud,
 } from "lucide-react";
 
 const COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"];
@@ -995,6 +996,16 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         }
     };
 
+    const openInDrive = async () => {
+        try {
+            const { data } = await adminApi.get(`/submissions/${submission.id}/drive`);
+            window.open(data.url, "_blank", "noopener,noreferrer");
+        } catch (e) {
+            const msg = e?.response?.data?.detail || "Google Drive not configured";
+            toast.error(msg);
+        }
+    };
+
     const FIELDS = [
         { key: "first_name", label: "First Name" },
         { key: "last_name", label: "Last Name" },
@@ -1020,12 +1031,25 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                 <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2">
                     {submission.talent_name}
                 </h2>
-                <p className="text-sm text-muted-foreground tg-mono mb-10">
+                <p className="text-sm text-muted-foreground tg-mono mb-6">
                     {submission.talent_email}
                     {submission.talent_phone
                         ? ` · ${submission.talent_phone}`
                         : ""}
                 </p>
+
+                <div className="flex flex-wrap gap-2 mb-10">
+                    <button
+                        type="button"
+                        onClick={openInDrive}
+                        data-testid="open-in-drive-btn"
+                        className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-border hover:border-foreground/60 rounded-sm"
+                        title="Opens the Google Drive backup folder for this submission"
+                    >
+                        <Cloud className="w-3.5 h-3.5" />
+                        Open in Drive
+                    </button>
+                </div>
 
                 {/* Editable form data with per-field visibility toggles */}
                 <section

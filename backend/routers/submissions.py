@@ -2,7 +2,8 @@
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from pymongo.errors import DuplicateKeyError
 
 from core import (
     APP_NAME,
@@ -55,13 +56,19 @@ async def public_project(slug: str):
 
 
 @router.get("/public/prefill")
-async def prefill_for_email(email: str):
+async def prefill_for_email(email: str, request: Request):
     """Public lookup: if the email matches an approved talent, return safe fields
     so the audition form can pre-fill. Returns 204-style empty dict if not found.
 
     Only NON-SENSITIVE fields are exposed (never DOB, gender, bio, or media paths):
       first_name, last_name, age (computed), height, location, instagram_handle, instagram_followers
+
+    Phase 0: rate-limited to **20 lookups per minute per IP** to mitigate
+    email-probing. The limiter is a sliding-window in-memory counter — fine
+    for our scale; replace with Redis once we run multi-replica.
     """
+    if not _prefill_rate_limit_ok(request):
+        raise HTTPException(429, "Too many lookups — please slow down")
     email = (email or "").strip().lower()
     if "@" not in email:
         return {}
@@ -84,6 +91,29 @@ async def prefill_for_email(email: str):
         "instagram_handle": talent.get("instagram_handle"),
         "instagram_followers": talent.get("instagram_followers"),
     }
+
+
+# Sliding-window rate limiter for the prefill endpoint. 20 reqs / 60 s / IP.
+_PREFILL_BUCKET: Dict[str, list] = {}
+_PREFILL_LIMIT = 20
+_PREFILL_WINDOW = 60.0
+
+
+def _prefill_rate_limit_ok(request: Request) -> bool:
+    import time
+    now = time.monotonic()
+    ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+    bucket = _PREFILL_BUCKET.setdefault(ip, [])
+    # Drop expired
+    cutoff = now - _PREFILL_WINDOW
+    bucket[:] = [t for t in bucket if t > cutoff]
+    if len(bucket) >= _PREFILL_LIMIT:
+        return False
+    bucket.append(now)
+    return True
 
 
 @router.post("/public/projects/{slug}/submission")
@@ -129,7 +159,25 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "created_at": _now(),
         "submitted_at": None,
     }
-    await db.submissions.insert_one(doc)
+    try:
+        await db.submissions.insert_one(doc)
+    except DuplicateKeyError:
+        # Race: parallel start hit the unique (project_id, talent_email)
+        # index. Fall through to the existing-submission resume path.
+        existing = await db.submissions.find_one({
+            "project_id": project["id"],
+            "talent_email": email,
+        })
+        if existing:
+            sid = existing["id"]
+            token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
+            return {
+                "id": sid,
+                "token": token,
+                "resumed": True,
+                "status": existing.get("status", "draft"),
+            }
+        raise HTTPException(409, "Submission already exists for this email")
     token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
     return {"id": sid, "token": token, "resumed": False, "status": "draft"}
 
@@ -417,12 +465,20 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # ------------------------------------------------------------------
     # Auto-link to global Talent DB (dedupe by email).
     # First-time finalize only — retest never overwrites global talent data.
+    # Uses the SAME broad $or lookup as /apply approval so the merge logic
+    # is consistent across all entry points (Phase 0).
     # ------------------------------------------------------------------
     if not is_retest and not sub.get("talent_id"):
         email = (sub.get("talent_email") or "").lower().strip()
         talent_doc = None
         if email:
-            talent_doc = await db.talents.find_one({"email": email}, {"_id": 0})
+            talent_doc = await db.talents.find_one(
+                {"$or": [
+                    {"email": email},
+                    {"source.talent_email": email},
+                ]},
+                {"_id": 0},
+            )
         if not talent_doc:
             # Build a minimal talent record from the submission's form_data.
             full_name = (
@@ -449,16 +505,35 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 "instagram_followers": None,
                 "work_links": [],
                 "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
-                "source": "audition_submission",
+                # Phase 0 — `source` is ALWAYS an object with the exact shape
+                # {type, talent_email, reference_id} so the merge $or lookup
+                # works symmetrically across all entry points.
+                "source": {
+                    "type": "audition_submission",
+                    "talent_email": email or None,
+                    "reference_id": sid,
+                },
                 "media": [],                 # keep global media separate (spec: media must NOT merge)
                 "cover_media_id": None,
                 "created_at": _now(),
                 "created_by": "auto-audition",
             }
-            await db.talents.insert_one(new_talent)
-            new_talent.pop("_id", None)
-            talent_doc = new_talent
-        patch["talent_id"] = talent_doc["id"]
+            try:
+                await db.talents.insert_one(new_talent)
+                new_talent.pop("_id", None)
+                talent_doc = new_talent
+            except DuplicateKeyError:
+                # Race: another submission for the same email finalised in
+                # parallel. Re-fetch the winner and link to it.
+                talent_doc = await db.talents.find_one(
+                    {"$or": [
+                        {"email": email},
+                        {"source.talent_email": email},
+                    ]},
+                    {"_id": 0},
+                )
+        if talent_doc:
+            patch["talent_id"] = talent_doc["id"]
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 

@@ -387,18 +387,36 @@ async def seed_admin() -> None:
         await db.users.create_index("email", unique=True)
     except Exception as e:
         logger.warning(f"users email index: {e}")
-    # Talents: non-unique email index for fast dedupe lookup. Not unique —
-    # some legacy talents may lack email; we dedupe in application code.
+    # Talents: UNIQUE email (Phase 0 enforcement). Partial filter so legacy
+    # talents that lack an email don't violate the constraint. The migration
+    # script in /app/backend/migrations/phase0_dedup.py must run BEFORE this
+    # the first time on a populated DB. Idempotent on subsequent boots.
     try:
-        await db.talents.create_index("email")
+        # Drop any pre-existing non-unique `email_1` index from the legacy boot.
+        try:
+            await db.talents.drop_index("email_1")
+        except Exception:
+            pass
+        await db.talents.create_index(
+            "email",
+            unique=True,
+            name="talents_email_unique",
+            partialFilterExpression={"email": {"$type": "string"}},
+        )
     except Exception as e:
-        logger.warning(f"talents email index: {e}")
+        logger.warning(f"talents email unique index: {e}")
 
     # P0 production indexes — 6 collections.
     # Each is idempotent; create_index is a no-op if already present.
     p0_indexes = [
         ("submissions", [("project_id", 1), ("created_at", -1)], {}),
         ("submissions", [("talent_email", 1), ("project_id", 1)], {}),
+        # Phase 0: enforce one submission per (project, talent_email).
+        ("submissions", [("project_id", 1), ("talent_email", 1)],
+         {"unique": True, "name": "submissions_project_email_unique"}),
+        # Phase 0: enforce one application per email.
+        ("applications", [("talent_email", 1)],
+         {"unique": True, "name": "applications_email_unique"}),
         ("links", [("slug", 1)], {"unique": True, "name": "slug_unique"}),
         ("link_views", [("link_id", 1), ("created_at", -1)], {}),
         ("link_actions", [("link_id", 1), ("viewer_email", 1)], {}),

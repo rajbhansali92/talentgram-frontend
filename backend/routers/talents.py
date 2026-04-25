@@ -4,6 +4,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pymongo.errors import DuplicateKeyError
 
 from core import (
     APP_NAME,
@@ -26,14 +27,65 @@ router = APIRouter(prefix="/api", tags=["talents"])
 
 @router.post("/talents", response_model=TalentOut)
 async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
+    """Phase 0: email is the canonical identity. If a talent with this
+    email already exists, MERGE non-empty incoming fields into the
+    existing record instead of inserting a duplicate. Admins can still
+    create email-less talents (e.g. legacy) — those bypass the dedup.
+    """
     doc = payload.model_dump()
+    raw_email = (doc.get("email") or "")
+    if isinstance(raw_email, str):
+        raw_email = raw_email.strip().lower() or None
+        doc["email"] = raw_email
+
+    if raw_email:
+        existing = await db.talents.find_one(
+            {"$or": [
+                {"email": raw_email},
+                {"source.talent_email": raw_email},
+            ]},
+            {"_id": 0},
+        )
+        if existing:
+            # Fill empty fields ONLY (never overwrite existing data).
+            patch: Dict[str, Any] = {}
+            for k, v in doc.items():
+                if k in {"id", "media", "created_at", "created_by"}:
+                    continue
+                if v in (None, "", [], {}):
+                    continue
+                if not existing.get(k):
+                    patch[k] = v
+            # Always canonicalise email to lower-case.
+            if existing.get("email") != raw_email:
+                patch["email"] = raw_email
+            if patch:
+                await db.talents.update_one({"id": existing["id"]}, {"$set": patch})
+                existing.update(patch)
+            existing.pop("created_by", None)
+            return enrich_talent(existing)
+
     doc.update({
         "id": str(uuid.uuid4()),
         "media": [],
+        # Phase 0: standardised source shape.
+        "source": {
+            "type": "admin",
+            "talent_email": raw_email,
+            "reference_id": None,
+        },
         "created_at": _now(),
         "created_by": admin["id"],
     })
-    await db.talents.insert_one(doc)
+    try:
+        await db.talents.insert_one(doc)
+    except DuplicateKeyError:
+        # Race: parallel create won. Re-fetch and merge.
+        existing = await db.talents.find_one({"email": raw_email}, {"_id": 0})
+        if existing:
+            existing.pop("created_by", None)
+            return enrich_talent(existing)
+        raise HTTPException(409, "Talent with this email already exists")
     doc.pop("_id", None)
     doc.pop("created_by", None)
     return enrich_talent(doc)
@@ -72,7 +124,20 @@ async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
 @router.put("/talents/{tid}", response_model=TalentOut)
 async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
     update = payload.model_dump()
-    res = await db.talents.update_one({"id": tid}, {"$set": update})
+    # Phase 0: canonicalise email; reject email re-assignment that would
+    # collide with another talent.
+    if isinstance(update.get("email"), str):
+        update["email"] = update["email"].strip().lower() or None
+    if update.get("email"):
+        clash = await db.talents.find_one(
+            {"email": update["email"], "id": {"$ne": tid}}, {"_id": 0, "id": 1}
+        )
+        if clash:
+            raise HTTPException(409, "Another talent already has this email")
+    try:
+        res = await db.talents.update_one({"id": tid}, {"$set": update})
+    except DuplicateKeyError:
+        raise HTTPException(409, "Another talent already has this email")
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})

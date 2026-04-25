@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from pymongo.errors import DuplicateKeyError
 
 from core import (
     APP_NAME,
@@ -92,7 +93,17 @@ async def start_application(payload: ApplicationStartIn):
         "created_at": _now(),
         "submitted_at": None,
     }
-    await db.applications.insert_one(doc)
+    try:
+        await db.applications.insert_one(doc)
+    except DuplicateKeyError:
+        # Race: another tab/device created an application for this email
+        # in parallel. Fall back to that one (resume).
+        existing = await db.applications.find_one({"talent_email": email})
+        if existing:
+            aid = existing["id"]
+            token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
+            return {"id": aid, "token": token, "resumed": True}
+        raise HTTPException(409, "An application already exists for this email")
     token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
     return {"id": aid, "token": token, "resumed": False}
 
@@ -385,9 +396,9 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         "cover_media_id": cover_mid,
         "media": new_media,
         "source": {
-            "type": "open_application",
-            "application_id": app_doc["id"],
+            "type": "self_onboard",
             "talent_email": app_doc.get("talent_email"),
+            "reference_id": app_doc["id"],
         },
         "created_at": _now(),
         "created_by": admin_id,

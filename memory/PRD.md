@@ -42,6 +42,21 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v28)** — **Phase 0: Unified Email-Identity Hardening.** Strict no-new-features production cleanup before Phase 1.
+  - **Migration script** (`/app/backend/migrations/phase0_dedup.py`): groups talents by lowercased email, keeps the oldest per cluster, merges non-empty fields + media (without overwriting), then deletes duplicates. Same logic on `applications` (one per email, prefer submitted-over-draft + newest) and `submissions` (unique per `(project_id, talent_email)`). Generates a CSV report at `migrations/reports/phase0_<ts>.csv` for every merge. Idempotent — safe to re-run.
+  - **`source` field standardised** to `{type, talent_email, reference_id}` across all 68 existing talents. Any future write that supplies a string is silently re-shaped via the standardise helper.
+  - **DB-level unique indexes**:
+    - `talents.email` (unique, partial filter so legacy email-less rows don't violate)
+    - `applications.talent_email` (unique)
+    - `submissions (project_id, talent_email)` (unique compound)
+    - All created idempotently in `core.ensure_indexes` so they survive future boots.
+  - **Merge logic unified**: submission finalize now uses the same broad `{$or: [{email}, {source.talent_email}]}` lookup as `/apply` approval. Both paths handle `DuplicateKeyError` races by re-fetching the winner.
+  - **Admin "Add Talent" now upserts** by email — fills empty fields on the existing record, never inserts a duplicate. Returns the canonical talent (whether merged or new).
+  - **Admin "Edit Talent" rejects email collisions** with a 409 instead of silently breaking the unique index.
+  - **Application + submission start endpoints** now respond `resumed: true` with the existing record's id when the unique index fires (race-safe).
+  - **Prefill endpoint rate-limited**: `/api/public/prefill` capped at 20 lookups / 60 s / IP via a sliding-window in-process counter (replace with Redis when we run multi-replica). Returns 429 on excess.
+  - **Tests**: 7 new pytests (`tests/test_phase0_identity.py`) — all pass. Full backend regression 39/39 on Atlas.
+
 - **2026-04-25 (v27)** — **Sprint 3: Client Decision Experience.** Mobile-first review polish — every decision now reachable by one thumb.
   - **Sticky bottom action bar** on mobile (`<md`) inside `TalentDetail`: `quick-shortlist-btn` (gold) · `quick-hold-btn` (white outline) · `quick-reject-btn` (red), each 52 px tall with `active:scale-[0.97]` + safe-area padding for iPhone notches. Hidden on desktop where the existing in-card action grid is already thumb-reachable.
   - **Auto-advance after action**: tap any quick-action → backend save → 350 ms transition → next talent in the **filtered** list (respects current Pending/Shortlisted/etc. tab). Last talent in list closes the overlay. Includes a per-button spinner during the transition.

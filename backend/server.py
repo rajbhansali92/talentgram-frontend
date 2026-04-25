@@ -18,6 +18,7 @@ from routers import (
     applications,
     auth,
     drive_admin,
+    feedback,
     links,
     notifications as notifications_router,
     password,
@@ -78,6 +79,7 @@ app.include_router(users.router)
 app.include_router(password.router)
 app.include_router(drive_admin.router)
 app.include_router(notifications_router.router)
+app.include_router(feedback.router)
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
@@ -98,6 +100,10 @@ async def on_startup():
     await db.client_states.create_index(
         [("link_id", 1), ("viewer_email", 1)], unique=True
     )
+    # feedback — talent-facing query needs a fast (submission_id, status, visibility) lookup.
+    await db.feedback.create_index([("submission_id", 1), ("status", 1)])
+    await db.feedback.create_index([("project_id", 1), ("status", 1)])
+    await db.feedback.create_index([("created_at", -1)])
     if drive_enabled():
         logger.info("Google Drive backup ENABLED — starting retry worker")
         attach_db(db)

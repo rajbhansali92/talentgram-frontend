@@ -42,6 +42,23 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v22)** — **Moderated Client→Talent Feedback Relay (M6, backend-only).** Admin is the only gateway between client and talent.
+  - **New `feedback` collection**: `{id, type (text|voice), text, content_url, content_type, talent_id, submission_id, project_id, link_id, created_by="client", client_viewer_email/name, status (pending|approved|rejected), visibility (admin_only|shared_with_talent), created_at, approved_at, approved_by, rejected_at, rejected_by, edited_at, edited_by}`. Indexes on `(submission_id, status)`, `(project_id, status)`, and `created_at`.
+  - **Client (viewer-token) endpoints**:
+    - `POST /api/public/links/{slug}/feedback` (JSON, text)
+    - `POST /api/public/links/{slug}/feedback/voice` (multipart, audio file → S3, max 25 MB)
+    - Both default to `status=pending, visibility=admin_only`. Subject-isolation guard: link must include the (submission_id | talent_id | auto_pull project) trio, else 403.
+  - **Admin (admin/team) endpoints**:
+    - `GET /api/admin/feedback` (filter: status, project_id, submission_id; supports pagination)
+    - `POST /api/admin/feedback/{fid}/approve` → status=approved, visibility=shared_with_talent, approved_by/_at stamped
+    - `POST /api/admin/feedback/{fid}/reject` → status=rejected, visibility stays admin_only
+    - `POST /api/admin/feedback/{fid}/edit` → text edit (text-only rows; voice 400)
+    - `DELETE /api/admin/feedback/{fid}` (cleanup)
+  - **Talent surface**: `GET /api/public/submissions/{sid}` now includes `client_feedback: [...]` — ONLY rows where `status=approved AND visibility=shared_with_talent`. Pending/rejected/admin_only rows are silently filtered. Sensitive fields (viewer email, link_id, approver_id) stripped via `_client_feedback_view()`.
+  - **Notifications fan-out**: `client_feedback_new` on creation; `feedback_approved` / `feedback_rejected` on moderation. No talent push channel yet — talents discover approved feedback on their next submission fetch (single source of truth, no duplicate state).
+  - **Retake-loop compatibility preserved**: feedback is keyed by `submission_id`, never duplicated when talent retakes; submission edits flow through existing `submission_updated` notification path.
+  - **Tests**: 9 new pytests (`test_feedback_relay.py`) → 100% pass. Total backend regression now 117/117 on Atlas.
+
 - **2026-04-25 (v21)** — **Client Viewing Intelligence System (M5).** Self-aware client review experience.
   - **5 tabs** on the public link page: All · Pending · Seen · ❤ Shortlisted · ✨ New (with live counts).
   - **Progress bar** "X of Y reviewed" pinned above the talent grid.

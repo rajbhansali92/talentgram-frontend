@@ -500,6 +500,11 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
     sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
     if not sub:
         raise HTTPException(404, "Submission not found")
+    # Surface ONLY approved+shared client feedback. The talent never sees
+    # pending/rejected/admin_only rows. This is the single approved channel
+    # for client→talent communication (relay through admin moderation).
+    from routers.feedback import list_approved_feedback_for_talent
+    sub["client_feedback"] = await list_approved_feedback_for_talent(sid)
     return sub
 
 

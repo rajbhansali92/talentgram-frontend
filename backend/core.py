@@ -522,6 +522,13 @@ IMAGE_RESIZE_MAX_WIDTH = 1600
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 
+# Moderated client→talent feedback relay
+FEEDBACK_TYPES = {"voice", "text"}
+FEEDBACK_STATUSES = {"pending", "approved", "rejected"}
+FEEDBACK_VISIBILITIES = {"admin_only", "shared_with_talent"}
+MAX_FEEDBACK_TEXT_LEN = 4000
+MAX_FEEDBACK_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB ceiling for voice notes
+
 # Open talent applications (project-independent signups)
 APPLICATION_UPLOAD_CATEGORIES = {"intro_video", "image"}
 MAX_APPLICATION_IMAGES = 8
@@ -635,6 +642,18 @@ class IdentifyIn(BaseModel):
 
 class SeenIn(BaseModel):
     talent_id: str
+
+
+class ClientTextFeedbackIn(BaseModel):
+    """Public client feedback (text). Voice uploads use the multipart endpoint."""
+    talent_id: str
+    submission_id: str
+    project_id: str
+    text: str = Field(min_length=1, max_length=MAX_FEEDBACK_TEXT_LEN)
+
+
+class FeedbackEditIn(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_FEEDBACK_TEXT_LEN)
 
 
 class ActionIn(BaseModel):

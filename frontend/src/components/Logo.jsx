@@ -19,10 +19,13 @@ const SIZES = {
 const SRC_DARK = "/brand/talentgram-white.png"; // white ink → for dark backgrounds
 const SRC_LIGHT = "/brand/talentgram-black.png"; // black ink → for light backgrounds
 
-export default function Logo({ size = "md", className = "" }) {
+export default function Logo({ size = "md", className = "", forceVariant = undefined }) {
     const { isLight } = useTheme();
     const h = typeof size === "number" ? size : SIZES[size] || SIZES.md;
-    const src = isLight ? SRC_LIGHT : SRC_DARK;
+    const useLight = forceVariant
+        ? forceVariant === "black"
+        : isLight;
+    const src = useLight ? SRC_LIGHT : SRC_DARK;
     return (
         <img
             src={src}

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { adminApi, saveAdminSession } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
-import Logo from "@/components/Logo";
+import BrandHero from "@/components/BrandHero";
 import { Loader2 } from "lucide-react";
 
 export default function AdminLogin() {
@@ -45,19 +45,9 @@ export default function AdminLogin() {
                         backgroundPosition: "center",
                     }}
                 />
-                <div className="absolute inset-0 bg-gradient-to-br from-black/40 to-black/80" />
-                <div className="relative h-full flex flex-col justify-between p-12 text-white">
-                    <Logo size="md" />
-                    <div>
-                        <p className="eyebrow mb-4">Client Review System</p>
-                        <h2 className="font-display text-4xl lg:text-5xl leading-tight tracking-tight">
-                            Curated decisions.
-                            <br />
-                            <span className="text-white/50">
-                                Quietly powerful.
-                            </span>
-                        </h2>
-                    </div>
+                <div className="absolute inset-0 bg-gradient-to-br from-black/55 via-black/65 to-black/85" />
+                <div className="relative h-full flex flex-col items-center justify-center p-12">
+                    <BrandHero size="md" inverted />
                 </div>
             </div>
 

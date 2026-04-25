@@ -42,6 +42,13 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v24)** — **Brand-first Landing & Admin Login.** Removed all marketing copy on the public-facing surfaces; the logo IS the hero now.
+  - **`BrandHero.jsx`** — new shared component: centred logo, hairline divider, dual-line tagline `WE SCOUT · WE MANAGE` / `INDIA | UAE`. Sizes: `lg` (Landing, ~220 px logo) and `md` (Admin Login left rail, ~140 px). `inverted` prop forces white logo + white text on always-dark surfaces (admin-login left panel) regardless of the active theme.
+  - **`Logo.jsx`** — new `forceVariant` prop ("white" | "black") so consumers can override the auto-theme swap when the surrounding panel has a fixed colour.
+  - **Landing.jsx** — removed `Talentgram × Portfolio Engine` eyebrow, "Curated portfolios. Decisive presentations." headline and the description paragraph. Hero is now logo + tagline; CTAs (`Enter Dashboard` / `Apply as Talent`) sit centred below. Subtle radial vignette replaces the heavy background photo. Footer keeps version + copyright.
+  - **AdminLogin.jsx** — removed `Client Review System` eyebrow and the "Curated decisions. Quietly powerful." H2. Left rail now shows `BrandHero` (inverted, md) centred over the existing dark texture. Right column form unchanged.
+  - **Day & Night** verified via theme toggle — landing flips backgrounds; admin-login left rail keeps its dark texture intact in both modes; tagline typography (`tg-mono` for "We Scout" + `font-display` for "INDIA | UAE") matches the existing serif logo voice.
+
 - **2026-04-25 (v23)** — **M6 Feedback Relay UI shipped.** Three coordinated surfaces.
   - **Admin** (`/admin/feedback`, `AdminFeedback.jsx`): moderation queue with filter chips (Pending/Approved/Rejected/All), per-row Approve & Share / Reject / Edit (text-only) / Delete actions, project subtitle, voice player. New sidebar nav `Feedback`.
   - **Client** (inside `TalentDetail` overlay on `ClientView.jsx`): `FeedbackComposer` with two tabs — text (4000 chars) and voice (60 s `MediaRecorder`, preview before send). Posts to `/api/public/links/{slug}/feedback[/voice]`. Submission-backed cards only (M2/M3); pure talent-share (M1) doesn't expose composer because no `submission_id` is attached.

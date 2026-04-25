@@ -42,6 +42,16 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v21)** — **Client Viewing Intelligence System (M5).** Self-aware client review experience.
+  - **5 tabs** on the public link page: All · Pending · Seen · ❤ Shortlisted · ✨ New (with live counts).
+  - **Progress bar** "X of Y reviewed" pinned above the talent grid.
+  - **Per-card badges**: 👁 Seen, ❤ Shortlisted, ✨ New.
+  - **Auto-track Seen**: IntersectionObserver fires after 5 s of ≥50% viewport visibility OR on overlay-open. POST `/api/public/links/{slug}/seen` is idempotent ($addToSet).
+  - **"New" detection**: per-link `link.subject_added_at[id]` stamped at create + on PUT for newly-added subjects (preserved for existing). For auto-pull (M2), the timestamp is derived from the submission's `decided_at`/`created_at`. A subject is "new" when `subject_added_at > viewer.prev_visit_at`.
+  - **Visit rotation**: each `identify` rolls `prev_visit_at = state.last_visit_at; last_visit_at = now` in the new `client_states` collection (unique index on link_id + viewer_email).
+  - **Shortlisted tab** filters where the viewer's existing per-talent action == "shortlist" — no duplicate state.
+  - **Tests**: 6 new pytests (`test_client_intelligence.py`) → 100% pass. Frontend testing agent (iteration_7) → 11/11 review_request bullets verified, 0 bugs.
+
 - **2026-04-25 (v20)** — **Phase 1 + 4 spec + Drive backup + 3-mode Link Generator UI.**
   - **Google Drive backup** via User OAuth + PKCE running on a non-blocking asyncio worker (`drive_backup.py`). Submissions backed up post-S3 with retry queue. Strict naming convention: `{brand}/{submission_id}/...`. UI: `DriveBackupCard` shows connection status + folder link.
   - **In-app notifications**: `notifications` collection + `routers/notifications.py` + `NotificationBell` (sidebar + mobile) + `/admin/notifications` page. Fanout on submission_new / submission_updated / submission_retake / submission_decision.

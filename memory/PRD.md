@@ -42,6 +42,17 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v27)** — **Sprint 3: Client Decision Experience.** Mobile-first review polish — every decision now reachable by one thumb.
+  - **Sticky bottom action bar** on mobile (`<md`) inside `TalentDetail`: `quick-shortlist-btn` (gold) · `quick-hold-btn` (white outline) · `quick-reject-btn` (red), each 52 px tall with `active:scale-[0.97]` + safe-area padding for iPhone notches. Hidden on desktop where the existing in-card action grid is already thumb-reachable.
+  - **Auto-advance after action**: tap any quick-action → backend save → 350 ms transition → next talent in the **filtered** list (respects current Pending/Shortlisted/etc. tab). Last talent in list closes the overlay. Includes a per-button spinner during the transition.
+  - **Swipe gestures**: native touchstart/touchmove/touchend on the overlay container — left = next talent, right = prev, swipe-down (≥ 110 px from top) = close. 60 px threshold + horizontal-vs-vertical disambiguation prevents accidental triggers during scroll. Horizontally-scrollable children (e.g. take-thumbs strip) opt out via `data-stop-swipe="1"`.
+  - **Talent counter pill** (top-left of overlay on mobile): "1 / N" — always visible.
+  - **Manual prev/next breadcrumb** at the bottom of the action bar with hint text "← swipe right · prev | N of M | next · swipe left →" so users discover the gesture if they don't try it first.
+  - **Haptic feedback**: `navigator.vibrate(10)` on supported devices (Android Chrome) when an action fires.
+  - **State persistence verified**: shortlists from a previous session re-paint the gold pill on the action bar via the existing M5 `client_states` backend.
+  - **Tap targets**: all 3 quick-action buttons + close button + nav arrows ≥ 44 px.
+  - **Verified on iPhone 12 viewport (390 × 844)**: created a 3-talent fixture, opened the first card → tapped Shortlist → auto-advanced to the second card → tapped Next → advanced to the third card. Heading + counter pill update correctly throughout.
+
 - **2026-04-25 (v26)** — **Sprint 2: Mobile-First Submission Wizard.** The highest-ROI mobile change in the system.
   - **3-step wizard on `<md`** (`SubmissionPage.jsx` + `index.css`): Step 1 Profile → Step 2 Brief / Questions → Step 3 Uploads. Implemented as a CSS-driven view (`data-mobile-step` on root + `data-step` markers on every block). **Desktop layout completely unchanged** — the same single-page form renders for `md+`.
   - **Stepbar UI** (`wizard-stepbar`): tappable step pills with check-state for completed steps + thin gold progress bar, all sticky under the header.

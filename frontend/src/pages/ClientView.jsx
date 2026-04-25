@@ -488,10 +488,15 @@ export default function ClientView() {
             {activeTalent && (
                 <TalentDetail
                     talent={activeTalent}
+                    talents={filteredTalents}
                     link={link}
                     slug={slug}
                     viewerAction={viewerActions[activeTalent.id]}
                     onClose={() => setActiveTalent(null)}
+                    onNavigate={(t) => {
+                        setActiveTalent(t);
+                        markSeen(t.id);
+                    }}
                     setAction={setAction}
                     commentDraft={
                         commentDrafts[activeTalent.id] ??
@@ -514,10 +519,12 @@ export default function ClientView() {
 
 function TalentDetail({
     talent,
+    talents,
     link,
     slug,
     viewerAction,
     onClose,
+    onNavigate,
     setAction,
     commentDraft,
     setCommentDraft,
@@ -534,9 +541,104 @@ function TalentDetail({
     const intro = mediaAll.find((m) => m.category === "video") || null;
     const takes = mediaAll.filter((m) => m.category === "take");
     const [idx, setIdx] = useState(0);
+    const [busyAction, setBusyAction] = useState(null);
+    const overlayRef = useRef(null);
 
     const prev = () => setIdx((i) => (i - 1 + images.length) % images.length);
     const next = () => setIdx((i) => (i + 1) % images.length);
+
+    // Talent navigation — driven by the parent's filtered list so swipe
+    // respects the current tab (Pending / Shortlisted / etc.).
+    const list = Array.isArray(talents) ? talents : [];
+    const currentTalentIdx = list.findIndex((t) => t.id === talent.id);
+    const hasPrevTalent = currentTalentIdx > 0;
+    const hasNextTalent =
+        currentTalentIdx >= 0 && currentTalentIdx < list.length - 1;
+    const goPrevTalent = () => {
+        if (hasPrevTalent && onNavigate) onNavigate(list[currentTalentIdx - 1]);
+    };
+    const goNextTalent = () => {
+        if (hasNextTalent && onNavigate) {
+            onNavigate(list[currentTalentIdx + 1]);
+        } else {
+            onClose();
+        }
+    };
+
+    // Swipe gesture handler — distinguishes horizontal (talent navigation)
+    // from vertical (close on swipe-down) intent. 60 px threshold avoids
+    // accidental triggers during scroll.
+    useEffect(() => {
+        const node = overlayRef.current;
+        if (!node) return;
+        let startX = 0;
+        let startY = 0;
+        let movedX = 0;
+        let movedY = 0;
+        let active = false;
+        const onTouchStart = (e) => {
+            if (e.touches.length !== 1) return;
+            // Skip if the touch starts on a horizontally-scrollable child
+            // (e.g. take video carousel) so internal scrolling works.
+            const el = e.target.closest('[data-stop-swipe="1"]');
+            if (el) return;
+            active = true;
+            startX = e.touches[0].clientX;
+            startY = e.touches[0].clientY;
+            movedX = 0;
+            movedY = 0;
+        };
+        const onTouchMove = (e) => {
+            if (!active) return;
+            movedX = e.touches[0].clientX - startX;
+            movedY = e.touches[0].clientY - startY;
+        };
+        const onTouchEnd = () => {
+            if (!active) return;
+            active = false;
+            const ax = Math.abs(movedX);
+            const ay = Math.abs(movedY);
+            // Horizontal swipe wins iff distinctly horizontal AND ≥ 60 px.
+            if (ax > 60 && ax > ay * 1.4) {
+                if (movedX < 0) goNextTalent();
+                else goPrevTalent();
+                return;
+            }
+            // Downward swipe-to-close (must be near top of overlay).
+            if (movedY > 110 && ay > ax * 1.4 && startY < 200) {
+                onClose();
+            }
+        };
+        node.addEventListener("touchstart", onTouchStart, { passive: true });
+        node.addEventListener("touchmove", onTouchMove, { passive: true });
+        node.addEventListener("touchend", onTouchEnd, { passive: true });
+        return () => {
+            node.removeEventListener("touchstart", onTouchStart);
+            node.removeEventListener("touchmove", onTouchMove);
+            node.removeEventListener("touchend", onTouchEnd);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [talent.id, list.length, currentTalentIdx]);
+
+    // Quick-decision: shortlist / reject / hold. Auto-advances to the next
+    // talent after the action so casting reviews fly through the list.
+    const quickAction = async (key) => {
+        if (busyAction) return;
+        setBusyAction(key);
+        // Subtle haptic on supported devices (Android Chrome).
+        try { navigator.vibrate?.(10); } catch {}
+        try {
+            await setAction(talent.id, key);
+            // Tiny delay so the action confirmation toast registers + the
+            // overlay's transition feels natural.
+            setTimeout(() => {
+                if (hasNextTalent) goNextTalent();
+                setBusyAction(null);
+            }, 350);
+        } catch {
+            setBusyAction(null);
+        }
+    };
 
     const download = async (m) => {
         await logDownload(talent.id, m.id);
@@ -550,12 +652,22 @@ function TalentDetail({
 
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-2xl overflow-y-auto"
+            ref={overlayRef}
+            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-2xl overflow-y-auto pb-[88px] md:pb-0"
             data-testid="talent-detail-overlay"
         >
+            {/* Talent navigation pills (mobile only — desktop has arrow keys
+                via image carousel; swipe is the primary mobile pattern). */}
+            <div className="md:hidden fixed top-3 left-3 z-50 flex items-center gap-1 text-[10px] tg-mono">
+                {currentTalentIdx >= 0 && (
+                    <span className="px-2 py-1 bg-black/60 border border-white/15 rounded-sm text-white/70">
+                        {currentTalentIdx + 1} / {list.length}
+                    </span>
+                )}
+            </div>
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-50 w-10 h-10 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50"
+                className="fixed top-5 right-5 z-50 w-11 h-11 border border-white/20 hover:border-white rounded-sm flex items-center justify-center bg-black/50 active:scale-95 transition-transform"
                 data-testid="detail-close-btn"
             >
                 <X className="w-4 h-4" />
@@ -655,7 +767,10 @@ function TalentDetail({
 
                         {/* Thumbs */}
                         {images.length > 1 && (
-                            <div className="mt-3 flex gap-2 overflow-x-auto tg-scroll pb-2">
+                            <div
+                                className="mt-3 flex gap-2 overflow-x-auto tg-scroll pb-2"
+                                data-stop-swipe="1"
+                            >
                                 {images.map((m, i) => (
                                     <button
                                         key={m.id}
@@ -901,6 +1016,87 @@ function TalentDetail({
                         </div>
                     </div>
                 </div>
+            </div>
+
+            {/* Mobile-only sticky bottom action bar — Shortlist / Hold / Reject.
+                Auto-advances to the next talent after the action so casting
+                reviews fly through the list one-thumb. Hidden on desktop where
+                the in-card action grid is already thumb-reachable. */}
+            <div
+                className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-black/90 backdrop-blur-xl border-t border-white/10 px-3 py-3"
+                data-testid="detail-bottom-bar"
+                style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
+            >
+                <div className="grid grid-cols-3 gap-2">
+                    <button
+                        type="button"
+                        onClick={() => quickAction("shortlist")}
+                        disabled={Boolean(busyAction)}
+                        data-testid="quick-shortlist-btn"
+                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-sm border text-[11px] tracking-widest uppercase active:scale-[0.97] transition-transform ${viewerAction?.action === "shortlist" ? "bg-[#FFCC00] text-black border-[#FFCC00]" : "border-white/20 text-white/85 hover:border-white"}`}
+                    >
+                        {busyAction === "shortlist" ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />
+                        )}
+                        Shortlist
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => quickAction("not_sure")}
+                        disabled={Boolean(busyAction)}
+                        data-testid="quick-hold-btn"
+                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-sm border text-[11px] tracking-widest uppercase active:scale-[0.97] transition-transform ${viewerAction?.action === "not_sure" ? "bg-white/10 text-white border-white/60" : "border-white/20 text-white/70 hover:border-white"}`}
+                    >
+                        {busyAction === "not_sure" ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <HelpCircle className="w-4 h-4" />
+                        )}
+                        Hold
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => quickAction("not_for_this")}
+                        disabled={Boolean(busyAction)}
+                        data-testid="quick-reject-btn"
+                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-sm border text-[11px] tracking-widest uppercase active:scale-[0.97] transition-transform ${viewerAction?.action === "not_for_this" ? "bg-[#FF3B30] text-white border-[#FF3B30]" : "border-white/20 text-white/70 hover:border-[#FF3B30] hover:text-[#FF3B30]"}`}
+                    >
+                        {busyAction === "not_for_this" ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <XCircle className="w-4 h-4" />
+                        )}
+                        Reject
+                    </button>
+                </div>
+                {/* Tiny breadcrumb — clarifies "you're on N of M" + nav arrows. */}
+                {list.length > 1 && (
+                    <div className="flex items-center justify-between mt-2 text-[10px] tg-mono text-white/40">
+                        <button
+                            type="button"
+                            onClick={goPrevTalent}
+                            disabled={!hasPrevTalent}
+                            data-testid="quick-prev-btn"
+                            className="px-2 py-1 disabled:opacity-30 active:scale-[0.95]"
+                            aria-label="Previous talent"
+                        >
+                            ← swipe right · prev
+                        </button>
+                        <span>{currentTalentIdx + 1} of {list.length}</span>
+                        <button
+                            type="button"
+                            onClick={goNextTalent}
+                            disabled={!hasNextTalent}
+                            data-testid="quick-next-btn"
+                            className="px-2 py-1 disabled:opacity-30 active:scale-[0.95]"
+                            aria-label="Next talent"
+                        >
+                            next · swipe left →
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );

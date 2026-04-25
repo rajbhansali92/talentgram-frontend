@@ -934,6 +934,14 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
     # Custom answers — same deal (per-question visibility already applied).
     if talent.get("custom_answers"):
         out["custom_answers"] = talent["custom_answers"]
+    # Pass through submission/project IDs for the moderated feedback relay.
+    # These are non-PII opaque IDs the client must round-trip back to
+    # `/public/links/{slug}/feedback`. Only present on submission-backed
+    # cards (M2/M3); pure talent-share (M1) has them as None.
+    if talent.get("submission_id"):
+        out["submission_id"] = talent["submission_id"]
+    if talent.get("project_id"):
+        out["project_id"] = talent["project_id"]
     # Final defensive sweep
     return {k: v2 for k, v2 in out.items() if k in CLIENT_ALLOWED_FIELDS}
 

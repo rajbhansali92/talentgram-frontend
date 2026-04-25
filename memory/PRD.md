@@ -42,6 +42,15 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-25 (v23)** — **M6 Feedback Relay UI shipped.** Three coordinated surfaces.
+  - **Admin** (`/admin/feedback`, `AdminFeedback.jsx`): moderation queue with filter chips (Pending/Approved/Rejected/All), per-row Approve & Share / Reject / Edit (text-only) / Delete actions, project subtitle, voice player. New sidebar nav `Feedback`.
+  - **Client** (inside `TalentDetail` overlay on `ClientView.jsx`): `FeedbackComposer` with two tabs — text (4000 chars) and voice (60 s `MediaRecorder`, preview before send). Posts to `/api/public/links/{slug}/feedback[/voice]`. Submission-backed cards only (M2/M3); pure talent-share (M1) doesn't expose composer because no `submission_id` is attached.
+  - **Talent** (Submitted thank-you screen on `SubmissionPage.jsx`): new `Client Feedback` inbox section. Empty state when nothing approved; otherwise renders `FeedbackRow`s — voice player or text bubble + "Received Xm ago".
+  - **NotificationBell**: `client_feedback_new` / `feedback_approved` / `feedback_rejected` notifications now route to `/admin/feedback`.
+  - **Backend tweak**: `_filter_talent_for_client` now passes through `submission_id` + `project_id` (added to `CLIENT_ALLOWED_FIELDS`) — required for the composer to round-trip the feedback POST. These are non-PII opaque IDs.
+  - **VoiceRecorder.jsx**: standalone reusable component (mic permission handling, double-click guard, 60s auto-stop, preview audio + Send/Discard).
+  - **Tests**: 32/32 backend pytests pass (feedback relay 9 + client_intelligence 6 + phase1_arch 11 + isolation 6). Live E2E curl round-trip confirmed: pending→admin queue→approve→talent inbox surfaces only after approval.
+
 - **2026-04-25 (v22)** — **Moderated Client→Talent Feedback Relay (M6, backend-only).** Admin is the only gateway between client and talent.
   - **New `feedback` collection**: `{id, type (text|voice), text, content_url, content_type, talent_id, submission_id, project_id, link_id, created_by="client", client_viewer_email/name, status (pending|approved|rejected), visibility (admin_only|shared_with_talent), created_at, approved_at, approved_by, rejected_at, rejected_by, edited_at, edited_by}`. Indexes on `(submission_id, status)`, `(project_id, status)`, and `created_at`.
   - **Client (viewer-token) endpoints**:

@@ -35,7 +35,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
     }, [previewUrl]);
 
     const start = async () => {
-        if (disabled) return;
+        if (disabled || recording) return;
         setPermError(null);
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });

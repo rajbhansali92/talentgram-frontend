@@ -37,7 +37,7 @@ export default function AdminFeedback() {
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
     const [editing, setEditing] = useState(null); // {id, text}
-    const [meta, setMeta] = useState({ projects: {}, submissions: {} });
+    const [meta, setMeta] = useState({ projects: {} });
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -45,30 +45,20 @@ export default function AdminFeedback() {
             const params = filter === "all" ? {} : { status: filter };
             const { data } = await adminApi.get("/admin/feedback", { params });
             setItems(data || []);
-            // Lazy-load project + submission names for display
+            // Lazy-load project names (used by the FeedbackCard subtitle).
             const projectIds = Array.from(
-                new Set(data.map((f) => f.project_id).filter(Boolean)),
+                new Set((data || []).map((f) => f.project_id).filter(Boolean)),
             );
-            const submissionIds = Array.from(
-                new Set(data.map((f) => f.submission_id).filter(Boolean)),
-            );
-            const out = { projects: {}, submissions: {} };
-            await Promise.all([
-                ...projectIds.map(async (pid) => {
+            const projects = {};
+            await Promise.all(
+                projectIds.map(async (pid) => {
                     try {
                         const { data: p } = await adminApi.get(`/projects/${pid}`);
-                        out.projects[pid] = p;
+                        projects[pid] = p;
                     } catch {}
                 }),
-                ...submissionIds.map(async (sid) => {
-                    try {
-                        // List endpoint requires project context — fetch via list+filter is overkill,
-                        // so we skip; talent_name comes from feedback.client_viewer_name as fallback.
-                        out.submissions[sid] = null;
-                    } catch {}
-                }),
-            ]);
-            setMeta(out);
+            );
+            setMeta({ projects });
         } catch (e) {
             toast.error("Failed to load feedback");
         } finally {

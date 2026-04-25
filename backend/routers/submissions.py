@@ -74,7 +74,14 @@ async def prefill_for_email(email: str, request: Request):
         return {}
     talent = await db.talents.find_one(
         {"$or": [{"email": email}, {"source.talent_email": email}]},
-        {"_id": 0, "created_by": 0, "media": 0, "bio": 0, "dob": 0, "gender": 0, "ethnicity": 0, "work_links": 0, "cover_media_id": 0},
+        # Strict allowlist projection — never expose media, bio, gender,
+        # ethnicity, work_links. Phone is included so the talent doesn't
+        # have to retype it.
+        {
+            "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
+            "phone": 1, "location": 1,
+            "instagram_handle": 1, "instagram_followers": 1,
+        },
     )
     if not talent:
         return {}
@@ -86,6 +93,8 @@ async def prefill_for_email(email: str, request: Request):
         "first_name": first,
         "last_name": last,
         "age": talent.get("age"),
+        "dob": talent.get("dob"),
+        "phone": talent.get("phone"),
         "height": talent.get("height"),
         "location": talent.get("location"),
         "instagram_handle": talent.get("instagram_handle"),

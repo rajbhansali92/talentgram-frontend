@@ -329,36 +329,70 @@ export default function SubmissionPage() {
         }
     };
 
-    // Auto-prefill on email blur — if this email has an approved talent record,
-    // auto-fill known fields so returning talents don't retype everything.
+    // Email-first auto-fill (Phase 1).
+    //
+    // On email blur we hit `/api/public/prefill`. If we get a hit, we DO NOT
+    // silently overwrite — we surface a small inline confirmation card with
+    // "Use this" / "Edit manually" so the talent stays in control.
+    //
+    // Strict scope (per Phase 1 spec):
+    //   ✅ Auto-fill: first_name, last_name, age, dob, height, phone, location, instagram_*
+    //   ❌ NEVER auto-fill: any media (intro, takes, images), previous form
+    //      answers, custom-questions, availability/budget/commission.
+    //
+    // The user can re-trigger prefill by re-entering the email — we only
+    // auto-trigger ONCE per email value.
     const [prefillTried, setPrefillTried] = useState(false);
+    const [prefillSuggestion, setPrefillSuggestion] = useState(null); // {data}
+    const [prefillEmail, setPrefillEmail] = useState("");
+
     const tryPrefill = async () => {
-        if (saved) return; // already started submission
+        if (saved) return; // submission already started — too late
         const email = (form.email || "").trim().toLowerCase();
-        if (!email || !email.includes("@") || prefillTried) return;
+        if (!email || !email.includes("@")) return;
+        if (email === prefillEmail && prefillTried) return; // already tried
+        setPrefillEmail(email);
         setPrefillTried(true);
         try {
             const { data } = await axios.get(
                 `${API}/public/prefill?email=${encodeURIComponent(email)}`,
             );
-            if (!data || !data.first_name) return;
-            setForm((f) => ({
-                ...f,
-                first_name: f.first_name || data.first_name || "",
-                last_name: f.last_name || data.last_name || "",
-                height: f.height || data.height || "",
-                location: f.location || data.location || "",
-                instagram_handle: f.instagram_handle || data.instagram_handle || "",
-                instagram_followers:
-                    f.instagram_followers || data.instagram_followers || "",
-            }));
-            toast.success(
-                `Welcome back, ${data.first_name} — we auto-filled what we had`,
-            );
+            if (!data || !data.first_name) {
+                // New talent — quietly do nothing.
+                setPrefillSuggestion(null);
+                return;
+            }
+            // Surface the prompt instead of silently overwriting.
+            setPrefillSuggestion({ data });
         } catch {
-            // silent
+            // 429 (rate-limited) or network — fail silently. The user can
+            // continue manually; prefill is purely a convenience.
         }
     };
+
+    // "Use this" — apply the suggested fields, but ONLY where the user
+    // hasn't already typed something. Never touches media or rich answers.
+    const applyPrefill = () => {
+        const data = prefillSuggestion?.data;
+        if (!data) return;
+        setForm((f) => ({
+            ...f,
+            first_name: f.first_name || data.first_name || "",
+            last_name: f.last_name || data.last_name || "",
+            phone: f.phone || data.phone || "",
+            age: f.age || (data.age != null ? String(data.age) : ""),
+            dob: f.dob || data.dob || "",
+            height: f.height || data.height || "",
+            location: f.location || data.location || "",
+            instagram_handle: f.instagram_handle || data.instagram_handle || "",
+            instagram_followers:
+                f.instagram_followers || data.instagram_followers || "",
+        }));
+        setPrefillSuggestion(null);
+        toast.success(`Welcome back, ${data.first_name}`);
+    };
+
+    const dismissPrefill = () => setPrefillSuggestion(null);
 
     const startSubmission = async (e) => {
         e.preventDefault();
@@ -851,6 +885,77 @@ export default function SubmissionPage() {
                     </p>
 
                     <form onSubmit={startSubmission} className="space-y-6">
+                        {/* Phase 1 — email-first identity. The email field
+                            anchors the form so we can prefill known talents
+                            BEFORE they retype everything. */}
+                        <div data-step="1">
+                            <FormField
+                                label="Email *"
+                                type="email"
+                                value={form.email}
+                                onChange={(v) =>
+                                    setForm({ ...form, email: v })
+                                }
+                                onBlur={() => {
+                                    saveForm();
+                                    tryPrefill();
+                                }}
+                                testid="form-email"
+                                required
+                                disabled={!!saved}
+                                wide
+                            />
+                            <p className="text-[11px] text-white/40 mt-2 tg-mono">
+                                We use email to recognise you. Returning
+                                talents see saved details below.
+                            </p>
+                        </div>
+
+                        {/* Prefill suggestion card — only shown when an
+                            approved talent record matches the email. The
+                            user is in control: Use this OR Edit manually. */}
+                        {prefillSuggestion && !saved && (
+                            <div
+                                className="border border-[#c9a961]/40 bg-[#c9a961]/[0.06] p-4 rounded-sm flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
+                                data-testid="prefill-suggestion-card"
+                                data-step="1"
+                            >
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm text-white">
+                                        We found your profile.{" "}
+                                        <span className="text-white/60">
+                                            Use saved details?
+                                        </span>
+                                    </p>
+                                    <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
+                                        {prefillSuggestion.data.first_name}{" "}
+                                        {prefillSuggestion.data.last_name || ""}
+                                        {prefillSuggestion.data.location ? ` · ${prefillSuggestion.data.location}` : ""}
+                                        {prefillSuggestion.data.height ? ` · ${prefillSuggestion.data.height}` : ""}
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={applyPrefill}
+                                        data-testid="prefill-use-btn"
+                                        className="bg-white text-black px-4 py-2.5 text-xs rounded-sm hover:opacity-90 inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-transform"
+                                    >
+                                        <Check className="w-3.5 h-3.5" />
+                                        Use this
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={dismissPrefill}
+                                        data-testid="prefill-dismiss-btn"
+                                        className="border border-white/20 text-white/70 hover:border-white px-4 py-2.5 text-xs rounded-sm inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-transform"
+                                    >
+                                        Edit manually
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6" data-step="1">
                             <FormField
                                 label="First Name *"
@@ -871,21 +976,6 @@ export default function SubmissionPage() {
                                 onBlur={saveForm}
                                 testid="form-last-name"
                                 required
-                            />
-                            <FormField
-                                label="Email *"
-                                type="email"
-                                value={form.email}
-                                onChange={(v) =>
-                                    setForm({ ...form, email: v })
-                                }
-                                onBlur={() => {
-                                    saveForm();
-                                    tryPrefill();
-                                }}
-                                testid="form-email"
-                                required
-                                disabled={!!saved}
                             />
                             <FormField
                                 label="Phone (optional)"

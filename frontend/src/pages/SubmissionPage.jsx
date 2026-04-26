@@ -9,7 +9,10 @@ import ThemeToggle from "@/components/ThemeToggle";
 import {
     Select,
     SelectContent,
+    SelectGroup,
     SelectItem,
+    SelectLabel,
+    SelectSeparator,
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
@@ -27,33 +30,19 @@ import {
     Mic,
     MessageSquare,
 } from "lucide-react";
+import {
+    HEIGHT_OPTIONS,
+    GENDER_OPTIONS,
+    ETHNICITY_OPTIONS,
+    FOLLOWER_TIERS,
+    calcAge,
+} from "@/lib/talentSchema";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
 const MIN_IMAGES = 5;
 const LS_KEY = (slug) => `tg_submission_${slug}`;
 const LS_DRAFT_KEY = (slug) => `tg_draft_${slug}`;
-
-const HEIGHT_OPTIONS = (() => {
-    const out = [];
-    for (let ft = 3; ft <= 6; ft++) {
-        const maxIn = ft === 6 ? 7 : 11;
-        for (let inch = 0; inch <= maxIn; inch++) out.push(`${ft}'${inch}"`);
-    }
-    return out;
-})();
-
-function calcAge(dob) {
-    if (!dob) return null;
-    const [y, m, d] = dob.split("-").map((n) => parseInt(n, 10));
-    if (!y || !m || !d) return null;
-    const today = new Date();
-    let age = today.getFullYear() - y;
-    const mm = today.getMonth() + 1;
-    const dd = today.getDate();
-    if (mm < m || (mm === m && dd < d)) age -= 1;
-    return age >= 0 && age <= 120 ? age : null;
-}
 
 function readSaved(slug) {
     try {
@@ -93,6 +82,15 @@ export default function SubmissionPage() {
             age: "",
             height: "",
             location: "",
+            // Phase 2 — schema unification: every talent-facing form writes
+            // the SAME shape directly into the talent record. No separate
+            // mappings.
+            gender: "",
+            ethnicity: "",
+            instagram_handle: "",
+            instagram_followers: "",
+            bio: "",
+            work_links: [],
             competitive_brand: "",
             availability: { status: "", note: "" },
             budget: { status: "", value: "" },
@@ -124,6 +122,8 @@ export default function SubmissionPage() {
     const newTakeRef = useRef();
     const imagesRef = useRef();
     const cameraImagesRef = useRef(); // mobile camera-first photo capture
+    const indianImagesRef = useRef();
+    const westernImagesRef = useRef();
 
     // Load project
     useEffect(() => {
@@ -308,6 +308,14 @@ export default function SubmissionPage() {
                     age: computedAge != null ? String(computedAge) : form.age || null,
                     height: form.height,
                     location: form.location,
+                    // Phase 2 unified identity
+                    dob: form.dob || null,
+                    gender: form.gender || null,
+                    ethnicity: form.ethnicity || null,
+                    instagram_handle: form.instagram_handle || null,
+                    instagram_followers: form.instagram_followers || null,
+                    bio: form.bio || null,
+                    work_links: form.work_links || [],
                     competitive_brand: form.competitive_brand || null,
                     availability: form.availability,
                     budget: form.budget,
@@ -384,9 +392,16 @@ export default function SubmissionPage() {
             dob: f.dob || data.dob || "",
             height: f.height || data.height || "",
             location: f.location || data.location || "",
+            gender: f.gender || data.gender || "",
+            ethnicity: f.ethnicity || data.ethnicity || "",
+            bio: f.bio || data.bio || "",
             instagram_handle: f.instagram_handle || data.instagram_handle || "",
             instagram_followers:
                 f.instagram_followers || data.instagram_followers || "",
+            work_links:
+                f.work_links && f.work_links.length
+                    ? f.work_links
+                    : (data.work_links || []),
         }));
         setPrefillSuggestion(null);
         toast.success(`Welcome back, ${data.first_name}`);
@@ -414,6 +429,13 @@ export default function SubmissionPage() {
                     age: computedAge != null ? String(computedAge) : "",
                     height: form.height,
                     location: form.location,
+                    // Phase 2 unified identity (mirrored to talent on finalize)
+                    gender: form.gender || "",
+                    ethnicity: form.ethnicity || "",
+                    instagram_handle: form.instagram_handle || "",
+                    instagram_followers: form.instagram_followers || "",
+                    bio: form.bio || "",
+                    work_links: form.work_links || [],
                     competitive_brand: project.competitive_brand_enabled
                         ? form.competitive_brand
                         : "",
@@ -551,8 +573,8 @@ export default function SubmissionPage() {
         }
     };
 
-    const uploadImages = async (files) => {
-        const current = images.length;
+    const uploadImages = async (files, imageCategory = "image") => {
+        const current = allImages.length;
         const room = MAX_IMAGES - current;
         const accepted = Array.from(files).slice(0, room);
         if (files.length > room) {
@@ -564,7 +586,7 @@ export default function SubmissionPage() {
             toast.error(`"${over.name}" is too large (max 25 MB per image).`);
             return;
         }
-        setUploading("image");
+        setUploading(imageCategory);
         setUploadPct(0);
         try {
             let last = null;
@@ -573,7 +595,7 @@ export default function SubmissionPage() {
                 const f = accepted[i];
                 const fd = new FormData();
                 fd.append("file", f);
-                fd.append("category", "image");
+                fd.append("category", imageCategory);
                 const { data } = await axios.post(
                     `${API}/public/submissions/${saved.id}/upload`,
                     fd,
@@ -663,7 +685,13 @@ export default function SubmissionPage() {
     }
 
     const media = submission?.media || [];
+    // Phase 2 — portfolio images come in 3 flavours: generic, indian look,
+    // western look. They share the MAX_IMAGES bucket so the talent doesn't
+    // exceed the 8-image cap by splitting categories.
     const images = media.filter((m) => m.category === "image");
+    const indianImages = media.filter((m) => m.category === "indian");
+    const westernImages = media.filter((m) => m.category === "western");
+    const allImages = [...images, ...indianImages, ...westernImages];
     const intro = media.find((m) => m.category === "intro_video");
     // Renamable takes: new `take` category + legacy `take_1/2/3` (auto-labelled)
     const takes = media
@@ -687,7 +715,7 @@ export default function SubmissionPage() {
     const readyToSubmit =
         intro &&
         takes.length > 0 &&
-        images.length >= MIN_IMAGES &&
+        allImages.length >= MIN_IMAGES &&
         form.first_name &&
         form.last_name &&
         form.height &&
@@ -713,9 +741,9 @@ export default function SubmissionPage() {
         missing.push("Budget amount");
     if (!intro) missing.push("Introduction video");
     if (takes.length === 0) missing.push("At least 1 audition take");
-    if (images.length < MIN_IMAGES)
+    if (allImages.length < MIN_IMAGES)
         missing.push(
-            `${MIN_IMAGES - images.length} more image${MIN_IMAGES - images.length > 1 ? "s" : ""} (${images.length}/${MIN_IMAGES} min)`,
+            `${MIN_IMAGES - allImages.length} more image${MIN_IMAGES - allImages.length > 1 ? "s" : ""} (${allImages.length}/${MIN_IMAGES} min)`,
         );
 
     // ---------------------------------------------------------------
@@ -1083,6 +1111,166 @@ export default function SubmissionPage() {
                             )}
                         </div>
 
+                        {/* Phase 2 — unified identity fields. These map 1:1
+                            to TalentIn (gender, ethnicity, instagram_*, bio,
+                            work_links) so the same shape lands in the master
+                            talent record on finalize. */}
+                        <div
+                            className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6"
+                            data-step="1"
+                            data-testid="unified-identity-block"
+                        >
+                            <div data-testid="form-gender-field">
+                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                    Gender
+                                </span>
+                                <div className="mt-2 grid grid-cols-2 gap-2">
+                                    {GENDER_OPTIONS.map((g) => {
+                                        const active = form.gender === g.key;
+                                        return (
+                                            <button
+                                                key={g.key}
+                                                type="button"
+                                                onClick={() => {
+                                                    setForm({
+                                                        ...form,
+                                                        gender: active
+                                                            ? ""
+                                                            : g.key,
+                                                    });
+                                                    setTimeout(saveForm, 0);
+                                                }}
+                                                data-testid={`form-gender-${g.key}`}
+                                                className={`px-3 py-2.5 text-xs rounded-sm border transition-all min-h-[44px] active:scale-[0.97] ${
+                                                    active
+                                                        ? "bg-white text-black border-white"
+                                                        : "border-white/20 hover:border-white text-white/80"
+                                                }`}
+                                            >
+                                                {g.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            <div data-testid="form-ethnicity-field">
+                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                    Ethnicity
+                                </span>
+                                <div className="mt-2">
+                                    <Select
+                                        value={form.ethnicity || ""}
+                                        onValueChange={(v) => {
+                                            setForm({ ...form, ethnicity: v });
+                                            setTimeout(saveForm, 0);
+                                        }}
+                                    >
+                                        <SelectTrigger
+                                            data-testid="form-ethnicity-trigger"
+                                            className="bg-transparent border-0 border-b border-white/20 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-3"
+                                        >
+                                            <SelectValue placeholder="Select ethnicity" />
+                                        </SelectTrigger>
+                                        <SelectContent className="max-h-72">
+                                            {ETHNICITY_OPTIONS.map((e) => (
+                                                <SelectItem
+                                                    key={e.key}
+                                                    value={e.key}
+                                                    data-testid={`form-ethnicity-option-${e.key}`}
+                                                >
+                                                    {e.label}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                            <FormField
+                                label="Instagram Handle"
+                                value={form.instagram_handle}
+                                onChange={(v) =>
+                                    setForm({ ...form, instagram_handle: v })
+                                }
+                                onBlur={saveForm}
+                                testid="form-instagram-handle"
+                                placeholder="@yourhandle"
+                            />
+                            <div data-testid="form-instagram-followers-field">
+                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                    Instagram Followers
+                                </span>
+                                <div className="mt-2">
+                                    <Select
+                                        value={form.instagram_followers || ""}
+                                        onValueChange={(v) => {
+                                            setForm({
+                                                ...form,
+                                                instagram_followers: v,
+                                            });
+                                            setTimeout(saveForm, 0);
+                                        }}
+                                    >
+                                        <SelectTrigger
+                                            data-testid="form-instagram-followers-trigger"
+                                            className="bg-transparent border-0 border-b border-white/20 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-3"
+                                        >
+                                            <SelectValue placeholder="Select range" />
+                                        </SelectTrigger>
+                                        <SelectContent className="max-h-72">
+                                            {FOLLOWER_TIERS.map((tier) => (
+                                                <SelectGroup key={tier.label}>
+                                                    <SelectLabel className="text-[10px] tracking-wide uppercase text-white/40">
+                                                        {tier.label}
+                                                    </SelectLabel>
+                                                    {tier.items.map((it) => (
+                                                        <SelectItem
+                                                            key={it}
+                                                            value={it}
+                                                        >
+                                                            {it}
+                                                        </SelectItem>
+                                                    ))}
+                                                    <SelectSeparator />
+                                                </SelectGroup>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                            <label className="block md:col-span-2" data-testid="form-bio-field">
+                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                    Bio (optional)
+                                </span>
+                                <textarea
+                                    value={form.bio}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            bio: e.target.value,
+                                        })
+                                    }
+                                    onBlur={saveForm}
+                                    rows={3}
+                                    maxLength={600}
+                                    data-testid="form-bio"
+                                    className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base resize-none"
+                                    placeholder="A short note about you (max 600 chars)"
+                                />
+                            </label>
+                            <div className="md:col-span-2" data-testid="form-work-links-field">
+                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                    Work Links (optional)
+                                </span>
+                                <WorkLinksEditor
+                                    links={form.work_links || []}
+                                    onChange={(arr) => {
+                                        setForm({ ...form, work_links: arr });
+                                        setTimeout(saveForm, 0);
+                                    }}
+                                />
+                            </div>
+                        </div>
+
                         {/* AVAILABILITY — decision block */}
                         <div
                             className="border-t border-white/10 pt-7"
@@ -1406,15 +1594,54 @@ export default function SubmissionPage() {
                                 </p>
                                 <span
                                     data-testid="image-counter"
-                                    className={`text-xs tg-mono ${images.length >= MIN_IMAGES ? "text-[#34C759]" : "text-white/70"}`}
+                                    className={`text-xs tg-mono ${allImages.length >= MIN_IMAGES ? "text-[#34C759]" : "text-white/70"}`}
                                 >
-                                    {images.length}/{MAX_IMAGES}
+                                    {allImages.length}/{MAX_IMAGES}
                                 </span>
                             </div>
                             <p className="text-xs text-white/50 mb-4 leading-relaxed">
                                 Please send 7–8 high-resolution professional
                                 images that align with the brand's aesthetic.
-                                Minimum {MIN_IMAGES} required.
+                                Minimum {MIN_IMAGES} required (counts include
+                                Indian / Western look images below).
+                            </p>
+
+                            {/* Phase 2 — optional Indian look images */}
+                            <PortfolioGroup
+                                label="Indian Look (optional)"
+                                hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
+                                items={indianImages}
+                                category="indian"
+                                allImagesCount={allImages.length}
+                                maxImages={MAX_IMAGES}
+                                inputRef={indianImagesRef}
+                                uploadImages={uploadImages}
+                                removeMedia={removeMedia}
+                                uploading={uploading}
+                                uploadPct={uploadPct}
+                                FILE_URL={FILE_URL}
+                                testidPrefix="indian"
+                            />
+
+                            {/* Phase 2 — optional Western look images */}
+                            <PortfolioGroup
+                                label="Western Look (optional)"
+                                hint="Casual, formal or western-styled references."
+                                items={westernImages}
+                                category="western"
+                                allImagesCount={allImages.length}
+                                maxImages={MAX_IMAGES}
+                                inputRef={westernImagesRef}
+                                uploadImages={uploadImages}
+                                removeMedia={removeMedia}
+                                uploading={uploading}
+                                uploadPct={uploadPct}
+                                FILE_URL={FILE_URL}
+                                testidPrefix="western"
+                            />
+
+                            <p className="eyebrow mt-2 mb-3" data-testid="generic-portfolio-label">
+                                Portfolio (general)
                             </p>
 
                             <div className="grid grid-cols-3 md:grid-cols-4 gap-2 mb-3">
@@ -1436,7 +1663,7 @@ export default function SubmissionPage() {
                                         </button>
                                     </div>
                                 ))}
-                                {images.length < MAX_IMAGES && (
+                                {images.length < MAX_IMAGES && allImages.length < MAX_IMAGES && (
                                     <button
                                         onClick={() =>
                                             imagesRef.current?.click()
@@ -1502,7 +1729,7 @@ export default function SubmissionPage() {
                                 <button
                                     type="button"
                                     onClick={() => cameraImagesRef.current?.click()}
-                                    disabled={uploading === "image" || images.length >= MAX_IMAGES}
+                                    disabled={uploading === "image" || allImages.length >= MAX_IMAGES}
                                     data-testid="add-image-camera-btn"
                                     className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
                                 >
@@ -1511,7 +1738,7 @@ export default function SubmissionPage() {
                                 <button
                                     type="button"
                                     onClick={() => imagesRef.current?.click()}
-                                    disabled={uploading === "image" || images.length >= MAX_IMAGES}
+                                    disabled={uploading === "image" || allImages.length >= MAX_IMAGES}
                                     data-testid="add-image-library-btn"
                                     className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
                                 >
@@ -1595,6 +1822,161 @@ function Info({ label, value, wide }) {
                 {label}
             </div>
             <div className="text-sm font-medium">{value}</div>
+        </div>
+    );
+}
+
+function PortfolioGroup({
+    label,
+    hint,
+    items,
+    category,
+    allImagesCount,
+    maxImages,
+    inputRef,
+    uploadImages,
+    removeMedia,
+    uploading,
+    uploadPct,
+    FILE_URL,
+    testidPrefix,
+}) {
+    const isUploading = uploading === category;
+    const reachedCap = allImagesCount >= maxImages;
+    return (
+        <div className="mb-5" data-testid={`portfolio-group-${testidPrefix}`}>
+            <div className="flex items-center justify-between mb-1">
+                <p className="eyebrow">{label}</p>
+                <span className="text-[10px] tg-mono text-white/50">
+                    {items.length}
+                </span>
+            </div>
+            {hint && (
+                <p className="text-[11px] text-white/40 mb-3 tg-mono">
+                    {hint}
+                </p>
+            )}
+            <div className="grid grid-cols-3 md:grid-cols-4 gap-2">
+                {items.map((m) => (
+                    <div
+                        key={m.id}
+                        className="relative aspect-square bg-[#0a0a0a] border border-white/10 group"
+                        data-testid={`${testidPrefix}-image-${m.id}`}
+                    >
+                        <img
+                            src={FILE_URL(m.storage_path)}
+                            alt=""
+                            className="w-full h-full object-cover"
+                        />
+                        <button
+                            onClick={() => removeMedia(m.id)}
+                            data-testid={`${testidPrefix}-image-remove-${m.id}`}
+                            className="absolute top-1 right-1 p-1 bg-black/70 hover:bg-[#FF3B30] rounded-sm"
+                        >
+                            <X className="w-3 h-3" />
+                        </button>
+                    </div>
+                ))}
+                {!reachedCap && (
+                    <button
+                        type="button"
+                        onClick={() => inputRef.current?.click()}
+                        disabled={isUploading}
+                        data-testid={`add-${testidPrefix}-image-btn`}
+                        className="relative aspect-square border border-dashed border-white/20 hover:border-white/50 flex items-center justify-center text-white/50 hover:text-white transition-all overflow-hidden disabled:opacity-50"
+                    >
+                        {isUploading && uploadPct > 0 && (
+                            <span
+                                aria-hidden
+                                className="absolute inset-y-0 left-0 bg-white/10"
+                                style={{ width: `${uploadPct}%` }}
+                            />
+                        )}
+                        {isUploading ? (
+                            <div className="relative flex flex-col items-center gap-1">
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                <span className="text-[10px] tg-mono">
+                                    {uploadPct ? `${uploadPct}%` : "…"}
+                                </span>
+                            </div>
+                        ) : (
+                            <div className="relative flex flex-col items-center gap-1">
+                                <Plus className="w-5 h-5" />
+                                <span className="text-[10px] tg-mono">Add</span>
+                            </div>
+                        )}
+                    </button>
+                )}
+            </div>
+            <input
+                ref={inputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                    if (e.target.files?.length)
+                        uploadImages(e.target.files, category);
+                    e.target.value = "";
+                }}
+            />
+        </div>
+    );
+}
+
+function WorkLinksEditor({ links, onChange }) {
+    const [input, setInput] = useState("");
+    const add = () => {
+        const v = input.trim();
+        if (!v) return;
+        onChange([...(links || []), v]);
+        setInput("");
+    };
+    const remove = (i) =>
+        onChange((links || []).filter((_, idx) => idx !== i));
+    return (
+        <div className="mt-2 space-y-2" data-testid="work-links-editor">
+            {(links || []).map((w, i) => (
+                <div
+                    key={`${w}-${i}`}
+                    className="flex items-center justify-between gap-2 px-3 py-2 border border-white/10 rounded-sm text-xs tg-mono break-all"
+                    data-testid={`work-link-row-${i}`}
+                >
+                    <span className="truncate text-white/80">{w}</span>
+                    <button
+                        type="button"
+                        onClick={() => remove(i)}
+                        data-testid={`work-link-remove-${i}`}
+                        className="text-white/40 hover:text-white shrink-0"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            ))}
+            <div className="flex items-center gap-2">
+                <input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                            e.preventDefault();
+                            add();
+                        }
+                    }}
+                    inputMode="url"
+                    placeholder="https://… (paste & press Enter)"
+                    data-testid="work-link-input"
+                    className="flex-1 bg-transparent border-b border-white/20 focus:border-white outline-none py-2 text-sm"
+                />
+                <button
+                    type="button"
+                    onClick={add}
+                    data-testid="work-link-add-btn"
+                    className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm min-h-[44px] active:scale-[0.97] transition-transform"
+                >
+                    Add
+                </button>
+            </div>
         </div>
     );
 }

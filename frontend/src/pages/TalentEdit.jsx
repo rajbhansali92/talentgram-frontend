@@ -23,9 +23,17 @@ import {
     X,
     Play,
 } from "lucide-react";
+import {
+    HEIGHT_OPTIONS,
+    GENDER_OPTIONS,
+    ETHNICITY_OPTIONS,
+    FOLLOWER_TIERS,
+} from "@/lib/talentSchema";
 
 const emptyTalent = {
     name: "",
+    email: "",
+    phone: "",
     age: "",
     dob: "",
     height: "",
@@ -38,18 +46,6 @@ const emptyTalent = {
     work_links: [],
 };
 
-// 3'0" through 6'7"
-const HEIGHT_OPTIONS = (() => {
-    const out = [];
-    for (let ft = 3; ft <= 6; ft++) {
-        const maxIn = ft === 6 ? 7 : 11;
-        for (let inch = 0; inch <= maxIn; inch++) {
-            out.push(`${ft}'${inch}"`);
-        }
-    }
-    return out;
-})();
-
 function calcAge(dob) {
     if (!dob) return null;
     const [y, m, d] = dob.split("-").map((n) => parseInt(n, 10));
@@ -61,25 +57,6 @@ function calcAge(dob) {
     if (mm < m || (mm === m && dd < d)) age -= 1;
     return age >= 0 && age <= 120 ? age : null;
 }
-
-const FOLLOWER_TIERS = [
-    {
-        label: "Early Range",
-        items: ["1K+", "10K+", "25K+", "50K+", "75K+", "100K+"],
-    },
-    {
-        label: "Mid Range",
-        items: ["150K+", "200K+", "300K+", "400K+", "500K+", "750K+", "1M+"],
-    },
-    {
-        label: "High Range",
-        items: ["2M+", "3M+", "4M+", "5M+", "7M+", "10M+"],
-    },
-    {
-        label: "Premium Influencer",
-        items: ["15M+", "20M+", "25M+", "30M+", "40M+", "50M+"],
-    },
-];
 
 function Field({ label, value, onChange, type = "text", ...rest }) {
     return (
@@ -289,6 +266,22 @@ export default function TalentEdit() {
                         value={talent.name}
                         onChange={(v) => setTalent({ ...talent, name: v })}
                     />
+                    <Field
+                        label="Email"
+                        type="email"
+                        value={talent.email}
+                        onChange={(v) => setTalent({ ...talent, email: v })}
+                        data-testid="talent-email-input"
+                        placeholder="optional"
+                    />
+                    <Field
+                        label="Phone"
+                        type="tel"
+                        value={talent.phone}
+                        onChange={(v) => setTalent({ ...talent, phone: v })}
+                        data-testid="talent-phone-input"
+                        placeholder="optional"
+                    />
 
                     {/* DOB + auto Age (admin-only) */}
                     <label className="block" data-testid="field-dob">
@@ -325,32 +318,32 @@ export default function TalentEdit() {
                         </div>
                     </div>
 
-                    {/* Gender pills */}
+                    {/* Gender pills — canonical 4-value list (shared schema) */}
                     <div data-testid="field-gender">
                         <span className="text-[11px] text-white/50 tracking-widest uppercase">
                             Gender
                         </span>
-                        <div className="mt-2 flex gap-2">
-                            {["Male", "Female"].map((g) => {
-                                const active = talent.gender === g;
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                            {GENDER_OPTIONS.map((g) => {
+                                const active = talent.gender === g.key;
                                 return (
                                     <button
-                                        key={g}
+                                        key={g.key}
                                         type="button"
                                         onClick={() =>
                                             setTalent({
                                                 ...talent,
-                                                gender: active ? "" : g,
+                                                gender: active ? "" : g.key,
                                             })
                                         }
-                                        data-testid={`gender-${g.toLowerCase()}-btn`}
-                                        className={`flex-1 px-4 py-2.5 rounded-full text-sm border transition-all ${
+                                        data-testid={`gender-${g.key}-btn`}
+                                        className={`px-3 py-2.5 text-sm rounded-full border transition-all ${
                                             active
                                                 ? "bg-white text-black border-white"
                                                 : "border-white/20 hover:border-white/50 text-white/80"
                                         }`}
                                     >
-                                        {g}
+                                        {g.label}
                                     </button>
                                 );
                             })}
@@ -395,11 +388,37 @@ export default function TalentEdit() {
                         value={talent.location}
                         onChange={(v) => setTalent({ ...talent, location: v })}
                     />
-                    <Field
-                        label="Ethnicity"
-                        value={talent.ethnicity}
-                        onChange={(v) => setTalent({ ...talent, ethnicity: v })}
-                    />
+                    <div data-testid="field-ethnicity">
+                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                            Ethnicity
+                        </span>
+                        <div className="mt-2">
+                            <Select
+                                value={talent.ethnicity || ""}
+                                onValueChange={(v) =>
+                                    setTalent({ ...talent, ethnicity: v })
+                                }
+                            >
+                                <SelectTrigger
+                                    data-testid="ethnicity-select-trigger"
+                                    className="bg-transparent border-0 border-b border-white/15 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-2.5"
+                                >
+                                    <SelectValue placeholder="Select ethnicity" />
+                                </SelectTrigger>
+                                <SelectContent className="max-h-72">
+                                    {ETHNICITY_OPTIONS.map((e) => (
+                                        <SelectItem
+                                            key={e.key}
+                                            value={e.key}
+                                            data-testid={`ethnicity-option-${e.key}`}
+                                        >
+                                            {e.label}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                    </div>
                     <Field
                         label="Instagram Handle"
                         value={talent.instagram_handle}

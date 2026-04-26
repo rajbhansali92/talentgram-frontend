@@ -525,9 +525,11 @@ MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
 #   intro_video      — single slot
 #   take             — NEW renamable takes, up to MAX_SUBMISSION_TAKES (carries `label`)
 #   take_1/take_2/take_3 — LEGACY fixed slots (read-only back-compat; auto-labelled "Take N")
-#   image            — portfolio images (MIN/MAX_SUBMISSION_IMAGES bounds)
-SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3", "image"}
+#   image            — generic portfolio images (MIN/MAX_SUBMISSION_IMAGES bounds)
+#   indian / western — look-specific portfolio images (Phase 2 schema unification)
+SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3", "image", "indian", "western"}
 LEGACY_TAKE_CATEGORIES = {"take_1", "take_2", "take_3"}
+PORTFOLIO_IMAGE_CATEGORIES = {"image", "indian", "western"}
 MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
@@ -547,8 +549,9 @@ FEEDBACK_VISIBILITIES = {"admin_only", "shared_with_talent"}
 MAX_FEEDBACK_TEXT_LEN = 4000
 MAX_FEEDBACK_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB ceiling for voice notes
 
-# Open talent applications (project-independent signups)
-APPLICATION_UPLOAD_CATEGORIES = {"intro_video", "image"}
+# Open talent applications (project-independent signups). `indian`/`western`
+# image categories share the same image limits as generic portfolio images.
+APPLICATION_UPLOAD_CATEGORIES = {"intro_video", "image", "indian", "western"}
 MAX_APPLICATION_IMAGES = 8
 MIN_APPLICATION_IMAGES = 5
 APPLICATION_DECISIONS = SUBMISSION_DECISIONS
@@ -604,6 +607,7 @@ class MediaItem(BaseModel):
 class TalentIn(BaseModel):
     name: str
     email: Optional[EmailStr] = None
+    phone: Optional[str] = None
     age: Optional[int] = None
     dob: Optional[str] = None
     height: Optional[str] = None

@@ -15,6 +15,7 @@ from core import (
     MAX_SUBMISSION_TAKES,
     MAX_SUBMISSION_VIDEO_BYTES,
     MIN_SUBMISSION_IMAGES,
+    PORTFOLIO_IMAGE_CATEGORIES,
     SUBMISSION_DECISIONS,
     SUBMISSION_UPLOAD_CATEGORIES,
     AdminSubmissionEditIn,
@@ -60,8 +61,8 @@ async def prefill_for_email(email: str, request: Request):
     """Public lookup: if the email matches an approved talent, return safe fields
     so the audition form can pre-fill. Returns 204-style empty dict if not found.
 
-    Only NON-SENSITIVE fields are exposed (never DOB, gender, bio, or media paths):
-      first_name, last_name, age (computed), height, location, instagram_handle, instagram_followers
+    Phase 2 unified schema: returns the full set of non-sensitive identity
+    fields. Media / source / notes / created_by are NEVER included.
 
     Phase 0: rate-limited to **20 lookups per minute per IP** to mitigate
     email-probing. The limiter is a sliding-window in-memory counter — fine
@@ -74,13 +75,12 @@ async def prefill_for_email(email: str, request: Request):
         return {}
     talent = await db.talents.find_one(
         {"$or": [{"email": email}, {"source.talent_email": email}]},
-        # Strict allowlist projection — never expose media, bio, gender,
-        # ethnicity, work_links. Phone is included so the talent doesn't
-        # have to retype it.
+        # Strict allowlist projection. Media / storage paths / source / notes
+        # never leave this endpoint.
         {
             "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
-            "phone": 1, "location": 1,
-            "instagram_handle": 1, "instagram_followers": 1,
+            "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
+            "instagram_handle": 1, "instagram_followers": 1, "work_links": 1,
         },
     )
     if not talent:
@@ -97,8 +97,12 @@ async def prefill_for_email(email: str, request: Request):
         "phone": talent.get("phone"),
         "height": talent.get("height"),
         "location": talent.get("location"),
+        "ethnicity": talent.get("ethnicity"),
+        "gender": talent.get("gender"),
+        "bio": talent.get("bio"),
         "instagram_handle": talent.get("instagram_handle"),
         "instagram_followers": talent.get("instagram_followers"),
+        "work_links": talent.get("work_links") or [],
     }
 
 
@@ -233,8 +237,10 @@ async def submission_upload(
     if not sub:
         raise HTTPException(404, "Submission not found")
 
-    if category == "image":
-        existing = sum(1 for m in sub.get("media", []) if m["category"] == "image")
+    if category in PORTFOLIO_IMAGE_CATEGORIES:
+        existing = sum(
+            1 for m in sub.get("media", []) if m["category"] in PORTFOLIO_IMAGE_CATEGORIES
+        )
         if existing >= MAX_SUBMISSION_IMAGES:
             raise HTTPException(400, f"Image limit reached ({MAX_SUBMISSION_IMAGES})")
 
@@ -272,7 +278,7 @@ async def submission_upload(
             400,
             f"Video is too large ({mb} MB). Max {cap_mb} MB — please compress and retry.",
         )
-    if category == "image" and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+    if category in PORTFOLIO_IMAGE_CATEGORIES and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
         mb = size_bytes // (1024 * 1024)
         cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
         raise HTTPException(
@@ -296,8 +302,9 @@ async def submission_upload(
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
 
     # Generate an optimised 1600px JPEG variant for portfolio images so the
-    # client view loads fast. Original is retained for downloads.
-    if category == "image":
+    # client view loads fast. Original is retained for downloads. Applies to
+    # generic + indian + western look images.
+    if category in PORTFOLIO_IMAGE_CATEGORIES:
         resized = resize_image_bytes(data, max_width=IMAGE_RESIZE_MAX_WIDTH)
         if resized and len(resized) < size_bytes:
             resized_path = f"{APP_NAME}/submissions/{sid}/{uuid.uuid4()}_1600.jpg"
@@ -446,7 +453,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
         for m in media
     )
-    img_count = sum(1 for m in media if m["category"] == "image")
+    img_count = sum(1 for m in media if m["category"] in PORTFOLIO_IMAGE_CATEGORIES)
     if not has_intro:
         raise HTTPException(400, "Introduction video is required")
     if not has_any_take:
@@ -488,6 +495,37 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 ]},
                 {"_id": 0},
             )
+        if talent_doc:
+            # Q5 (Phase 2 schema unification): "fill empty only" sync. The
+            # admin's hand-edits are sacred — we only fill blanks from the
+            # talent's latest submission, never overwrite. Media is also
+            # never merged here (per Phase 0 spec).
+            update: Dict[str, Any] = {}
+            unified_fields = (
+                "phone", "dob", "height", "location", "ethnicity",
+                "gender", "instagram_handle", "instagram_followers", "bio",
+            )
+            for key in unified_fields:
+                if not talent_doc.get(key):
+                    val = form.get(key) if key != "phone" else (form.get("phone") or sub.get("talent_phone"))
+                    if val:
+                        update[key] = val
+            if not talent_doc.get("age"):
+                age_val = None
+                if form.get("age") not in (None, ""):
+                    try:
+                        age_val = int(form["age"])
+                    except Exception:
+                        age_val = None
+                if age_val is not None:
+                    update["age"] = age_val
+            new_links = [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()]
+            if new_links and not (talent_doc.get("work_links") or []):
+                update["work_links"] = new_links
+            if update:
+                await db.talents.update_one(
+                    {"id": talent_doc["id"]}, {"$set": update}
+                )
         if not talent_doc:
             # Build a minimal talent record from the submission's form_data.
             full_name = (
@@ -504,15 +542,17 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 "id": str(uuid.uuid4()),
                 "name": full_name,
                 "email": email or None,
-                "phone": sub.get("talent_phone"),
+                "phone": (form.get("phone") or sub.get("talent_phone") or None),
                 "age": age_val,
                 "dob": (form.get("dob") or None),
                 "height": (form.get("height") or None),
                 "location": (form.get("location") or None),
-                "ethnicity": None,
+                "ethnicity": (form.get("ethnicity") or None),
+                "gender": (form.get("gender") or None),
                 "instagram_handle": (form.get("instagram_handle") or None),
-                "instagram_followers": None,
-                "work_links": [],
+                "instagram_followers": (form.get("instagram_followers") or None),
+                "bio": (form.get("bio") or None),
+                "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
                 "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
                 # Phase 0 — `source` is ALWAYS an object with the exact shape
                 # {type, talent_email, reference_id} so the merge $or lookup

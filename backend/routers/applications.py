@@ -158,15 +158,17 @@ async def upload_application_media(
 ):
     _check_app_token(authorization, aid)
     if category not in APPLICATION_UPLOAD_CATEGORIES:
-        raise HTTPException(400, "Invalid category (image|intro_video)")
+        raise HTTPException(400, "Invalid category (image|indian|western|intro_video)")
     app_doc = await db.applications.find_one({"id": aid})
     if not app_doc:
         raise HTTPException(404, "Application not found")
     if app_doc.get("status") == "submitted":
         raise HTTPException(400, "Application already finalized")
 
-    if category == "image":
-        existing = sum(1 for m in app_doc.get("media", []) if m["category"] == "image")
+    if category in ("image", "indian", "western"):
+        existing = sum(
+            1 for m in app_doc.get("media", []) if m["category"] in ("image", "indian", "western")
+        )
         if existing >= MAX_APPLICATION_IMAGES:
             raise HTTPException(400, f"Image limit reached ({MAX_APPLICATION_IMAGES})")
     if category == "intro_video":
@@ -187,7 +189,7 @@ async def upload_application_media(
             400,
             f"Video is too large ({mb} MB). Max {cap_mb} MB — please compress and retry.",
         )
-    if category == "image" and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+    if category in ("image", "indian", "western") and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
         mb = size_bytes // (1024 * 1024)
         cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
         raise HTTPException(
@@ -206,7 +208,7 @@ async def upload_application_media(
         "scope": "application",
         "application_id": aid,
     }
-    if category == "image":
+    if category in ("image", "indian", "western"):
         resized = resize_image_bytes(data, max_width=IMAGE_RESIZE_MAX_WIDTH)
         if resized and len(resized) < size_bytes:
             resized_path = f"{APP_NAME}/applications/{aid}/{uuid.uuid4()}_1600.jpg"
@@ -251,7 +253,7 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
     media = app_doc.get("media", [])
     if not any(m["category"] == "intro_video" for m in media):
         raise HTTPException(400, "Introduction video is required")
-    img_count = sum(1 for m in media if m["category"] == "image")
+    img_count = sum(1 for m in media if m["category"] in ("image", "indian", "western"))
     if img_count < MIN_APPLICATION_IMAGES:
         raise HTTPException(
             400,
@@ -331,9 +333,12 @@ async def set_application_decision(
                 m for m in talent["media"] if m["id"] not in {x["id"] for x in existing.get("media", [])}
             ]
             update = {"media": new_media}
-            for key in ("email", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio"):
+            for key in ("email", "phone", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio"):
                 if not existing.get(key) and talent.get(key):
                     update[key] = talent[key]
+            # work_links: extend (dedupe) only if existing list is empty.
+            if not (existing.get("work_links") or []) and talent.get("work_links"):
+                update["work_links"] = talent["work_links"]
             if not existing.get("cover_media_id") and talent.get("cover_media_id"):
                 update["cover_media_id"] = talent["cover_media_id"]
             await db.talents.update_one({"id": existing["id"]}, {"$set": update})
@@ -359,6 +364,10 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         cat = m.get("category")
         if cat == "image":
             new_cat = "portfolio"
+        elif cat == "indian":
+            new_cat = "indian"
+        elif cat == "western":
+            new_cat = "western"
         elif cat == "intro_video":
             new_cat = "video"
         else:
@@ -375,7 +384,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
             "scope": "talent_portfolio",
             "talent_id": tid,
         })
-        if new_cat == "portfolio" and not cover_mid:
+        if new_cat in ("portfolio", "indian", "western") and not cover_mid:
             cover_mid = mid
     dob = (fd.get("dob") or "").strip() or None
     age = compute_age(dob) if dob else None
@@ -383,16 +392,17 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         "id": tid,
         "name": f"{fd.get('first_name','')} {fd.get('last_name','')}".strip() or app_doc.get("talent_name"),
         "email": app_doc.get("talent_email"),
+        "phone": (fd.get("phone") or app_doc.get("talent_phone") or None),
         "age": age,
         "dob": dob,
         "height": fd.get("height") or None,
         "location": fd.get("location") or None,
-        "ethnicity": None,
+        "ethnicity": fd.get("ethnicity") or None,
         "gender": fd.get("gender") or None,
         "instagram_handle": fd.get("instagram_handle") or None,
         "instagram_followers": fd.get("instagram_followers") or None,
         "bio": fd.get("bio") or None,
-        "work_links": [],
+        "work_links": [w for w in (fd.get("work_links") or []) if isinstance(w, str) and w.strip()],
         "cover_media_id": cover_mid,
         "media": new_media,
         "source": {

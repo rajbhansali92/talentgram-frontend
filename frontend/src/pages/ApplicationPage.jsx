@@ -7,7 +7,10 @@ import ThemeToggle from "@/components/ThemeToggle";
 import {
     Select,
     SelectContent,
+    SelectGroup,
     SelectItem,
+    SelectLabel,
+    SelectSeparator,
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
@@ -22,7 +25,15 @@ import {
     Sparkles,
     ArrowRight,
     Mail,
+    Plus,
 } from "lucide-react";
+import {
+    HEIGHT_OPTIONS,
+    GENDER_OPTIONS,
+    ETHNICITY_OPTIONS,
+    FOLLOWER_TIERS,
+    calcAge,
+} from "@/lib/talentSchema";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
@@ -31,44 +42,6 @@ const LS_KEY = "tg_application";
 // Draft expiry: local data (token + PII) is wiped after 30 days even if
 // the user never finalises — defense-in-depth against stale tokens / stale PII.
 const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-
-const HEIGHT_OPTIONS = (() => {
-    const out = [];
-    for (let ft = 3; ft <= 6; ft++) {
-        const maxIn = ft === 6 ? 7 : 11;
-        for (let inch = 0; inch <= maxIn; inch++) out.push(`${ft}'${inch}"`);
-    }
-    return out;
-})();
-
-const FOLLOWER_TIERS = [
-    "< 1K",
-    "1K – 5K",
-    "5K – 10K",
-    "10K – 50K",
-    "50K – 100K",
-    "100K – 500K",
-    "500K – 1M",
-    "1M+",
-];
-
-const GENDER_OPTIONS = [
-    { key: "female", label: "Female" },
-    { key: "male", label: "Male" },
-    { key: "non_binary", label: "Non-binary" },
-    { key: "prefer_not_say", label: "Prefer not to say" },
-];
-
-function calcAge(dob) {
-    if (!dob) return null;
-    const [y, m, d] = dob.split("-").map((n) => parseInt(n, 10));
-    if (!y || !m || !d) return null;
-    const today = new Date();
-    let age = today.getFullYear() - y;
-    if (today.getMonth() + 1 < m || (today.getMonth() + 1 === m && today.getDate() < d))
-        age -= 1;
-    return age >= 0 && age <= 120 ? age : null;
-}
 
 export default function ApplicationPage() {
     // Flow: identity gate → sections 1-4 → submitted
@@ -87,16 +60,20 @@ export default function ApplicationPage() {
         age: "",
         height: "",
         gender: "",
+        ethnicity: "",
         location: "",
         instagram_handle: "",
         instagram_followers: "",
         bio: "",
+        work_links: [],
     });
     const [media, setMedia] = useState([]);
     const [uploading, setUploading] = useState(null);
     const [saving, setSaving] = useState(false);
     const imgRef = useRef();
     const videoRef = useRef();
+    const indianRef = useRef();
+    const westernRef = useRef();
 
     // Restore local draft
     useEffect(() => {
@@ -209,11 +186,13 @@ export default function ApplicationPage() {
 
     const upload = async (files, category) => {
         if (!files || !files.length) return;
-        if (category === "image") {
-            const existing = media.filter((m) => m.category === "image").length;
+        if (category === "image" || category === "indian" || category === "western") {
+            const existing = media.filter(
+                (m) => m.category === "image" || m.category === "indian" || m.category === "western",
+            ).length;
             const remaining = MAX_IMAGES - existing;
             if (remaining <= 0) {
-                toast.error(`Max ${MAX_IMAGES} images`);
+                toast.error(`Max ${MAX_IMAGES} images (across all looks)`);
                 return;
             }
             files = Array.from(files).slice(0, remaining);
@@ -278,6 +257,9 @@ export default function ApplicationPage() {
     };
 
     const images = media.filter((m) => m.category === "image");
+    const indianImages = media.filter((m) => m.category === "indian");
+    const westernImages = media.filter((m) => m.category === "western");
+    const allImages = [...images, ...indianImages, ...westernImages];
     const intro = media.find((m) => m.category === "intro_video");
 
     // --- Identity gate -----------------------------------------------------
@@ -505,10 +487,45 @@ export default function ApplicationPage() {
                                 >
                                     <SelectValue placeholder="Select range" />
                                 </SelectTrigger>
-                                <SelectContent>
-                                    {FOLLOWER_TIERS.map((t) => (
-                                        <SelectItem key={t} value={t}>
-                                            {t}
+                                <SelectContent className="max-h-72">
+                                    {FOLLOWER_TIERS.map((tier) => (
+                                        <SelectGroup key={tier.label}>
+                                            <SelectLabel className="text-[10px] tracking-wide uppercase text-white/40">
+                                                {tier.label}
+                                            </SelectLabel>
+                                            {tier.items.map((it) => (
+                                                <SelectItem key={it} value={it}>
+                                                    {it}
+                                                </SelectItem>
+                                            ))}
+                                            <SelectSeparator />
+                                        </SelectGroup>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                        <div>
+                            <Label>Ethnicity</Label>
+                            <Select
+                                value={form.ethnicity}
+                                onValueChange={(v) =>
+                                    setForm({ ...form, ethnicity: v })
+                                }
+                            >
+                                <SelectTrigger
+                                    className="mt-2 bg-transparent border-0 border-b border-white/15 rounded-none px-0 h-auto py-2.5 text-sm"
+                                    data-testid="form-ethnicity"
+                                >
+                                    <SelectValue placeholder="Select ethnicity" />
+                                </SelectTrigger>
+                                <SelectContent className="max-h-72">
+                                    {ETHNICITY_OPTIONS.map((e) => (
+                                        <SelectItem
+                                            key={e.key}
+                                            value={e.key}
+                                            data-testid={`form-ethnicity-${e.key}`}
+                                        >
+                                            {e.label}
                                         </SelectItem>
                                     ))}
                                 </SelectContent>
@@ -525,6 +542,15 @@ export default function ApplicationPage() {
                                 placeholder="A few lines about yourself — experience, strengths, what you're looking for."
                                 data-testid="form-bio"
                                 className="mt-2 w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
+                            />
+                        </div>
+                        <div className="md:col-span-2">
+                            <Label>Work Links (optional)</Label>
+                            <ApplyWorkLinksEditor
+                                links={form.work_links || []}
+                                onChange={(arr) =>
+                                    setForm({ ...form, work_links: arr })
+                                }
                             />
                         </div>
                     </div>
@@ -585,13 +611,43 @@ export default function ApplicationPage() {
                             />
                         </div>
 
+                        {/* Phase 2 — optional Indian/Western look images */}
+                        <ApplyLookGroup
+                            label="Indian Look (optional)"
+                            hint="Saree, lehenga, sherwani, or traditional/Indian-look references."
+                            items={indianImages}
+                            category="indian"
+                            allCount={allImages.length}
+                            maxImages={MAX_IMAGES}
+                            inputRef={indianRef}
+                            upload={upload}
+                            removeMedia={removeMedia}
+                            uploading={uploading}
+                            FILE_URL={FILE_URL}
+                            testidPrefix="indian"
+                        />
+                        <ApplyLookGroup
+                            label="Western Look (optional)"
+                            hint="Casual, formal or western-styled references."
+                            items={westernImages}
+                            category="western"
+                            allCount={allImages.length}
+                            maxImages={MAX_IMAGES}
+                            inputRef={westernRef}
+                            upload={upload}
+                            removeMedia={removeMedia}
+                            uploading={uploading}
+                            FILE_URL={FILE_URL}
+                            testidPrefix="western"
+                        />
+
                         <div>
                             <div className="flex items-center justify-between mb-3">
                                 <p className="text-sm text-white/80">
-                                    Profile Images * ({images.length}/
+                                    Profile Images * ({allImages.length}/
                                     {MAX_IMAGES})
                                 </p>
-                                {images.length < MAX_IMAGES && (
+                                {allImages.length < MAX_IMAGES && (
                                     <button
                                         onClick={() => imgRef.current?.click()}
                                         data-testid="apply-image-upload-btn"
@@ -610,7 +666,7 @@ export default function ApplicationPage() {
                             <p className="text-xs text-white/40 mb-3">
                                 Upload {MIN_IMAGES}–{MAX_IMAGES}{" "}
                                 high-resolution images aligned with your
-                                portfolio.
+                                portfolio (counts include Indian / Western look images above).
                             </p>
                             <input
                                 ref={imgRef}
@@ -724,6 +780,141 @@ function Row({ label, value, onChange, type = "text", testid, hint }) {
                     {hint}
                 </p>
             )}
+        </div>
+    );
+}
+
+function ApplyLookGroup({
+    label,
+    hint,
+    items,
+    category,
+    allCount,
+    maxImages,
+    inputRef,
+    upload,
+    removeMedia,
+    uploading,
+    FILE_URL,
+    testidPrefix,
+}) {
+    const isUploading = uploading === category;
+    const reachedCap = allCount >= maxImages;
+    return (
+        <div className="mb-2" data-testid={`apply-look-group-${testidPrefix}`}>
+            <div className="flex items-center justify-between mb-1">
+                <p className="text-sm text-white/80">{label}</p>
+                <span className="text-[10px] tg-mono text-white/40">
+                    {items.length}
+                </span>
+            </div>
+            {hint && (
+                <p className="text-xs text-white/40 mb-2">{hint}</p>
+            )}
+            <input
+                ref={inputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => upload(e.target.files, category)}
+            />
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                {items.map((m) => (
+                    <div
+                        key={m.id}
+                        data-testid={`${testidPrefix}-image-${m.id}`}
+                        className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
+                    >
+                        <img
+                            src={FILE_URL(m.storage_path)}
+                            alt=""
+                            loading="lazy"
+                            className="w-full h-full object-cover"
+                        />
+                        <button
+                            onClick={() => removeMedia(m.id)}
+                            data-testid={`${testidPrefix}-image-remove-${m.id}`}
+                            className="absolute top-1 right-1 w-6 h-6 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#FF3B30] rounded-sm"
+                        >
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    </div>
+                ))}
+                {!reachedCap && (
+                    <button
+                        type="button"
+                        onClick={() => inputRef.current?.click()}
+                        disabled={isUploading}
+                        data-testid={`apply-add-${testidPrefix}-btn`}
+                        className="aspect-[3/4] border border-dashed border-white/20 hover:border-white/50 flex flex-col items-center justify-center gap-1 text-xs text-white/60 disabled:opacity-50"
+                    >
+                        {isUploading ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <Plus className="w-4 h-4" />
+                        )}
+                        <span>Add</span>
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function ApplyWorkLinksEditor({ links, onChange }) {
+    const [input, setInput] = useState("");
+    const add = () => {
+        const v = input.trim();
+        if (!v) return;
+        onChange([...(links || []), v]);
+        setInput("");
+    };
+    const remove = (i) =>
+        onChange((links || []).filter((_, idx) => idx !== i));
+    return (
+        <div className="mt-2 space-y-2" data-testid="apply-work-links-editor">
+            {(links || []).map((w, i) => (
+                <div
+                    key={`${w}-${i}`}
+                    className="flex items-center justify-between gap-2 px-3 py-2 border border-white/10 rounded-sm text-xs tg-mono break-all"
+                    data-testid={`apply-work-link-row-${i}`}
+                >
+                    <span className="truncate text-white/80">{w}</span>
+                    <button
+                        type="button"
+                        onClick={() => remove(i)}
+                        data-testid={`apply-work-link-remove-${i}`}
+                        className="text-white/40 hover:text-white shrink-0"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            ))}
+            <div className="flex items-center gap-2">
+                <input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                            e.preventDefault();
+                            add();
+                        }
+                    }}
+                    inputMode="url"
+                    placeholder="https://… (paste & press Enter)"
+                    data-testid="apply-work-link-input"
+                    className="flex-1 bg-transparent border-b border-white/20 focus:border-white outline-none py-2 text-sm"
+                />
+                <button
+                    type="button"
+                    onClick={add}
+                    data-testid="apply-work-link-add-btn"
+                    className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm"
+                >
+                    Add
+                </button>
+            </div>
         </div>
     );
 }

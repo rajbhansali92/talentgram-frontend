@@ -124,7 +124,21 @@ export default function NotificationBell() {
                         aria-hidden="true"
                     />
                     <div
-                        className="fixed left-2 right-2 top-[60px] mt-0 md:absolute md:left-auto md:right-0 md:top-full md:mt-2 md:w-[360px] z-50 bg-[#0a0a0a] border border-white/10 shadow-2xl max-h-[calc(100vh-80px)] overflow-hidden flex flex-col"
+                        // Layout fix:
+                        //   • max-h: 80vh per spec — panel never grows beyond 80% of viewport
+                        //   • outer overflow-hidden retained so rounded edges + border crop cleanly
+                        //   • inner list grows with flex-1 so it always uses the available
+                        //     vertical space (was previously capped to max-h-[420px] which made
+                        //     the dropdown look cropped on tall viewports and prevented the
+                        //     scrollable region from expanding)
+                        //   • position: mobile = full-width sheet pinned 60px from top with
+                        //     equal 8px gutters, desktop = absolute LEFT-aligned with the bell
+                        //     so the dropdown extends INTO the main content area instead of
+                        //     off the left side of the viewport (the bell sits at the right
+                        //     edge of the sidebar, which is the LEFT edge of the page).
+                        //   • z-50 keeps it above sidebar/sticky-headers without raising the
+                        //     backdrop above modals (which use z-[60]+).
+                        className="fixed left-2 right-2 top-[60px] mt-0 md:absolute md:right-auto md:left-0 md:top-full md:mt-2 md:w-[360px] z-50 bg-[#0a0a0a] border border-white/10 shadow-2xl max-h-[80vh] overflow-hidden flex flex-col"
                         data-testid="notification-dropdown"
                     >
                         <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between shrink-0">
@@ -151,7 +165,14 @@ export default function NotificationBell() {
                             </div>
                         </div>
 
-                        <div className="flex-1 max-h-[420px] overflow-y-auto">
+                        {/* Scrollable region — `flex-1` claims the remainder of the
+                            80vh wrapper after header & footer (which both `shrink-0`).
+                            `overflow-y-auto` enables vertical scroll inside the panel
+                            without ever pushing footer off-screen. */}
+                        <div
+                            className="flex-1 overflow-y-auto overscroll-contain min-h-0"
+                            data-testid="notification-scroll-region"
+                        >
                         {loading ? (
                             <div className="p-6 text-center text-white/40 text-xs inline-flex items-center gap-2 justify-center w-full">
                                 <Loader2 className="w-3 h-3 animate-spin" />

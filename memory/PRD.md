@@ -42,6 +42,17 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-26 (v36)** — **Notification panel layout fix.** The dropdown was being cropped on desktop because:
+  1. Outer wrapper used `max-h-[calc(100vh-80px)]` (≈90vh) — looser than the 80vh spec.
+  2. Inner scroll region had `max-h-[420px]` — capped the list and made the panel look stunted on tall viewports.
+  3. Position was `md:right-0` against a bell wrapper that sits at the right edge of the **left** sidebar — the dropdown's left edge was rendering at `x=-129` on a 1280px viewport, **off the left side of the screen**.
+  - Fix (CSS-only, no JS / state / API changes):
+    - Outer wrapper: `max-h-[80vh]` (per spec) + retain `overflow-hidden` for clean rounded edges.
+    - Inner scroll region: drop the `max-h-[420px]` cap; let `flex-1 overflow-y-auto overscroll-contain min-h-0` claim the remainder of the 80vh wrapper.
+    - Position: `md:right-auto md:left-0 md:top-full md:mt-2` — dropdown now drops down + extends INTO the main content area instead of off-screen left.
+    - Mobile sheet (`fixed left-2 right-2 top-[60px]`) untouched.
+  - Verified live at 1280x800: panel x=199, y=68, w=360, h=640 → **fully within viewport, exactly 80vh tall**. Scroll region overflow-y: `auto`. Header + footer never clip; list scrolls cleanly.
+
 - **2026-04-26 (v35)** — **Video streaming fix: real `206 Partial Content` + Range support.** The upstream Emergent Object Store ignored `Range` headers and always returned `200 OK` with the full body, while we falsely advertised `Accept-Ranges: bytes`. That broke Safari/iOS playback and made every seek re-download the entire file. **Fixed via server-side range slicing in `core.py:stream_object()`** — no storage-layer or schema changes.
   - When the client sends a `Range` header and upstream returns `200`, we now parse the range (`bytes=START-END`, `bytes=START-`, `bytes=-N`), stream the upstream body chunk-by-chunk, yield only the requested slice, and respond with `206 Partial Content` + correct `Content-Range: bytes <start>-<end>/<total>` + slice-length `Content-Length`.
   - When upstream actually honors the Range (returns 206), we forward unchanged.

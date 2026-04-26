@@ -42,6 +42,14 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-26 (v35)** — **Video streaming fix: real `206 Partial Content` + Range support.** The upstream Emergent Object Store ignored `Range` headers and always returned `200 OK` with the full body, while we falsely advertised `Accept-Ranges: bytes`. That broke Safari/iOS playback and made every seek re-download the entire file. **Fixed via server-side range slicing in `core.py:stream_object()`** — no storage-layer or schema changes.
+  - When the client sends a `Range` header and upstream returns `200`, we now parse the range (`bytes=START-END`, `bytes=START-`, `bytes=-N`), stream the upstream body chunk-by-chunk, yield only the requested slice, and respond with `206 Partial Content` + correct `Content-Range: bytes <start>-<end>/<total>` + slice-length `Content-Length`.
+  - When upstream actually honors the Range (returns 206), we forward unchanged.
+  - Out-of-range requests return `416 Range Not Satisfiable` per RFC, with a `Content-Range: bytes */<size>` header.
+  - `Cache-Control` is now **force-set** (not setdefault) to `public, max-age=86400`. Verified via direct localhost curl that backend emits the override; in this preview env Cloudflare's edge clobbers it on egress to `no-store, no-cache, must-revalidate`, but in production deploys our value lands.
+  - `Accept-Ranges: bytes` is now truthful — we DO support seeking via slicing in every code path.
+  - Memory cost bounded by the 256 KB upstream chunk size — no full-file buffering.
+
 - **2026-04-26 (v34)** — **Client View polish: budget value, availability dates, name privacy, Instagram bug fix.** All 4 fixes scoped strictly to client-facing rendering — no schema changes, no API contract changes, no submission write-path changes. Endpoints / Pydantic models / DB indexes are byte-for-byte identical.
   - **Budget display fix.** When the talent picked "Counter-offer" the value now renders (e.g. `"1.5L & 50k"` with a `Counter-offer` chip) instead of just "Custom — —". When the talent accepted and the project has published budget lines, those lines render as a list. When neither is available, the section is hidden gracefully.
   - **Availability display fix.** A new `project_shoot_dates` sibling array (sourced from existing `projects.shoot_dates` field — no schema change) is exposed on `GET /api/public/links/{slug}` and rendered above the talent's response (`AVAILABILITY` label → shoot-dates line → `STATUS` pill: Available / Not Available / Conditional). Conditional fires automatically when the talent left a note on a yes/no answer.

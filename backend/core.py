@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -280,14 +281,30 @@ def get_object(path: str) -> tuple[bytes, str]:
 def stream_object(path: str, range_header: Optional[str] = None):
     """Stream a file from Emergent Object Store to the client.
 
-    - Forwards the incoming `Range` header upstream (enables video seeking).
-    - Yields the body in chunks so we never buffer the full file in RAM.
-    - Returns `(iterator, response_headers, status_code)` so the FastAPI
-      layer can wrap the stream in a `StreamingResponse` with the same
-      Content-Type / Content-Range / Content-Length as upstream.
+    The upstream Emergent Object Store currently ignores the `Range` header
+    and always returns `200 OK` with the full body. That breaks Safari's
+    `<video>` element (which refuses to play unless it sees `206 Partial
+    Content`) and breaks seek interactions in every browser (each seek
+    re-downloads the entire file).
 
-    Response headers we whitelist through: Content-Type, Content-Length,
-    Content-Range, Accept-Ranges, ETag, Last-Modified.
+    This function therefore does **server-side range slicing** when the
+    client requested a range and upstream replied with 200:
+
+      • Parse the `Range` header (`bytes=START-END`, `bytes=START-`, `bytes=-N`).
+      • Stream the upstream body chunk-by-chunk and yield only the requested
+        slice. Memory cost is bounded by the chunk size (256 KB).
+      • Respond with `206 Partial Content` + a proper `Content-Range` header
+        and a `Content-Length` equal to the slice length.
+
+    If upstream actually does honor the Range (returns 206), we forward
+    that response unchanged.
+
+    `Cache-Control` is *force-set* (not setdefault) to override the
+    `no-store, no-cache, must-revalidate` that Cloudflare-fronted upstream
+    sends — that header was forcing the browser to refetch the entire file
+    every play, compounding the no-Range pain.
+
+    Returns `(iterator, headers, status_code)`.
     """
     key = init_storage()
     if not key:
@@ -308,31 +325,144 @@ def stream_object(path: str, range_header: Optional[str] = None):
         raise HTTPException(status_code=404, detail="File not found")
     resp.raise_for_status()
 
-    passthrough = {
-        k: v
-        for k, v in resp.headers.items()
-        if k.lower()
-        in (
-            "content-type",
-            "content-length",
-            "content-range",
-            "accept-ranges",
-            "etag",
-            "last-modified",
-        )
-    }
-    # Ensure the client knows seeking is supported even if upstream omits it.
-    passthrough.setdefault("Accept-Ranges", "bytes")
+    upstream_status = resp.status_code
+    content_type = resp.headers.get("Content-Type", "application/octet-stream")
+    upstream_len_str = resp.headers.get("Content-Length")
+    try:
+        upstream_len = int(upstream_len_str) if upstream_len_str else None
+    except ValueError:
+        upstream_len = None
+    etag = resp.headers.get("ETag")
+    last_modified = resp.headers.get("Last-Modified")
 
-    def _iter():
+    # ── Case 1 ─ Upstream honored the Range and returned 206. Pass through.
+    if upstream_status == 206:
+        passthrough: Dict[str, str] = {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower()
+            in (
+                "content-type",
+                "content-length",
+                "content-range",
+                "etag",
+                "last-modified",
+            )
+        }
+        passthrough["Accept-Ranges"] = "bytes"
+        passthrough["Cache-Control"] = "public, max-age=86400"
+
+        def _passthrough_iter():
+            try:
+                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        yield chunk
+            finally:
+                resp.close()
+
+        return _passthrough_iter(), passthrough, 206
+
+    # ── Case 2 ─ Range was requested but upstream returned 200 + full body.
+    #             Slice locally and synthesize a proper 206 response.
+    if range_header and upstream_status == 200 and upstream_len is not None:
+        m = re.match(r"^\s*bytes=(\d*)-(\d*)\s*$", range_header)
+        if m:
+            start_s, end_s = m.group(1), m.group(2)
+            if start_s == "" and end_s == "":
+                start, end = None, None  # malformed
+            elif start_s == "":
+                # Suffix range — last N bytes.
+                n = int(end_s)
+                start = max(0, upstream_len - n)
+                end = upstream_len - 1
+            elif end_s == "":
+                start = int(start_s)
+                end = upstream_len - 1
+            else:
+                start = int(start_s)
+                end = int(end_s)
+
+            # Validate. If unsatisfiable, RFC requires 416 with a
+            # `Content-Range: bytes */<size>` header.
+            if start is None or start >= upstream_len:
+                resp.close()
+                raise HTTPException(
+                    status_code=416,
+                    detail="Requested range not satisfiable",
+                    headers={"Content-Range": f"bytes */{upstream_len}"},
+                )
+
+            # Clamp upper bound to the actual file size.
+            start = max(0, start)
+            end = max(start, min(end, upstream_len - 1))
+            slice_len = end - start + 1
+
+            def _sliced_iter():
+                """Yield only bytes [start, end] from the streamed upstream body.
+
+                Walks the chunk stream once, drops chunks fully before the
+                window, slices chunks that overlap the window edges, and
+                stops as soon as the window is satisfied.
+                """
+                consumed = 0  # bytes seen so far (exclusive of current chunk)
+                try:
+                    for chunk in resp.iter_content(chunk_size=1024 * 256):
+                        if not chunk:
+                            continue
+                        chunk_start = consumed
+                        chunk_end = consumed + len(chunk)  # exclusive
+                        consumed = chunk_end
+                        if chunk_end <= start:
+                            continue
+                        if chunk_start > end:
+                            break
+                        lo = max(0, start - chunk_start)
+                        hi = min(len(chunk), end + 1 - chunk_start)
+                        out = chunk[lo:hi]
+                        if out:
+                            yield out
+                        if consumed > end:
+                            break
+                finally:
+                    resp.close()
+
+            headers = {
+                "Content-Type": content_type,
+                "Content-Length": str(slice_len),
+                "Content-Range": f"bytes {start}-{end}/{upstream_len}",
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "public, max-age=86400",
+            }
+            if etag:
+                headers["ETag"] = etag
+            if last_modified:
+                headers["Last-Modified"] = last_modified
+            return _sliced_iter(), headers, 206
+
+    # ── Case 3 ─ Full body (no Range requested OR malformed Range).
+    #             We support seeking via slicing now, so we DO advertise
+    #             Accept-Ranges: bytes here.
+    headers = {
+        "Content-Type": content_type,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=86400",
+    }
+    if upstream_len is not None:
+        headers["Content-Length"] = str(upstream_len)
+    if etag:
+        headers["ETag"] = etag
+    if last_modified:
+        headers["Last-Modified"] = last_modified
+
+    def _full_iter():
         try:
-            for chunk in resp.iter_content(chunk_size=1024 * 256):  # 256 KB
+            for chunk in resp.iter_content(chunk_size=1024 * 256):
                 if chunk:
                     yield chunk
         finally:
             resp.close()
 
-    return _iter(), passthrough, resp.status_code
+    return _full_iter(), headers, 200
 
 
 # --------------------------------------------------------------------------

@@ -109,7 +109,7 @@ async def download_file(path: str, request: Request):
     """
     range_header = request.headers.get("range") or request.headers.get("Range")
     iterator, headers, status = stream_object(path, range_header=range_header)
-    headers.setdefault("Cache-Control", "public, max-age=86400")
+    # Cache-Control is force-set inside stream_object — no need to override here.
     return StreamingResponse(
         iterator,
         status_code=status,

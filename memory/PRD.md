@@ -42,6 +42,16 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-26 (v33)** — **Dropdown / Enum Centralization (Phase 2.1).** Every dropdown option, decision-status list, and enumeration in the UI now consumes from the single `/app/frontend/src/lib/talentSchema.js` module. Zero hardcoded enum drift remains in any user-facing form.
+  - **New centralized exports:** `AVAILABILITY_OPTIONS` (yes/no), `BUDGET_OPTIONS` (accept/custom), `SUBMISSION_DECISIONS` (pending/approved/hold/rejected) + `SUBMISSION_DECISION_KEYS`, `SUBMISSION_FILTER_TABS` (adds `all` + `updated` synthetic tabs), `FEEDBACK_TYPES` (voice/text), `FEEDBACK_STATUSES` (pending/approved/rejected), `MATERIAL_CATEGORIES` (image/video_file/audio).
+  - **Refactored consumers:**
+    - `SubmissionPage.jsx` → AVAILABILITY_OPTIONS for the Yes/No availability gate (replaced inline `[{key:"yes",...}]`).
+    - `ProjectEdit.jsx` → AVAILABILITY_OPTIONS, BUDGET_OPTIONS in the admin review-side selects + SUBMISSION_FILTER_TABS for the per-project filter chips.
+    - `AdminFeedback.jsx` → FEEDBACK_STATUSES (synthesized with `all` for the filter tabs).
+  - **Pre-existing centralized exports (Phase 2):** `HEIGHT_OPTIONS`, `GENDER_OPTIONS`, `ETHNICITY_OPTIONS`, `FOLLOWER_TIERS`, `MEDIA_CATEGORIES`, `PORTFOLIO_LOOK_CATEGORIES`, `calcAge`, `genderLabel`, `ethnicityLabel`.
+  - **Verified live:** AdminFeedback shows 4 chips (Pending/Approved/Rejected/All), ProjectEdit shows 6 chips (All/Pending/Approved/Hold/Rejected/Updated), no console errors. Lint clean across all touched files.
+  - Note: `Applications.jsx` STATUS_FILTERS and `ClientView.jsx` TABS keep their own bespoke rows because they each carry view-specific metadata (`query` payloads, `icon` components) and bespoke keys (`drafts`, `seen`, `shortlisted`, `new`) that aren't part of the canonical decision/status enums. These are admin-side filter UIs, not talent-input forms.
+
 - **2026-04-26 (v32)** — **Email-First Conditional Rendering on `/apply` and `/submit`.** Pure conditional-rendering + state work — no backend, schema, prefill API, or validation changes.
   - Both surfaces now show ONLY the email field on first paint. Every other input + the wizard stepbar + the wizard bottom action bar are hidden behind a new `emailGateUnlocked` boolean.
   - **On email blur:** the existing `/api/public/prefill` is called.

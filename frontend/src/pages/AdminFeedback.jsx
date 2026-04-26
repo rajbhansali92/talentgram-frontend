@@ -13,11 +13,11 @@ import {
     Clock,
     ExternalLink,
 } from "lucide-react";
+import { FEEDBACK_STATUSES } from "@/lib/talentSchema";
 
+// Filter tabs add an `all` synthetic option on top of the canonical statuses.
 const FILTERS = [
-    { key: "pending", label: "Pending" },
-    { key: "approved", label: "Approved" },
-    { key: "rejected", label: "Rejected" },
+    ...FEEDBACK_STATUSES,
     { key: "all", label: "All" },
 ];
 

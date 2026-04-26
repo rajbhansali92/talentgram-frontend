@@ -35,6 +35,8 @@ import {
     GENDER_OPTIONS,
     ETHNICITY_OPTIONS,
     FOLLOWER_TIERS,
+    AVAILABILITY_OPTIONS,
+    BUDGET_OPTIONS,
     calcAge,
 } from "@/lib/talentSchema";
 
@@ -1322,10 +1324,7 @@ export default function SubmissionPage() {
                                 </p>
                             )}
                             <div className="grid grid-cols-2 gap-2 mb-3">
-                                {[
-                                    { key: "yes", label: "Yes, available" },
-                                    { key: "no", label: "Not available" },
-                                ].map((opt) => {
+                                {AVAILABILITY_OPTIONS.map((opt) => {
                                     const active =
                                         form.availability.status === opt.key;
                                     return (

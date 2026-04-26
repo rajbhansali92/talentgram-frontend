@@ -98,6 +98,73 @@ export const MEDIA_CATEGORIES = {
 export const PORTFOLIO_LOOK_CATEGORIES = ["indian", "western", "image"];
 
 // ────────────────────────────────────────────────────────────────────────
+// Submission enumerations — these mirror the backend's storage shape and
+// MUST stay in sync with `routers/submissions.py`. The talent submission
+// form (/submit), the admin review page (ProjectEdit) and any analytics
+// dashboard ALL consume from here.
+// ────────────────────────────────────────────────────────────────────────
+
+// Yes/No availability gate on the audition form.
+export const AVAILABILITY_OPTIONS = [
+    { key: "yes", label: "Yes, available" },
+    { key: "no", label: "Not available" },
+];
+
+// Budget intent gate on the audition form (paired with a free-text amount
+// when the talent picks "custom").
+export const BUDGET_OPTIONS = [
+    { key: "accept", label: "Accept budget" },
+    { key: "custom", label: "Counter-offer" },
+];
+
+// Admin-side decision per submission. `pending` is implied when the
+// `decision` field is null/missing — the UI normalizes both to `pending`.
+export const SUBMISSION_DECISIONS = [
+    { key: "pending", label: "Pending" },
+    { key: "approved", label: "Approved" },
+    { key: "hold", label: "Hold" },
+    { key: "rejected", label: "Rejected" },
+];
+export const SUBMISSION_DECISION_KEYS = SUBMISSION_DECISIONS.map((d) => d.key);
+
+// Tab filters in the ProjectEdit review pane. Includes the synthetic
+// `all` (no filter) and `updated` (status-based) tabs in addition to the
+// canonical decisions.
+export const SUBMISSION_FILTER_TABS = [
+    { key: "all", label: "All" },
+    { key: "pending", label: "Pending" },
+    { key: "approved", label: "Approved" },
+    { key: "hold", label: "Hold" },
+    { key: "rejected", label: "Rejected" },
+    { key: "updated", label: "Updated" },
+];
+
+// ────────────────────────────────────────────────────────────────────────
+// Moderated client-talent feedback (M6).
+// ────────────────────────────────────────────────────────────────────────
+export const FEEDBACK_TYPES = [
+    { key: "voice", label: "Voice note" },
+    { key: "text", label: "Text" },
+];
+
+export const FEEDBACK_STATUSES = [
+    { key: "pending", label: "Pending" },
+    { key: "approved", label: "Approved" },
+    { key: "rejected", label: "Rejected" },
+];
+
+// ────────────────────────────────────────────────────────────────────────
+// Audition material library (admin-side reference media that's attached
+// to a project so talent can see briefs / mood-boards / reference clips).
+// The 3 categories below mirror the backend's `materials.category` enum.
+// ────────────────────────────────────────────────────────────────────────
+export const MATERIAL_CATEGORIES = [
+    { key: "image", label: "Images" },
+    { key: "video_file", label: "Videos" },
+    { key: "audio", label: "Audio" },
+];
+
+// ────────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
 export function calcAge(dob) {

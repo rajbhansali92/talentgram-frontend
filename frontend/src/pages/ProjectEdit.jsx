@@ -7,6 +7,11 @@ import MaterialModal from "@/components/MaterialModal";
 import ForwardToLinkModal from "@/components/ForwardToLinkModal";
 import BudgetLines from "@/components/BudgetLines";
 import {
+    AVAILABILITY_OPTIONS,
+    BUDGET_OPTIONS,
+    SUBMISSION_FILTER_TABS,
+} from "@/lib/talentSchema";
+import {
     Select,
     SelectContent,
     SelectItem,
@@ -833,14 +838,22 @@ export default function ProjectEdit() {
                                 className="px-6 py-3 border-b border-white/10 flex items-center gap-2 flex-wrap"
                                 data-testid="submission-filters"
                             >
-                                {[
-                                    { key: "all", label: "All", count: submissions.length },
-                                    { key: "pending", label: "Pending", count: submissions.filter((s) => (s.decision || "pending") === "pending").length },
-                                    { key: "approved", label: "Approved", count: submissions.filter((s) => s.decision === "approved").length },
-                                    { key: "hold", label: "Hold", count: submissions.filter((s) => s.decision === "hold").length },
-                                    { key: "rejected", label: "Rejected", count: submissions.filter((s) => s.decision === "rejected").length },
-                                    { key: "updated", label: "Updated", count: submissions.filter((s) => s.status === "updated").length },
-                                ].map((f) => {
+                                {SUBMISSION_FILTER_TABS.map((tab) => {
+                                    const f = {
+                                        ...tab,
+                                        count:
+                                            tab.key === "all"
+                                                ? submissions.length
+                                                : tab.key === "updated"
+                                                  ? submissions.filter(
+                                                        (s) => s.status === "updated",
+                                                    ).length
+                                                  : submissions.filter(
+                                                        (s) =>
+                                                            (s.decision || "pending") ===
+                                                            tab.key,
+                                                    ).length,
+                                    };
                                     const active = submissionFilter === f.key;
                                     return (
                                         <button
@@ -1249,12 +1262,15 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     <option value="" className="bg-background text-foreground">
                                         —
                                     </option>
-                                    <option value="yes" className="bg-background text-foreground">
-                                        Yes
-                                    </option>
-                                    <option value="no" className="bg-background text-foreground">
-                                        No
-                                    </option>
+                                    {AVAILABILITY_OPTIONS.map((opt) => (
+                                        <option
+                                            key={opt.key}
+                                            value={opt.key}
+                                            className="bg-background text-foreground"
+                                        >
+                                            {opt.label}
+                                        </option>
+                                    ))}
                                 </select>
                                 <input
                                     type="text"
@@ -1320,12 +1336,15 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     <option value="" className="bg-background text-foreground">
                                         —
                                     </option>
-                                    <option value="accept" className="bg-background text-foreground">
-                                        Accept
-                                    </option>
-                                    <option value="custom" className="bg-background text-foreground">
-                                        Not accepting
-                                    </option>
+                                    {BUDGET_OPTIONS.map((opt) => (
+                                        <option
+                                            key={opt.key}
+                                            value={opt.key}
+                                            className="bg-background text-foreground"
+                                        >
+                                            {opt.label}
+                                        </option>
+                                    ))}
                                 </select>
                                 <input
                                     type="text"

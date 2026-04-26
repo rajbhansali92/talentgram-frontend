@@ -70,6 +70,11 @@ export default function ApplicationPage() {
     const [media, setMedia] = useState([]);
     const [uploading, setUploading] = useState(null);
     const [saving, setSaving] = useState(false);
+    // Email-first gate (does NOT touch /api/public/apply, validation, or schema —
+    // pure conditional rendering inside the existing identity screen).
+    const [emailGateUnlocked, setEmailGateUnlocked] = useState(false);
+    const [applyPrefill, setApplyPrefill] = useState(null); // {data}
+    const [applyPrefillTried, setApplyPrefillTried] = useState("");
     const imgRef = useRef();
     const videoRef = useRef();
     const indianRef = useRef();
@@ -134,6 +139,70 @@ export default function ApplicationPage() {
         () => calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null),
         [form.dob, form.age],
     );
+
+    // Email-first prefill on blur. Calls EXISTING /api/public/prefill — no
+    // backend changes. Decision tree:
+    //   • match → show "We found your profile" card; user picks Use/Edit
+    //   • miss  → unlock the rest of the gate immediately (silent)
+    const tryEmailPrefill = async () => {
+        const email = (basics.email || "").trim().toLowerCase();
+        if (!email || !email.includes("@")) return;
+        if (email === applyPrefillTried) return;
+        setApplyPrefillTried(email);
+        try {
+            const { data } = await axios.get(
+                `${API}/public/prefill?email=${encodeURIComponent(email)}`,
+            );
+            if (data && data.first_name) {
+                setApplyPrefill({ data });
+            } else {
+                setApplyPrefill(null);
+                setEmailGateUnlocked(true);
+            }
+        } catch {
+            // 429 / network — silently unlock so the user isn't blocked.
+            setApplyPrefill(null);
+            setEmailGateUnlocked(true);
+        }
+    };
+
+    // "Use this" — fill EMPTY fields only on basics + form; never overwrite.
+    // Never touches media. Then unlock the rest of the gate.
+    const useApplyPrefill = () => {
+        const d = applyPrefill?.data;
+        if (!d) return;
+        setBasics((b) => ({
+            ...b,
+            first_name: b.first_name || d.first_name || "",
+            last_name: b.last_name || d.last_name || "",
+            phone: b.phone || d.phone || "",
+        }));
+        setForm((f) => ({
+            ...f,
+            dob: f.dob || d.dob || "",
+            age: f.age || (d.age != null ? String(d.age) : ""),
+            height: f.height || d.height || "",
+            location: f.location || d.location || "",
+            gender: f.gender || d.gender || "",
+            ethnicity: f.ethnicity || d.ethnicity || "",
+            bio: f.bio || d.bio || "",
+            instagram_handle: f.instagram_handle || d.instagram_handle || "",
+            instagram_followers:
+                f.instagram_followers || d.instagram_followers || "",
+            work_links:
+                f.work_links && f.work_links.length
+                    ? f.work_links
+                    : (d.work_links || []),
+        }));
+        setApplyPrefill(null);
+        setEmailGateUnlocked(true);
+        toast.success(`Welcome back, ${d.first_name}`);
+    };
+
+    const dismissApplyPrefill = () => {
+        setApplyPrefill(null);
+        setEmailGateUnlocked(true);
+    };
 
     const startApplication = async () => {
         const { first_name, last_name, email } = basics;
@@ -281,35 +350,89 @@ export default function ApplicationPage() {
                     </p>
                     <div className="space-y-5">
                         <Row
-                            label="First Name *"
-                            value={basics.first_name}
-                            onChange={(v) => setBasics({ ...basics, first_name: v })}
-                            testid="apply-first-name"
-                        />
-                        <Row
-                            label="Last Name *"
-                            value={basics.last_name}
-                            onChange={(v) => setBasics({ ...basics, last_name: v })}
-                            testid="apply-last-name"
-                        />
-                        <Row
                             label="Email *"
                             type="email"
                             value={basics.email}
-                            onChange={(v) => setBasics({ ...basics, email: v })}
+                            onChange={(v) => {
+                                setBasics({ ...basics, email: v });
+                                // Re-arm the prefill if the email changed.
+                                if (v.trim().toLowerCase() !== applyPrefillTried) {
+                                    setEmailGateUnlocked(false);
+                                    setApplyPrefill(null);
+                                }
+                            }}
+                            onBlur={tryEmailPrefill}
                             testid="apply-email"
                             hint="Used as your unique identifier — we'll resume from where you stop"
                         />
-                        <Row
-                            label="Phone (optional)"
-                            value={basics.phone}
-                            onChange={(v) => setBasics({ ...basics, phone: v })}
-                            testid="apply-phone"
-                        />
+
+                        {applyPrefill && !emailGateUnlocked && (
+                            <div
+                                className="border border-[#c9a961]/40 bg-[#c9a961]/[0.06] p-4 rounded-sm flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
+                                data-testid="apply-prefill-card"
+                            >
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm text-white">
+                                        We found your profile.{" "}
+                                        <span className="text-white/60">
+                                            Use saved details?
+                                        </span>
+                                    </p>
+                                    <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
+                                        {applyPrefill.data.first_name}{" "}
+                                        {applyPrefill.data.last_name || ""}
+                                        {applyPrefill.data.location ? ` · ${applyPrefill.data.location}` : ""}
+                                        {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={useApplyPrefill}
+                                        data-testid="apply-prefill-use-btn"
+                                        className="bg-white text-black px-4 py-2.5 text-xs rounded-sm hover:opacity-90 inline-flex items-center gap-1.5 min-h-[44px]"
+                                    >
+                                        <Check className="w-3.5 h-3.5" />
+                                        Use this
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={dismissApplyPrefill}
+                                        data-testid="apply-prefill-dismiss-btn"
+                                        className="border border-white/20 text-white/70 hover:border-white px-4 py-2.5 text-xs rounded-sm inline-flex items-center gap-1.5 min-h-[44px]"
+                                    >
+                                        Edit manually
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {emailGateUnlocked && (
+                            <div className="space-y-5" data-testid="apply-identity-rest">
+                                <Row
+                                    label="First Name *"
+                                    value={basics.first_name}
+                                    onChange={(v) => setBasics({ ...basics, first_name: v })}
+                                    testid="apply-first-name"
+                                />
+                                <Row
+                                    label="Last Name *"
+                                    value={basics.last_name}
+                                    onChange={(v) => setBasics({ ...basics, last_name: v })}
+                                    testid="apply-last-name"
+                                />
+                                <Row
+                                    label="Phone (optional)"
+                                    value={basics.phone}
+                                    onChange={(v) => setBasics({ ...basics, phone: v })}
+                                    testid="apply-phone"
+                                />
+                            </div>
+                        )}
                     </div>
                     <button
                         onClick={startApplication}
-                        disabled={saving}
+                        disabled={saving || !emailGateUnlocked}
                         data-testid="apply-start-btn"
                         className="mt-10 inline-flex items-center gap-2 bg-white text-black px-6 py-3.5 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40"
                     >
@@ -764,7 +887,7 @@ function Label({ children }) {
     );
 }
 
-function Row({ label, value, onChange, type = "text", testid, hint }) {
+function Row({ label, value, onChange, onBlur, type = "text", testid, hint }) {
     return (
         <div>
             <Label>{label}</Label>
@@ -772,6 +895,7 @@ function Row({ label, value, onChange, type = "text", testid, hint }) {
                 type={type}
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
+                onBlur={onBlur}
                 data-testid={testid}
                 className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
             />

@@ -42,6 +42,16 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-26 (v32)** — **Email-First Conditional Rendering on `/apply` and `/submit`.** Pure conditional-rendering + state work — no backend, schema, prefill API, or validation changes.
+  - Both surfaces now show ONLY the email field on first paint. Every other input + the wizard stepbar + the wizard bottom action bar are hidden behind a new `emailGateUnlocked` boolean.
+  - **On email blur:** the existing `/api/public/prefill` is called.
+    - **Match → "We found your profile" card** appears (`apply-prefill-card` on /apply, `prefill-suggestion-card` on /submit) with two CTAs: `Use this` / `Edit manually`. The rest of the form stays hidden until the user picks one.
+    - **No match / network error / 429 → silent unlock** so the user is never blocked.
+  - **`Use this`** fills only EMPTY fields (never overwrites typed values, never touches media), shows toast `Welcome back, {first_name}`, and unlocks the form. **`Edit manually`** dismisses the card and unlocks the form.
+  - **Re-arm logic:** if the user edits an email after a tried lookup, the gate re-locks so a corrected typo retriggers prefill.
+  - **Existing draft resume:** if /submit has a `saved` draft (already-started submission), the gate auto-unlocks so resumed sessions skip straight to where the talent left off.
+  - Smoke-tested all 4 behaviours on both pages: initial-only-email ✅, unknown-email auto-unlock ✅, known-email card ✅, Use-this prefill+unlock ✅.
+
 - **2026-04-26 (v31)** — **Phase 2: Schema Unification across the 3 talent-facing surfaces.**
   - **Single source of truth** at `/app/frontend/src/lib/talentSchema.js`: exports `HEIGHT_OPTIONS`, `GENDER_OPTIONS` (4: female/male/non_binary/prefer_not_say), `ETHNICITY_OPTIONS` (9: indian/south_asian/east_asian/caucasian/african/middle_eastern/latino/mixed/other), `FOLLOWER_TIERS` (25 buckets across 4 groups: Early/Mid/High/Premium), `MEDIA_CATEGORIES`, `calcAge`. Admin TalentEdit, `/apply`, and `/submit` now ALL import from this module — no more inline drift.
   - **Backend schema additions (`core.py`)**: `phone: Optional[str]` added to `TalentIn` (was previously collected by 2 of 3 forms but silently dropped on merge — fixed). `SUBMISSION_UPLOAD_CATEGORIES` and `APPLICATION_UPLOAD_CATEGORIES` extended to accept `indian` and `western` look images. New `PORTFOLIO_IMAGE_CATEGORIES = {image, indian, western}` drives a unified MAX(8)/MIN(5) image gate at upload + finalize.

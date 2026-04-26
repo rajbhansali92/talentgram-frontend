@@ -353,6 +353,12 @@ export default function SubmissionPage() {
     const [prefillTried, setPrefillTried] = useState(false);
     const [prefillSuggestion, setPrefillSuggestion] = useState(null); // {data}
     const [prefillEmail, setPrefillEmail] = useState("");
+    // Email-first gate: hides every form section EXCEPT the email field
+    // until the talent's email has been blurred and the prefill response
+    // is processed (Use this / Edit manually / no match).
+    // If the talent has an existing draft (`saved` is set), unlock immediately
+    // so the wizard can resume from where they left off.
+    const [emailGateUnlocked, setEmailGateUnlocked] = useState(() => !!saved);
 
     const tryPrefill = async () => {
         if (saved) return; // submission already started — too late
@@ -366,15 +372,18 @@ export default function SubmissionPage() {
                 `${API}/public/prefill?email=${encodeURIComponent(email)}`,
             );
             if (!data || !data.first_name) {
-                // New talent — quietly do nothing.
+                // New talent — quietly unlock the rest of the form.
                 setPrefillSuggestion(null);
+                setEmailGateUnlocked(true);
                 return;
             }
-            // Surface the prompt instead of silently overwriting.
+            // Surface the prompt; rest of the form stays hidden until the
+            // user picks Use/Edit so we never silently overwrite.
             setPrefillSuggestion({ data });
         } catch {
-            // 429 (rate-limited) or network — fail silently. The user can
-            // continue manually; prefill is purely a convenience.
+            // 429 (rate-limited) or network — fail silently AND unlock so
+            // the user isn't blocked behind a transient network error.
+            setEmailGateUnlocked(true);
         }
     };
 
@@ -404,10 +413,14 @@ export default function SubmissionPage() {
                     : (data.work_links || []),
         }));
         setPrefillSuggestion(null);
+        setEmailGateUnlocked(true);
         toast.success(`Welcome back, ${data.first_name}`);
     };
 
-    const dismissPrefill = () => setPrefillSuggestion(null);
+    const dismissPrefill = () => {
+        setPrefillSuggestion(null);
+        setEmailGateUnlocked(true);
+    };
 
     const startSubmission = async (e) => {
         e.preventDefault();
@@ -822,7 +835,10 @@ export default function SubmissionPage() {
                     <ThemeToggle size="sm" />
                 </div>
                 {/* Mobile-only 3-step indicator. Desktop renders the full
-                    form vertically (this bar is hidden via md:hidden). */}
+                    form vertically (this bar is hidden via md:hidden).
+                    Email-first gate: hidden until the talent has tabbed
+                    out of the email field and chosen Use/Edit (or no match). */}
+                {emailGateUnlocked && (
                 <div
                     className="md:hidden border-t border-white/10 bg-black/70"
                     data-testid="wizard-stepbar"
@@ -860,6 +876,7 @@ export default function SubmissionPage() {
                         />
                     </div>
                 </div>
+                )}
             </header>
 
             <div className="max-w-3xl mx-auto px-5 py-8 md:py-14">
@@ -921,9 +938,21 @@ export default function SubmissionPage() {
                                 label="Email *"
                                 type="email"
                                 value={form.email}
-                                onChange={(v) =>
-                                    setForm({ ...form, email: v })
-                                }
+                                onChange={(v) => {
+                                    setForm({ ...form, email: v });
+                                    // Re-arm the gate if the user is editing
+                                    // an already-tried email — they should
+                                    // be able to fix a typo without being
+                                    // locked into a stale prefill state.
+                                    if (
+                                        !saved &&
+                                        v.trim().toLowerCase() !== prefillEmail
+                                    ) {
+                                        setPrefillTried(false);
+                                        setPrefillSuggestion(null);
+                                        setEmailGateUnlocked(false);
+                                    }
+                                }}
                                 onBlur={() => {
                                     saveForm();
                                     tryPrefill();
@@ -934,8 +963,10 @@ export default function SubmissionPage() {
                                 wide
                             />
                             <p className="text-[11px] text-white/40 mt-2 tg-mono">
-                                We use email to recognise you. Returning
-                                talents see saved details below.
+                                We use email to recognise you.{" "}
+                                {emailGateUnlocked
+                                    ? "Returning talents see saved details below."
+                                    : "Tab out of the email field to continue."}
                             </p>
                         </div>
 
@@ -984,6 +1015,8 @@ export default function SubmissionPage() {
                             </div>
                         )}
 
+                        {emailGateUnlocked && (
+                        <>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6" data-step="1">
                             <FormField
                                 label="First Name *"
@@ -1503,11 +1536,13 @@ export default function SubmissionPage() {
                                 Save Details & Continue to Uploads
                             </button>
                         )}
+                        </>
+                        )}
                     </form>
                 </section>
 
-                {/* SECTION 3 — UPLOADS (gated on saved) */}
-                {saved && (
+                {/* SECTION 3 — UPLOADS (gated on saved + email-first gate) */}
+                {emailGateUnlocked && saved && (
                     <section
                         className="border-t border-white/10 pt-10"
                         data-testid="uploads-section"
@@ -1781,7 +1816,7 @@ export default function SubmissionPage() {
 
             {/* Mobile-only sticky bottom action bar for steps 1 & 2.
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
-            {mobileStep < 3 && (
+            {emailGateUnlocked && mobileStep < 3 && (
                 <div
                     className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3"
                     data-testid="wizard-bottom-bar"

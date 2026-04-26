@@ -1080,9 +1080,14 @@ def _submission_to_client_shape(sub: dict) -> dict:
         "height": fd.get("height") if fv.get("height") else None,
         "location": fd.get("location") if fv.get("location") else None,
         "ethnicity": None,
-        "instagram_handle": None,
-        "instagram_followers": None,
-        "work_links": [],
+        # Phase 2 unified identity: surface form_data values into the client
+        # view shape (gated by both submission-level field_visibility AND the
+        # link-level `visibility.instagram` / `visibility.instagram_followers`
+        # toggles upstream). Previously hardcoded to None — that silently
+        # dropped Instagram even when the admin had toggled it ON.
+        "instagram_handle": (fd.get("instagram_handle") or None) if fv.get("instagram_handle", True) else None,
+        "instagram_followers": (fd.get("instagram_followers") or None) if fv.get("instagram_followers", True) else None,
+        "work_links": (fd.get("work_links") or []) if fv.get("work_links", True) else [],
         "availability": (fd.get("availability") if fv.get("availability") else None),
         "budget": (fd.get("budget") if fv.get("budget") else None),
         "cover_media_id": cover_mid,

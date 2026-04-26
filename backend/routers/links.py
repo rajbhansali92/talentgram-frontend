@@ -472,6 +472,26 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
 
     # Client-facing project budget (gated by visibility.budget)
     project_budget: List[Dict[str, Any]] = []
+    # Client-facing project shoot dates (gated by visibility.availability) —
+    # surfaces existing `projects.shoot_dates` so the talent's availability
+    # response can render alongside the project's actual shoot window.
+    # Sibling array so it stays available even when the budget toggle is off.
+    project_shoot_dates: List[Dict[str, Any]] = []
+    # Aggregate unique projects ONCE — both budget + shoot_dates branches
+    # consume it. Preserves first-seen order for stable rendering.
+    seen_pids: List[str] = []
+    if raw_subs:
+        for s in raw_subs:
+            pid = s.get("project_id")
+            if pid and pid not in seen_pids:
+                seen_pids.append(pid)
+    project_meta_by_id: Dict[str, dict] = {}
+    if seen_pids:
+        proj_docs = await db.projects.find(
+            {"id": {"$in": seen_pids}},
+            {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1},
+        ).to_list(500)
+        project_meta_by_id = {p["id"]: p for p in proj_docs}
     if visibility.get("budget"):
         override = link.get("client_budget_override")
         if override:
@@ -480,30 +500,30 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
                 "brand_name": link.get("brand_name") or link.get("title"),
                 "lines": override,
             }]
-        elif raw_subs:
-            # Aggregate unique projects from submissions (preserve first-seen order)
-            seen_pids: List[str] = []
-            for s in raw_subs:
-                pid = s.get("project_id")
-                if pid and pid not in seen_pids:
-                    seen_pids.append(pid)
-            if seen_pids:
-                projects = await db.projects.find(
-                    {"id": {"$in": seen_pids}},
-                    {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1},
-                ).to_list(500)
-                by_id = {p["id"]: p for p in projects}
-                for pid in seen_pids:
-                    proj = by_id.get(pid)
-                    if not proj:
-                        continue
-                    lines = proj.get("client_budget") or []
-                    if lines:
-                        project_budget.append({
-                            "project_id": pid,
-                            "brand_name": proj.get("brand_name"),
-                            "lines": lines,
-                        })
+        else:
+            for pid in seen_pids:
+                proj = project_meta_by_id.get(pid)
+                if not proj:
+                    continue
+                lines = proj.get("client_budget") or []
+                if lines:
+                    project_budget.append({
+                        "project_id": pid,
+                        "brand_name": proj.get("brand_name"),
+                        "lines": lines,
+                    })
+    if visibility.get("availability", True):
+        for pid in seen_pids:
+            proj = project_meta_by_id.get(pid)
+            if not proj:
+                continue
+            sd = (proj.get("shoot_dates") or "").strip()
+            if sd:
+                project_shoot_dates.append({
+                    "project_id": pid,
+                    "brand_name": proj.get("brand_name"),
+                    "shoot_dates": sd,
+                })
 
     actions = await db.link_actions.find({
         "link_id": link["id"],
@@ -534,6 +554,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         "talents": talents,
         "actions": actions,
         "project_budget": project_budget,
+        "project_shoot_dates": project_shoot_dates,
         "viewer": {"email": viewer["email"], "name": viewer["name"]},
         "client_state": client_state,
         "subject_added_at": subject_added_at,

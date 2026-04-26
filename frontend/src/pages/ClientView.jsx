@@ -29,6 +29,39 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+/**
+ * Client-facing privacy helper — collapses the talent's full name to
+ * "First L." so casting clients never see the full last name.
+ *
+ *   "Ayushi Thakur"     → "Ayushi T"
+ *   "  Riya  Singh   "  → "Riya S"
+ *   "Madonna"           → "Madonna"   (single name passes through)
+ *   ""                  → "Unnamed"
+ */
+function privatizeName(raw) {
+    const s = (raw || "").trim();
+    if (!s) return "Unnamed";
+    const parts = s.split(/\s+/);
+    if (parts.length === 1) return parts[0];
+    const first = parts[0];
+    const lastInitial = parts[parts.length - 1].charAt(0).toUpperCase();
+    return `${first} ${lastInitial}`;
+}
+
+/**
+ * Map the talent's availability response to one of three labels the client
+ * sees. A note on a "yes" or "no" response upgrades the label to
+ * "Conditional" because the talent has qualified the answer.
+ */
+function availabilityLabel(av) {
+    if (!av || !av.status) return null;
+    const status = av.status;
+    const note = (av.note || "").trim();
+    if (status === "yes") return note ? "Conditional" : "Available";
+    if (status === "no") return note ? "Conditional" : "Not Available";
+    return null;
+}
+
 const ACTIONS = [
     { key: "shortlist", label: "Shortlist", icon: Star, color: "#FFCC00" },
     { key: "interested", label: "Interested", icon: ThumbsUp, color: "#34C759" },
@@ -280,6 +313,7 @@ export default function ClientView() {
     const { link, talents, viewer } = data;
     const vis = link.visibility || {};
     const projectBudget = data.project_budget || [];
+    const projectShootDates = data.project_shoot_dates || [];
     const subjectAddedAt = data.subject_added_at || {};
     const prevVisitAt = data?.client_state?.prev_visit_at || null;
 
@@ -491,6 +525,8 @@ export default function ClientView() {
                     talents={filteredTalents}
                     link={link}
                     slug={slug}
+                    projectBudget={projectBudget}
+                    projectShootDates={projectShootDates}
                     viewerAction={viewerActions[activeTalent.id]}
                     onClose={() => setActiveTalent(null)}
                     onNavigate={(t) => {
@@ -522,6 +558,8 @@ function TalentDetail({
     talents,
     link,
     slug,
+    projectBudget = [],
+    projectShootDates = [],
     viewerAction,
     onClose,
     onNavigate,
@@ -727,7 +765,7 @@ function TalentDetail({
                             <div className="relative bg-[#0a0a0a] aspect-[3/4] border border-white/10 overflow-hidden">
                                 <img
                                     src={IMAGE_URL(images[idx])}
-                                    alt={talent.name}
+                                    alt={privatizeName(talent.name)}
                                     className="w-full h-full object-contain"
                                 />
                                 {images.length > 1 && (
@@ -791,8 +829,11 @@ function TalentDetail({
                     {/* Info */}
                     <div className="lg:col-span-2">
                         <p className="eyebrow mb-3">Talent</p>
-                        <h2 className="font-display text-4xl md:text-5xl tracking-tight mb-6">
-                            {talent.name}
+                        <h2
+                            className="font-display text-4xl md:text-5xl tracking-tight mb-6"
+                            data-testid="client-talent-name"
+                        >
+                            {privatizeName(talent.name)}
                         </h2>
 
                         <div className="grid grid-cols-2 gap-y-5 mb-8 text-sm">
@@ -818,70 +859,191 @@ function TalentDetail({
                         </div>
 
                         {/* Availability & Budget & Competitive Brand — admin-controlled final values */}
-                        {((vis.availability !== false && talent.availability) ||
-                            (vis.budget && talent.budget) ||
-                            talent.competitive_brand) && (
-                            <div
-                                className="mb-8 border border-white/10 p-4 space-y-4"
-                                data-testid="client-details-section"
-                            >
-                                {vis.availability !== false &&
-                                    talent.availability && (
+                        {(() => {
+                            // Resolve the project this talent submitted to (if any) so we can
+                            // surface its shoot_dates + budget value alongside the talent's response.
+                            const tProj =
+                                (talent.project_id &&
+                                    projectShootDates.find(
+                                        (p) => p.project_id === talent.project_id,
+                                    )) ||
+                                projectShootDates[0] ||
+                                null;
+                            const tProjBudget =
+                                (talent.project_id &&
+                                    projectBudget.find(
+                                        (p) => p.project_id === talent.project_id,
+                                    )) ||
+                                projectBudget[0] ||
+                                null;
+                            const showAvail =
+                                vis.availability !== false &&
+                                ((talent.availability && talent.availability.status) ||
+                                    (tProj && tProj.shoot_dates));
+                            // Budget visibility now only requires either the talent's
+                            // response OR the project's published budget — we render
+                            // "Budget: <value>" using whichever side is present.
+                            const showBudget =
+                                vis.budget &&
+                                (talent.budget?.status ||
+                                    (tProjBudget && (tProjBudget.lines || []).length));
+                            if (
+                                !showAvail &&
+                                !showBudget &&
+                                !talent.competitive_brand
+                            )
+                                return null;
+                            return (
+                                <div
+                                    className="mb-8 border border-white/10 p-4 space-y-4"
+                                    data-testid="client-details-section"
+                                >
+                                    {showAvail && (
                                         <div data-testid="client-availability">
                                             <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
                                                 Availability
                                             </p>
-                                            <p className="text-sm">
-                                                <span
-                                                    className={`inline-block px-2 py-0.5 mr-2 text-[10px] tg-mono uppercase rounded-sm ${talent.availability.status === "yes" ? "bg-[#34C759]/15 text-[#34C759]" : "bg-[#FF3B30]/15 text-[#FF3B30]"}`}
+                                            {tProj?.shoot_dates && (
+                                                <p
+                                                    className="text-sm text-white/90 mb-1"
+                                                    data-testid="client-shoot-dates"
                                                 >
-                                                    {talent.availability.status === "yes"
-                                                        ? "Available"
-                                                        : "Not Available"}
-                                                </span>
-                                                {talent.availability.note && (
-                                                    <span className="text-white/70">
-                                                        {talent.availability.note}
-                                                    </span>
-                                                )}
+                                                    {tProj.shoot_dates}
+                                                </p>
+                                            )}
+                                            {(() => {
+                                                const lbl = availabilityLabel(
+                                                    talent.availability,
+                                                );
+                                                if (!lbl) return null;
+                                                const tone =
+                                                    lbl === "Available"
+                                                        ? "bg-[#34C759]/15 text-[#34C759]"
+                                                        : lbl === "Not Available"
+                                                          ? "bg-[#FF3B30]/15 text-[#FF3B30]"
+                                                          : "bg-[#c9a961]/15 text-[#c9a961]";
+                                                return (
+                                                    <p className="text-sm">
+                                                        <span className="text-white/40 mr-2 text-[10px] tg-mono uppercase">
+                                                            Status
+                                                        </span>
+                                                        <span
+                                                            className={`inline-block px-2 py-0.5 mr-2 text-[10px] tg-mono uppercase rounded-sm ${tone}`}
+                                                            data-testid="client-availability-status"
+                                                        >
+                                                            {lbl}
+                                                        </span>
+                                                        {talent.availability
+                                                            ?.note && (
+                                                            <span className="text-white/70">
+                                                                {
+                                                                    talent.availability
+                                                                        .note
+                                                                }
+                                                            </span>
+                                                        )}
+                                                    </p>
+                                                );
+                                            })()}
+                                        </div>
+                                    )}
+                                    {showBudget && (
+                                        <div data-testid="client-budget">
+                                            <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+                                                Budget
+                                            </p>
+                                            {(() => {
+                                                // 1) Custom counter — show the talent's typed amount.
+                                                if (
+                                                    talent.budget?.status === "custom" &&
+                                                    (talent.budget?.value || "").trim()
+                                                ) {
+                                                    return (
+                                                        <p className="text-sm text-white/90">
+                                                            {talent.budget.value}
+                                                            <span className="ml-2 inline-block px-2 py-0.5 text-[10px] tg-mono uppercase rounded-sm bg-white/10 text-white/60">
+                                                                Counter-offer
+                                                            </span>
+                                                        </p>
+                                                    );
+                                                }
+                                                // 2) Talent agreed → show the project's published budget lines.
+                                                const lines =
+                                                    (tProjBudget?.lines || []).filter(
+                                                        (l) =>
+                                                            (l.label || "").trim() ||
+                                                            (l.value || "").trim(),
+                                                    );
+                                                if (
+                                                    talent.budget?.status === "accept" &&
+                                                    lines.length
+                                                ) {
+                                                    return (
+                                                        <ul className="text-sm text-white/90 space-y-0.5">
+                                                            {lines.map((ln, i) => (
+                                                                <li
+                                                                    key={i}
+                                                                    className="flex justify-between gap-4"
+                                                                    data-testid={`client-budget-line-${i}`}
+                                                                >
+                                                                    <span className="text-white/70">
+                                                                        {ln.label}
+                                                                    </span>
+                                                                    <span>{ln.value}</span>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    );
+                                                }
+                                                // 3) Talent agreed but no published lines → show
+                                                //    the brand's headline budget if available.
+                                                if (
+                                                    talent.budget?.status === "accept" &&
+                                                    !lines.length
+                                                ) {
+                                                    return (
+                                                        <p className="text-sm">
+                                                            <span className="inline-block px-2 py-0.5 text-[10px] tg-mono uppercase rounded-sm bg-[#34C759]/15 text-[#34C759]">
+                                                                Agreed
+                                                            </span>
+                                                        </p>
+                                                    );
+                                                }
+                                                // 4) No talent response, project lines only.
+                                                if (lines.length) {
+                                                    return (
+                                                        <ul className="text-sm text-white/90 space-y-0.5">
+                                                            {lines.map((ln, i) => (
+                                                                <li
+                                                                    key={i}
+                                                                    className="flex justify-between gap-4"
+                                                                >
+                                                                    <span className="text-white/70">
+                                                                        {ln.label}
+                                                                    </span>
+                                                                    <span>{ln.value}</span>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    );
+                                                }
+                                                return null;
+                                            })()}
+                                        </div>
+                                    )}
+                                    {talent.competitive_brand && (
+                                        <div data-testid="client-competitive-brand">
+                                            <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+                                                Competitive Brand
+                                            </p>
+                                            <p className="text-sm text-white/90">
+                                                {talent.competitive_brand}
                                             </p>
                                         </div>
                                     )}
-                                {vis.budget && talent.budget && (
-                                    <div data-testid="client-budget">
-                                        <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
-                                            Budget
-                                        </p>
-                                        <p className="text-sm">
-                                            {talent.budget.status === "accept" ? (
-                                                <span className="inline-block px-2 py-0.5 text-[10px] tg-mono uppercase rounded-sm bg-[#34C759]/15 text-[#34C759]">
-                                                    Accepts proposed budget
-                                                </span>
-                                            ) : (
-                                                <>
-                                                    <span className="inline-block px-2 py-0.5 mr-2 text-[10px] tg-mono uppercase rounded-sm bg-white/10 text-white/70">
-                                                        Custom
-                                                    </span>
-                                                    <span className="text-white/90">
-                                                        {talent.budget.value || "—"}
-                                                    </span>
-                                                </>
-                                            )}
-                                        </p>
-                                    </div>
-                                )}
-                                {talent.competitive_brand && (
-                                    <div data-testid="client-competitive-brand">
-                                        <p className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
-                                            Competitive Brand
-                                        </p>
-                                        <p className="text-sm text-white/90">
-                                            {talent.competitive_brand}
-                                        </p>
-                                    </div>
-                                )}
-                            </div>
-                        )}
+                                </div>
+                            );
+                        })()}
 
                         {/* Custom questions & answers — admin-filtered per-question */}
                         {(talent.custom_answers || []).length > 0 && (
@@ -911,7 +1073,8 @@ function TalentDetail({
                                 <a
                                     href={`https://instagram.com/${talent.instagram_handle.replace("@", "")}`}
                                     target="_blank"
-                                    rel="noreferrer"
+                                    rel="noopener noreferrer"
+                                    data-testid="client-instagram-link"
                                     className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/20 hover:border-white rounded-sm text-xs"
                                 >
                                     <Instagram className="w-3.5 h-3.5" />{" "}
@@ -1156,7 +1319,7 @@ function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen })
                 {cover ? (
                     <img
                         src={IMAGE_URL(cover)}
-                        alt={talent.name}
+                        alt={privatizeName(talent.name)}
                         loading="lazy"
                         className="w-full h-full object-cover group-hover:scale-[1.03] transition-all duration-700"
                     />
@@ -1171,8 +1334,11 @@ function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen })
                 )}
 
                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/40 to-transparent p-4">
-                    <div className="font-display text-lg md:text-xl tracking-tight">
-                        {talent.name}
+                    <div
+                        className="font-display text-lg md:text-xl tracking-tight"
+                        data-testid={`client-card-name-${talent.id}`}
+                    >
+                        {privatizeName(talent.name)}
                     </div>
                     <div className="text-[11px] text-white/50 tg-mono mt-1">
                         {vis.location && talent.location ? talent.location : ""}

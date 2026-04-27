@@ -42,6 +42,9 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
+// Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
+// `western` is independently capped at this value, NOT combined.
+const MAX_IMAGES_PER_CATEGORY = 10;
 const LS_KEY = (slug) => `tg_submission_${slug}`;
 const LS_DRAFT_KEY = (slug) => `tg_draft_${slug}`;
 
@@ -117,6 +120,16 @@ export default function SubmissionPage() {
     // Upload retry queue: per-slot pending file with attempt counter so a
     // transient network drop doesn't lose the file selection.
     const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
+
+    // Email-first gate: hides every form section EXCEPT the email field
+    // until the talent's email has been blurred and the prefill response
+    // is processed (Use this / Edit manually / no match).
+    // Initialised here (rather than later in the component body) so
+    // validateForm / validateStep1 can read it without TDZ surprises.
+    const [emailGateUnlocked, setEmailGateUnlocked] = useState(() => !!saved);
+    const [prefillTried, setPrefillTried] = useState(false);
+    const [prefillSuggestion, setPrefillSuggestion] = useState(null); // {data}
+    const [prefillEmail, setPrefillEmail] = useState("");
 
     const introRef = useRef();
     const take1Ref = useRef();
@@ -219,10 +232,6 @@ export default function SubmissionPage() {
         // yet (no prefill decision made), we deliberately skip every
         // other validation. The Continue button is already gated on
         // `emailGateUnlocked` in the UI; this is a defense-in-depth.
-        // (Audited: emailGateUnlocked is declared later in the component
-        // body, but validateForm only runs from event handlers AFTER the
-        // synchronous render initializes every const — closure resolves
-        // names at call-time, not definition-time. Audited 2026-04-27.)
         if (!emailGateUnlocked) return "Please complete the email step first";
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
@@ -247,7 +256,6 @@ export default function SubmissionPage() {
         // details step, so without a confirmed email we have nothing to
         // validate against.
         if (!form.email.trim()) return "Email is required";
-        // Same closure-resolution note as validateForm above.
         if (!emailGateUnlocked) return "Please complete the email step first";
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
@@ -333,7 +341,9 @@ export default function SubmissionPage() {
         setMobileStep(n);
     };
     // Convenience wrapper that returns a boolean (vs the form-handler version).
-    const startSubmissionDirect = async () => {
+    // Function declaration (not `const = async () =>`) so it's fully hoisted
+    // and `goToStep` above can call it without a TDZ reference.
+    async function startSubmissionDirect() {
         const err = validateForm();
         if (err) {
             toast.error(err);
@@ -377,7 +387,7 @@ export default function SubmissionPage() {
         } finally {
             setStarting(false);
         }
-    };
+    }
 
     // Email-first auto-fill (Phase 1).
     //
@@ -392,16 +402,6 @@ export default function SubmissionPage() {
     //
     // The user can re-trigger prefill by re-entering the email — we only
     // auto-trigger ONCE per email value.
-    const [prefillTried, setPrefillTried] = useState(false);
-    const [prefillSuggestion, setPrefillSuggestion] = useState(null); // {data}
-    const [prefillEmail, setPrefillEmail] = useState("");
-    // Email-first gate: hides every form section EXCEPT the email field
-    // until the talent's email has been blurred and the prefill response
-    // is processed (Use this / Edit manually / no match).
-    // If the talent has an existing draft (`saved` is set), unlock immediately
-    // so the wizard can resume from where they left off.
-    const [emailGateUnlocked, setEmailGateUnlocked] = useState(() => !!saved);
-
     const tryPrefill = async () => {
         if (saved) return; // submission already started — too late
         const email = (form.email || "").trim().toLowerCase();
@@ -514,7 +514,9 @@ export default function SubmissionPage() {
         }
     };
 
-    const saveForm = async () => {
+    // Function declaration (not `const = async () =>`) so it's fully hoisted
+    // and `goToStep` above can call it without a TDZ reference.
+    async function saveForm() {
         if (!saved) return;
         try {
             await axios.put(
@@ -531,7 +533,7 @@ export default function SubmissionPage() {
                 authCfg,
             );
         } catch (e) { console.error(e); }
-    };
+    }
 
     const uploadFile = async (file, category, label = null) => {
         // Client-side guard mirrors backend cap (150 MB videos / 25 MB images)
@@ -628,15 +630,39 @@ export default function SubmissionPage() {
         }
     };
 
+    // Media derivations (initialised here before uploadImages so the
+    // `allImages.length` read inside it never sees an undefined value).
+    // `submission` is React state — it's null on first render, so `media`
+    // safely falls back to []. Kept as `const` so re-renders pick up the
+    // latest submission state automatically.
+    const media = submission?.media || [];
+    // Phase 2 — portfolio images come in 3 flavours: generic, indian look,
+    // western look. They share the MAX_IMAGES bucket so the talent doesn't
+    // exceed the 8-image cap by splitting categories.
+    const images = media.filter((m) => m.category === "image");
+    const indianImages = media.filter((m) => m.category === "indian");
+    const westernImages = media.filter((m) => m.category === "western");
+    const allImages = [...images, ...indianImages, ...westernImages];
+
     const uploadImages = async (files, imageCategory = "image") => {
-        // `allImages` is declared later in the component body — safe here
-        // because uploadImages only fires from a file-input change AFTER
-        // render initializes the const. See validateForm note.
-        const current = allImages.length;
-        const room = MAX_IMAGES - current;
-        const accepted = Array.from(files).slice(0, room);
+        // Phase 3 — per-category cap (10 each), not combined. Look up the
+        // current count of THIS category and refuse uploads that would
+        // overflow it.
+        const currentForCategory =
+            imageCategory === "indian"
+                ? indianImages.length
+                : imageCategory === "western"
+                  ? westernImages.length
+                  : images.length;
+        const room = MAX_IMAGES_PER_CATEGORY - currentForCategory;
+        const accepted = Array.from(files).slice(0, Math.max(0, room));
+        if (room <= 0) {
+            const label = imageCategory === "indian" ? "Indian look" : imageCategory === "western" ? "Western look" : "Portfolio";
+            toast.error(`${label} image limit reached (${MAX_IMAGES_PER_CATEGORY})`);
+            return;
+        }
         if (files.length > room) {
-            toast.info(`Only ${room} more images allowed (max ${MAX_IMAGES})`);
+            toast.info(`Only ${room} more ${imageCategory} images allowed (max ${MAX_IMAGES_PER_CATEGORY})`);
         }
         // Client-side per-image cap (25 MB)
         const over = accepted.find((f) => f.size > 25 * 1024 * 1024);
@@ -742,14 +768,6 @@ export default function SubmissionPage() {
         );
     }
 
-    const media = submission?.media || [];
-    // Phase 2 — portfolio images come in 3 flavours: generic, indian look,
-    // western look. They share the MAX_IMAGES bucket so the talent doesn't
-    // exceed the 8-image cap by splitting categories.
-    const images = media.filter((m) => m.category === "image");
-    const indianImages = media.filter((m) => m.category === "indian");
-    const westernImages = media.filter((m) => m.category === "western");
-    const allImages = [...images, ...indianImages, ...westernImages];
     const intro = media.find((m) => m.category === "intro_video");
     // Renamable takes: new `take` category + legacy `take_1/2/3` (auto-labelled)
     const takes = media
@@ -1682,15 +1700,15 @@ export default function SubmissionPage() {
                                     data-testid="image-counter"
                                     className="text-xs tg-mono text-white/70"
                                 >
-                                    {allImages.length}/{MAX_IMAGES}
+                                    {images.length}/{MAX_IMAGES_PER_CATEGORY}
                                 </span>
                             </div>
                             <p className="text-xs text-white/50 mb-4 leading-relaxed">
                                 Optional (recommended). High-resolution
                                 portfolio images aligned with the brand's
                                 aesthetic improve your selection odds. Up to{" "}
-                                {MAX_IMAGES} images across Indian / Western /
-                                general looks combined.
+                                {MAX_IMAGES_PER_CATEGORIES_LABEL} per category
+                                (Indian / Western / general looks).
                             </p>
 
                             {/* Phase 2 — optional Indian look images */}
@@ -1699,8 +1717,8 @@ export default function SubmissionPage() {
                                 hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
                                 items={indianImages}
                                 category="indian"
-                                allImagesCount={allImages.length}
-                                maxImages={MAX_IMAGES}
+                                allImagesCount={indianImages.length}
+                                maxImages={MAX_IMAGES_PER_CATEGORY}
                                 inputRef={indianImagesRef}
                                 uploadImages={uploadImages}
                                 removeMedia={removeMedia}
@@ -1716,8 +1734,8 @@ export default function SubmissionPage() {
                                 hint="Casual, formal or western-styled references."
                                 items={westernImages}
                                 category="western"
-                                allImagesCount={allImages.length}
-                                maxImages={MAX_IMAGES}
+                                allImagesCount={westernImages.length}
+                                maxImages={MAX_IMAGES_PER_CATEGORY}
                                 inputRef={westernImagesRef}
                                 uploadImages={uploadImages}
                                 removeMedia={removeMedia}
@@ -1750,7 +1768,7 @@ export default function SubmissionPage() {
                                         </button>
                                     </div>
                                 ))}
-                                {images.length < MAX_IMAGES && allImages.length < MAX_IMAGES && (
+                                {images.length < MAX_IMAGES_PER_CATEGORY && (
                                     <button
                                         onClick={() =>
                                             imagesRef.current?.click()
@@ -1816,7 +1834,7 @@ export default function SubmissionPage() {
                                 <button
                                     type="button"
                                     onClick={() => cameraImagesRef.current?.click()}
-                                    disabled={uploading === "image" || allImages.length >= MAX_IMAGES}
+                                    disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
                                     data-testid="add-image-camera-btn"
                                     className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
                                 >
@@ -1825,7 +1843,7 @@ export default function SubmissionPage() {
                                 <button
                                     type="button"
                                     onClick={() => imagesRef.current?.click()}
-                                    disabled={uploading === "image" || allImages.length >= MAX_IMAGES}
+                                    disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
                                     data-testid="add-image-library-btn"
                                     className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
                                 >

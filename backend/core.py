@@ -674,6 +674,11 @@ PORTFOLIO_IMAGE_CATEGORIES = {"image", "indian", "western"}
 MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
+# Per-category portfolio image cap (Phase 3): each of `image`/`indian`/
+# `western` is independently capped at this value, NOT a combined total.
+# Talents can therefore upload up to 30 portfolio images total without
+# hitting a global ceiling.
+MAX_IMAGES_PER_CATEGORY = 10
 # Public audition upload size cap: 150 MB for videos (intro/take), 25 MB for images.
 # Enforced server-side to protect against accidental/malicious bloat.
 MAX_SUBMISSION_VIDEO_BYTES = 150 * 1024 * 1024
@@ -1182,6 +1187,18 @@ def _submission_to_client_shape(sub: dict) -> dict:
             image_items.append(mapped)
             if not cover_mid:
                 cover_mid = mapped.get("id")
+        elif cat == "indian":
+            # Phase 3 — preserve Indian-look images as a distinct section so
+            # the client view can render Indian / Western / Portfolio
+            # buckets independently. Previously these were silently dropped
+            # because _submission_to_client_shape only handled `image`.
+            image_items.append({**m, "category": "indian"})
+            if not cover_mid:
+                cover_mid = m.get("id")
+        elif cat == "western":
+            image_items.append({**m, "category": "western"})
+            if not cover_mid:
+                cover_mid = m.get("id")
         elif cat == "intro_video":
             intro_items.append({**m, "category": "video"})
         elif cat in LEGACY_TAKE_CATEGORIES or cat == "take":

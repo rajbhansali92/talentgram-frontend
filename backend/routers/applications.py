@@ -25,6 +25,7 @@ from core import (
     APPLICATION_UPLOAD_CATEGORIES,
     IMAGE_RESIZE_MAX_WIDTH,
     MAX_APPLICATION_IMAGES,
+    MAX_IMAGES_PER_CATEGORY,
     MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_VIDEO_BYTES,
     ApplicationStartIn,
@@ -165,11 +166,13 @@ async def upload_application_media(
         raise HTTPException(400, "Application already finalized")
 
     if category in ("image", "indian", "western"):
+        # Phase 3: per-category cap (10 each) — NOT a combined total.
         existing = sum(
-            1 for m in app_doc.get("media", []) if m["category"] in ("image", "indian", "western")
+            1 for m in app_doc.get("media", []) if m.get("category") == category
         )
-        if existing >= MAX_APPLICATION_IMAGES:
-            raise HTTPException(400, f"Image limit reached ({MAX_APPLICATION_IMAGES})")
+        if existing >= MAX_IMAGES_PER_CATEGORY:
+            label = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
+            raise HTTPException(400, f"{label} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
     if category == "intro_video":
         # Single slot; replace previous if exists
         await db.applications.update_one(

@@ -37,6 +37,9 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
+// Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
+// `western` is independently capped at this value, NOT combined.
+const MAX_IMAGES_PER_CATEGORY = 10;
 const LS_KEY = "tg_application";
 // Draft expiry: local data (token + PII) is wiped after 30 days even if
 // the user never finalises — defense-in-depth against stale tokens / stale PII.
@@ -281,12 +284,12 @@ export default function ApplicationPage() {
     const upload = async (files, category) => {
         if (!files || !files.length) return;
         if (category === "image" || category === "indian" || category === "western") {
-            const existing = media.filter(
-                (m) => m.category === "image" || m.category === "indian" || m.category === "western",
-            ).length;
-            const remaining = MAX_IMAGES - existing;
+            // Phase 3 — per-category cap (10 each), not combined.
+            const existing = media.filter((m) => m.category === category).length;
+            const remaining = MAX_IMAGES_PER_CATEGORY - existing;
             if (remaining <= 0) {
-                toast.error(`Max ${MAX_IMAGES} images (across all looks)`);
+                const label = category === "indian" ? "Indian look" : category === "western" ? "Western look" : "Portfolio";
+                toast.error(`${label} image limit reached (${MAX_IMAGES_PER_CATEGORY})`);
                 return;
             }
             files = Array.from(files).slice(0, remaining);
@@ -764,8 +767,8 @@ export default function ApplicationPage() {
                             hint="Saree, lehenga, sherwani, or traditional/Indian-look references."
                             items={indianImages}
                             category="indian"
-                            allCount={allImages.length}
-                            maxImages={MAX_IMAGES}
+                            allCount={indianImages.length}
+                            maxImages={MAX_IMAGES_PER_CATEGORY}
                             inputRef={indianRef}
                             upload={upload}
                             removeMedia={removeMedia}
@@ -778,8 +781,8 @@ export default function ApplicationPage() {
                             hint="Casual, formal or western-styled references."
                             items={westernImages}
                             category="western"
-                            allCount={allImages.length}
-                            maxImages={MAX_IMAGES}
+                            allCount={westernImages.length}
+                            maxImages={MAX_IMAGES_PER_CATEGORY}
                             inputRef={westernRef}
                             upload={upload}
                             removeMedia={removeMedia}
@@ -791,9 +794,9 @@ export default function ApplicationPage() {
                         <div>
                             <div className="flex items-center justify-between mb-3">
                                 <p className="text-sm text-white/80">
-                                    Profile / Headshot Image * <span className="text-white/40 text-xs ml-1">({allImages.length}/{MAX_IMAGES})</span>
+                                    Profile / Headshot Image * <span className="text-white/40 text-xs ml-1">({images.length}/{MAX_IMAGES_PER_CATEGORY})</span>
                                 </p>
-                                {allImages.length < MAX_IMAGES && (
+                                {images.length < MAX_IMAGES_PER_CATEGORY && (
                                     <button
                                         onClick={() => imgRef.current?.click()}
                                         data-testid="apply-image-upload-btn"
@@ -810,7 +813,7 @@ export default function ApplicationPage() {
                                 )}
                             </div>
                             <p className="text-xs text-white/40 mb-3">
-                                Upload at least 1 clear profile/headshot image (required). Add more (up to {MAX_IMAGES}, including Indian / Western looks above) to improve your selection chances.
+                                Upload at least 1 clear profile/headshot image (required). Add more (up to {MAX_IMAGES_PER_CATEGORY} per category, including Indian / Western looks above) to improve your selection chances.
                             </p>
                             <input
                                 ref={imgRef}

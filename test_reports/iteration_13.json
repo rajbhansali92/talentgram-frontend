@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 13 — Phase 3 fix verified end-to-end. Backend pytest 14/14 PASS covering: (a) submission upload per-category 10-cap independently for image/indian/western with 11th returning HTTP 400 with the exact error message ('Indian look image limit reached (10)' / 'Western look image limit reached (10)' / 'Portfolio image limit reached (10)'); (b) submission can hold 10 image + 10 indian + 10 western = 30 portfolio images concurrently; (c) /public/apply per-category 10-cap parity for image/indian/western; (d) ClientView shape now preserves indian + western media on the public link payload (verified against existing seeded link 'talentgram-x-comfort-9339a4'); (e) work_links round-trips through form_data → talent.work_links on /api/public/links/{slug}; (f) admin login + /api/talents, /api/projects, /api/links, /api/applications, /api/submissions/approved all 200. Frontend smoke on /l/talentgram-x-comfort-9339a4 confirms portfolio carousel now shows '1 / 8' for the talent (4 portfolio + 3 indian + 1 western), proving the 3-section concatenation in ClientView.jsx works (was '1 / 4' before — indian/western were silently dropped).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase3_categories.py",
+    "/app/test_reports/pytest/pytest_phase3.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "core.py L1185-1201: indian/western mapping is correct but mutates the cover_mid order (cover_mid is set to the FIRST media item regardless of category — that includes indian/western). If the product expectation is 'cover should be a portfolio image', indian/western should NOT seed cover_mid. Currently any first-uploaded indian image becomes the cover. Confirm with product.",
+    "links.py POST /links: backend slugifies the title and ignores any client-sent `slug` field — the LinkIn schema appears to expect `title` not `name`. Document this in the API; current Phase 3 testing surfaced 422 when only `name` was sent.",
+    "submissions.py L240-247 & applications.py L168-175: duplicated cap-check block. Worth extracting into a shared helper `assert_per_category_cap(media_list, category)` in core.py to keep cap message consistent across endpoints (already consistent, but DRY).",
+    "ClientView.jsx L596: order is portfolio → indian → western. If product wants indian/western surfaced FIRST (they are higher-value reference shots), reorder. Otherwise good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase3_categories.py"
+  ],
+  "success_rate": {
+    "backend": "100% (14/14)",
+    "frontend": "Smoke verified — ClientView carousel renders portfolio+indian+western combined (1/8 on Shivani Y card); identify flow + talent open works."
+  },
+  "test_credentials": "admin@talentgram.com / Admin@123 (working)",
+  "seed_data_creation": "Created several TEST_phase3_*@example.com submissions and applications to verify per-category caps. Each holds up to 30 tiny placeholder JPEG images. One TEST submission was finalized and approved on the first project, then attached to a new TEST link 'test-phase3-work-links-*' to verify work_links surface in the public payload. Cleanup not performed; data is harmless and TEST_-prefixed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Project slugs on this env: 'comfort-90435a', 'ikonic-me-f18f3c'. The seeded public link with indian/western media is 'talentgram-x-comfort-9339a4' (submission 133b702c-... contains 9 media: 4 image + 3 indian + 1 western + 1 video). Use that link to smoke ClientView 3-section rendering — expected carousel size = 8. Backend POST /api/links accepts `title` (slugified into `slug` on response); do NOT send `name`/`slug`.",
+  "rca of the issue": "Phase 3 fix correctly closes the prior bug where _submission_to_client_shape only mapped cat=='image' → 'portfolio' and silently dropped indian/western. Now indian and western are passed through verbatim into image_items (with category preserved) and ClientView.jsx concatenates them into the portfolio carousel. Per-category 10-cap is enforced server-side in both submissions.upload and applications.upload (was previously a combined 8-cap)."
+}

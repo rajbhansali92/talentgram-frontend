@@ -258,6 +258,10 @@ def _folder_for_category(category: str) -> Optional[str]:
         return "takes"
     if category == "image":
         return "images"
+    if category == "indian":
+        return "indian_look"
+    if category == "western":
+        return "western_look"
     return None
 
 
@@ -296,6 +300,24 @@ def _build_filename(media: dict, sub: dict) -> str:
                 idx += 1
         ext = _ext_from_filename(orig, fallback="jpg")
         return f"image_{idx}.{ext}"
+    if cat == "indian":
+        idx = 1
+        for m in sub.get("media", []) or []:
+            if m.get("category") == "indian":
+                if m.get("id") == media.get("id"):
+                    break
+                idx += 1
+        ext = _ext_from_filename(orig, fallback="jpg")
+        return f"indian_{idx}.{ext}"
+    if cat == "western":
+        idx = 1
+        for m in sub.get("media", []) or []:
+            if m.get("category") == "western":
+                if m.get("id") == media.get("id"):
+                    break
+                idx += 1
+        ext = _ext_from_filename(orig, fallback="jpg")
+        return f"western_{idx}.{ext}"
     return sanitize_filename(orig or "file")
 
 

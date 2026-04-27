@@ -585,10 +585,15 @@ function TalentDetail({
     const vis = link.visibility || {};
     // Split media by explicit category. Backend normalises all takes (new +
     // legacy) to category="take" + label, preserves intro as "video" and
-    // images as "portfolio". Order is also enforced backend-side, but we
-    // pick buckets here for independent section rendering.
+    // images as "portfolio" / "indian" / "western". Order is also enforced
+    // backend-side, but we pick buckets here for independent section
+    // rendering.
     const mediaAll = talent.media || [];
-    const images = mediaAll.filter((m) => m.category === "portfolio");
+    const portfolioImages = mediaAll.filter((m) => m.category === "portfolio");
+    const indianImages = mediaAll.filter((m) => m.category === "indian");
+    const westernImages = mediaAll.filter((m) => m.category === "western");
+    // Combined view used by the lightbox carousel (preserves order: portfolio → indian → western).
+    const images = [...portfolioImages, ...indianImages, ...westernImages];
     const intro = mediaAll.find((m) => m.category === "video") || null;
     const takes = mediaAll.filter((m) => m.category === "take");
     const [idx, setIdx] = useState(0);

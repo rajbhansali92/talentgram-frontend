@@ -14,6 +14,7 @@ from core import (
     MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_TAKES,
     MAX_SUBMISSION_VIDEO_BYTES,
+    MAX_IMAGES_PER_CATEGORY,
     PORTFOLIO_IMAGE_CATEGORIES,
     SUBMISSION_DECISIONS,
     SUBMISSION_UPLOAD_CATEGORIES,
@@ -237,11 +238,13 @@ async def submission_upload(
         raise HTTPException(404, "Submission not found")
 
     if category in PORTFOLIO_IMAGE_CATEGORIES:
+        # Phase 3: per-category cap (10 each) — NOT a combined total.
         existing = sum(
-            1 for m in sub.get("media", []) if m["category"] in PORTFOLIO_IMAGE_CATEGORIES
+            1 for m in sub.get("media", []) if m.get("category") == category
         )
-        if existing >= MAX_SUBMISSION_IMAGES:
-            raise HTTPException(400, f"Image limit reached ({MAX_SUBMISSION_IMAGES})")
+        if existing >= MAX_IMAGES_PER_CATEGORY:
+            label = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
+            raise HTTPException(400, f"{label} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
 
     if category == "take":
         existing_takes = sum(

@@ -742,9 +742,11 @@ export default function SubmissionPage() {
         submission?.status === "submitted" || submission?.status === "updated";
 
     const readyToSubmit =
-        intro &&
-        takes.length > 0 &&
-        allImages.length >= MIN_IMAGES &&
+        // Phase 1 v37c: media is no longer mandatory. Submission requires
+        // ONLY the form-data identity / availability / budget fields. Intro
+        // video, audition takes, and portfolio images are recommended but
+        // optional — talents who are pressed for time can ship a "form-only"
+        // submission and add media later via Refine.
         form.first_name &&
         form.last_name &&
         form.height &&
@@ -756,7 +758,8 @@ export default function SubmissionPage() {
         (form.budget.status !== "custom" || form.budget.value.trim());
 
     // Specific, actionable checklist of what's still missing — shown under
-    // the Submit button so talents never guess why it's disabled.
+    // the Submit button so talents never guess why it's disabled. Media
+    // entries are intentionally excluded (they are recommended, not required).
     const missing = [];
     if (!form.first_name) missing.push("First name");
     if (!form.last_name) missing.push("Last name");
@@ -768,12 +771,6 @@ export default function SubmissionPage() {
     if (!form.budget.status) missing.push("Budget (Accept / Custom)");
     else if (form.budget.status === "custom" && !form.budget.value.trim())
         missing.push("Budget amount");
-    if (!intro) missing.push("Introduction video");
-    if (takes.length === 0) missing.push("At least 1 audition take");
-    if (allImages.length < MIN_IMAGES)
-        missing.push(
-            `${MIN_IMAGES - allImages.length} more image${MIN_IMAGES - allImages.length > 1 ? "s" : ""} (${allImages.length}/${MIN_IMAGES} min)`,
-        );
 
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED state — offer a "Refine my submission" path
@@ -1569,14 +1566,19 @@ export default function SubmissionPage() {
                         data-step="3"
                     >
                         <p className="eyebrow mb-3">Uploads</p>
-                        <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-8">
+                        <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-2">
                             Show us your work.
                         </h2>
+                        <p
+                            className="text-xs text-white/50 mb-8 tg-mono"
+                            data-testid="uploads-optional-hint"
+                        >
+                            Optional — but recommended to increase your selection chances.
+                        </p>
 
                         <UploadSlot
                             title="Introduction Video"
-                            required
-                            note="Please provide your most recent professional introduction video (without contact info)."
+                            note="Optional (recommended). Your most recent professional introduction video (without contact info)."
                             icon={Video}
                             accept="video/*"
                             inputRef={introRef}
@@ -1607,9 +1609,10 @@ export default function SubmissionPage() {
                                 </span>
                             </div>
                             <p className="text-xs text-white/50 mb-4 leading-relaxed">
-                                Upload each take as a separate video and label
-                                it (e.g., "Scene 1", "Closeup emotional"). At
-                                least one take is required.
+                                Optional (recommended). Upload each take as a
+                                separate video and label it (e.g., "Scene 1",
+                                "Closeup emotional"). Talents with takes have
+                                a stronger chance of selection.
                             </p>
 
                             {takes.map((t, i) => (
@@ -1628,7 +1631,6 @@ export default function SubmissionPage() {
                             {canAddTake && (
                                 <AddTakeSlot
                                     number={takes.length + 1}
-                                    required={takes.length === 0}
                                     uploading={uploading}
                                     uploadPct={uploadPct}
                                     onPick={(file, label) =>
@@ -1644,21 +1646,22 @@ export default function SubmissionPage() {
                                 <p className="eyebrow">
                                     Images{" "}
                                     <span className="text-white/40">
-                                        (min {MIN_IMAGES})
+                                        (optional)
                                     </span>
                                 </p>
                                 <span
                                     data-testid="image-counter"
-                                    className={`text-xs tg-mono ${allImages.length >= MIN_IMAGES ? "text-[#34C759]" : "text-white/70"}`}
+                                    className="text-xs tg-mono text-white/70"
                                 >
                                     {allImages.length}/{MAX_IMAGES}
                                 </span>
                             </div>
                             <p className="text-xs text-white/50 mb-4 leading-relaxed">
-                                Please send 7–8 high-resolution professional
-                                images that align with the brand's aesthetic.
-                                Minimum {MIN_IMAGES} required (counts include
-                                Indian / Western look images below).
+                                Optional (recommended). High-resolution
+                                portfolio images aligned with the brand's
+                                aesthetic improve your selection odds. Up to{" "}
+                                {MAX_IMAGES} images across Indian / Western /
+                                general looks combined.
                             </p>
 
                             {/* Phase 2 — optional Indian look images */}

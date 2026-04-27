@@ -1191,7 +1191,6 @@ def _submission_to_client_shape(sub: dict) -> dict:
 
     # Deterministic order inside takes: legacy first (take_1/2/3), then new takes by created_at
     def _take_sort_key(m: dict):
-        orig = m.get("original_category") or m.get("category") or ""
         # Pull original legacy ordering hint
         raw_cat = next(
             (rm.get("category") for rm in raw_media if rm.get("id") == m.get("id")),

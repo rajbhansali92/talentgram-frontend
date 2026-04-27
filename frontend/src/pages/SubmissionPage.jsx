@@ -147,6 +147,19 @@ export default function SubmissionPage() {
         })();
     }, [slug]);
 
+    // Branded page title — replaces the raw slug-based title users used to
+    // see in the browser tab. Shape: "Talentgram | <Brand> Audition".
+    useEffect(() => {
+        const prev = document.title;
+        const brand = (project?.brand_name || "").trim();
+        document.title = brand
+            ? `Talentgram | ${brand} Audition`
+            : "Talentgram | Audition";
+        return () => {
+            document.title = prev;
+        };
+    }, [project?.brand_name]);
+
     // Resume submission
     useEffect(() => {
         if (!saved?.token || !saved?.id) return;

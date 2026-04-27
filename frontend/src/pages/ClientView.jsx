@@ -117,6 +117,18 @@ export default function ClientView() {
         if (identified) loadData();
     }, [identified, loadData]);
 
+    // Branded page title — replaces the raw slug-based title users used to
+    // see in the browser tab. Shape: "Talentgram | <Project Name>" using
+    // brand_name when set, else the link title.
+    useEffect(() => {
+        const prev = document.title;
+        const brand = (data?.link?.brand_name || data?.link?.title || "").trim();
+        document.title = brand ? `Talentgram | ${brand}` : "Talentgram | Portfolio";
+        return () => {
+            document.title = prev;
+        };
+    }, [data?.link?.brand_name, data?.link?.title]);
+
     const identify = async (e) => {
         e.preventDefault();
         setLoading(true);

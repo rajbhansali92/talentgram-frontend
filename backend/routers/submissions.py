@@ -33,7 +33,9 @@ from core import (
     decode_submitter,
     make_token,
     put_object,
+    remove_synced_media_from_global_talent,
     resize_image_bytes,
+    sync_media_to_global_talent,
 )
 from drive_backup import (
     drive_enabled,
@@ -367,6 +369,14 @@ async def submission_upload(
         brand = (project or {}).get("brand_name") or sub.get("project_slug") or "Unknown"
         enqueue_drive_upload(db, media, updated, brand, data)
 
+    # ------------------------------------------------------------------
+    # Phase 3 v37i — mirror image-category media into the global talent
+    # record so the talent's profile (/admin/talents/:id) reflects every
+    # portfolio image they've uploaded across all projects. Idempotent
+    # via source_submission_media_id; no-op for intro_video/take.
+    # ------------------------------------------------------------------
+    await sync_media_to_global_talent(updated, media)
+
     return updated
 
 
@@ -418,6 +428,8 @@ async def submission_delete_media(
             "updated_at": _now(),
         }
     await db.submissions.update_one({"id": sid}, patch)
+    # Phase 3 v37i — keep the global talent profile in sync.
+    await remove_synced_media_from_global_talent(sub, mid)
     return {"ok": True}
 
 

@@ -1342,3 +1342,85 @@ def _clean_ids(ids: List[str]) -> List[str]:
             seen.add(i)
             out.append(i)
     return out
+
+
+# --------------------------------------------------------------------------
+# Submission ↔ Talent global-profile media sync (Phase 3 v37i)
+# --------------------------------------------------------------------------
+# Submission media (image/indian/western) is project-scoped, but the talent's
+# global profile (TalentEdit / /admin/talents/:id) used to render an empty
+# media tab because `db.talents[].media[]` was never populated from
+# submission uploads. These helpers mirror image-category media into the
+# talent record when a submission has a `talent_email`, and remove it when
+# a submission media item is deleted. Idempotent via
+# `source_submission_media_id`.
+
+# Categories that should be mirrored from submission to global talent.
+# Audition-only categories (intro_video, take, take_*) are project-scoped
+# and intentionally NOT mirrored.
+SYNC_TO_GLOBAL_CATEGORIES = {"image", "indian", "western"}
+
+
+async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
+    """Mirror a submission's image media into the global talent record.
+
+    No-op when:
+      - submission has no `talent_email` (anonymous draft)
+      - media category is not in SYNC_TO_GLOBAL_CATEGORIES
+      - the same source-id has already been mirrored (idempotent)
+      - no talent record exists for that email yet (will sync on next upload)
+    """
+    cat = media.get("category")
+    if cat not in SYNC_TO_GLOBAL_CATEGORIES:
+        return
+    email = (submission.get("talent_email") or "").lower().strip()
+    if not email:
+        return
+    source_id = media.get("id")
+    if not source_id:
+        return
+
+    # Build the mirror item — preserves storage_path / resized_storage_path /
+    # mime / size so the global profile renders identically. New `id` is
+    # generated to keep talent.media ids unique across mirror sources.
+    mirror = {
+        "id": str(uuid.uuid4()),
+        "category": cat,
+        "storage_path": media.get("storage_path"),
+        "mime": media.get("mime"),
+        "content_type": media.get("content_type"),
+        "size": media.get("size"),
+        "created_at": media.get("created_at") or _now(),
+        "scope": "talent",
+        "source_submission_id": submission.get("id"),
+        "source_submission_media_id": source_id,
+    }
+    if media.get("resized_storage_path"):
+        mirror["resized_storage_path"] = media["resized_storage_path"]
+        mirror["resized_size"] = media.get("resized_size")
+
+    # Idempotent push: only insert if no existing item carries this
+    # source_submission_media_id.
+    await db.talents.update_one(
+        {
+            "email": email,
+            "media.source_submission_media_id": {"$ne": source_id},
+        },
+        {"$push": {"media": mirror}},
+    )
+
+
+async def remove_synced_media_from_global_talent(submission: dict, source_media_id: str) -> None:
+    """Remove the mirrored copy of a submission media from the global talent.
+
+    No-op when no mirror exists. Called from the submission media-delete
+    endpoint so the global profile stays in sync.
+    """
+    email = (submission.get("talent_email") or "").lower().strip()
+    if not email or not source_media_id:
+        return
+    await db.talents.update_one(
+        {"email": email},
+        {"$pull": {"media": {"source_submission_media_id": source_media_id}}},
+    )
+

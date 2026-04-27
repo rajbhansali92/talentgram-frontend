@@ -42,6 +42,13 @@ export default function BudgetLines({
         <div className="space-y-2" data-testid={`${testidPrefix}-list`}>
             {(lines || []).map((row, i) => (
                 <div
+                    // NOTE: index used intentionally as key here. Each row is an
+                    // editable <input> pair; switching to a content-derived key
+                    // (e.g. `${row.label}-${row.value}`) would remount the input
+                    // on every keystroke and steal focus. Rows are appended/
+                    // removed at known positions and never reordered, so the
+                    // index is stable for the row's lifetime — the canonical
+                    // React-docs case for `key={index}`.
                     key={i}
                     className="flex items-center gap-2 border-b border-border/40 pb-2"
                     data-testid={`${testidPrefix}-row-${i}`}

@@ -989,7 +989,7 @@ function TalentDetail({
                                                         <ul className="text-sm text-white/90 space-y-0.5">
                                                             {lines.map((ln, i) => (
                                                                 <li
-                                                                    key={i}
+                                                                    key={`${ln.label}-${ln.value}`}
                                                                     className="flex justify-between gap-4"
                                                                     data-testid={`client-budget-line-${i}`}
                                                                 >
@@ -1020,9 +1020,9 @@ function TalentDetail({
                                                 if (lines.length) {
                                                     return (
                                                         <ul className="text-sm text-white/90 space-y-0.5">
-                                                            {lines.map((ln, i) => (
+                                                            {lines.map((ln) => (
                                                                 <li
-                                                                    key={i}
+                                                                    key={`${ln.label}-${ln.value}`}
                                                                     className="flex justify-between gap-4"
                                                                 >
                                                                     <span className="text-white/70">

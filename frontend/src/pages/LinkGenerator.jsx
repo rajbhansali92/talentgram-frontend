@@ -18,6 +18,10 @@ import {
 
 const VIS_ITEMS = [
     { key: "portfolio", label: "Portfolio Images" },
+    // Phase 3 v37j — granular look-specific toggles. Independent of `portfolio`
+    // so admins can ship "Indian only" or "Western only" curations.
+    { key: "indian_images", label: "Indian Look Images" },
+    { key: "western_images", label: "Western Look Images" },
     { key: "intro_video", label: "Introduction Video" },
     { key: "takes", label: "Audition Takes" },
     { key: "instagram", label: "Instagram (clickable)" },
@@ -37,6 +41,8 @@ const VIS_ITEMS = [
 
 const DEFAULT_VIS = {
     portfolio: true,
+    indian_images: true,
+    western_images: true,
     intro_video: true,
     takes: true,
     instagram: true,

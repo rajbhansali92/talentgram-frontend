@@ -992,7 +992,9 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 m.category === "take_2" ||
                 m.category === "take_3",
         ).length,
-        images: (s.media || []).filter((m) => m.category === "image").length,
+        images: (s.media || []).filter(
+            (m) => m.category === "image" || m.category === "indian" || m.category === "western",
+        ).length,
     };
     return (
         <div
@@ -1097,7 +1099,13 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
     if (!submission) return null;
     const media = submission.media || [];
     const intro = media.find((m) => m.category === "intro_video");
-    const images = media.filter((m) => m.category === "image");
+    // Phase 3 v37j — split portfolio media into 3 buckets so admins can
+    // see the Indian/Western/Portfolio sections separately during review.
+    // Reuses existing media.category — no schema change.
+    const portfolioImages = media.filter((m) => m.category === "image");
+    const indianImages = media.filter((m) => m.category === "indian");
+    const westernImages = media.filter((m) => m.category === "western");
+    const totalImages = portfolioImages.length + indianImages.length + westernImages.length;
 
     const save = async () => {
         setSaving(true);
@@ -1480,13 +1488,66 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         );
                     })()}
                 </section>
-                {images.length > 0 && (
-                    <section className="mb-10">
+                {/* Phase 3 v37j — Indian / Western / Portfolio image sections.
+                    Each is independent and hidden when empty. Same grid UI
+                    across all three. */}
+                {indianImages.length > 0 && (
+                    <section className="mb-10" data-testid="review-indian-images-section">
                         <p className="eyebrow mb-3">
-                            Images ({images.length})
+                            Indian Look Images ({indianImages.length})
                         </p>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                            {images.map((m) => (
+                            {indianImages.map((m) => (
+                                <a
+                                    key={m.id}
+                                    href={FILE_URL(m.storage_path)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="aspect-square bg-muted overflow-hidden border border-border"
+                                >
+                                    <img
+                                        src={FILE_URL(m.storage_path)}
+                                        alt=""
+                                        loading="lazy"
+                                        className="w-full h-full object-cover"
+                                    />
+                                </a>
+                            ))}
+                        </div>
+                    </section>
+                )}
+                {westernImages.length > 0 && (
+                    <section className="mb-10" data-testid="review-western-images-section">
+                        <p className="eyebrow mb-3">
+                            Western Look Images ({westernImages.length})
+                        </p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {westernImages.map((m) => (
+                                <a
+                                    key={m.id}
+                                    href={FILE_URL(m.storage_path)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="aspect-square bg-muted overflow-hidden border border-border"
+                                >
+                                    <img
+                                        src={FILE_URL(m.storage_path)}
+                                        alt=""
+                                        loading="lazy"
+                                        className="w-full h-full object-cover"
+                                    />
+                                </a>
+                            ))}
+                        </div>
+                    </section>
+                )}
+                {portfolioImages.length > 0 && (
+                    <section className="mb-10" data-testid="review-portfolio-images-section">
+                        <p className="eyebrow mb-3">
+                            Portfolio Images ({portfolioImages.length})
+                        </p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {portfolioImages.map((m) => (
                                 <a
                                     key={m.id}
                                     href={FILE_URL(m.storage_path)}

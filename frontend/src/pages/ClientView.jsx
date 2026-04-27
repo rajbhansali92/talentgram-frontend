@@ -589,9 +589,27 @@ function TalentDetail({
     // backend-side, but we pick buckets here for independent section
     // rendering.
     const mediaAll = talent.media || [];
-    const portfolioImages = mediaAll.filter((m) => m.category === "portfolio");
-    const indianImages = mediaAll.filter((m) => m.category === "indian");
-    const westernImages = mediaAll.filter((m) => m.category === "western");
+    // Phase 3 v37j — granular per-look visibility. The umbrella `portfolio`
+    // toggle is the master gate (when OFF, no look images render at all).
+    // When `portfolio` is ON, each look bucket is gated by its own toggle:
+    //   - portfolio (generic)  → vis.portfolio_images (default ON when key absent)
+    //   - indian               → vis.indian_images   (default ON when key absent)
+    //   - western              → vis.western_images  (default ON when key absent)
+    // `?? true` keeps backward-compat for older links that don't have the
+    // new keys yet.
+    const portfolioOn = vis.portfolio !== false;
+    const indianOn = portfolioOn && (vis.indian_images ?? true);
+    const westernOn = portfolioOn && (vis.western_images ?? true);
+    const portfolioGenericOn = portfolioOn; // existing behaviour kept identical
+    const portfolioImages = portfolioGenericOn
+        ? mediaAll.filter((m) => m.category === "portfolio")
+        : [];
+    const indianImages = indianOn
+        ? mediaAll.filter((m) => m.category === "indian")
+        : [];
+    const westernImages = westernOn
+        ? mediaAll.filter((m) => m.category === "western")
+        : [];
     // Combined view used by the lightbox carousel (preserves order: portfolio → indian → western).
     const images = [...portfolioImages, ...indianImages, ...westernImages];
     const intro = mediaAll.find((m) => m.category === "video") || null;

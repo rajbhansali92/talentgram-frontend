@@ -655,6 +655,13 @@ function TalentDetail({
             node.removeEventListener("touchmove", onTouchMove);
             node.removeEventListener("touchend", onTouchEnd);
         };
+        // `goNextTalent` / `goPrevTalent` / `onClose` / `onNavigate` are
+        // intentionally omitted from deps. They're closures recreated on
+        // every render, but our re-registration triggers (`talent.id`,
+        // `list.length`, `currentTalentIdx`) cover every case where the
+        // closures' meaningful inputs change. Including them would
+        // tear-down + re-attach the touch listeners on every parent
+        // render, causing dropped gestures mid-swipe.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [talent.id, list.length, currentTalentIdx]);
 

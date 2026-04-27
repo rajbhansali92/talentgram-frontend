@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -100,12 +100,15 @@ export default function ProjectEdit() {
     const audioRef = useRef();
     const videoFileRef = useRef();
 
-    const loadSubmissions = async (pid) => {
+    // Stable reference (uses only `pid` param + `setSubmissions` setter)
+    // so adding it to `useEffect` deps never causes spurious re-runs but
+    // still avoids any future stale-closure pitfall under React Strict Mode.
+    const loadSubmissions = useCallback(async (pid) => {
         try {
             const { data } = await adminApi.get(`/projects/${pid}/submissions`);
             setSubmissions(data);
         } catch {}
-    };
+    }, []);
 
     useEffect(() => {
         if (!isEdit) return;
@@ -118,7 +121,7 @@ export default function ProjectEdit() {
                 toast.error("Failed to load project");
             }
         })();
-    }, [id, isEdit]);
+    }, [id, isEdit, loadSubmissions]);
 
     const setDecision = async (sid, decision) => {
         await adminApi.post(`/projects/${id}/submissions/${sid}/decision`, {

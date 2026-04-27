@@ -271,6 +271,12 @@ export default function SubmissionPage() {
     // re-seeing the profile step on a return visit.
     useEffect(() => {
         if (saved && mobileStep < 3) setMobileStep(3);
+    // `mobileStep` and `setMobileStep` are intentionally omitted: this
+    // effect is meant to fire ONLY when `saved` transitions (e.g. talent
+    // record just got created). Including `mobileStep` would re-trigger
+    // every time the user manually navigates back to step 1/2 via
+    // `goToStep` and force them forward again — the exact UX bug we
+    // designed this guard to avoid.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [saved]);
 

@@ -508,9 +508,16 @@ async def seed_admin() -> None:
     """Idempotently seed the root admin into `db.users`.
 
     Migration: if a legacy `db.admins` record exists for this email but no
-    matching `db.users` row, move the hash + name over. New installs skip this.
-    Password is refreshed from env on every boot (upsert semantics) so the
-    playbook's "rotate ADMIN_PASSWORD in .env" pattern works.
+    matching `db.users` row, move the hash + name over. New installs skip
+    this.
+
+    PERSISTENCE GUARANTEE (2026-04-27 fix):
+    The env `ADMIN_PASSWORD` seeds the password ONLY on first-boot
+    insertion. If the admin row already exists, we never rewrite
+    `password_hash` from env — admin password changes made via the UI
+    (`/api/users/me/password`, forgot/reset flow) MUST survive server
+    restarts. To rotate the admin password, use the in-app password
+    change flow, not env mutations.
     """
     # Unique email index — idempotent.
     try:
@@ -598,14 +605,16 @@ async def seed_admin() -> None:
         return
 
     # Ensure role/status are correct for the seeded admin account.
+    # NOTE: We deliberately DO NOT touch `password_hash` for an existing
+    # admin row — once the admin changes their password via the UI, that
+    # change must persist across restarts. The env `ADMIN_PASSWORD` is
+    # used ONLY at first-boot insertion above. To rotate the password,
+    # use the in-app password change / forgot-password flow.
     patch: Dict[str, Any] = {}
     if existing.get("role") != "admin":
         patch["role"] = "admin"
     if existing.get("status") != "active":
         patch["status"] = "active"
-    # Refresh hash only if env password doesn't match (rotation support).
-    if not verify_password(ADMIN_PASSWORD, existing.get("password_hash") or ""):
-        patch["password_hash"] = hash_password(ADMIN_PASSWORD)
     if patch:
         await db.users.update_one({"email": ADMIN_EMAIL}, {"$set": patch})
         logger.info(f"Updated seeded admin {ADMIN_EMAIL}: {list(patch.keys())}")

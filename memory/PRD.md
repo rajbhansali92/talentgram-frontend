@@ -42,6 +42,15 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-27 (v37)** — **Phase 1 cleanup: budget consolidation + project metadata visibility on /submit.** Pure rendering / mapping work — no backend, schema, or API changes.
+  - **Removed from project creation UI:** the two `<BudgetLines>` editors on `ProjectEdit` (talent-facing + client-facing budget). Wrapped the section in `{false &&}` so the existing data on already-created projects is preserved untouched in the DB but no longer surfaces or can be edited. Re-enable by restoring the conditional.
+  - **Removed from link generator UI:** the `Client Budget Override` section. Also wrapped in `{false &&}` for the same legacy-data preservation; existing override values on existing links are inert from the UI's perspective but DB-untouched.
+  - **Removed from visibility toggles:** the `Budget Form` row in `LinkGenerator`'s `FIELDS` array. The single `Budget` toggle now controls all client-facing budget visibility. Existing links keep their `visibility.budget_form` value in the DB but it's no longer surfaced anywhere.
+  - **Single budget source going forward:** the talent's submitted budget on each submission. Admin can edit it on the submission row in `ProjectEdit` (existing flow). Client view's `client-budget` block already prefers `talent.budget.value` (counter-offer) and falls back gracefully to "Agreed" pill when the talent accepted — no changes needed to the rendering logic.
+  - **/submit project metadata:** Director + Production House are now rendered alongside Character / Shoot Dates / Commission / Medium-Usage / Additional Details. Both fields already existed in `projects.director` / `projects.production_house` — the talent-facing audition page just wasn't surfacing them. `<Info>` auto-hides empty values, so older projects without those fields stay clean.
+  - **Note:** `/apply` is project-independent (open self-onboarding), so Director/Production House aren't applicable there. Surfacing was added only to `/submit/{slug}` per actual context.
+  - Verified live: 1 screenshot of `/submit/pantaloons-with-a-celebrity-11ccd4` shows DIRECTOR=misha ghose + PRODUCTION HOUSE=Amok Films + no Budget/Day. 1 screenshot of `/admin/projects/{id}` confirms 0 BudgetLines editors. 1 screenshot of `/admin/links/new` confirms no Override section + no Budget Form toggle. Lint clean across all 3 files.
+
 - **2026-04-26 (v36)** — **Notification panel layout fix.** The dropdown was being cropped on desktop because:
   1. Outer wrapper used `max-h-[calc(100vh-80px)]` (≈90vh) — looser than the 80vh spec.
   2. Inner scroll region had `max-h-[420px]` — capped the list and made the panel look stunted on tall viewports.

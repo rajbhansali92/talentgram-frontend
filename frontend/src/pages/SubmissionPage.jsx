@@ -891,7 +891,14 @@ export default function SubmissionPage() {
                     <div className="grid grid-cols-2 gap-x-6 gap-y-5 mb-6 border-t border-white/10 pt-6">
                         <Info label="Character" value={project.character} />
                         <Info label="Shoot Dates" value={project.shoot_dates} />
-                        <Info label="Budget / Day" value={project.budget_per_day} />
+                        {/* Phase 1 (v37): expose Director + Production House so
+                            talents see who's behind the project before they
+                            invest time. Both fields already exist in the
+                            project schema — this is rendering-only. `<Info>`
+                            already auto-hides when value is empty, so no
+                            extra guard needed. */}
+                        <Info label="Director" value={project.director} />
+                        <Info label="Production House" value={project.production_house} />
                         <Info label="Commission" value={project.commission_percent} />
                         <Info label="Medium / Usage" value={project.medium_usage} wide />
                     </div>

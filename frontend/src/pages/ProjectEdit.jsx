@@ -571,8 +571,15 @@ export default function ProjectEdit() {
                 </p>
             )}
 
-            {/* Budget Configuration */}
-            {isEdit && (
+            {/* Budget Configuration — Phase 1 cleanup (v37):
+                Project-level budget editors (talent-facing + client-facing) are
+                fully hidden. The single source of truth is the budget the
+                talent submits in their audition (admin can edit it on the
+                submission row). Existing project-level budget lines persist
+                untouched in the DB but are no longer presented to anyone.
+                Re-enable by restoring this <section> if the workflow ever
+                changes. */}
+            {false && isEdit && (
                 <section
                     className="border border-white/10 p-6 md:p-8 mt-6"
                     data-testid="budget-config-section"

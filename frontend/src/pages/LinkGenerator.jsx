@@ -29,7 +29,9 @@ const VIS_ITEMS = [
     { key: "availability", label: "Availability" },
     { key: "budget", label: "Budget" },
     { key: "work_links", label: "Work Links" },
-    { key: "budget_form", label: "Budget Form" },
+    // Phase 1 cleanup (v37): "Budget Form" toggle removed — was redundant
+    // with the single "Budget" toggle above. Existing links keep their
+    // visibility.budget_form value in the DB but it's no longer surfaced.
     { key: "download", label: "Download Option" },
 ];
 
@@ -416,6 +418,13 @@ export default function LinkGenerator() {
                         )}
                     </section>
 
+                    {/* Client Budget Override — Phase 1 cleanup (v37):
+                        hidden from UI. The budget shown on the link view now
+                        comes solely from each talent's submitted budget
+                        (admin-editable). Existing override values persist in
+                        the DB untouched but are no longer presented or
+                        edited. Re-enable by restoring this section. */}
+                    {false && (
                     <section
                         className="border border-white/10 p-6"
                         data-testid="link-budget-override-section"
@@ -434,6 +443,7 @@ export default function LinkGenerator() {
                             Requires "Budget" visibility toggle ON for clients.
                         </p>
                     </section>
+                    )}
 
                     <section className="border border-white/10 p-6">
                         <p className="eyebrow mb-3">Internal Notes</p>

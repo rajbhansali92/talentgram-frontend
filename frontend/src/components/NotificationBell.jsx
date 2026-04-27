@@ -24,7 +24,8 @@ export default function NotificationBell() {
         try {
             const { data } = await adminApi.get("/notifications/unread-count");
             setCount(data?.count || 0);
-        } catch {
+        } catch (e) {
+            console.error(e);
             // silent — bell just shows stale count
         }
     };

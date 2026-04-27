@@ -46,6 +46,7 @@ export default function Dashboard() {
                 });
                 setRecent(links.data.slice(0, 5));
             } catch (e) {
+                console.error(e);
                 // ignore
             }
         })();

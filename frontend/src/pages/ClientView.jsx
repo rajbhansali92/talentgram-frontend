@@ -231,7 +231,8 @@ export default function ClientView() {
                         },
                     },
                 );
-            } catch {
+            } catch (e) {
+                console.error(e);
                 // Silent — local state still tracks visually for this session
             }
         },

@@ -269,7 +269,8 @@ export default function ApplicationPage() {
                     { headers: { Authorization: `Bearer ${token}` } },
                 );
                 saveLocal();
-            } catch {
+            } catch (e) {
+                console.error(e);
                 // ignore; next attempt will retry
             }
         }, 800);

@@ -4,12 +4,16 @@ import os
 import uuid
 import pytest
 import requests
+from dotenv import load_dotenv
+
+# Load /app/backend/.env so secrets stay out of source.
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://casting-deck-pro.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASSWORD = "Admin@123"
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 
 # ---------------- Fixtures ----------------

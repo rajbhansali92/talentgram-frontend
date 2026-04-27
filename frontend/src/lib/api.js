@@ -37,7 +37,7 @@ adminApi.interceptors.response.use(
             try {
                 localStorage.removeItem("tg_admin_token");
                 localStorage.removeItem("tg_admin");
-            } catch {}
+            } catch (e) { console.error(e); }
             window.location.href = "/admin/login";
         }
         return Promise.reject(err);

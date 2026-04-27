@@ -261,7 +261,7 @@ export default function SubmissionPage() {
         const t = setTimeout(() => {
             try {
                 localStorage.setItem(LS_DRAFT_KEY(slug), JSON.stringify(form));
-            } catch {}
+            } catch (e) { console.error(e); }
         }, 400);
         return () => clearTimeout(t);
     }, [form, slug]);
@@ -509,7 +509,7 @@ export default function SubmissionPage() {
                 },
                 authCfg,
             );
-        } catch {}
+        } catch (e) { console.error(e); }
     };
 
     const uploadFile = async (file, category, label = null) => {
@@ -691,7 +691,7 @@ export default function SubmissionPage() {
             setSubmission(data);
             // Once the user finalises, clear the local draft — the
             // canonical state lives on the backend now.
-            try { localStorage.removeItem(LS_DRAFT_KEY(slug)); } catch {}
+            try { localStorage.removeItem(LS_DRAFT_KEY(slug)); } catch (e) { console.error(e); }
             toast.success("Submitted — the team will review soon");
         } catch (err) {
             toast.error(

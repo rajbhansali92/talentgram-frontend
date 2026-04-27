@@ -73,7 +73,7 @@ export default function NotificationBell() {
                 await adminApi.post(`/notifications/${n.id}/read`);
                 setCount((c) => Math.max(0, c - 1));
             }
-        } catch {}
+        } catch (e) { console.error(e); }
         const type = n?.type || "";
         const pid = n?.payload?.project_id;
         const sid = n?.payload?.submission_id;
@@ -92,7 +92,7 @@ export default function NotificationBell() {
             await adminApi.post("/notifications/read-all");
             setCount(0);
             setItems((arr) => arr.map((n) => ({ ...n, read_at: new Date().toISOString() })));
-        } catch {}
+        } catch (e) { console.error(e); }
     };
 
     return (

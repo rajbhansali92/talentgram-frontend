@@ -48,7 +48,7 @@ export default function NotificationsPage() {
     const open = async (n) => {
         try {
             if (!n.read_at) await adminApi.post(`/notifications/${n.id}/read`);
-        } catch {}
+        } catch (e) { console.error(e); }
         const pid = n?.payload?.project_id;
         const sid = n?.payload?.submission_id;
         if (pid && sid) nav(`/admin/projects/${pid}?sub=${sid}`);

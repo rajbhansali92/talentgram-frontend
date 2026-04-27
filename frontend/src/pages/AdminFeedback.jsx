@@ -55,7 +55,7 @@ export default function AdminFeedback() {
                     try {
                         const { data: p } = await adminApi.get(`/projects/${pid}`);
                         projects[pid] = p;
-                    } catch {}
+                    } catch (e) { console.error(e); }
                 }),
             );
             setMeta({ projects });

@@ -28,7 +28,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
             if (recRef.current && recRef.current.state !== "inactive") {
                 try {
                     recRef.current.stop();
-                } catch {}
+                } catch (e) { console.error(e); }
             }
             if (previewUrl) URL.revokeObjectURL(previewUrl);
         };
@@ -81,7 +81,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
         if (recRef.current && recRef.current.state !== "inactive") {
             try {
                 recRef.current.stop();
-            } catch {}
+            } catch (e) { console.error(e); }
         }
         setRecording(false);
     };

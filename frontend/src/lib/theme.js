@@ -21,7 +21,7 @@ export function useTheme() {
         applyTheme(theme);
         try {
             localStorage.setItem("tg_theme", theme);
-        } catch {}
+        } catch (e) { console.error(e); }
     }, [theme]);
 
     const toggle = useCallback(() => {

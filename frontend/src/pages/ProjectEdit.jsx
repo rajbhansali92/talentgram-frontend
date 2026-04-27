@@ -107,7 +107,7 @@ export default function ProjectEdit() {
         try {
             const { data } = await adminApi.get(`/projects/${pid}/submissions`);
             setSubmissions(data);
-        } catch {}
+        } catch (e) { console.error(e); }
     }, []);
 
     useEffect(() => {

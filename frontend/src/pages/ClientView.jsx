@@ -194,7 +194,7 @@ export default function ClientView() {
                     },
                 },
             );
-        } catch {}
+        } catch (e) { console.error(e); }
     };
 
     // Mark a subject as "seen" — fires from IntersectionObserver (5s in
@@ -671,7 +671,7 @@ function TalentDetail({
         if (busyAction) return;
         setBusyAction(key);
         // Subtle haptic on supported devices (Android Chrome).
-        try { navigator.vibrate?.(10); } catch {}
+        try { navigator.vibrate?.(10); } catch (e) { console.error(e); }
         try {
             await setAction(talent.id, key);
             // Tiny delay so the action confirmation toast registers + the

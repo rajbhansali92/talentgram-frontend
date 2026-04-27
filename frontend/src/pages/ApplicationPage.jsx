@@ -206,8 +206,33 @@ export default function ApplicationPage() {
 
     const startApplication = async () => {
         const { first_name, last_name, email } = basics;
-        if (!first_name.trim() || !last_name.trim() || !email.trim()) {
-            toast.error("First name, last name, and email are required");
+        // Email-first ordering (Phase 1 v37 fix): always check email
+        // before any other required field so a returning user who
+        // hasn't typed anything else doesn't see a misleading
+        // "First name is required" toast.
+        if (!email.trim()) {
+            toast.error("Email is required");
+            return;
+        }
+        if (!emailGateUnlocked) {
+            // The Continue button is already disabled while the gate is
+            // locked; this is defense-in-depth in case the button is
+            // clicked via keyboard / a11y pathway before the prefill
+            // decision lands.
+            toast.error("Please complete the email step first");
+            return;
+        }
+        // After the gate is unlocked, first/last name are required so we
+        // can create an application document. If the gate was unlocked
+        // through "Use this" on the prefill card, basics.first_name /
+        // last_name are already populated from the saved profile; the
+        // user just clicks Continue.
+        if (!first_name.trim()) {
+            toast.error("First name is required");
+            return;
+        }
+        if (!last_name.trim()) {
+            toast.error("Last name is required");
             return;
         }
         setSaving(true);

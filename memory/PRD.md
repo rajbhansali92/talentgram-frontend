@@ -42,6 +42,15 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-27 (v37b)** — **Email-first validation timing fix.** The Continue / Save buttons on `/apply` and `/submit` were validating `first_name` BEFORE `email` in their order-of-checks, so a user who hadn't completed the email step (or who had only typed an email) saw a misleading "First name is required" toast. Pure validation-order fix in the frontend — no schema, no API, no UI redesign.
+  - **/submit `validateForm` and `validateStep1`**: now check `email` FIRST. If email is empty → "Email is required". If `emailGateUnlocked` is `false` → "Please complete the email step first". Otherwise full validation continues in the original order. The Continue button on the mobile wizard bottom bar was already hidden behind `{emailGateUnlocked && ...}`, so this is also defense-in-depth.
+  - **/apply `startApplication`**: reordered checks — email first, then `emailGateUnlocked` guard, then first_name, then last_name. The Continue button was already gated on `disabled={!emailGateUnlocked}`.
+  - **Behavior verified live** at 390x844 mobile viewport on `/submit/{slug}`:
+    - Initial load → Continue button HIDDEN, no validation can fire ✅
+    - Empty email blur → Continue still hidden ✅
+    - Unknown email blur → Continue appears → click without first_name → correctly shows "First name is required" (correct post-email-step error) ✅
+    - Known email + "Use this" → first_name auto-prefilled → Continue passes through ✅
+
 - **2026-04-27 (v37)** — **Phase 1 cleanup: budget consolidation + project metadata visibility on /submit.** Pure rendering / mapping work — no backend, schema, or API changes.
   - **Removed from project creation UI:** the two `<BudgetLines>` editors on `ProjectEdit` (talent-facing + client-facing budget). Wrapped the section in `{false &&}` so the existing data on already-created projects is preserved untouched in the DB but no longer surfaces or can be edited. Re-enable by restoring the conditional.
   - **Removed from link generator UI:** the `Client Budget Override` section. Also wrapped in `{false &&}` for the same legacy-data preservation; existing override values on existing links are inert from the UI's perspective but DB-untouched.

@@ -197,9 +197,19 @@ export default function SubmissionPage() {
     );
 
     const validateForm = () => {
+        // Email-first ordering (Phase 1 v37 fix): the email field is the
+        // gate that reveals every other field. Validation MUST surface
+        // an email error before any other "required" message — otherwise
+        // a returning user who hasn't filled email yet sees a confusing
+        // "First name is required" toast.
+        if (!form.email.trim()) return "Email is required";
+        // Email-first gate guard: if the rest of the form isn't unlocked
+        // yet (no prefill decision made), we deliberately skip every
+        // other validation. The Continue button is already gated on
+        // `emailGateUnlocked` in the UI; this is a defense-in-depth.
+        if (!emailGateUnlocked) return "Please complete the email step first";
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
-        if (!form.email.trim()) return "Email is required";
         if (!form.height) return "Height is required";
         if (!form.location.trim()) return "Current location is required";
         if (!form.availability.status) return "Please confirm your availability";
@@ -217,9 +227,13 @@ export default function SubmissionPage() {
     // Mobile wizard step validators — narrower than the full form so users
     // can advance after completing only the current step's fields.
     const validateStep1 = () => {
+        // Same email-first rule as validateForm. Step 1 IS the talent-
+        // details step, so without a confirmed email we have nothing to
+        // validate against.
+        if (!form.email.trim()) return "Email is required";
+        if (!emailGateUnlocked) return "Please complete the email step first";
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
-        if (!form.email.trim()) return "Email is required";
         if (!form.height) return "Height is required";
         if (!form.location.trim()) return "Current location is required";
         return null;

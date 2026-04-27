@@ -37,7 +37,6 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
-const MIN_IMAGES = 5;
 const LS_KEY = "tg_application";
 // Draft expiry: local data (token + PII) is wiped after 30 days even if
 // the user never finalises — defense-in-depth against stale tokens / stale PII.
@@ -710,7 +709,7 @@ export default function ApplicationPage() {
                         <div>
                             <div className="flex items-center justify-between mb-3">
                                 <p className="text-sm text-white/80">
-                                    Introduction Video *
+                                    Introduction Video <span className="text-white/40 text-xs ml-1">(optional)</span>
                                 </p>
                                 {intro && (
                                     <button
@@ -722,8 +721,7 @@ export default function ApplicationPage() {
                                 )}
                             </div>
                             <p className="text-xs text-white/40 mb-3">
-                                Please provide your most recent professional
-                                introduction video (without contact info).
+                                Optional (recommended to improve selection chances). Your most recent professional introduction video, without contact info.
                             </p>
                             {intro ? (
                                 <video
@@ -792,8 +790,7 @@ export default function ApplicationPage() {
                         <div>
                             <div className="flex items-center justify-between mb-3">
                                 <p className="text-sm text-white/80">
-                                    Profile Images * ({allImages.length}/
-                                    {MAX_IMAGES})
+                                    Profile / Headshot Image * <span className="text-white/40 text-xs ml-1">({allImages.length}/{MAX_IMAGES})</span>
                                 </p>
                                 {allImages.length < MAX_IMAGES && (
                                     <button
@@ -812,9 +809,7 @@ export default function ApplicationPage() {
                                 )}
                             </div>
                             <p className="text-xs text-white/40 mb-3">
-                                Upload {MIN_IMAGES}–{MAX_IMAGES}{" "}
-                                high-resolution images aligned with your
-                                portfolio (counts include Indian / Western look images above).
+                                Upload at least 1 clear profile/headshot image (required). Add more (up to {MAX_IMAGES}, including Indian / Western looks above) to improve your selection chances.
                             </p>
                             <input
                                 ref={imgRef}

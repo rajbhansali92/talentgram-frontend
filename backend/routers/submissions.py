@@ -14,7 +14,6 @@ from core import (
     MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_TAKES,
     MAX_SUBMISSION_VIDEO_BYTES,
-    MIN_SUBMISSION_IMAGES,
     PORTFOLIO_IMAGE_CATEGORIES,
     SUBMISSION_DECISIONS,
     SUBMISSION_UPLOAD_CATEGORIES,
@@ -447,19 +446,12 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         raise HTTPException(400, "Please confirm the budget")
     if bstatus == "custom" and not (budget.get("value") or "").strip():
         raise HTTPException(400, "Please enter your expected budget")
-    media = sub.get("media", [])
-    has_intro = any(m["category"] == "intro_video" for m in media)
-    has_any_take = any(
-        m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
-        for m in media
-    )
-    img_count = sum(1 for m in media if m["category"] in PORTFOLIO_IMAGE_CATEGORIES)
-    if not has_intro:
-        raise HTTPException(400, "Introduction video is required")
-    if not has_any_take:
-        raise HTTPException(400, "At least one audition take is required")
-    if img_count < MIN_SUBMISSION_IMAGES:
-        raise HTTPException(400, f"At least {MIN_SUBMISSION_IMAGES} images are required (you have {img_count})")
+    # Phase 1 v37c: media is fully optional on the audition submission
+    # flow. Talents can ship a "form-only" submission and add intro
+    # video / takes / portfolio images later via Refine. Caps on the
+    # per-upload endpoint still apply (MAX_SUBMISSION_IMAGES, MAX_TAKES,
+    # size limits). This block is intentionally empty — no media
+    # minimums are enforced at finalize.
 
     # First-time finalize vs retest finalize
     is_retest = sub.get("status") in ("submitted", "updated")

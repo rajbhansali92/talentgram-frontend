@@ -42,7 +42,6 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
-const MIN_IMAGES = 5;
 const LS_KEY = (slug) => `tg_submission_${slug}`;
 const LS_DRAFT_KEY = (slug) => `tg_draft_${slug}`;
 
@@ -1822,7 +1821,7 @@ export default function SubmissionPage() {
                             {!readyToSubmit && (
                                 <p className="text-[11px] text-white/40 text-center mt-3 tg-mono">
                                     Need: First+Last name · Height · Location ·
-                                    Intro · Take 1 · {MIN_IMAGES}+ images
+                                    Availability · Budget
                                 </p>
                             )}
                         </div>

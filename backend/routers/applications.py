@@ -27,7 +27,6 @@ from core import (
     MAX_APPLICATION_IMAGES,
     MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_VIDEO_BYTES,
-    MIN_APPLICATION_IMAGES,
     ApplicationStartIn,
     SubmissionDecisionIn,
     SubmissionUpdateIn,
@@ -251,13 +250,15 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
         if not (fd.get(field) or "").strip() if isinstance(fd.get(field), str) else not fd.get(field):
             raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
     media = app_doc.get("media", [])
-    if not any(m["category"] == "intro_video" for m in media):
-        raise HTTPException(400, "Introduction video is required")
+    # Phase 1 v37c: balanced media requirement.
+    # - At least 1 portfolio/headshot image is REQUIRED (so admins always
+    #   have a recognisable photo to review).
+    # - Introduction video and additional images are OPTIONAL (recommended).
     img_count = sum(1 for m in media if m["category"] in ("image", "indian", "western"))
-    if img_count < MIN_APPLICATION_IMAGES:
+    if img_count < 1:
         raise HTTPException(
             400,
-            f"At least {MIN_APPLICATION_IMAGES} images required (you have {img_count})",
+            "Please upload at least 1 clear profile/headshot image to continue.",
         )
     await db.applications.update_one(
         {"id": aid},

@@ -177,6 +177,11 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
     if not res.matched_count:
         raise HTTPException(404, "Link not found")
     link = await db.links.find_one({"id": lid}, {"_id": 0})
+    # Defensive: a parallel delete between update_one and find_one would
+    # leave `link` as None. Convert to a clean 404 instead of crashing on
+    # the next subscript assignment.
+    if link is None:
+        raise HTTPException(404, "Link not found")
     link["view_count"] = await db.link_views.count_documents({"link_id": lid})
     link["unique_viewers"] = len(await db.link_views.distinct("viewer_email", {"link_id": lid}))
     return link

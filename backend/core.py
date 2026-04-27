@@ -532,8 +532,10 @@ async def seed_admin() -> None:
         # Drop any pre-existing non-unique `email_1` index from the legacy boot.
         try:
             await db.talents.drop_index("email_1")
-        except Exception:
-            pass
+        except Exception as e:
+            # Index may not exist on a fresh DB — that's fine, but still log
+            # so any unexpected failure (auth/permission) is visible.
+            logger.debug(f"talents legacy email_1 drop skipped: {e}")
         await db.talents.create_index(
             "email",
             unique=True,

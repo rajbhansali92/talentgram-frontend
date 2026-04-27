@@ -1,4 +1,5 @@
 """Auth, file upload, file serving."""
+import logging
 import uuid
 from typing import Dict
 
@@ -25,6 +26,7 @@ from core import (
 _now_iso = _now
 
 router = APIRouter(prefix="/api", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/auth/login", response_model=TokenOut)
@@ -46,8 +48,10 @@ async def login(payload: LoginIn):
     # Track last_login (best-effort)
     try:
         await db.users.update_one({"id": user["id"]}, {"$set": {"last_login": _now_iso()}})
-    except Exception:
-        pass
+    except Exception as e:
+        # Don't block login on this — but surface the error so a Mongo
+        # outage doesn't fail silently.
+        logger.warning(f"last_login write failed for {user.get('email')}: {e}")
     return {
         "token": token,
         "admin": {

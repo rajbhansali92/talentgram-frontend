@@ -219,6 +219,10 @@ export default function SubmissionPage() {
         // yet (no prefill decision made), we deliberately skip every
         // other validation. The Continue button is already gated on
         // `emailGateUnlocked` in the UI; this is a defense-in-depth.
+        // (Audited: emailGateUnlocked is declared later in the component
+        // body, but validateForm only runs from event handlers AFTER the
+        // synchronous render initializes every const — closure resolves
+        // names at call-time, not definition-time. Audited 2026-04-27.)
         if (!emailGateUnlocked) return "Please complete the email step first";
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
@@ -243,6 +247,7 @@ export default function SubmissionPage() {
         // details step, so without a confirmed email we have nothing to
         // validate against.
         if (!form.email.trim()) return "Email is required";
+        // Same closure-resolution note as validateForm above.
         if (!emailGateUnlocked) return "Please complete the email step first";
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
@@ -305,6 +310,9 @@ export default function SubmissionPage() {
                 }
                 // Persist draft on every advance so a refresh / app-switch
                 // never loses progress (combined with backend upsert).
+                // (`saveForm` / `startSubmissionDirect` are declared later
+                // in the component body — safe here because goToStep only
+                // fires from button clicks AFTER render. See validateForm.)
                 await saveForm();
             } else if (mobileStep === 2) {
                 const err = validateStep2();
@@ -621,6 +629,9 @@ export default function SubmissionPage() {
     };
 
     const uploadImages = async (files, imageCategory = "image") => {
+        // `allImages` is declared later in the component body — safe here
+        // because uploadImages only fires from a file-input change AFTER
+        // render initializes the const. See validateForm note.
         const current = allImages.length;
         const room = MAX_IMAGES - current;
         const accepted = Array.from(files).slice(0, room);

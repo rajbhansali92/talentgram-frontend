@@ -593,6 +593,17 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 
+    # Phase 3 v37i — at first-time finalize, the talent record is created
+    # (or matched) above. ALL pre-finalize image uploads (image/indian/
+    # western) need to be retroactively mirrored into the talent's global
+    # media so the Global Profile reflects what was uploaded during this
+    # submission. Idempotent via source_submission_media_id.
+    if not is_retest:
+        finalized_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+        if finalized_sub:
+            for m in finalized_sub.get("media") or []:
+                await sync_media_to_global_talent(finalized_sub, m)
+
     # Fan out an admin notification — first-time finalize vs retest variant.
     project = await db.projects.find_one(
         {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}

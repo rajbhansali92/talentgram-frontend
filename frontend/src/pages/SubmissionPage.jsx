@@ -1707,7 +1707,7 @@ export default function SubmissionPage() {
                                 Optional (recommended). High-resolution
                                 portfolio images aligned with the brand's
                                 aesthetic improve your selection odds. Up to{" "}
-                                {MAX_IMAGES_PER_CATEGORIES_LABEL} per category
+                                {MAX_IMAGES_PER_CATEGORY} per category
                                 (Indian / Western / general looks).
                             </p>
 

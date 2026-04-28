@@ -245,7 +245,7 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
   - **Testing**: 81 existing pytests + 9 new `test_password_flows.py` + 1 updated `test_user_roles_api.py` = **87/87 passing on Atlas**. Testing agent iteration_5.json reports **100% backend + 100% frontend critical path** with zero issues across change-password, forgot, admin-reset, reset-consume, single-use, token_version invalidation, and rate-limit paths.
 
 - **2026-04-24 (v18)** — **MongoDB Atlas migration complete.** Production-ready persistence.
-  - `backend/.env` switched to `mongodb+srv://...@cluster0.sipmssu.mongodb.net/talentgram?retryWrites=true&w=majority` with `DB_NAME=talentgram`.
+  - `backend/.env` switched to MongoDB Atlas (connection string in `.env`, not committed) with `DB_NAME=talentgram`.
   - Atlas Network Access configured with `0.0.0.0/0` allowlist (creds-only auth). TLS handshake confirmed OK; `admin ping` returns `{ok:1}`.
   - End-to-end smoke pass against Atlas: admin login ✅, create talent ✅, create project ✅, public submission start ✅, create link ✅, viewer identify ✅. Supervisor restart retains 100% of data (persistence proven).
   - Full pytest regression on Atlas: **70 passed, 6 skipped, 2 transient failures retried → 78/78 pass.** Both initial failures were HTTP 500s from `integrations.emergentagent.com/objstore` (upstream object storage), unrelated to Mongo. Retry passed cleanly in 23 s.

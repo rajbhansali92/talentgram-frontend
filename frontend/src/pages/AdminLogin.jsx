@@ -7,8 +7,8 @@ import BrandHero from "@/components/BrandHero";
 import { Loader2 } from "lucide-react";
 
 export default function AdminLogin() {
-    const [email, setEmail] = useState("admin@talentgram.com");
-    const [password, setPassword] = useState("Admin@123");
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
     const [loading, setLoading] = useState(false);
     const nav = useNavigate();
 
@@ -108,10 +108,7 @@ export default function AdminLogin() {
                         )}
                         Enter Dashboard
                     </button>
-                    <div className="flex items-center justify-between mt-4">
-                        <p className="text-[11px] text-white/40 tg-mono">
-                            Default · admin@talentgram.com · Admin@123
-                        </p>
+                    <div className="flex items-center justify-end mt-4">
                         <a
                             href="/forgot-password"
                             data-testid="login-forgot-link"

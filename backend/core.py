@@ -32,8 +32,8 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret")
 APP_NAME = os.environ.get("APP_NAME", "talentgram")
 EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@talentgram.com")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@123")
+ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
+ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 

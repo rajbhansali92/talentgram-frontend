@@ -35,7 +35,20 @@ EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+# --------------------------------------------------------------------------
+# Cloudinary — primary (and only) media storage as of v37m migration.
+# --------------------------------------------------------------------------
+import cloudinary  # noqa: E402
+import cloudinary.uploader  # noqa: E402
+import cloudinary.utils  # noqa: E402
+
+cloudinary.config(
+    cloud_name=os.environ["CLOUDINARY_CLOUD_NAME"],
+    api_key=os.environ["CLOUDINARY_API_KEY"],
+    api_secret=os.environ["CLOUDINARY_API_SECRET"],
+    secure=True,
+)
+CLOUDINARY_CLOUD_NAME = os.environ["CLOUDINARY_CLOUD_NAME"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("talentgram")
@@ -196,273 +209,94 @@ def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------
-# Storage
+# Storage — Cloudinary (v37m migration)
 # --------------------------------------------------------------------------
-_storage_key: Optional[str] = None
+# All media (images + video) is uploaded directly to Cloudinary from the
+# backend; the frontend reads `media.url` and renders it without any backend
+# proxy. Cloudinary handles delivery, byte-range streaming for video, and
+# on-the-fly transformations (f_auto, q_auto, w_1600) — so this module no
+# longer needs init/put/get/stream helpers or server-side image resizing.
+
+ALLOWED_FOLDER_PREFIXES = ("talentgram/",)
 
 
-def init_storage() -> Optional[str]:
-    global _storage_key
-    if _storage_key:
-        return _storage_key
+def _validate_folder(folder: str) -> None:
+    if not folder.startswith(ALLOWED_FOLDER_PREFIXES):
+        raise HTTPException(400, f"Invalid Cloudinary folder: {folder}")
+
+
+def cloudinary_upload(
+    data: bytes,
+    folder: str,
+    public_id: str,
+    resource_type: str = "auto",
+    content_type: Optional[str] = None,
+) -> dict:
+    """Upload raw bytes to Cloudinary and return the upload result.
+
+    Result includes `secure_url`, `public_id`, `resource_type`, `bytes`, and
+    `format`. Raises HTTPException on validation failure or Cloudinary error.
+
+    `resource_type="auto"` lets Cloudinary detect image vs video vs raw
+    automatically — appropriate for our mixed audition uploads.
+    """
+    _validate_folder(folder)
     try:
-        resp = requests.post(
-            f"{STORAGE_URL}/init",
-            json={"emergent_key": EMERGENT_KEY},
-            timeout=30,
+        result = cloudinary.uploader.upload(
+            data,
+            folder=folder,
+            public_id=public_id,
+            resource_type=resource_type,
+            overwrite=True,
+            unique_filename=False,
         )
-        resp.raise_for_status()
-        _storage_key = resp.json()["storage_key"]
-        logger.info("Storage initialized")
     except Exception as e:
-        logger.error(f"Storage init failed: {e}")
-    return _storage_key
-
-
-def put_object(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    if not key:
-        raise HTTPException(status_code=503, detail="Storage unavailable")
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=180,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def resize_image_bytes(data: bytes, max_width: int = 1600, quality: int = 85) -> Optional[bytes]:
-    """Generate a display-optimised JPEG copy of a source image.
-
-    Returns the JPEG bytes if the source is a decodable image, or ``None`` if
-    the bytes are not a valid image (in which case callers should skip the
-    resize step and keep only the original). Width is capped at ``max_width``;
-    taller portraits preserve aspect ratio. Animated sources (GIF/WEBP) are
-    flattened to the first frame — acceptable for portfolio thumbnails.
-    """
-    try:
-        from PIL import Image  # local import keeps server startup light
-        import io as _io
-        img = Image.open(_io.BytesIO(data))
-        img.load()
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        w, h = img.size
-        if w > max_width:
-            new_h = int(h * (max_width / float(w)))
-            img = img.resize((max_width, new_h), Image.LANCZOS)
-        buf = _io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True)
-        return buf.getvalue()
-    except Exception as e:
-        logger.warning("resize_image_bytes skipped: %s", e)
-        return None
-
-
-def get_object(path: str) -> tuple[bytes, str]:
-    """Buffered fetch — kept for small payloads and back-compat. For large
-    media (video), prefer `stream_object` which never loads the full body."""
-    key = init_storage()
-    if not key:
-        raise HTTPException(status_code=503, detail="Storage unavailable")
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key},
-        timeout=120,
-    )
-    if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail="File not found")
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
-
-
-def stream_object(path: str, range_header: Optional[str] = None):
-    """Stream a file from Emergent Object Store to the client.
-
-    The upstream Emergent Object Store currently ignores the `Range` header
-    and always returns `200 OK` with the full body. That breaks Safari's
-    `<video>` element (which refuses to play unless it sees `206 Partial
-    Content`) and breaks seek interactions in every browser (each seek
-    re-downloads the entire file).
-
-    This function therefore does **server-side range slicing** when the
-    client requested a range and upstream replied with 200:
-
-      • Parse the `Range` header (`bytes=START-END`, `bytes=START-`, `bytes=-N`).
-      • Stream the upstream body chunk-by-chunk and yield only the requested
-        slice. Memory cost is bounded by the chunk size (256 KB).
-      • Respond with `206 Partial Content` + a proper `Content-Range` header
-        and a `Content-Length` equal to the slice length.
-
-    If upstream actually does honor the Range (returns 206), we forward
-    that response unchanged.
-
-    `Cache-Control` is *force-set* (not setdefault) to override the
-    `no-store, no-cache, must-revalidate` that Cloudflare-fronted upstream
-    sends — that header was forcing the browser to refetch the entire file
-    every play, compounding the no-Range pain.
-
-    Returns `(iterator, headers, status_code)`.
-    """
-    key = init_storage()
-    if not key:
-        raise HTTPException(status_code=503, detail="Storage unavailable")
-
-    upstream_headers = {"X-Storage-Key": key}
-    if range_header:
-        upstream_headers["Range"] = range_header
-
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers=upstream_headers,
-        stream=True,
-        timeout=600,
-    )
-    if resp.status_code == 404:
-        resp.close()
-        raise HTTPException(status_code=404, detail="File not found")
-    resp.raise_for_status()
-
-    upstream_status = resp.status_code
-    content_type = resp.headers.get("Content-Type", "application/octet-stream")
-    upstream_len_str = resp.headers.get("Content-Length")
-    try:
-        upstream_len = int(upstream_len_str) if upstream_len_str else None
-    except ValueError:
-        upstream_len = None
-    etag = resp.headers.get("ETag")
-    last_modified = resp.headers.get("Last-Modified")
-
-    # ── Case 1 ─ Upstream honored the Range and returned 206. Pass through.
-    if upstream_status == 206:
-        passthrough: Dict[str, str] = {
-            k: v
-            for k, v in resp.headers.items()
-            if k.lower()
-            in (
-                "content-type",
-                "content-length",
-                "content-range",
-                "etag",
-                "last-modified",
-            )
-        }
-        passthrough["Accept-Ranges"] = "bytes"
-        passthrough["Cache-Control"] = "public, max-age=86400"
-
-        def _passthrough_iter():
-            try:
-                for chunk in resp.iter_content(chunk_size=1024 * 256):
-                    if chunk:
-                        yield chunk
-            finally:
-                resp.close()
-
-        return _passthrough_iter(), passthrough, 206
-
-    # ── Case 2 ─ Range was requested but upstream returned 200 + full body.
-    #             Slice locally and synthesize a proper 206 response.
-    if range_header and upstream_status == 200 and upstream_len is not None:
-        m = re.match(r"^\s*bytes=(\d*)-(\d*)\s*$", range_header)
-        if m:
-            start_s, end_s = m.group(1), m.group(2)
-            if start_s == "" and end_s == "":
-                start, end = None, None  # malformed
-            elif start_s == "":
-                # Suffix range — last N bytes.
-                n = int(end_s)
-                start = max(0, upstream_len - n)
-                end = upstream_len - 1
-            elif end_s == "":
-                start = int(start_s)
-                end = upstream_len - 1
-            else:
-                start = int(start_s)
-                end = int(end_s)
-
-            # Validate. If unsatisfiable, RFC requires 416 with a
-            # `Content-Range: bytes */<size>` header.
-            if start is None or start >= upstream_len:
-                resp.close()
-                raise HTTPException(
-                    status_code=416,
-                    detail="Requested range not satisfiable",
-                    headers={"Content-Range": f"bytes */{upstream_len}"},
-                )
-
-            # Clamp upper bound to the actual file size.
-            start = max(0, start)
-            end = max(start, min(end, upstream_len - 1))
-            slice_len = end - start + 1
-
-            def _sliced_iter():
-                """Yield only bytes [start, end] from the streamed upstream body.
-
-                Walks the chunk stream once, drops chunks fully before the
-                window, slices chunks that overlap the window edges, and
-                stops as soon as the window is satisfied.
-                """
-                consumed = 0  # bytes seen so far (exclusive of current chunk)
-                try:
-                    for chunk in resp.iter_content(chunk_size=1024 * 256):
-                        if not chunk:
-                            continue
-                        chunk_start = consumed
-                        chunk_end = consumed + len(chunk)  # exclusive
-                        consumed = chunk_end
-                        if chunk_end <= start:
-                            continue
-                        if chunk_start > end:
-                            break
-                        lo = max(0, start - chunk_start)
-                        hi = min(len(chunk), end + 1 - chunk_start)
-                        out = chunk[lo:hi]
-                        if out:
-                            yield out
-                        if consumed > end:
-                            break
-                finally:
-                    resp.close()
-
-            headers = {
-                "Content-Type": content_type,
-                "Content-Length": str(slice_len),
-                "Content-Range": f"bytes {start}-{end}/{upstream_len}",
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=86400",
-            }
-            if etag:
-                headers["ETag"] = etag
-            if last_modified:
-                headers["Last-Modified"] = last_modified
-            return _sliced_iter(), headers, 206
-
-    # ── Case 3 ─ Full body (no Range requested OR malformed Range).
-    #             We support seeking via slicing now, so we DO advertise
-    #             Accept-Ranges: bytes here.
-    headers = {
-        "Content-Type": content_type,
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "public, max-age=86400",
+        logger.error(f"Cloudinary upload failed (folder={folder} pid={public_id}): {e}")
+        raise HTTPException(502, "Storage upload failed")
+    return {
+        "url": result.get("secure_url"),
+        "public_id": result.get("public_id"),
+        "resource_type": result.get("resource_type"),
+        "format": result.get("format"),
+        "bytes": result.get("bytes"),
+        "width": result.get("width"),
+        "height": result.get("height"),
+        "duration": result.get("duration"),
     }
-    if upstream_len is not None:
-        headers["Content-Length"] = str(upstream_len)
-    if etag:
-        headers["ETag"] = etag
-    if last_modified:
-        headers["Last-Modified"] = last_modified
 
-    def _full_iter():
-        try:
-            for chunk in resp.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    yield chunk
-        finally:
-            resp.close()
 
-    return _full_iter(), headers, 200
+def cloudinary_destroy(public_id: str, resource_type: str = "image") -> bool:
+    """Best-effort delete on Cloudinary. Returns True if deleted, False if
+    asset was already missing or deletion failed (logged, never raises)."""
+    if not public_id:
+        return False
+    try:
+        result = cloudinary.uploader.destroy(
+            public_id, resource_type=resource_type, invalidate=True
+        )
+        return result.get("result") in ("ok", "not found")
+    except Exception as e:
+        logger.warning(f"Cloudinary destroy failed (pid={public_id}): {e}")
+        return False
+
+
+def cloudinary_url_for(
+    public_id: str, resource_type: str = "image", **transformations
+) -> str:
+    """Build a transformation URL on the fly.
+
+    Default transformations applied to images: f_auto, q_auto. Pass
+    additional via kwargs (e.g. width=1600, crop="limit").
+    """
+    if resource_type == "image":
+        transformations.setdefault("fetch_format", "auto")
+        transformations.setdefault("quality", "auto")
+    url, _opts = cloudinary.utils.cloudinary_url(
+        public_id, resource_type=resource_type, secure=True, **transformations
+    )
+    return url
+
+
 
 
 # --------------------------------------------------------------------------

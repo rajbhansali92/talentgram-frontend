@@ -23,7 +23,6 @@ from core import (
     APP_NAME,
     APPLICATION_DECISIONS,
     APPLICATION_UPLOAD_CATEGORIES,
-    IMAGE_RESIZE_MAX_WIDTH,
     MAX_APPLICATION_IMAGES,
     MAX_IMAGES_PER_CATEGORY,
     MAX_SUBMISSION_IMAGE_BYTES,
@@ -34,14 +33,13 @@ from core import (
     _now,
     _paginate_params,
     _paginated,
+    cloudinary_upload,
     compute_age,
     current_admin,
     current_team_or_admin,
     db,
     decode_submitter,
     make_token,
-    put_object,
-    resize_image_bytes,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -179,8 +177,8 @@ async def upload_application_media(
             {"id": aid}, {"$pull": {"media": {"category": "intro_video"}}}
         )
 
-    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    path = f"{APP_NAME}/applications/{aid}/{uuid.uuid4()}.{ext}"
+    media_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/applications/{aid}"
     data = await file.read()
 
     size_bytes = len(data)
@@ -198,25 +196,30 @@ async def upload_application_media(
             400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
         )
 
-    result = put_object(path, data, file.content_type or "application/octet-stream")
+    # Cloudinary auto-detects video/image/raw by content type. Server-side
+    # resize is dropped (v37m) — Cloudinary URL transforms (f_auto, q_auto,
+    # w_1600) do this on demand at delivery time.
+    rt = "video" if (category == "intro_video" or (file.content_type or "").startswith("video/")) else "image"
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=media_id,
+        resource_type=rt,
+        content_type=file.content_type,
+    )
     media = {
-        "id": str(uuid.uuid4()),
+        "id": media_id,
         "category": category,
-        "storage_path": result["path"],
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
         "content_type": file.content_type or "application/octet-stream",
         "original_filename": file.filename,
-        "size": result.get("size", size_bytes),
+        "size": result.get("bytes") or size_bytes,
         "created_at": _now(),
         "scope": "application",
         "application_id": aid,
     }
-    if category in ("image", "indian", "western"):
-        resized = resize_image_bytes(data, max_width=IMAGE_RESIZE_MAX_WIDTH)
-        if resized and len(resized) < size_bytes:
-            resized_path = f"{APP_NAME}/applications/{aid}/{uuid.uuid4()}_1600.jpg"
-            r2 = put_object(resized_path, resized, "image/jpeg")
-            media["resized_storage_path"] = r2["path"]
-            media["resized_size"] = len(resized)
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
     updated = await db.applications.find_one({"id": aid}, {"_id": 0})
 

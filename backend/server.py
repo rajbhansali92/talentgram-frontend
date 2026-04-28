@@ -17,8 +17,8 @@ from fastapi import APIRouter, FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
-from core import db, get_object, init_storage, mongo_client, seed_admin
-from drive_backup import attach_db, drive_enabled, retry_pending_uploads, start_drive_worker
+from core import db, mongo_client, seed_admin
+from drive_backup import attach_db, drive_enabled, start_drive_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from routers import (
     applications,
@@ -95,7 +95,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup():
     await seed_admin()
-    init_storage()
+    # init_storage() removed in v37m — Cloudinary is configured at import time.
     await ensure_notifications_indexes(db)
 
     await db.client_states.create_index(
@@ -110,19 +110,12 @@ async def on_startup():
         logger.info("Google Drive backup ENABLED — starting retry worker")
         attach_db(db)
         start_drive_worker()
-        asyncio.create_task(_drive_retry_loop())
+        # `_drive_retry_loop` (which polled for failed Emergent-OS uploads) is
+        # disabled in v37m. With Cloudinary as primary storage, every successful
+        # POST has already returned a public CDN URL; there's no concept of
+        # "pending" data sitting on Emergent OS waiting to be backed up.
     else:
         logger.info("Google Drive backup DISABLED")
-
-
-async def _drive_retry_loop():
-    await asyncio.sleep(60)
-    while True:
-        try:
-            await retry_pending_uploads(db, get_object)
-        except Exception as e:
-            logger.warning("drive retry loop error: %s", e)
-        await asyncio.sleep(300)
 
 
 # Shutdown

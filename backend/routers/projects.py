@@ -22,7 +22,7 @@ from core import (
     current_admin,
     current_team_or_admin,
     db,
-    put_object,
+    cloudinary_upload,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,10 +148,10 @@ async def add_material(
     if category == "video_file" and not content_type.startswith("video/"):
         raise HTTPException(400, "Reference video must be a video file")
 
-    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    # Segregated storage path for reference videos
+    material_id = str(uuid.uuid4())
+    # Segregated folder for reference videos vs other materials
     subdir = "videos" if category == "video_file" else "materials"
-    path = f"{APP_NAME}/projects/{pid}/{subdir}/{uuid.uuid4()}.{ext}"
+    folder = f"{APP_NAME}/projects/{pid}/{subdir}"
     data = await file.read()
 
     # Enforce size limit for reference videos (100 MB)
@@ -161,14 +161,23 @@ async def add_material(
             f"Reference video too large ({len(data) // (1024 * 1024)} MB). Max {MAX_VIDEO_FILE_BYTES // (1024 * 1024)} MB.",
         )
 
-    result = put_object(path, data, content_type)
+    rt = "video" if category == "video_file" else "auto"
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=material_id,
+        resource_type=rt,
+        content_type=content_type,
+    )
     material = {
-        "id": str(uuid.uuid4()),
+        "id": material_id,
         "category": category,
-        "storage_path": result["path"],
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
         "content_type": content_type,
         "original_filename": file.filename,
-        "size": result.get("size", len(data)),
+        "size": result.get("bytes") or len(data),
         "created_at": _now(),
         # Explicit scope — project material is bound to this project only
         "scope": "project_material",

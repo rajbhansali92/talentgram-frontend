@@ -4,21 +4,18 @@ import uuid
 from typing import Dict
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
 
 from core import (
     APP_NAME,
     LoginIn,
     TokenOut,
     _now,
+    cloudinary_upload,
     current_admin,
     current_team_or_admin,
     current_user,
     db,
-    get_object,
     make_token,
-    put_object,
-    stream_object,
     verify_password,
 )
 
@@ -91,32 +88,24 @@ async def upload_file(
     file: UploadFile = File(...),
     admin: dict = Depends(current_team_or_admin),
 ):
-    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    path = f"{APP_NAME}/uploads/{admin['id']}/{uuid.uuid4()}.{ext}"
+    """Upload a generic admin file to Cloudinary."""
+    media_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/uploads/{admin['id']}"
     data = await file.read()
-    result = put_object(path, data, file.content_type or "application/octet-stream")
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=media_id,
+        resource_type="auto",
+        content_type=file.content_type,
+    )
     return {
-        "path": result["path"],
-        "size": result.get("size", len(data)),
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "size": result.get("bytes") or len(data),
         "content_type": file.content_type or "application/octet-stream",
         "original_filename": file.filename,
     }
-
-
-@router.get("/files/{path:path}")
-async def download_file(path: str, request: Request):
-    """Stream a file from Emergent Object Store.
-
-    - Supports HTTP Range (required for video seeking).
-    - Never buffers the full file in RAM — yields 256 KB chunks.
-    - Files are referenced by UUID-paths; intentionally public for client portfolio viewing.
-    """
-    range_header = request.headers.get("range") or request.headers.get("Range")
-    iterator, headers, status = stream_object(path, range_header=range_header)
-    # Cache-Control is force-set inside stream_object — no need to override here.
-    return StreamingResponse(
-        iterator,
-        status_code=status,
-        media_type=headers.get("Content-Type", "application/octet-stream"),
-        headers=headers,
-    )
+# /api/files/{path} download endpoint removed in v37m migration — all media
+# now lives on Cloudinary and is served directly from `media.url`.

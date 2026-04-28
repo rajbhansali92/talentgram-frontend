@@ -5,11 +5,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pymongo.errors import DuplicateKeyError
 import cloudinary
-import cloudinary.uploader
 from core import (
     APP_NAME,
     DEFAULT_FIELD_VISIBILITY,
-    IMAGE_RESIZE_MAX_WIDTH,
     LEGACY_TAKE_CATEGORIES,
     MAX_SUBMISSION_IMAGES,
     MAX_SUBMISSION_IMAGE_BYTES,
@@ -28,14 +26,13 @@ from core import (
     _paginated,
     _public_project,
     _submission_to_client_shape,
+    cloudinary_upload,
     current_admin,
     current_team_or_admin,
     db,
     decode_submitter,
     make_token,
-    put_object,
     remove_synced_media_from_global_talent,
-    resize_image_bytes,
     sync_media_to_global_talent,
 )
 from drive_backup import (
@@ -268,8 +265,8 @@ async def submission_upload(
             {"id": sid}, {"$pull": {"media": {"category": category}}}
         )
 
-    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    path = f"{APP_NAME}/submissions/{sid}/{uuid.uuid4()}.{ext}"
+    media_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/submissions/{sid}"
     data = await file.read()
 
     # Enforce size caps up front so oversized bodies never make it to storage.
@@ -290,39 +287,32 @@ async def submission_upload(
             400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
         )
 
-    
-upload_result = cloudinary.uploader.upload(
-    data,
-    resource_type="auto"  # supports images + videos
-)
-
-media = {
-    "id": str(uuid.uuid4()),
-    "category": category,
-    "url": upload_result["secure_url"],  # ✅ Cloudinary URL
-    "public_id": upload_result["public_id"],
-    "content_type": file.content_type or "application/octet-stream",
-    "original_filename": file.filename,
-    "size": upload_result.get("bytes", size_bytes),
-    "created_at": _now(),
-    "scope": "submission",
-    "submission_id": sid,
-    "project_id": sub["project_id"],
-}
-
-if category == "take":
-    media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
-
-    # Generate an optimised 1600px JPEG variant for portfolio images so the
-    # client view loads fast. Original is retained for downloads. Applies to
-    # generic + indian + western look images.
-    if category in PORTFOLIO_IMAGE_CATEGORIES:
-        resized = resize_image_bytes(data, max_width=IMAGE_RESIZE_MAX_WIDTH)
-        if resized and len(resized) < size_bytes:
-            resized_path = f"{APP_NAME}/submissions/{sid}/{uuid.uuid4()}_1600.jpg"
-            r2 = put_object(resized_path, resized, "image/jpeg")
-            media["resized_storage_path"] = r2["path"]
-            media["resized_size"] = len(resized)
+    # v37m — direct Cloudinary upload. Server-side resize is dropped in
+    # favour of on-the-fly URL transformations at delivery time.
+    rt = "video" if is_video_slot else "image"
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=media_id,
+        resource_type=rt,
+        content_type=file.content_type,
+    )
+    media = {
+        "id": media_id,
+        "category": category,
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "content_type": file.content_type or "application/octet-stream",
+        "original_filename": file.filename,
+        "size": result.get("bytes") or size_bytes,
+        "created_at": _now(),
+        "scope": "submission",
+        "submission_id": sid,
+        "project_id": sub["project_id"],
+    }
+    if category == "take":
+        media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
 
     patch: Dict[str, Any] = {"$push": {"media": media}}
     # Re-upload after finalize flips status back to "updated" and decision → pending

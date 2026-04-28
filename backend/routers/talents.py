@@ -19,7 +19,6 @@ from core import (
     current_team_or_admin,
     db,
     enrich_talent,
-    put_object,
 )
 
 logger = logging.getLogger(__name__)

@@ -37,7 +37,7 @@ from core import (
     current_team_or_admin,
     db,
     decode_viewer,
-    put_object,
+    cloudinary_upload,
 )
 from notifications import fanout as notify_fanout
 
@@ -213,9 +213,15 @@ async def create_voice_feedback(
         cap_mb = MAX_FEEDBACK_AUDIO_BYTES // (1024 * 1024)
         raise HTTPException(400, f"Voice note too large — max {cap_mb} MB")
 
-    ext = (file.filename or "audio.webm").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "webm"
-    path = f"{APP_NAME}/feedback/{submission_id}/{uuid.uuid4()}.{ext}"
-    result = put_object(path, data, ct or "application/octet-stream")
+    feedback_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/feedback/{submission_id}"
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=feedback_id,
+        resource_type="video",  # Cloudinary stores audio under the video resource type
+        content_type=ct or "application/octet-stream",
+    )
     doc = await _persist_feedback(
         link=link,
         viewer=viewer,
@@ -223,7 +229,7 @@ async def create_voice_feedback(
         talent_id=talent_id,
         submission_id=submission_id,
         project_id=project_id,
-        content_url=result["path"],
+        content_url=result["url"],
         content_type=ct,
     )
     return doc

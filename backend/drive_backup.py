@@ -579,37 +579,16 @@ def start_drive_worker():
 # --------------------------------------------------------------------------
 # Retry pending failures (scheduled from server.py startup)
 # --------------------------------------------------------------------------
-async def retry_pending_uploads(db, get_object) -> None:
-    """Walk through failure queue and retry each one via the single-worker
-    queue. Skips terminal failures (e.g. SA quota errors) which are marked
-    retry_count=99 at failure time. `get_object` is `core.get_object` —
-    passed in to avoid a circular import."""
-    if not drive_enabled():
-        return
-    pending = await db.drive_upload_failures.find(
-        {"retry_count": {"$lt": 5}, "terminal": {"$ne": True}}, {"_id": 0}
-    ).limit(20).to_list(20)
-    for row in pending:
-        coll = db.submissions if row.get("scope") == "submission" else db.applications
-        sub = await coll.find_one({"id": row["submission_id"]})
-        if not sub:
-            await db.drive_upload_failures.delete_one({"media_id": row["media_id"]})
-            continue
-        media = next((m for m in (sub.get("media") or []) if m.get("id") == row["media_id"]), None)
-        if not media or media.get("google_drive_url"):
-            await db.drive_upload_failures.delete_one({"media_id": row["media_id"]})
-            continue
-        try:
-            data, _ = get_object(media["storage_path"])
-        except Exception as e:
-            logger.warning("Drive retry: cannot re-fetch primary file %s: %s", media.get("id"), e)
-            await db.drive_upload_failures.update_one(
-                {"media_id": row["media_id"]},
-                {"$inc": {"retry_count": 1}, "$set": {"last_error": f"refetch: {e}"[:500]}},
-            )
-            continue
-        # Bump retry counter BEFORE enqueue so a persistent failure eventually exits the loop.
-        await db.drive_upload_failures.update_one(
-            {"media_id": row["media_id"]}, {"$inc": {"retry_count": 1}},
-        )
-        enqueue_drive_upload(db, media, sub, row["brand_name"], data)
+async def retry_pending_uploads(*args, **kwargs) -> None:
+    """No-op as of v37m migration.
+
+    Originally polled for failed Emergent-OS → Drive backup uploads and
+    re-queued them by re-fetching bytes from primary storage. With Cloudinary
+    as the only primary storage, every successful upload already returns a
+    public CDN URL — no `pending` queue exists. Drive backup itself can still
+    pull from `media.url` synchronously inside `enqueue_drive_upload`.
+
+    Kept as a callable shim so any orphaned import/call in legacy code paths
+    is harmless.
+    """
+    return None

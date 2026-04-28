@@ -4,7 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pymongo.errors import DuplicateKeyError
-
+import cloudinary
+import cloudinary.uploader
 from core import (
     APP_NAME,
     DEFAULT_FIELD_VISIBILITY,
@@ -289,21 +290,28 @@ async def submission_upload(
             400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
         )
 
-    result = put_object(path, data, file.content_type or "application/octet-stream")
-    media = {
-        "id": str(uuid.uuid4()),
-        "category": category,
-        "storage_path": result["path"],
-        "content_type": file.content_type or "application/octet-stream",
-        "original_filename": file.filename,
-        "size": result.get("size", size_bytes),
-        "created_at": _now(),
-        "scope": "submission",
-        "submission_id": sid,
-        "project_id": sub["project_id"],
-    }
-    if category == "take":
-        media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
+    
+upload_result = cloudinary.uploader.upload(
+    data,
+    resource_type="auto"  # supports images + videos
+)
+
+media = {
+    "id": str(uuid.uuid4()),
+    "category": category,
+    "url": upload_result["secure_url"],  # ✅ Cloudinary URL
+    "public_id": upload_result["public_id"],
+    "content_type": file.content_type or "application/octet-stream",
+    "original_filename": file.filename,
+    "size": upload_result.get("bytes", size_bytes),
+    "created_at": _now(),
+    "scope": "submission",
+    "submission_id": sid,
+    "project_id": sub["project_id"],
+}
+
+if category == "take":
+    media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
 
     # Generate an optimised 1600px JPEG variant for portfolio images so the
     # client view loads fast. Original is retained for downloads. Applies to

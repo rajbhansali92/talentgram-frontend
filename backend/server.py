@@ -1,8 +1,5 @@
-"""Talentgram Portfolio Engine — FastAPI bootstrap.
+"""Talentgram Portfolio Engine — FastAPI bootstrap."""
 
-All route logic lives in `routers/`. Shared primitives (config, DB, security,
-storage, utils, constants, models, visibility filters) live in `core.py`.
-"""
 import asyncio
 import logging
 import os
@@ -32,18 +29,15 @@ app = FastAPI(title="Talentgram Portfolio Engine")
 logger = logging.getLogger(__name__)
 
 
+# ✅ CORRECT MIDDLEWARE (FIXED)
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Defense-in-depth headers to reduce XSS/clickjacking blast radius.
-
-    Notes:
-    - CSP is deliberately permissive for the API (no HTML rendered here). The
-      React SPA is served by its own host; this middleware hardens direct
-      backend responses (JSON + media streams).
-    - `frame-ancestors 'none'` blocks clickjacking of any JSON response.
-    """
-
     async def dispatch(self, request, call_next):
         response = await call_next(request)
+
+        # Skip for Swagger / OpenAPI
+        if request.url.path.startswith("/docs") or request.url.path.startswith("/openapi"):
+            return response
+
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -53,8 +47,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'none'; frame-ancestors 'none'",
+            "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;",
         )
+
         return response
 
 
@@ -81,6 +76,7 @@ app.include_router(drive_admin.router)
 app.include_router(notifications_router.router)
 app.include_router(feedback.router)
 
+# Middleware
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -91,41 +87,41 @@ app.add_middleware(
 )
 
 
+# Startup
 @app.on_event("startup")
 async def on_startup():
     await seed_admin()
     init_storage()
     await ensure_notifications_indexes(db)
-    # client_states (M5 client viewing-intelligence) — fast lookup per (link, viewer).
+
     await db.client_states.create_index(
         [("link_id", 1), ("viewer_email", 1)], unique=True
     )
-    # feedback — talent-facing query needs a fast (submission_id, status, visibility) lookup.
+
     await db.feedback.create_index([("submission_id", 1), ("status", 1)])
     await db.feedback.create_index([("project_id", 1), ("status", 1)])
     await db.feedback.create_index([("created_at", -1)])
+
     if drive_enabled():
         logger.info("Google Drive backup ENABLED — starting retry worker")
         attach_db(db)
         start_drive_worker()
         asyncio.create_task(_drive_retry_loop())
     else:
-        logger.info("Google Drive backup DISABLED (env vars not set)")
+        logger.info("Google Drive backup DISABLED")
 
 
 async def _drive_retry_loop():
-    """Periodic background task — retries any failed Drive uploads every
-    5 minutes. In-process, single-instance — safe given current deployment
-    topology. If the queue is empty the call is essentially a no-op."""
-    await asyncio.sleep(60)  # let the app finish booting before first sweep
+    await asyncio.sleep(60)
     while True:
         try:
             await retry_pending_uploads(db, get_object)
         except Exception as e:
             logger.warning("drive retry loop error: %s", e)
-        await asyncio.sleep(5 * 60)
+        await asyncio.sleep(300)
 
 
+# Shutdown
 @app.on_event("shutdown")
 async def on_shutdown():
     mongo_client.close()

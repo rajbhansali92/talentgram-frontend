@@ -5,7 +5,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pymongo.errors import DuplicateKeyError
-
+import cloudinary
+import cloudinary.uploader
 from core import (
     APP_NAME,
     BulkDeleteIn,
@@ -198,20 +199,22 @@ async def add_media(
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
     path = f"{APP_NAME}/talents/{tid}/{uuid.uuid4()}.{ext}"
     data = await file.read()
-    result = put_object(path, data, file.content_type or "application/octet-stream")
-
-    media = {
-        "id": str(uuid.uuid4()),
-        "category": category,
-        "storage_path": result["path"],
-        "content_type": file.content_type or "application/octet-stream",
-        "original_filename": file.filename,
-        "size": result.get("size", len(data)),
-        "created_at": _now(),
-        # Explicit scope — talent media is global portfolio media, tied only to the talent.
-        "scope": "talent_portfolio",
-        "talent_id": tid,
-    }
+upload_result = cloudinary.uploader.upload(
+    data,
+    resource_type="auto"
+)
+   media = {
+    "id": str(uuid.uuid4()),
+    "category": category,
+    "url": upload_result["secure_url"],   # ✅ Cloudinary URL
+    "public_id": upload_result["public_id"],  # ✅ for delete later
+    "content_type": file.content_type or "application/octet-stream",
+    "original_filename": file.filename,
+    "size": upload_result.get("bytes", len(data)),
+    "created_at": _now(),
+    "scope": "talent_portfolio",
+    "talent_id": tid,
+}
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
     # set cover if none
     if not talent.get("cover_media_id") and category in {"indian", "western", "portfolio"}:

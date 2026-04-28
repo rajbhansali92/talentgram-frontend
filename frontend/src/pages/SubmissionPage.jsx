@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
-import { FILE_URL } from "@/lib/api";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -1724,7 +1723,6 @@ export default function SubmissionPage() {
                                 removeMedia={removeMedia}
                                 uploading={uploading}
                                 uploadPct={uploadPct}
-                                FILE_URL={FILE_URL}
                                 testidPrefix="indian"
                             />
 
@@ -1741,7 +1739,6 @@ export default function SubmissionPage() {
                                 removeMedia={removeMedia}
                                 uploading={uploading}
                                 uploadPct={uploadPct}
-                                FILE_URL={FILE_URL}
                                 testidPrefix="western"
                             />
 
@@ -1756,7 +1753,7 @@ export default function SubmissionPage() {
                                         className="relative aspect-square bg-[#0a0a0a] border border-white/10 group"
                                     >
                                         <img
-                                            src={FILE_URL(m.storage_path)}
+                                            src={m.url}
                                             alt=""
                                             className="w-full h-full object-cover"
                                         />
@@ -1943,7 +1940,6 @@ function PortfolioGroup({
     removeMedia,
     uploading,
     uploadPct,
-    FILE_URL,
     testidPrefix,
 }) {
     const isUploading = uploading === category;
@@ -1969,7 +1965,7 @@ function PortfolioGroup({
                         data-testid={`${testidPrefix}-image-${m.id}`}
                     >
                         <img
-                            src={FILE_URL(m.storage_path)}
+                            src={m.url}
                             alt=""
                             className="w-full h-full object-cover"
                         />
@@ -2506,7 +2502,7 @@ function FeedbackRow({ fb }) {
             </div>
             {isVoice ? (
                 <audio
-                    src={FILE_URL(fb.content_url)}
+                    src={fb.content_url}
                     controls
                     className="w-full"
                     data-testid={`talent-feedback-audio-${fb.id}`}

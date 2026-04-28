@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { adminApi, FILE_URL } from "@/lib/api";
+import { adminApi } from "@/lib/api";
 import VisibilityToggles, {
     DEFAULT_VISIBILITY,
 } from "@/components/VisibilityToggles";
@@ -68,7 +68,7 @@ export default function ForwardToLinkModal({
 
     const thumbOf = (s) => {
         const img = (s.media || []).find((m) => m.category === "image");
-        return img ? FILE_URL(img.storage_path) : null;
+        return img ? img.url || null : null;
     };
 
     return (

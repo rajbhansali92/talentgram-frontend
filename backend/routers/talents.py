@@ -5,8 +5,6 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pymongo.errors import DuplicateKeyError
-import cloudinary
-import cloudinary.uploader
 from core import (
     APP_NAME,
     BulkDeleteIn,
@@ -15,6 +13,8 @@ from core import (
     _now,
     _paginate_params,
     _paginated,
+    cloudinary_destroy,
+    cloudinary_upload,
     current_admin,
     current_team_or_admin,
     db,
@@ -195,25 +195,30 @@ async def add_media(
     if not talent:
         raise HTTPException(404, "Talent not found")
 
-    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    path = f"{APP_NAME}/talents/{tid}/{uuid.uuid4()}.{ext}"
+    media_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/talents/{tid}"
     data = await file.read()
-upload_result = cloudinary.uploader.upload(
-    data,
-    resource_type="auto"
-)
-   media = {
-    "id": str(uuid.uuid4()),
-    "category": category,
-    "url": upload_result["secure_url"],   # ✅ Cloudinary URL
-    "public_id": upload_result["public_id"],  # ✅ for delete later
-    "content_type": file.content_type or "application/octet-stream",
-    "original_filename": file.filename,
-    "size": upload_result.get("bytes", len(data)),
-    "created_at": _now(),
-    "scope": "talent_portfolio",
-    "talent_id": tid,
-}
+    rt = "video" if category == "video" else "image"
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=media_id,
+        resource_type=rt,
+        content_type=file.content_type,
+    )
+    media = {
+        "id": media_id,
+        "category": category,
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "content_type": file.content_type or "application/octet-stream",
+        "original_filename": file.filename,
+        "size": result.get("bytes") or len(data),
+        "created_at": _now(),
+        "scope": "talent_portfolio",
+        "talent_id": tid,
+    }
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
     # set cover if none
     if not talent.get("cover_media_id") and category in {"indian", "western", "portfolio"}:
@@ -224,9 +229,19 @@ upload_result = cloudinary.uploader.upload(
 
 @router.delete("/talents/{tid}/media/{mid}")
 async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin)):
+    talent = await db.talents.find_one({"id": tid}, {"_id": 0, "media": 1})
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+    target = next((m for m in (talent.get("media") or []) if m.get("id") == mid), None)
+    if not target:
+        raise HTTPException(404, "Media not found")
     res = await db.talents.update_one({"id": tid}, {"$pull": {"media": {"id": mid}}})
     if not res.modified_count:
         raise HTTPException(404, "Media not found")
+    pid = target.get("public_id")
+    if pid:
+        rt = target.get("resource_type") or ("video" if target.get("category") == "video" else "image")
+        cloudinary_destroy(pid, resource_type=rt)
     return {"ok": True}
 
 

@@ -12,17 +12,13 @@ export const API = `${BACKEND_URL}/api`;
 console.log("🚀 Backend URL:", BACKEND_URL);
 console.log("🚀 API URL:", API);
 
-export const FILE_URL = (path) => `${API}/files/${path}`;
-
-/**
- * Prefer the 1600px JPEG copy if available
- */
+// v37m — Cloudinary migration. Media is served directly from Cloudinary
+// via `media.url` (secure_url). Legacy `/api/files/*` proxy is removed.
+// `IMAGE_URL` is kept as a thin helper that prefers `media.url`.
 export const IMAGE_URL = (media) => {
-    const p =
-        (media &&
-            (media.resized_storage_path || media.storage_path)) ||
-        media;
-    return FILE_URL(p);
+    if (!media) return "";
+    if (typeof media === "string") return media;
+    return media.url || "";
 };
 
 // ================= ADMIN API =================

@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-import { FILE_URL } from "@/lib/api";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
 import {
@@ -729,7 +728,7 @@ export default function ApplicationPage() {
                             </p>
                             {intro ? (
                                 <video
-                                    src={FILE_URL(intro.storage_path)}
+                                    src={intro.url}
                                     controls
                                     preload="metadata"
                                     className="w-full max-w-lg border border-white/10 bg-black rounded-sm"
@@ -773,7 +772,6 @@ export default function ApplicationPage() {
                             upload={upload}
                             removeMedia={removeMedia}
                             uploading={uploading}
-                            FILE_URL={FILE_URL}
                             testidPrefix="indian"
                         />
                         <ApplyLookGroup
@@ -787,7 +785,6 @@ export default function ApplicationPage() {
                             upload={upload}
                             removeMedia={removeMedia}
                             uploading={uploading}
-                            FILE_URL={FILE_URL}
                             testidPrefix="western"
                         />
 
@@ -839,7 +836,7 @@ export default function ApplicationPage() {
                                             className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
                                         >
                                             <img
-                                                src={FILE_URL(m.storage_path)}
+                                                src={m.url}
                                                 alt=""
                                                 loading="lazy"
                                                 className="w-full h-full object-cover"
@@ -943,7 +940,6 @@ function ApplyLookGroup({
     upload,
     removeMedia,
     uploading,
-    FILE_URL,
     testidPrefix,
 }) {
     const isUploading = uploading === category;
@@ -975,7 +971,7 @@ function ApplyLookGroup({
                         className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
                     >
                         <img
-                            src={FILE_URL(m.storage_path)}
+                            src={m.url}
                             alt=""
                             loading="lazy"
                             className="w-full h-full object-cover"

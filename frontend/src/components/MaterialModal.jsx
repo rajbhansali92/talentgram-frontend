@@ -1,5 +1,4 @@
 import React from "react";
-import { FILE_URL } from "@/lib/api";
 import {
     X,
     FileText,
@@ -48,7 +47,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     onRemove={onRemove}
                     render={(m) => (
                         <a
-                            href={FILE_URL(m.storage_path)}
+                            href={m.url}
                             target="_blank"
                             rel="noreferrer"
                             className="flex items-center gap-3 flex-1"
@@ -73,13 +72,13 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     grid
                     render={(m) => (
                         <a
-                            href={FILE_URL(m.storage_path)}
+                            href={m.url}
                             target="_blank"
                             rel="noreferrer"
                             className="block aspect-square bg-muted overflow-hidden"
                         >
                             <img
-                                src={FILE_URL(m.storage_path)}
+                                src={m.url}
                                 alt=""
                                 loading="lazy"
                                 className="w-full h-full object-cover"
@@ -96,7 +95,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                         <div className="flex items-center gap-3 flex-1 bg-muted p-3 rounded-lg">
                             <Music className="w-5 h-5 text-muted-foreground shrink-0" />
                             <audio
-                                src={FILE_URL(m.storage_path)}
+                                src={m.url}
                                 controls
                                 className="w-full max-w-md"
                             />
@@ -111,7 +110,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     render={(m) => (
                         <div className="flex-1 bg-muted p-2 rounded-lg">
                             <video
-                                src={FILE_URL(m.storage_path)}
+                                src={m.url}
                                 controls
                                 preload="metadata"
                                 className="w-full rounded-sm bg-black"

@@ -383,7 +383,10 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         new_media.append({
             "id": mid,
             "category": new_cat,
-            "storage_path": m["storage_path"],
+            "url": m.get("url"),
+            "public_id": m.get("public_id"),
+            "resource_type": m.get("resource_type"),
+            "storage_path": m.get("storage_path"),
             "content_type": m.get("content_type", "application/octet-stream"),
             "original_filename": m.get("original_filename"),
             "size": m.get("size", 0),

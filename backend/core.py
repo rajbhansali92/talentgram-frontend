@@ -577,7 +577,10 @@ class TokenOut(BaseModel):
 class MediaItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     category: str
-    storage_path: str
+    url: Optional[str] = None
+    public_id: Optional[str] = None
+    resource_type: Optional[str] = None
+    storage_path: Optional[str] = None
     content_type: str
     original_filename: Optional[str] = None
     size: int = 0
@@ -842,6 +845,9 @@ def _public_media(m: dict) -> dict:
     out = {
         "id": m.get("id"),
         "category": m.get("category"),
+        "url": m.get("url"),
+        "public_id": m.get("public_id"),
+        "resource_type": m.get("resource_type"),
         "storage_path": m.get("storage_path"),
         "content_type": m.get("content_type"),
         "original_filename": m.get("original_filename"),
@@ -1214,12 +1220,15 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     if not source_id:
         return
 
-    # Build the mirror item — preserves storage_path / resized_storage_path /
+    # Build the mirror item — preserves url / public_id / storage_path /
     # mime / size so the global profile renders identically. New `id` is
     # generated to keep talent.media ids unique across mirror sources.
     mirror = {
         "id": str(uuid.uuid4()),
         "category": cat,
+        "url": media.get("url"),
+        "public_id": media.get("public_id"),
+        "resource_type": media.get("resource_type"),
         "storage_path": media.get("storage_path"),
         "mime": media.get("mime"),
         "content_type": media.get("content_type"),

@@ -34,6 +34,10 @@ dist
 
 *token.json*
 *credentials.json*
+# Google Drive service-account JSON (never commit — use GOOGLE_DRIVE_SA_KEY_JSON env var instead)
+.gdrive-sa.json
+*gdrive-sa*.json
+*service-account*.json
 
 # Logs and debug files
 npm-debug.log*

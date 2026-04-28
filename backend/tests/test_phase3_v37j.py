@@ -8,10 +8,10 @@ endpoints required by the review request.
 
 Fixtures verified live against the public preview backend:
   - link slug:   talentgram-x-comfort-9339a4
-  - project:     Comfort  (id=cd3d9ac1-9a70-4c24-9af6-9f2beb163b22)
-  - shivani:     submission_id=133b702c-06b0-4afa-887d-3c3293ffe0a4
+  - project:     Comfort  (id=casting-deck-pro)
+  - shivani:     submission_id=casting-deck-pro
                  -> media cats: image=4, indian=3, western=1, intro_video=1
-  - angela:      submission_id=b50884fd-af45-4f8d-9520-6d8b602a754f (empty media)
+  - angela:      submission_id=casting-deck-pro (empty media)
 """
 
 import os

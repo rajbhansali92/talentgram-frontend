@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -55,6 +56,9 @@ logger = logging.getLogger(__name__)
 # Config
 # --------------------------------------------------------------------------
 SA_KEY_PATH = os.environ.get("GOOGLE_DRIVE_SA_KEY_PATH")
+# Preferred: entire service-account JSON inline in an env var (no file on
+# disk). When set, this takes priority over SA_KEY_PATH.
+SA_KEY_JSON = os.environ.get("GOOGLE_DRIVE_SA_KEY_JSON")
 PARENT_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_PARENT_FOLDER_ID")
 OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
 OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
@@ -88,7 +92,7 @@ def drive_enabled() -> bool:
     credentials."""
     if not PARENT_FOLDER_ID:
         return False
-    if SA_KEY_PATH and os.path.exists(SA_KEY_PATH):
+    if SA_KEY_JSON or (SA_KEY_PATH and os.path.exists(SA_KEY_PATH)):
         return True
     if OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET:
         return True
@@ -200,6 +204,24 @@ def _get_service():
 
         # Fallback: service account. Folders work; files generally do NOT
         # without a Shared Drive — but we still allow folder lookups.
+        # Prefer inline JSON env var; fall back to on-disk path only if the
+        # path-based mode is explicitly configured. Inline env is the
+        # recommended production setup so no JSON key ever lands on the
+        # container FS or the git repo.
+        if SA_KEY_JSON:
+            try:
+                sa_info = json.loads(SA_KEY_JSON)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    "GOOGLE_DRIVE_SA_KEY_JSON is set but is not valid JSON"
+                ) from e
+            sa_creds = service_account.Credentials.from_service_account_info(
+                sa_info, scopes=SCOPES
+            )
+            _service = build("drive", "v3", credentials=sa_creds, cache_discovery=False)
+            _service_mode = "service_account"
+            logger.info("Google Drive client initialised (service account via env JSON)")
+            return _service
         if SA_KEY_PATH and os.path.exists(SA_KEY_PATH):
             sa_creds = service_account.Credentials.from_service_account_file(
                 SA_KEY_PATH, scopes=SCOPES

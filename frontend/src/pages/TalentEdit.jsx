@@ -104,32 +104,52 @@ export default function TalentEdit() {
     }, [id, isEdit]);
 
     const save = async () => {
-        setSaving(true);
-        try {
-            const payload = {
-                ...talent,
-                dob: talent.dob || null,
-                age: talent.dob
-                    ? calcAge(talent.dob)
-                    : talent.age
-                      ? parseInt(talent.age, 10)
-                      : null,
-                work_links: (talent.work_links || []).filter(Boolean),
-            };
-            if (isEdit) {
-                await adminApi.put(`/talents/${id}`, payload);
-                toast.success("Saved");
-            } else {
-                const { data } = await adminApi.post(`/talents`, payload);
-                toast.success("Talent created");
-                nav(`/admin/talents/${data.id}`);
-            }
-        } catch (e) {
-            toast.error(e?.response?.data?.detail || "Save failed");
-        } finally {
-            setSaving(false);
+
+    // 🔴 ADD THIS BLOCK HERE (FIRST THING)
+    if (!talent.email) {
+        toast.error("Email is required");
+        return;
+    }
+
+    if (!talent.name) {
+        toast.error("Name is required");
+        return;
+    }
+
+    setSaving(true);
+
+    try {
+        const payload = {
+            ...talent,
+            dob: talent.dob || null,
+            age: talent.dob
+                ? calcAge(talent.dob)
+                : talent.age
+                ? parseInt(talent.age, 10)
+                : null,
+            work_links: (talent.work_links || []).filter(Boolean),
+        };
+
+        if (isEdit) {
+            await adminApi.put(`/talents/${id}`, payload);
+            toast.success("Saved");
+        } else {
+            const { data } = await adminApi.post(`/talents`, payload);
+            toast.success("Talent created");
+            nav(`/admin/talents/${data.id}`);
         }
-    };
+
+    } catch (e) {
+        const msg =
+            e?.response?.data?.detail ||
+            e?.response?.data?.message ||
+            "Something went wrong";
+
+        toast.error(msg);
+    } finally {
+        setSaving(false);
+    }
+};
 
     const computedAge = useMemo(
         () => calcAge(talent.dob) ?? (talent.age || null),

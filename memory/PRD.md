@@ -306,5 +306,12 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - [ ] Presigned/tokenized file URLs for stricter privacy
 - [ ] Activity timeline on Results page
 
+## v37m — Cloudinary Migration (Apr 28, 2026) ✅ COMPLETE
+- Storage layer fully migrated from Emergent Object Storage to Cloudinary.
+- **Backend**: `cloudinary_upload` / `cloudinary_destroy` helpers in `core.py`; all routers (`talents`, `submissions`, `applications`, `projects`, `feedback`) write to Cloudinary. Legacy `init_storage`/`put_object`/`get_object`/`stream_object` removed. `/api/files/*` proxy removed.
+- **Frontend**: `FILE_URL` helper deleted from `lib/api.js`; all 13+ components/pages refactored to render `media.url` directly. `IMAGE_URL(media)` retained as a thin pass-through (`media.url`) for backward call sites (`ClientView.jsx`).
+- **Data backfill**: `scripts/migrate_emergent_to_cloudinary.py` migrated 152/252 legacy media records (additive — `storage_path` preserved). 100 failures are 1×1 placeholder JPEGs (537 bytes, test data) which Cloudinary rejects as invalid; documented as expected.
+- **Validation**: 9/9 backend tests passing (`tests/test_cloudinary_migration.py`); admin smoke + client view + submission page all render Cloudinary thumbnails.
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`.

@@ -29,12 +29,11 @@ app = FastAPI(title="Talentgram Portfolio Engine")
 logger = logging.getLogger(__name__)
 
 
-# ✅ CORRECT MIDDLEWARE (FIXED)
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
 
-        # Skip for Swagger / OpenAPI
+        # Skip docs completely
         if request.url.path.startswith("/docs") or request.url.path.startswith("/openapi"):
             return response
 
@@ -44,10 +43,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault(
             "Permissions-Policy",
             "geolocation=(), microphone=(), camera=()",
-        )
-        response.headers.setdefault(
-            "Content-Security-Policy",
-            "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;",
         )
 
         return response

@@ -4,6 +4,15 @@ import asyncio
 import logging
 import os
 
+import cloudinary
+import cloudinary.uploader
+
+cloudinary.config(
+    cloud_name="talentgram",
+    api_key="289136642237122",
+    api_secret="c08LXACrkoWqHVf3tyAnBvEYF20"
+)
+
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware

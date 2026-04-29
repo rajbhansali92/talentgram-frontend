@@ -33,6 +33,7 @@ from core import (
     _now,
     _paginate_params,
     _paginated,
+    _resolve_cover_url,
     cloudinary_upload,
     compute_age,
     current_admin,
@@ -291,11 +292,12 @@ async def list_applications(
         query["decision"] = decision
     cursor = db.applications.find(query, {"_id": 0}).sort("created_at", -1)
     if page is None:
-        return await cursor.to_list(5000)
+        items = await cursor.to_list(5000)
+        return [_with_image_url(a) for a in items]
     skip, limit, p, s = _paginate_params(page, size)
     total = await db.applications.count_documents(query)
     items = await cursor.skip(skip).limit(limit).to_list(limit)
-    return _paginated(items, total, p, s)
+    return _paginated([_with_image_url(a) for a in items], total, p, s)
 
 
 @router.get("/applications/{aid}")
@@ -303,6 +305,16 @@ async def get_admin_application(aid: str, admin: dict = Depends(current_team_or_
     app_doc = await db.applications.find_one({"id": aid}, {"_id": 0})
     if not app_doc:
         raise HTTPException(404, "Application not found")
+    return _with_image_url(app_doc)
+
+
+def _with_image_url(app_doc: dict) -> dict:
+    """Add a top-level ``image_url`` (Cloudinary cover URL or None) so
+    frontends don't need to walk media[]. Frontend-safe — never returns
+    the literal string ``"undefined"``."""
+    if app_doc is None:
+        return app_doc
+    app_doc["image_url"] = _resolve_cover_url(app_doc) or None
     return app_doc
 
 

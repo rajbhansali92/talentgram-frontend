@@ -319,7 +319,16 @@ def compute_age(dob: Optional[str]) -> Optional[int]:
 
 
 def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
-    """If dob is set, always derive age from it (overrides any stored age)."""
+    """Annotate a talent document for API responses.
+
+    Currently derives:
+      - ``age`` from ``dob`` (overrides any stored age).
+      - ``image_url`` — top-level convenience pointer to the cover image
+        Cloudinary URL (or first portfolio/indian/western image if no
+        cover is set). Returns ``None`` (never the string ``"undefined"``)
+        when the talent has no image. Frontends that prefer a single field
+        over walking ``media[]`` can use this directly.
+    """
     if not doc:
         return doc
     dob = doc.get("dob")
@@ -327,7 +336,35 @@ def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
         computed = compute_age(dob)
         if computed is not None:
             doc["age"] = computed
+    doc["image_url"] = _resolve_cover_url(doc) or None
     return doc
+
+
+def _resolve_cover_url(doc: dict) -> Optional[str]:
+    """Find the best Cloudinary URL to represent this talent/submission.
+
+    Order of preference:
+      1. media item whose ``id`` == ``cover_media_id``
+      2. first media item with category in {portfolio, indian, western, image}
+      3. first media item with any non-empty ``url``
+    Returns ``None`` if no usable URL exists.
+    """
+    media = doc.get("media") or []
+    if not media:
+        return None
+    cover_id = doc.get("cover_media_id")
+    if cover_id:
+        for m in media:
+            if m.get("id") == cover_id and m.get("url"):
+                return m["url"]
+    image_cats = {"portfolio", "indian", "western", "image"}
+    for m in media:
+        if m.get("category") in image_cats and m.get("url"):
+            return m["url"]
+    for m in media:
+        if m.get("url"):
+            return m["url"]
+    return None
 
 
 def _slugify(title: str) -> str:
@@ -549,6 +586,7 @@ CLIENT_ALLOWED_FIELDS = {
     "competitive_brand",   # plain string, gated by field_visibility.competitive_brand
     "custom_answers",      # [{"question": str, "answer": str}] — gated per-question
     "cover_media_id",
+    "image_url",           # top-level Cloudinary cover URL or None (frontend-safe)
     "media",
     # IDs needed for the moderated client→talent feedback relay. These are
     # NOT sensitive — they're foreign keys clients must round-trip back when
@@ -896,6 +934,7 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
         "name": talent.get("name"),
         "media": filtered_media,
         "cover_media_id": cover_mid,
+        "image_url": _resolve_cover_url({"media": filtered_media, "cover_media_id": cover_mid}) or None,
     }
     if v.get("age") and talent.get("age") is not None:
         out["age"] = talent["age"]
@@ -1081,6 +1120,9 @@ def _submission_to_client_shape(sub: dict) -> dict:
         "cover_media_id": cover_mid,
         "media": media,
     }
+    # Top-level cover URL for clients that prefer a single field over
+    # walking media[]. Always either a non-empty Cloudinary URL or None.
+    out["image_url"] = _resolve_cover_url(out) or None
 
     # Competitive brand — only when explicitly enabled.
     if fv.get("competitive_brand"):

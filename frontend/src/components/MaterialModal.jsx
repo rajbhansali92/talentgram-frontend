@@ -13,7 +13,7 @@ import {
  * Theme-aware: respects light/dark mode via shadcn tokens (bg-background, text-foreground, etc.)
  *
  * Props:
- *  - project: { brand_name, materials: [{id, category, storage_path, content_type, original_filename}], video_links: [] }
+ *  - project: { brand_name, materials: [{id, category, url, public_id, content_type, original_filename}], video_links: [] }
  *  - onClose: fn
  *  - onRemove?: (mid) => void   // admin-only; if omitted, trash buttons are hidden
  */

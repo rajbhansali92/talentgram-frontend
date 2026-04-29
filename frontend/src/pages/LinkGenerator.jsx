@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi } from "@/lib/api";
+import { adminApi, COVER_URL } from "@/lib/api";
 import { toast } from "sonner";
 import BudgetLines from "@/components/BudgetLines";
 import {
@@ -533,16 +533,7 @@ export default function LinkGenerator() {
                                 data-testid="talent-select-grid"
                             >
                                 {filteredTalents.map((t) => {
-                                    const cover =
-                                        (t.media || []).find(
-                                            (m) =>
-                                                m.id === t.cover_media_id,
-                                        ) ||
-                                        (t.media || []).find((m) =>
-                                            m.content_type?.startsWith(
-                                                "image/",
-                                            ),
-                                        );
+                                    const coverUrl = COVER_URL(t);
                                     const active = selectedTalents.has(t.id);
                                     const hasOverride =
                                         active &&
@@ -563,9 +554,9 @@ export default function LinkGenerator() {
                                                 className="block w-full text-left"
                                             >
                                                 <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
-                                                    {cover ? (
+                                                    {coverUrl ? (
                                                         <img
-                                                            src={cover.url}
+                                                            src={coverUrl}
                                                             alt={t.name}
                                                             className="w-full h-full object-cover"
                                                         />
@@ -632,16 +623,7 @@ export default function LinkGenerator() {
                                 data-testid="submission-select-grid"
                             >
                                 {filteredSubs.map((s) => {
-                                    const cover =
-                                        (s.media || []).find(
-                                            (m) =>
-                                                m.id === s.cover_media_id,
-                                        ) ||
-                                        (s.media || []).find(
-                                            (m) =>
-                                                m.category === "portfolio" ||
-                                                m.category === "image",
-                                        );
+                                    const coverUrl = COVER_URL(s);
                                     const active = selectedSubs.has(s.id);
                                     return (
                                         <button
@@ -652,9 +634,9 @@ export default function LinkGenerator() {
                                             className={`relative group text-left border transition-all ${active ? "border-[#34C759]" : "border-white/10 hover:border-white/30"}`}
                                         >
                                             <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
-                                                {cover ? (
+                                                {coverUrl ? (
                                                     <img
-                                                        src={cover.url}
+                                                        src={coverUrl}
                                                         alt={s.talent_name}
                                                         className="w-full h-full object-cover"
                                                     />

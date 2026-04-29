@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, isAdmin } from "@/lib/api";
+import { adminApi, COVER_URL, isAdmin } from "@/lib/api";
 import { Search, Plus, Image as ImageIcon, Check } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
@@ -126,16 +126,7 @@ export default function TalentList() {
                     data-testid="talents-grid"
                 >
                     {talents.map((t) => {
-                        const cover = (t.media || []).find(
-                            (m) => m.id === t.cover_media_id,
-                        );
-                        const anyImg =
-                            cover ||
-                            (t.media || []).find(
-                                (m) =>
-                                    m.category !== "video" &&
-                                    m.content_type?.startsWith("image/"),
-                            );
+                        const coverUrl = COVER_URL(t);
                         const checked = selected.has(t.id);
                         const goesToDetail = !isSelectionMode;
                         return (
@@ -169,7 +160,7 @@ export default function TalentList() {
                                     >
                                         <Inner
                                             t={t}
-                                            anyImg={anyImg}
+                                            coverUrl={coverUrl}
                                         />
                                     </Link>
                                 ) : (
@@ -178,7 +169,7 @@ export default function TalentList() {
                                         onClick={() => toggle(t.id)}
                                         className="block w-full text-left"
                                     >
-                                        <Inner t={t} anyImg={anyImg} />
+                                        <Inner t={t} coverUrl={coverUrl} />
                                     </button>
                                 )}
                             </div>

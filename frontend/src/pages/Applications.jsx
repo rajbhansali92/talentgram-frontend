@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { adminApi } from "@/lib/api";
+import { adminApi, COVER_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     X,
@@ -165,7 +165,7 @@ export default function Applications() {
 function ApplicationCard({ app, onReview, onDecide }) {
     const fd = app.form_data || {};
     const imgs = (app.media || []).filter((m) => m.category === "image");
-    const cover = imgs[0];
+    const coverUrl = COVER_URL(app);
     const badge = getStatusBadge(app);
     return (
         <div
@@ -173,9 +173,9 @@ function ApplicationCard({ app, onReview, onDecide }) {
             data-testid={`app-card-${app.id}`}
         >
             <div className="relative aspect-[4/5] bg-[#0a0a0a] overflow-hidden">
-                {cover ? (
+                {coverUrl ? (
                     <img
-                        src={cover.url}
+                        src={coverUrl}
                         alt={app.talent_name}
                         loading="lazy"
                         className="w-full h-full object-cover"

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
-import { viewerApi, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { viewerApi, COVER_URL, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import FeedbackComposer from "@/components/FeedbackComposer";
@@ -1312,11 +1312,7 @@ function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen })
     const ref = useRef(null);
     const timerRef = useRef(null);
 
-    const cover =
-        (talent.media || []).find((m) => m.id === talent.cover_media_id) ||
-        (talent.media || []).find((m) =>
-            m.content_type?.startsWith("image/"),
-        );
+    const coverUrl = COVER_URL(talent);
     const isShortlisted = action === "shortlist";
 
     useEffect(() => {

@@ -67,8 +67,9 @@ export default function ForwardToLinkModal({
     };
 
     const thumbOf = (s) => {
+        if (s.image_url) return s.image_url;
         const img = (s.media || []).find((m) => m.category === "image");
-        return img ? img.url || null : null;
+        return img?.url || null;
     };
 
     return (

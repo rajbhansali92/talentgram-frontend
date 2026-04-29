@@ -21,6 +21,30 @@ export const IMAGE_URL = (media) => {
     return media.url || "";
 };
 
+/**
+ * Resolve the best Cloudinary thumbnail for a talent/submission/application.
+ * Order:
+ *   1. The new top-level `image_url` field (set by backend `_resolve_cover_url`)
+ *   2. The media[] item whose id == cover_media_id
+ *   3. The first media[] item with a portfolio/indian/western/image category
+ *   4. The first media[] item with any non-empty url
+ *   5. null  (callers MUST handle null — never returns "undefined" or "")
+ */
+export const COVER_URL = (subject) => {
+    if (!subject || typeof subject !== "object") return null;
+    if (subject.image_url) return subject.image_url;
+    const media = subject.media || [];
+    if (subject.cover_media_id) {
+        const c = media.find((m) => m.id === subject.cover_media_id);
+        if (c?.url) return c.url;
+    }
+    const PRIMARY = new Set(["portfolio", "indian", "western", "image"]);
+    const first = media.find((m) => PRIMARY.has(m.category) && m.url);
+    if (first) return first.url;
+    const any = media.find((m) => m.url);
+    return any?.url || null;
+};
+
 // ================= ADMIN API =================
 
 export const adminApi = axios.create({ baseURL: API });

@@ -205,14 +205,16 @@ export default function TalentList() {
     );
 }
 
-function Inner({ t, anyImg }) {
+function Inner({ t, coverUrl }) {
     return (
         <>
             <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
-                {anyImg ? (
+                {coverUrl ? (
                     <img
-                        src={anyImg.url}
+                        src={coverUrl}
                         alt={t.name}
+                        loading="lazy"
+                        onError={(e) => { e.currentTarget.style.display = "none"; }}
                         className="w-full h-full object-cover group-hover:scale-[1.02] transition-all duration-500"
                     />
                 ) : (

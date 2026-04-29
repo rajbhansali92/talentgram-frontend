@@ -167,3 +167,12 @@ credentials.json
 frontend.zip
 frontend/frontend.zip
 frontend/.git/objects/4b/c2e994f6c7668a4e3f04cf91b9d2d39072e4f8
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

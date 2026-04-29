@@ -47,7 +47,9 @@ async def main() -> None:
             mirror = {
                 "id": str(uuid.uuid4()),
                 "category": m.get("category"),
-                "storage_path": m.get("storage_path"),
+                "url": m.get("url"),
+                "public_id": m.get("public_id"),
+                "resource_type": m.get("resource_type"),
                 "mime": m.get("mime"),
                 "content_type": m.get("content_type"),
                 "size": m.get("size"),
@@ -57,9 +59,6 @@ async def main() -> None:
                 "source_submission_id": sub.get("id"),
                 "source_submission_media_id": source_id,
             }
-            if m.get("resized_storage_path"):
-                mirror["resized_storage_path"] = m["resized_storage_path"]
-                mirror["resized_size"] = m.get("resized_size")
 
             res = await db.talents.update_one(
                 {

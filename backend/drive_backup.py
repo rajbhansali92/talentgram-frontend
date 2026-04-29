@@ -511,9 +511,7 @@ async def _do_upload_async(
                 "scope": media.get("scope") or "submission",
                 "brand_name": brand_name,
                 "last_error": msg[:500],
-                # `data` field intentionally NOT persisted — re-fetch from
-                # primary storage on retry to keep the queue lightweight.
-                "storage_path": media.get("storage_path"),
+                "media_url": media.get("url"),
                 "terminal": terminal,
                 # If terminal, set retry_count to a high value so the cron
                 # skips it. If not, keep at 0 for next sweep to retry.

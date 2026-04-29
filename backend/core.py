@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 
 import bcrypt
 import jwt
-import requests
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -517,8 +516,6 @@ MAX_IMAGES_PER_CATEGORY = 10
 # Enforced server-side to protect against accidental/malicious bloat.
 MAX_SUBMISSION_VIDEO_BYTES = 150 * 1024 * 1024
 MAX_SUBMISSION_IMAGE_BYTES = 25 * 1024 * 1024
-# Target width when generating the display-optimised JPEG copy.
-IMAGE_RESIZE_MAX_WIDTH = 1600
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 
@@ -577,10 +574,9 @@ class TokenOut(BaseModel):
 class MediaItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     category: str
-    url: Optional[str] = None
+    url: str
     public_id: Optional[str] = None
     resource_type: Optional[str] = None
-    storage_path: Optional[str] = None
     content_type: str
     original_filename: Optional[str] = None
     size: int = 0
@@ -848,16 +844,11 @@ def _public_media(m: dict) -> dict:
         "url": m.get("url"),
         "public_id": m.get("public_id"),
         "resource_type": m.get("resource_type"),
-        "storage_path": m.get("storage_path"),
         "content_type": m.get("content_type"),
         "original_filename": m.get("original_filename"),
         "size": m.get("size", 0),
         "created_at": m.get("created_at"),
     }
-    # Display-optimised 1600px JPEG variant (images only). Frontend prefers this
-    # path for the portfolio view; the original remains available for download.
-    if m.get("resized_storage_path"):
-        out["resized_storage_path"] = m["resized_storage_path"]
     if m.get("label"):
         out["label"] = m["label"]
     return out
@@ -1220,8 +1211,8 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     if not source_id:
         return
 
-    # Build the mirror item — preserves url / public_id / storage_path /
-    # mime / size so the global profile renders identically. New `id` is
+    # Build the mirror item — preserves Cloudinary url + public_id so the
+    # global profile renders identically to the submission. New `id` is
     # generated to keep talent.media ids unique across mirror sources.
     mirror = {
         "id": str(uuid.uuid4()),
@@ -1229,7 +1220,6 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
         "url": media.get("url"),
         "public_id": media.get("public_id"),
         "resource_type": media.get("resource_type"),
-        "storage_path": media.get("storage_path"),
         "mime": media.get("mime"),
         "content_type": media.get("content_type"),
         "size": media.get("size"),
@@ -1238,9 +1228,6 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
         "source_submission_id": submission.get("id"),
         "source_submission_media_id": source_id,
     }
-    if media.get("resized_storage_path"):
-        mirror["resized_storage_path"] = media["resized_storage_path"]
-        mirror["resized_size"] = media.get("resized_size")
 
     # Idempotent push: only insert if no existing item carries this
     # source_submission_media_id.

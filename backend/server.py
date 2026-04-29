@@ -86,7 +86,6 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup():
     await seed_admin()
-    # init_storage() removed in v37m — Cloudinary is configured at import time.
     await ensure_notifications_indexes(db)
 
     await db.client_states.create_index(

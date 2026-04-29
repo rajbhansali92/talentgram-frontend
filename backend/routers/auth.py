@@ -107,5 +107,3 @@ async def upload_file(
         "content_type": file.content_type or "application/octet-stream",
         "original_filename": file.filename,
     }
-# /api/files/{path} download endpoint removed in v37m migration — all media
-# now lives on Cloudinary and is served directly from `media.url`.

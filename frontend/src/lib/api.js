@@ -148,6 +148,46 @@ export const OPTIMIZED_AUDIO_URL = (media) => {
     return head + transform + tail;
 };
 
+/**
+ * v38i — Resolve the correct Cloudinary URL for non-image files (PDFs,
+ * docs, zips, etc).
+ *
+ * Cloudinary classifies uploads under three resource types: `image`,
+ * `video`, `raw`. PDFs are sometimes uploaded under `image/upload/...`
+ * (which lets Cloudinary extract page thumbnails), but unsigned direct
+ * access to those PDFs returns 401 "Untrusted resource type" on accounts
+ * that have the strict-image-delivery setting enabled. Serving the same
+ * file from `/raw/upload/...` bypasses the image-pipeline restrictions.
+ *
+ * Strategy:
+ *   - If the media's `resource_type === "raw"` → rewrite to `/raw/upload/`.
+ *   - If the URL ends with `.pdf` (case-insensitive) → rewrite to
+ *     `/raw/upload/`.
+ *   - Otherwise → return the URL unchanged (images, videos, audio all
+ *     keep their existing helpers untouched).
+ *
+ * Accepts:
+ *   - a Cloudinary `media` object `{ url, secure_url, resource_type }`
+ *   - a raw URL string (fallback)
+ */
+export const FILE_URL = (file) => {
+    if (!file) return null;
+    const raw =
+        typeof file === "string"
+            ? file
+            : file.url || file.secure_url || "";
+    if (!raw) return null;
+
+    const isRaw =
+        (typeof file === "object" && file.resource_type === "raw") ||
+        /\.pdf(?:\?.*)?$/i.test(raw);
+
+    if (isRaw && raw.includes("/image/upload/")) {
+        return raw.replace("/image/upload/", "/raw/upload/");
+    }
+    return raw;
+};
+
 // ================= ADMIN API =================
 
 export const adminApi = axios.create({ baseURL: API });

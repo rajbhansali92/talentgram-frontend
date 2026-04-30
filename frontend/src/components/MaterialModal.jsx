@@ -1,5 +1,5 @@
 import React from "react";
-import { VIDEO_URL, VIDEO_POSTER_URL, OPTIMIZED_IMAGE_URL, OPTIMIZED_AUDIO_URL } from "@/lib/api";
+import { VIDEO_URL, VIDEO_POSTER_URL, OPTIMIZED_IMAGE_URL, OPTIMIZED_AUDIO_URL, FILE_URL } from "@/lib/api";
 import {
     X,
     FileText,
@@ -48,7 +48,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     onRemove={onRemove}
                     render={(m) => (
                         <a
-                            href={m.url}
+                            href={FILE_URL(m)}
                             target="_blank"
                             rel="noreferrer"
                             className="flex items-center gap-3 flex-1"

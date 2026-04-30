@@ -316,9 +316,36 @@ export default function ClientView() {
     }
 
     if (!data) {
+        // v37t — Loading skeleton: 8 placeholder cards in a responsive grid
+        // with shimmer animation. Mirrors the post-load card aspect ratio so
+        // the layout doesn't jump when content arrives.
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#050505] text-white/40">
-                <Loader2 className="w-6 h-6 animate-spin" />
+            <div className="min-h-screen bg-[#050505] text-white">
+                <header className="sticky top-0 z-30 bg-black/70 backdrop-blur-xl border-b border-white/10">
+                    <div className="max-w-7xl mx-auto px-5 py-4 flex items-center justify-between">
+                        <Logo size="md" />
+                        <div className="w-7 h-7 rounded-full bg-white/5 animate-pulse" />
+                    </div>
+                </header>
+                <div className="max-w-7xl mx-auto px-5 py-8">
+                    <div className="h-3 w-24 bg-white/8 rounded animate-pulse mb-3" />
+                    <div className="h-8 w-64 bg-white/10 rounded animate-pulse mb-8" />
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
+                        {Array.from({ length: 8 }).map((_, i) => (
+                            <div
+                                key={i}
+                                className="aspect-[3/4] bg-white/[0.04] border border-white/10 rounded-sm overflow-hidden relative tg-skeleton"
+                                style={{ animationDelay: `${i * 60}ms` }}
+                                data-testid={`talent-skeleton-${i}`}
+                            >
+                                <div className="absolute inset-x-0 bottom-0 p-4 space-y-2">
+                                    <div className="h-3 w-2/3 bg-white/10 rounded" />
+                                    <div className="h-2 w-1/3 bg-white/8 rounded" />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
             </div>
         );
     }
@@ -1151,7 +1178,11 @@ function TalentDetail({
                                 </div>
                             )}
 
-                        {/* Actions */}
+                        {/* Actions — v37t premium pill row.
+                            Each action gets its accent color: shortlist gold,
+                            interested green, reject red, not-sure gray.
+                            Active state fills the button with the accent;
+                            inactive state shows accent-tinted icon + border. */}
                         <div className="border-t border-white/10 pt-6 mt-6">
                             <p className="eyebrow mb-4">Your Decision</p>
                             <div className="grid grid-cols-2 gap-2 mb-6">
@@ -1167,13 +1198,30 @@ function TalentDetail({
                                                 )
                                             }
                                             data-testid={`action-${a.key}-${talent.id}`}
-                                            className={`flex items-center gap-2 px-4 py-3 border rounded-sm text-sm transition-all ${active ? "bg-white text-black border-white" : "border-white/15 hover:border-white/40"}`}
+                                            style={
+                                                active
+                                                    ? {
+                                                          backgroundColor: a.color,
+                                                          borderColor: a.color,
+                                                          color:
+                                                              a.key === "not_sure"
+                                                                  ? "#fff"
+                                                                  : "#000",
+                                                          boxShadow: `0 0 0 1px ${a.color}66, 0 6px 20px -8px ${a.color}80`,
+                                                      }
+                                                    : {
+                                                          borderColor: `${a.color}55`,
+                                                      }
+                                            }
+                                            className="flex items-center justify-center gap-2 px-4 py-3.5 border rounded-sm text-sm font-medium tracking-wide transition-all duration-200 active:scale-[0.97] min-h-[52px] hover:brightness-110"
                                         >
                                             <a.icon
                                                 className="w-4 h-4"
                                                 style={{
                                                     color: active
-                                                        ? "#000"
+                                                        ? a.key === "not_sure"
+                                                            ? "#fff"
+                                                            : "#000"
                                                         : a.color,
                                                 }}
                                             />

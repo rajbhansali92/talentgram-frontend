@@ -530,6 +530,35 @@ html.light .shadow-\[0_0_0_1px_rgba\(201\,169\,97\,0\.4\)\] {
     box-shadow: 0 0 0 1px rgba(180, 140, 60, 0.55) !important;
 }
 
+/* ---- v37t — Loading skeleton shimmer (used on ClientView grid) */
+@keyframes tg-shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+.tg-skeleton {
+    background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0.04) 0%,
+        rgba(255, 255, 255, 0.08) 50%,
+        rgba(255, 255, 255, 0.04) 100%
+    );
+    background-size: 200% 100%;
+    animation: tg-shimmer 1.6s infinite linear;
+}
+html.light .tg-skeleton {
+    background: linear-gradient(
+        90deg,
+        rgba(0, 0, 0, 0.04) 0%,
+        rgba(0, 0, 0, 0.08) 50%,
+        rgba(0, 0, 0, 0.04) 100%
+    );
+    background-size: 200% 100%;
+}
+
 /* ==========================================================================
    v37p — Mobile submission UX hardening
    Guarantees the last inputs (Work Links, custom answers) always scroll into

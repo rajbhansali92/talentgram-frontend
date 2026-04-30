@@ -7,6 +7,13 @@ import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
 import { OPTIMIZED_AUDIO_URL } from "@/lib/api";
 import {
+    compressVideoIfNeeded,
+    COMPRESS_THRESHOLD,
+    SOFT_LIMIT,
+    HARD_MAX,
+    MB,
+} from "@/lib/videoCompress";
+import {
     Select,
     SelectContent,
     SelectGroup,
@@ -114,6 +121,12 @@ export default function SubmissionPage() {
     const [submission, setSubmission] = useState(null);
     const [uploading, setUploading] = useState(null);
     const [uploadPct, setUploadPct] = useState(0);
+    // v38e — client-side video compression progress.
+    // `compressing` is the slot key currently being transcoded (or null).
+    // `compressPct` is 0–100. Both feed into <UploadOverlay> so the user
+    // sees the optimisation phase BEFORE the network upload begins.
+    const [compressing, setCompressing] = useState(null);
+    const [compressPct, setCompressPct] = useState(0);
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
@@ -548,29 +561,68 @@ export default function SubmissionPage() {
     }
 
     const uploadFile = async (file, category, label = null) => {
-        // Client-side guard mirrors backend cap (150 MB videos / 25 MB images)
+        // v38e — Spec: lift the 150 MB hard block but still cap at 500 MB
+        // intake. Anything above the legacy 25 MB compression threshold is
+        // transcoded to 720p H.264 ≈ 15-25 MB CLIENT-SIDE before it ever
+        // touches the network. Only the optimised file is uploaded — never
+        // the original. Images are unchanged (still 25 MB hard cap).
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
-        const CAP_MB = isVideoSlot ? 150 : 25;
-        if (file && file.size > CAP_MB * 1024 * 1024) {
-            toast.error(`File too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
+        const slotKey = label ? `${category}:${label}` : category;
+
+        if (!isVideoSlot && file && file.size > 25 * MB) {
+            toast.error(`File too large (${Math.round(file.size / MB)} MB). Max 25 MB.`);
             return;
         }
-        // v37r — Soft compression nudge for large videos. Cloudinary will still
-        // serve a 720p compressed copy via URL transforms regardless, but we
-        // warn the user up-front so a 100 MB upload doesn't surprise them on
-        // a slow mobile network. Auto-acknowledged after 4s via the toast.
-        if (isVideoSlot && file && file.size > 25 * 1024 * 1024) {
-            const mb = Math.round(file.size / 1024 / 1024);
-            toast.message(
-                `Large video (${mb} MB) — uploading at full quality. We'll auto-optimize to 720p for viewers.`,
-                { duration: 4500 },
+        if (isVideoSlot && file && file.size > HARD_MAX) {
+            toast.error(
+                `Video too large (${Math.round(file.size / MB)} MB). Max ${Math.round(HARD_MAX / MB)} MB.`,
             );
+            return;
         }
-        const slotKey = label ? `${category}:${label}` : category;
+
+        // ⓞ Compression phase — runs only for videos > 25 MB. The user sees
+        //   a dedicated "Optimising..." overlay (compressing + compressPct)
+        //   BEFORE the network upload begins. Failures here abort the whole
+        //   flow — the original is NEVER uploaded as a fallback.
+        let payload = file;
+        if (isVideoSlot && file && file.size > COMPRESS_THRESHOLD) {
+            const mb = Math.round(file.size / MB);
+            if (file.size > SOFT_LIMIT) {
+                toast.message(
+                    `Large file detected (${mb} MB). Optimizing before upload…`,
+                    { duration: 4000 },
+                );
+            } else {
+                toast.message(`Optimising video (${mb} MB → ~720p)…`, { duration: 3000 });
+            }
+            setCompressing(slotKey);
+            setCompressPct(0);
+            try {
+                payload = await compressVideoIfNeeded(file, {
+                    onProgress: (_stage, pct) => setCompressPct(pct),
+                });
+                const newMb = Math.round((payload.size || 0) / MB);
+                toast.success(`Optimised to ${newMb} MB — uploading…`, { duration: 2500 });
+            } catch (e) {
+                console.error("[compress]", e);
+                setCompressing(null);
+                setCompressPct(0);
+                toast.error(
+                    e?.code === "VIDEO_TOO_LARGE"
+                        ? e.message
+                        : "Compression failed. Please try a shorter clip or smaller file.",
+                );
+                return; // FAIL-SAFE: never upload the original
+            } finally {
+                setCompressing(null);
+                setCompressPct(0);
+            }
+        }
+
         setUploading(slotKey);
         setUploadPct(0);
         // Persist the pending file in retryQueue so reload + retry button work.
-        setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size } }));
+        setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: payload.name || file.name, fileSize: payload.size } }));
 
         // Auto-retry loop with exponential backoff (3 attempts, 1s/2s/4s).
         // Solves transient mobile-network disconnects without backend changes.
@@ -580,7 +632,7 @@ export default function SubmissionPage() {
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 const fd = new FormData();
-                fd.append("file", file);
+                fd.append("file", payload);
                 fd.append("category", category);
                 if (label) fd.append("label", label);
                 const { data } = await axios.post(
@@ -621,9 +673,11 @@ export default function SubmissionPage() {
             }
         }
         // Failed after retries — keep entry in retryQueue so user can tap "Retry".
+        // Use the (possibly already-compressed) payload so the user doesn't
+        // pay the transcode cost again on retry.
         setRetryQueue((q) => ({
             ...q,
-            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file },
+            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file: payload },
         }));
         setUploading(null);
         setUploadPct(0);
@@ -752,7 +806,7 @@ export default function SubmissionPage() {
     // Modern browsers ignore the custom message (they show their own default),
     // but any non-empty returnValue still triggers the native confirm dialog.
     useEffect(() => {
-        if (!uploading) return;
+        if (!uploading && !compressing) return;
         const handler = (e) => {
             e.preventDefault();
             e.returnValue =
@@ -761,7 +815,7 @@ export default function SubmissionPage() {
         };
         window.addEventListener("beforeunload", handler);
         return () => window.removeEventListener("beforeunload", handler);
-    }, [uploading]);
+    }, [uploading, compressing]);
 
     // Derive "has failed uploads" for the overlay's retry CTA.
     const failedSlots = useMemo(
@@ -944,6 +998,8 @@ export default function SubmissionPage() {
             <UploadOverlay
                 uploading={uploading}
                 uploadPct={uploadPct}
+                compressing={compressing}
+                compressPct={compressPct}
                 failedSlots={failedSlots}
                 onRetry={retryUpload}
                 onDismissFailure={(slotKey) =>
@@ -2841,12 +2897,14 @@ function timeAgo(iso) {
 function UploadOverlay({
     uploading,
     uploadPct,
+    compressing,
+    compressPct,
     failedSlots,
     onRetry,
     onDismissFailure,
 }) {
     const hasFailed = failedSlots && failedSlots.length > 0;
-    const visible = !!uploading || hasFailed;
+    const visible = !!uploading || !!compressing || hasFailed;
     if (!visible) return null;
 
     // Prettier label from the internal slot key (e.g. "intro_video" → "Intro video").
@@ -2855,6 +2913,9 @@ function UploadOverlay({
             .split(":")[0]
             .replace(/_/g, " ")
             .replace(/^./, (c) => c.toUpperCase());
+
+    // Phase priority: compress → upload → failure. Only one card is shown.
+    const phase = compressing ? "compress" : uploading ? "upload" : "failure";
 
     return (
         <div
@@ -2869,7 +2930,50 @@ function UploadOverlay({
 
             {/* Card */}
             <div className="relative w-full sm:max-w-md bg-[#0a0a0a] border border-white/15 rounded-lg shadow-2xl p-6 sm:p-7">
-                {!!uploading && !hasFailed && (
+                {phase === "compress" && (
+                    <>
+                        <div className="flex items-center gap-3 mb-5">
+                            <div className="relative w-10 h-10 shrink-0">
+                                <Sparkles className="w-10 h-10 text-[#c9a961]" strokeWidth={1.5} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                <p className="font-display text-lg tracking-tight text-white">
+                                    Optimising your video…
+                                </p>
+                                <p className="text-[11px] tg-mono text-white/55 mt-0.5 truncate">
+                                    {prettySlot(compressing)}  ·  720p compression
+                                </p>
+                            </div>
+                            <div
+                                className="tg-mono text-sm text-white/85 tabular-nums shrink-0"
+                                data-testid="compress-overlay-pct"
+                            >
+                                {Math.max(0, Math.min(100, compressPct || 0))}%
+                            </div>
+                        </div>
+                        <div
+                            className="h-2.5 w-full bg-white/8 rounded-full overflow-hidden"
+                            role="progressbar"
+                            aria-valuenow={compressPct}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                        >
+                            <div
+                                className="h-full bg-gradient-to-r from-[#c9a961] to-[#e8cd8a] transition-[width] duration-200 ease-out"
+                                style={{ width: `${Math.max(2, Math.min(100, compressPct || 0))}%` }}
+                                data-testid="compress-overlay-bar"
+                            />
+                        </div>
+                        <p className="mt-4 text-[11px] text-white/55 leading-relaxed">
+                            Large file detected — we're compressing it to ~720p
+                            in your browser before uploading. This keeps your
+                            wait short on slow networks. Please keep this tab
+                            open.
+                        </p>
+                    </>
+                )}
+
+                {phase === "upload" && (
                     <>
                         <div className="flex items-center gap-3 mb-5">
                             <div className="relative w-10 h-10 shrink-0">
@@ -2916,7 +3020,7 @@ function UploadOverlay({
                     </>
                 )}
 
-                {hasFailed && !uploading && (
+                {phase === "failure" && (
                     <>
                         <div className="flex items-center gap-3 mb-4">
                             <div className="w-10 h-10 shrink-0 rounded-full bg-[#FF3B30]/15 border border-[#FF3B30]/50 flex items-center justify-center">

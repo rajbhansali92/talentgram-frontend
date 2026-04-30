@@ -42,6 +42,24 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-30 (v38e)** — **Client-side video compression — accept up to 500 MB, upload only the optimised file.** Lifts the 150 MB hard block while keeping the network + Cloudinary store light.
+  - **New util** `/app/frontend/src/lib/videoCompress.js`:
+    - Lazy-loads ffmpeg.wasm v0.12.15 single-thread core from unpkg via `toBlobURL` (no SAB / COOP-COEP needed). Wasm fetch is one-time and HTTP-cached by the browser.
+    - `compressVideoIfNeeded(file, {onProgress})`:
+      - ≤ 25 MB → pass-through (fast path, no transcode).
+      - > 500 MB → throws `VIDEO_TOO_LARGE` (caller surfaces toast).
+      - else → transcodes to 720p H.264 / AAC 96k via `-vf scale='trunc(iw/2)*2':'min(720,ih)' -preset ultrafast -crf 28 -movflags +faststart`. Ranges 15-25 MB output.
+    - Wasm FS is freed after each run so back-to-back compressions don't OOM mobile.
+  - **`SubmissionPage.jsx` upload flow**:
+    - Replaced legacy `CAP_MB = 150` reject with: image-cap 25 MB unchanged, video-cap 500 MB intake.
+    - Compression phase runs BEFORE network upload. New `compressing` + `compressPct` state feed the existing `<UploadOverlay>`.
+    - Toast: "Large file detected (X MB). Optimizing before upload…" for files > 150 MB; subtler "Optimising video (X MB → ~720p)…" for 25-150 MB. Success toast shows new size: "Optimised to N MB — uploading…"
+    - Fail-safe: if compression throws, the original is **never uploaded** — the upload aborts and a clear error toast surfaces. The retry queue stores the COMPRESSED payload (not the original) so a network retry doesn't redo the transcode.
+    - `beforeunload` blocker now also triggers during compression (was upload-only).
+  - **`<UploadOverlay>` redesign**: now renders three mutually-exclusive phases — `compress` (sparkles icon, "Optimising your video…", 720p compression descriptor), `upload` (existing spinner + bar), and `failure` (existing retry list). Single source of truth for blocking the page mid-transfer.
+  - **`ApplicationPage.jsx`**: same compression flow added to the optional `intro_video` upload. Button text dynamically swaps between "Upload video" / "Optimising video…" / "Uploading…". 500 MB hard cap enforced.
+  - **No backend changes** — Cloudinary still does its eager 720p re-transcode; this just front-loads the work onto the client so 200 MB iPhone clips don't have to crawl up flaky mobile networks.
+  - **Verified**: lint clean. Apply page + Submission page load with zero runtime errors. Webpack compiles with 2 expected warnings (`@ffmpeg/ffmpeg/dist/esm/worker.js` "critical dependency" warning is harmless — ffmpeg uses `new URL(workerUrl, import.meta.url)` which webpack can't statically analyse but resolves at runtime).
 - **2026-04-30 (v38d)** — **Branded favicon + OG/social-share image (UI ONLY).** Premium meta-asset polish so shared `/l/...` links no longer surface as default Emergent badges in WhatsApp/LinkedIn/iMessage previews.
   - **Favicons** in `/app/frontend/public/`:
     - `favicon.svg` — theme-aware Talentgram monogram (T flanked by brand slashes), painted via `prefers-color-scheme` media query so the favicon adapts to the user's browser chrome.

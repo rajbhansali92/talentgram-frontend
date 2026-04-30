@@ -5,6 +5,13 @@ import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
 import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import {
+    compressVideoIfNeeded,
+    COMPRESS_THRESHOLD,
+    SOFT_LIMIT,
+    HARD_MAX,
+    MB,
+} from "@/lib/videoCompress";
+import {
     Select,
     SelectContent,
     SelectGroup,
@@ -294,11 +301,50 @@ export default function ApplicationPage() {
             }
             files = Array.from(files).slice(0, remaining);
         }
+        const isVideo = category === "intro_video";
         setUploading(category);
         try {
             for (const file of files) {
+                let payload = file;
+                // v38e — Client-side compression for large videos.
+                // Hard cap 500 MB; transcode anything > 25 MB to ~720p.
+                if (isVideo) {
+                    if (file.size > HARD_MAX) {
+                        toast.error(
+                            `Video too large (${Math.round(file.size / MB)} MB). Max ${Math.round(HARD_MAX / MB)} MB.`,
+                        );
+                        continue;
+                    }
+                    if (file.size > COMPRESS_THRESHOLD) {
+                        const mb = Math.round(file.size / MB);
+                        toast.message(
+                            file.size > SOFT_LIMIT
+                                ? `Large file detected (${mb} MB). Optimizing before upload…`
+                                : `Optimising video (${mb} MB → ~720p)…`,
+                            { duration: 3500 },
+                        );
+                        setUploading("intro_video_compressing");
+                        try {
+                            payload = await compressVideoIfNeeded(file, {
+                                onProgress: () => {},
+                            });
+                            const newMb = Math.round((payload.size || 0) / MB);
+                            toast.success(`Optimised to ${newMb} MB — uploading…`, { duration: 2000 });
+                        } catch (e) {
+                            console.error("[apply compress]", e);
+                            toast.error(
+                                e?.code === "VIDEO_TOO_LARGE"
+                                    ? e.message
+                                    : "Compression failed. Please try a shorter clip.",
+                            );
+                            continue; // FAIL-SAFE: skip the original
+                        } finally {
+                            setUploading(category);
+                        }
+                    }
+                }
                 const fd = new FormData();
-                fd.append("file", file);
+                fd.append("file", payload);
                 fd.append("category", category);
                 const { data } = await axios.post(
                     `${API}/public/apply/${aid}/upload`,
@@ -308,6 +354,7 @@ export default function ApplicationPage() {
                             Authorization: `Bearer ${token}`,
                             "Content-Type": "multipart/form-data",
                         },
+                        timeout: 0, // no per-request timeout for slow mobile networks
                     },
                 );
                 setMedia(data.media || []);
@@ -740,15 +787,21 @@ export default function ApplicationPage() {
                                 <button
                                     onClick={() => videoRef.current?.click()}
                                     data-testid="apply-intro-upload-btn"
-                                    disabled={uploading === "intro_video"}
+                                    disabled={uploading === "intro_video" || uploading === "intro_video_compressing"}
                                     className="w-full max-w-lg border border-dashed border-white/20 hover:border-white/50 py-10 flex flex-col items-center gap-2 text-sm text-white/60"
                                 >
-                                    {uploading === "intro_video" ? (
+                                    {uploading === "intro_video" || uploading === "intro_video_compressing" ? (
                                         <Loader2 className="w-5 h-5 animate-spin" />
                                     ) : (
                                         <Video className="w-5 h-5" />
                                     )}
-                                    <span>Upload video</span>
+                                    <span>
+                                        {uploading === "intro_video_compressing"
+                                            ? "Optimising video…"
+                                            : uploading === "intro_video"
+                                              ? "Uploading…"
+                                              : "Upload video"}
+                                    </span>
                                 </button>
                             )}
                             <input

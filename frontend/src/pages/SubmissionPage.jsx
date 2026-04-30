@@ -1506,7 +1506,7 @@ export default function SubmissionPage() {
                             )}
                         </div>
 
-                        {/* BUDGET — decision block */}
+                        {/* BUDGET — decision block (v37n redesign) */}
                         <div
                             className="border-t border-white/10 pt-7"
                             data-testid="budget-block"
@@ -1516,22 +1516,34 @@ export default function SubmissionPage() {
                                 Budget{" "}
                                 <span className="text-[#FF3B30]">*</span>
                             </p>
-                            {project.commission_percent && (
+
+                            {/* PROMINENT BUDGET CARD — gold-trimmed, high contrast.
+                                Always visible if the project shared a daily rate. */}
+                            {project.budget_per_day && (
                                 <div
-                                    className="flex items-center justify-between border border-white/25 bg-white/[0.04] px-4 py-3 mb-5"
-                                    data-testid="commission-card"
+                                    className="border border-[#c9a961]/50 bg-[#c9a961]/[0.07] px-5 py-5 mb-3 rounded-sm"
+                                    data-testid="client-budget-card"
                                 >
-                                    <span className="text-[11px] tracking-widest uppercase text-white/70">
-                                        Commission
-                                    </span>
-                                    <span className="font-display text-2xl text-white">
-                                        {project.commission_percent}
-                                    </span>
+                                    <p className="text-[10px] tracking-[0.18em] uppercase text-[#c9a961] mb-1.5">
+                                        Client Budget
+                                    </p>
+                                    <p
+                                        className="font-display text-3xl md:text-4xl tracking-tight text-white leading-none"
+                                        data-testid="client-budget-amount"
+                                    >
+                                        {project.budget_per_day}
+                                        <span className="text-base text-white/55 font-sans tracking-normal ml-1.5">
+                                            / day
+                                        </span>
+                                    </p>
                                 </div>
                             )}
+
+                            {/* Per-look budget breakdown (project.talent_budget),
+                                kept here as supporting info — same density as before. */}
                             {(project.talent_budget || []).length > 0 && (
                                 <div
-                                    className="border border-white/15 bg-white/[0.03] px-4 py-3 mb-5"
+                                    className="border border-white/15 bg-white/[0.03] px-4 py-3 mb-3 rounded-sm"
                                     data-testid="talent-budget-hint"
                                 >
                                     <div className="text-[10px] tracking-widest uppercase text-white/50 mb-2">
@@ -1555,7 +1567,10 @@ export default function SubmissionPage() {
                                     </div>
                                 </div>
                             )}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+
+                            {/* Two prominent CTAs — stacked on mobile, side-by-side ≥sm.
+                                Each is full-width with a 56px tap target. */}
+                            <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -1569,14 +1584,13 @@ export default function SubmissionPage() {
                                         setTimeout(saveForm, 0);
                                     }}
                                     data-testid="budget-accept-btn"
-                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "accept" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                    className={`flex-1 px-5 py-4 rounded-sm border tracking-widest uppercase text-[12px] font-semibold transition-all min-h-[56px] active:scale-[0.98] ${
+                                        form.budget.status === "accept"
+                                            ? "bg-white text-black border-white shadow-[0_0_0_1px_rgba(201,169,97,0.4)]"
+                                            : "bg-transparent border-white/25 hover:border-white/60 text-white"
+                                    }`}
                                 >
-                                    Accept
-                                    {project.budget_per_day && (
-                                        <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
-                                            {project.budget_per_day} / day
-                                        </span>
-                                    )}
+                                    Accept this budget
                                 </button>
                                 <button
                                     type="button"
@@ -1591,32 +1605,63 @@ export default function SubmissionPage() {
                                         setTimeout(saveForm, 0);
                                     }}
                                     data-testid="budget-custom-btn"
-                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "custom" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                    className={`flex-1 px-5 py-4 rounded-sm border tracking-widest uppercase text-[12px] font-semibold transition-all min-h-[56px] active:scale-[0.98] ${
+                                        form.budget.status === "custom"
+                                            ? "bg-white text-black border-white shadow-[0_0_0_1px_rgba(201,169,97,0.4)]"
+                                            : "bg-transparent border-white/25 hover:border-white/60 text-white"
+                                    }`}
                                 >
-                                    Not accepting
-                                    <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
-                                        Propose your own
-                                    </span>
+                                    Propose your own
                                 </button>
                             </div>
-                            {form.budget.status === "custom" && (
-                                <input
-                                    type="text"
-                                    value={form.budget.value}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            budget: {
-                                                ...form.budget,
-                                                value: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    placeholder="Enter your expected budget per day"
-                                    data-testid="budget-value-input"
-                                    className="w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
-                                />
+
+                            {/* Reveal: smooth height + opacity transition without
+                                triggering layout thrash. Uses CSS grid trick:
+                                grid-rows transitions from 0fr → 1fr. */}
+                            <div
+                                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
+                                    form.budget.status === "custom"
+                                        ? "grid-rows-[1fr] opacity-100 mt-4"
+                                        : "grid-rows-[0fr] opacity-0 mt-0"
+                                }`}
+                            >
+                                <div className="overflow-hidden">
+                                    <label className="block text-[11px] tracking-widest uppercase text-white/60 mb-2">
+                                        Enter your expected budget
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={form.budget.value}
+                                        onChange={(e) =>
+                                            setForm({
+                                                ...form,
+                                                budget: {
+                                                    ...form.budget,
+                                                    value: e.target.value,
+                                                },
+                                            })
+                                        }
+                                        onBlur={saveForm}
+                                        placeholder="e.g. ₹65,000 / day"
+                                        data-testid="budget-value-input"
+                                        autoFocus={form.budget.status === "custom"}
+                                        className="w-full bg-transparent border-b border-white/30 focus:border-white outline-none py-3 text-base placeholder-white/35"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Commission — secondary; surfaced below the decision
+                                so it doesn't compete with the primary budget card. */}
+                            {project.commission_percent && (
+                                <p
+                                    className="mt-5 text-[11px] tracking-widest uppercase text-white/45"
+                                    data-testid="commission-card"
+                                >
+                                    Agency Commission:{" "}
+                                    <span className="tg-mono text-white/70 normal-case tracking-normal">
+                                        {project.commission_percent}
+                                    </span>
+                                </p>
                             )}
                         </div>
 

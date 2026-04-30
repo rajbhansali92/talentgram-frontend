@@ -1185,25 +1185,37 @@ def _submission_to_client_shape(sub: dict) -> dict:
     return out
 
 
-def _paginate_params(page, size):
-    """Normalise + cap `?page=&size=` query params.
+def _paginate_params(page, size, limit=None):
+    """Normalise + cap pagination query params.
 
-    Returns `(skip, limit, page, size)` where:
-    - page is 0-indexed
-    - size is clamped to [1, 200]
-    - skip = page * size
+    Accepts either `?page=&size=` (legacy) or `?page=&limit=` (new). When
+    both are supplied, `limit` wins.
+
+    Returns `(skip, page_size, page, page_size)` where page is 0-indexed
+    and page_size is clamped to [1, 200].
     """
     p = max(0, int(page or 0))
-    s = max(1, min(200, int(size or 50)))
+    effective = limit if limit is not None else size
+    s = max(1, min(200, int(effective or 50)))
     return p * s, s, p, s
 
 
 def _paginated(items, total, page, size) -> dict:
+    """Paginated response shape.
+
+    Returns BOTH the legacy keys (`items`, `size`, `has_more`) and the
+    canonical keys (`data`, `pages`) so existing consumers keep working
+    while new consumers can use the cleaner shape.
+    """
+    pages = (total + size - 1) // size if size else 0
     return {
         "items": items,
+        "data": items,
         "total": total,
         "page": page,
         "size": size,
+        "limit": size,
+        "pages": pages,
         "has_more": (page + 1) * size < total,
     }
 

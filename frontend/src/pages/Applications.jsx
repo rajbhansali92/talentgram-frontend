@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { adminApi, COVER_URL, VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -15,6 +15,9 @@ import {
     UserPlus,
     Filter,
 } from "lucide-react";
+import useInfiniteList, { useInfiniteScroll } from "@/hooks/useInfiniteList";
+
+const PAGE_LIMIT = 30;
 
 const STATUS_FILTERS = [
     { key: "all", label: "All" },
@@ -25,29 +28,50 @@ const STATUS_FILTERS = [
 ];
 
 export default function Applications() {
-    const [items, setItems] = useState([]);
-    const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState("pending");
     const [active, setActive] = useState(null);
+    const [counts, setCounts] = useState({
+        all: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        drafts: 0,
+    });
 
-    const load = async () => {
-        setLoading(true);
-        try {
+    const fetchPage = useCallback(
+        async ({ page, limit }) => {
             const f = STATUS_FILTERS.find((s) => s.key === filter);
-            const params = f?.query || {};
+            const params = { page, limit, ...(f?.query || {}) };
             const { data } = await adminApi.get("/applications", { params });
-            setItems(data);
-        } catch (e) {
-            toast.error("Failed to load applications");
-        } finally {
-            setLoading(false);
+            return data;
+        },
+        [filter],
+    );
+
+    const {
+        items,
+        total,
+        hasMore,
+        loading,
+        loadingMore,
+        loadMore,
+        reload,
+    } = useInfiniteList(fetchPage, [filter], { limit: PAGE_LIMIT });
+
+    const sentinelRef = useInfiniteScroll(loadMore);
+
+    const loadCounts = useCallback(async () => {
+        try {
+            const { data } = await adminApi.get("/applications/stats");
+            setCounts(data);
+        } catch {
+            // non-blocking; chips just hide their counts
         }
-    };
+    }, []);
 
     useEffect(() => {
-        load();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [filter]);
+        loadCounts();
+    }, [loadCounts]);
 
     const decide = async (aid, decision) => {
         try {
@@ -63,22 +87,11 @@ export default function Applications() {
                     : "Rejected",
             );
             setActive(null);
-            await load();
+            await Promise.all([reload(), loadCounts()]);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed");
         }
     };
-
-    const counts = useMemo(() => {
-        const c = { all: items.length, pending: 0, approved: 0, rejected: 0, drafts: 0 };
-        for (const i of items) {
-            if (i.status === "draft") c.drafts++;
-            else if (i.decision === "approved") c.approved++;
-            else if (i.decision === "rejected") c.rejected++;
-            else if (i.status === "submitted" && i.decision === "pending") c.pending++;
-        }
-        return c;
-    }, [items]);
 
     return (
         <div
@@ -122,33 +135,70 @@ export default function Applications() {
                         }`}
                     >
                         {f.label}
+                        {typeof counts?.[f.key] === "number" && (
+                            <span className="ml-1.5 opacity-60">{counts[f.key]}</span>
+                        )}
                     </button>
                 ))}
             </div>
 
+            {!loading && total > 0 && (
+                <p
+                    className="text-white/40 text-xs tracking-wide mb-4"
+                    data-testid="applications-count-summary"
+                >
+                    Showing {items.length} of {total}
+                </p>
+            )}
+
             {loading ? (
-                <div className="py-20 flex justify-center">
+                <div className="py-20 flex justify-center" data-testid="applications-loading">
                     <Loader2 className="w-5 h-5 animate-spin text-white/40" />
                 </div>
             ) : items.length === 0 ? (
-                <div className="border border-dashed border-white/10 py-20 text-center text-white/40 text-sm">
+                <div
+                    className="border border-dashed border-white/10 py-20 text-center text-white/40 text-sm"
+                    data-testid="applications-empty"
+                >
                     No applications match this filter.
                 </div>
             ) : (
-                <div
-                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
-                    data-testid="applications-grid"
-                >
-                    {items.map((a) => (
-                        <ApplicationCard
-                            key={a.id}
-                            app={a}
-                            onReview={() => setActive(a)}
-                            onDecide={(d) => decide(a.id, d)}
-                            counts={counts}
-                        />
-                    ))}
-                </div>
+                <>
+                    <div
+                        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
+                        data-testid="applications-grid"
+                    >
+                        {items.map((a) => (
+                            <ApplicationCard
+                                key={a.id}
+                                app={a}
+                                onReview={() => setActive(a)}
+                                onDecide={(d) => decide(a.id, d)}
+                                counts={counts}
+                            />
+                        ))}
+                    </div>
+                    {hasMore && (
+                        <div className="mt-8 flex flex-col items-center gap-3">
+                            <div ref={sentinelRef} className="h-px w-px" aria-hidden />
+                            <button
+                                type="button"
+                                onClick={loadMore}
+                                disabled={loadingMore}
+                                data-testid="applications-load-more-btn"
+                                className="inline-flex items-center gap-2 border border-white/20 hover:border-white/60 transition-colors px-5 py-2.5 text-xs tracking-wide disabled:opacity-50"
+                            >
+                                {loadingMore ? (
+                                    <>
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading more...
+                                    </>
+                                ) : (
+                                    <>Load more ({total - items.length} remaining)</>
+                                )}
+                            </button>
+                        </div>
+                    )}
+                </>
             )}
 
             {active && (

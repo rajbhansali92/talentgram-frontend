@@ -283,6 +283,7 @@ async def list_applications(
     decision: Optional[str] = None,
     page: Optional[int] = None,
     size: Optional[int] = None,
+    limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {}
@@ -291,13 +292,35 @@ async def list_applications(
     if decision:
         query["decision"] = decision
     cursor = db.applications.find(query, {"_id": 0}).sort("created_at", -1)
-    if page is None:
+    if page is None and limit is None:
         items = await cursor.to_list(5000)
         return [_with_image_url(a) for a in items]
-    skip, limit, p, s = _paginate_params(page, size)
+    skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.applications.count_documents(query)
-    items = await cursor.skip(skip).limit(limit).to_list(limit)
+    items = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated([_with_image_url(a) for a in items], total, p, s)
+
+
+@router.get("/applications/stats")
+async def applications_stats(admin: dict = Depends(current_team_or_admin)):
+    """Lightweight counts for the filter chips. O(N) count_documents calls.
+
+    Returns counts for: all, pending (status=submitted, decision=pending),
+    approved, rejected, drafts.
+    """
+    coll = db.applications
+    all_total = await coll.count_documents({})
+    pending = await coll.count_documents({"status": "submitted", "decision": "pending"})
+    approved = await coll.count_documents({"decision": "approved"})
+    rejected = await coll.count_documents({"decision": "rejected"})
+    drafts = await coll.count_documents({"status": "draft"})
+    return {
+        "all": all_total,
+        "pending": pending,
+        "approved": approved,
+        "rejected": rejected,
+        "drafts": drafts,
+    }
 
 
 @router.get("/applications/{aid}")

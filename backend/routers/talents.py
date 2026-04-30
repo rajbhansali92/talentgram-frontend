@@ -96,6 +96,7 @@ async def list_talents(
     q: Optional[str] = None,
     page: Optional[int] = None,
     size: Optional[int] = None,
+    limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {}
@@ -104,12 +105,12 @@ async def list_talents(
     cursor = db.talents.find(query, {"_id": 0, "created_by": 0}).sort(
         "created_at", -1
     )
-    if page is None:
+    if page is None and limit is None:
         talents = await cursor.to_list(2000)
         return [enrich_talent(t) for t in talents]
-    skip, limit, p, s = _paginate_params(page, size)
+    skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.talents.count_documents(query)
-    talents = await cursor.skip(skip).limit(limit).to_list(limit)
+    talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated([enrich_talent(t) for t in talents], total, p, s)
 
 

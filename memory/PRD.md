@@ -42,6 +42,25 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-30 (v38g)** — **New high-res Talentgram logo applied globally.** User-uploaded enhanced asset replaces all logo variants.
+  - **Asset processing** (PIL pipeline):
+    - Source: 3840×2160 RGBA with white background + "Let's Enhance.io" watermark in bottom-left.
+    - Replaced near-white pixels (R/G/B > 245) with full transparency.
+    - Masked the bottom-left 25% × 35% quadrant where the watermark sat → fully transparent there.
+    - Auto-trimmed to glyph bounds via alpha bbox → final size **1155 × 805** (aspect ratio **1.435:1**, taller per unit width than the previous wordmark).
+    - Generated white-ink variant by inverting RGB on every visible pixel while preserving the alpha mask → pixel-identical glyph, swapped colour.
+  - **Files written**:
+    - `/app/frontend/public/brand/talentgram-black.png` (default, light surfaces)
+    - `/app/frontend/public/brand/talentgram-white.png` (forced for AdminLogin's dark hero rail)
+    - `favicon-16x16.png` / `favicon-32x32.png` / `favicon.ico` / `apple-touch-icon.png` regenerated from the new white-ink master on a near-black square canvas.
+    - `og-image.png` rebuilt at 1200×630 with the larger 270 px-tall logo, hairline corner ornaments, "WE SCOUT · WE MANAGE" + "INDIA | UAE" + "PORTFOLIO · CASTING DECISION ENGINE" footer + gold accent.
+  - **`Logo.jsx` size table bumped** (premium scale per spec):
+    - sm 24→**28**, md 40→**48**, lg 64→**72**, xl 110→**130**, 2xl 150→**180** (height; width auto from 1.435:1).
+    - Comments updated to reflect new aspect ratio.
+  - **`BrandHero.jsx` heights bumped**:
+    - md: 110/150 → **130/180** (mobile/desktop height; ≈187/258 width)
+    - lg: 140/200 → **170/240** (≈244/344 width)
+  - **Verified live** (1280×800 + 390×844): Landing hero, AdminLogin left rail (white-ink), admin sidebar, /apply header — all render the new asset crisply with no layout regression. Lint clean.
 - **2026-04-30 (v38f)** — **Light-mode-only — dark mode removed completely (UI only).** Per spec: force consistent light theme everywhere, strip the toggle, no functional or backend changes.
   - **`/app/frontend/public/index.html`**: pre-React inline script always sets `html.light` and writes `tg_theme=light` to localStorage. No `dark` class is ever added on cold load. Single `theme-color` meta (#fafaf7).
   - **`/app/frontend/src/lib/theme.js`** (rewritten, ~30 lines): `useTheme()` API kept identical (`{theme, toggle, isLight}`) for caller compatibility — but `theme` is locked to `"light"`, `isLight` is always `true`, `toggle` is a no-op. Effect re-applies `html.light` on every mount in case anything ever stripped it.

@@ -2144,57 +2144,122 @@ function PortfolioGroup({
 
 function WorkLinksEditor({ links, onChange }) {
     const [input, setInput] = useState("");
-    const add = () => {
-        const v = input.trim();
-        if (!v) return;
-        onChange([...(links || []), v]);
+
+    const addOne = (raw, current) => {
+        const v = (raw || "").trim();
+        if (!v) return current;
+        if (current.includes(v)) return current;
+        return [...current, v];
+    };
+
+    const addFromInput = () => {
+        // Accept whitespace / comma / newline-separated paste.
+        const parts = input
+            .split(/[\s,]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        if (!parts.length) return;
+        let next = links || [];
+        for (const p of parts) next = addOne(p, next);
+        if (next !== (links || [])) onChange(next);
         setInput("");
     };
+
     const remove = (i) =>
         onChange((links || []).filter((_, idx) => idx !== i));
+
     return (
-        <div className="mt-2 space-y-2" data-testid="work-links-editor">
-            {(links || []).map((w, i) => (
+        <div className="mt-2" data-testid="work-links-editor">
+            {/* Chip cloud — flex-wraps so dozens of links never break the layout. */}
+            {(links || []).length > 0 && (
                 <div
-                    key={`${w}-${i}`}
-                    className="flex items-center justify-between gap-2 px-3 py-2 border border-white/10 rounded-sm text-xs tg-mono break-all"
-                    data-testid={`work-link-row-${i}`}
+                    className="flex flex-wrap gap-2 mb-3"
+                    data-testid="work-links-chips"
                 >
-                    <span className="truncate text-white/80">{w}</span>
-                    <button
-                        type="button"
-                        onClick={() => remove(i)}
-                        data-testid={`work-link-remove-${i}`}
-                        className="text-white/40 hover:text-white shrink-0"
-                    >
-                        <X className="w-3.5 h-3.5" />
-                    </button>
+                    {(links || []).map((w, i) => {
+                        const href = /^https?:\/\//i.test(w) ? w : `https://${w}`;
+                        return (
+                            <span
+                                key={`${w}-${i}`}
+                                data-testid={`work-link-chip-${i}`}
+                                className="inline-flex items-center gap-1 max-w-full pl-3 pr-1 py-1.5 border border-white/15 bg-white/[0.04] rounded-full text-xs tg-mono hover:border-white/40 transition-colors"
+                            >
+                                <a
+                                    href={href}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="truncate max-w-[180px] sm:max-w-[260px] text-white/85 hover:text-white"
+                                    title={w}
+                                >
+                                    {w}
+                                </a>
+                                <button
+                                    type="button"
+                                    onClick={() => remove(i)}
+                                    aria-label={`Remove ${w}`}
+                                    data-testid={`work-link-remove-${i}`}
+                                    className="w-5 h-5 inline-flex items-center justify-center rounded-full text-white/45 hover:text-white hover:bg-white/10 active:scale-90 transition-all"
+                                >
+                                    <X className="w-3 h-3" />
+                                </button>
+                            </span>
+                        );
+                    })}
                 </div>
-            ))}
+            )}
+
+            {/* Input + always-visible Add Link button. `min-w-0` on the input
+                prevents flex overflow on mobile so the button never gets pushed
+                off-screen no matter how many chips are above. */}
             <div className="flex items-center gap-2">
                 <input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => {
-                        if (e.key === "Enter") {
+                        if (e.key === "Enter" || e.key === ",") {
                             e.preventDefault();
-                            add();
+                            addFromInput();
+                        } else if (
+                            e.key === "Backspace" &&
+                            !input &&
+                            (links || []).length
+                        ) {
+                            // Quick-remove last chip when input is empty.
+                            e.preventDefault();
+                            remove(links.length - 1);
+                        }
+                    }}
+                    onPaste={(e) => {
+                        const txt = e.clipboardData?.getData("text") || "";
+                        if (/[\s,]/.test(txt)) {
+                            e.preventDefault();
+                            const parts = txt
+                                .split(/[\s,]+/)
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                            let next = links || [];
+                            for (const p of parts) next = addOne(p, next);
+                            if (next !== (links || [])) onChange(next);
+                            setInput("");
                         }
                     }}
                     inputMode="url"
-                    placeholder="https://… (paste & press Enter)"
+                    placeholder="Paste a URL & press Enter"
                     data-testid="work-link-input"
-                    className="flex-1 bg-transparent border-b border-white/20 focus:border-white outline-none py-2 text-sm"
+                    className="flex-1 min-w-0 bg-transparent border-b border-white/20 focus:border-white outline-none py-2.5 text-sm"
                 />
                 <button
                     type="button"
-                    onClick={add}
+                    onClick={addFromInput}
                     data-testid="work-link-add-btn"
-                    className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm min-h-[44px] active:scale-[0.97] transition-transform"
+                    className="shrink-0 text-[11px] tracking-widest uppercase px-3.5 py-2.5 border border-white/25 hover:border-white text-white/85 hover:text-white rounded-sm min-h-[44px] active:scale-[0.97] transition-all"
                 >
-                    Add
+                    Add Link
                 </button>
             </div>
+            <p className="mt-1.5 text-[10px] text-white/40 leading-snug">
+                Customize links for this project only.
+            </p>
         </div>
     );
 }

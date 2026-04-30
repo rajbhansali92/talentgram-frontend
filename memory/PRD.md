@@ -313,5 +313,30 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Data backfill**: `scripts/migrate_emergent_to_cloudinary.py` migrated 152/252 legacy media records (additive — `storage_path` preserved). 100 failures are 1×1 placeholder JPEGs (537 bytes, test data) which Cloudinary rejects as invalid; documented as expected.
 - **Validation**: 9/9 backend tests passing (`tests/test_cloudinary_migration.py`); admin smoke + client view + submission page all render Cloudinary thumbnails.
 
+## v37n — Submission UX Premium Redesign (Apr 30, 2026) ✅ COMPLETE
+- **Backend**:
+  - New `_resolve_cover_url()` helper resolves: `cover_media_id` → portfolio/indian/western image → first usable `url`. Used by `enrich_talent`, `_submission_to_client_shape`, `_filter_talent_for_client`, `_with_image_url`.
+  - Every talent / submission / application response now exposes a top-level `image_url` (Cloudinary URL or `null`, never `"undefined"`).
+  - `/api/public/prefill` enriched with `image_url` and DOB-derived age fallback for the "Is this you?" confirmation card. 20/min IP rate-limited.
+  - `MediaItem` model dropped optional legacy `storage_path`; `_public_media` now returns clean Cloudinary fields only. DB cleanup script stripped 396 legacy fields across 37 docs.
+  - Removed hardcoded Cloudinary credentials from `server.py` (now solely env-based via `core.py`). Fixed malformed `.env` (separated `GOOGLE_DRIVE_SA_KEY_JSON` newline + dedupe).
+- **Frontend**:
+  - New `COVER_URL(subject)` helper in `lib/api.js` — single source of truth for image resolution. Used in TalentList, Applications, LinkGenerator, ClientView, ForwardToLinkModal.
+  - Talent grid bug fixed: `<Inner>` was receiving stale `anyImg` prop after migration → switched to `coverUrl={COVER_URL(t)}`.
+  - **Submission page redesign** (gold-themed Netflix-luxury aesthetic):
+    - "Is this you?" prefill card now shows Cloudinary thumbnail + name + age + location + height
+    - Age handling: when DOB present, shows read-only auto-calculated age + optional override input ("Override age for this submission") with helper text. Override stays in `form_data.age_override` (never overwrites global talent profile)
+    - Budget block: prominent gold card with `Client Budget: ₹X / day`, two large CTAs ("Accept this budget" / "Propose your own"), smooth grid-rows reveal animation, secondary commission line
+    - Availability block: gold card with `Shoot Dates`, two large CTAs ("Yes, available" / "Not available"), smooth reveal of details textarea
+    - Important Questions section: gold-bordered card with Lightbulb icon + "RECOMMENDED" tag + helper text "*These help us shortlist you better. Not mandatory.*"
+    - Work Links: chips with X buttons, paste/Enter to add, comma/whitespace split for multi-paste, backspace-on-empty removes last chip, helper text "Customize links for this project only"
+  - Premium polish CSS layer (`index.css`):
+    - Gold accent classes (`bg-[#c9a961]/[0.06-0.07]`, `border-[#c9a961]/40-50`) properly themed for both modes
+    - Placeholder contrast bumped to `white/55+` (dark) / `black/45+` (light) for AA compliance
+    - `tg-card` utility (subtle 1px highlight in dark, soft glow in light)
+    - `tg-divider` utility for clean section separation
+    - `tg-help` utility for accessible helper text
+- **Validation**: testing_agent_v3_fork iteration 17 → **10/10 backend pytest pass + 100% frontend Playwright** (admin grid, prefill + autofill, age override, budget redesign, availability redesign, work-link chips, theme toggle preserves gold accents in light mode).
+
 ## Test Credentials
 See `/app/memory/test_credentials.md`.

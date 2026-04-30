@@ -42,6 +42,24 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-30 (v38c)** — **Theme system upgrade — premium contrast & dual-logo polish (UI ONLY).** Tightens the dark/light parity to a locked colour spec without touching any business logic.
+  - **Locked colour tokens** (CSS vars in `index.css`):
+    - Light: primary `#111111` · secondary `#555555` · border `rgba(0,0,0,0.10)` strong `0.25`
+    - Dark: primary `#FFFFFF` · secondary `#BBBBBB` · border `rgba(255,255,255,0.10)` strong `0.25`
+    - Shadcn `--muted-foreground` synced: light `0 0% 33%` (#555), dark `0 0% 73%` (#BBB).
+  - **Dark-mode secondary floor**: `text-white/40`, `/50`, `/60` clamped to `#9a9a9a` / `#b0b0b0` / `#bbbbbb` so faded labels never drop below WCAG AA on dark surfaces.
+  - **Light-mode text mapping**: `text-white/85` (was unmapped → invisible on light bg, breaking the Landing "Apply as Talent" button) now resolves to `rgba(17,17,17,0.92)`. All `text-white/X` variants from `/95` through `/20` now map to graduated `#111`-based opacities.
+  - **Logo system** (`Logo.jsx`):
+    - Sizes bumped: `sm` 24, `md` 40, `lg` 64, `xl` 110, `2xl` 150 (height; width auto via 1.99:1 aspect).
+    - Subtle drop-shadow added (`0 1px 2px rgba(opposite,0.55)`) so the logo never blends into similar-luminance surfaces.
+    - Theme detection unchanged — `useTheme().isLight` already swaps `talentgram-black.png` ↔ `talentgram-white.png`.
+  - **BrandHero** (`BrandHero.jsx`): hero sizes bumped — md=110/150 (mobile/desktop height), lg=140/200. Width on desktop hero reaches ~280–400px.
+  - **Eyebrow weight** raised to 600 for legibility on small uppercase labels.
+  - **Verified live** at 1280×800 + 390×844 across Landing, AdminLogin, Dashboard, Talents, /apply — both modes:
+    - Logo correctly swaps ink (white in dark, black in light).
+    - Drop-shadow halo visible on solid surfaces, invisible on contrasted ones (intentional).
+    - `Apply as Talent` outline CTA on Landing now READABLE in light mode (was washed-out before).
+    - Sidebar logo, page headings, secondary text, primary buttons, outlined buttons — all pass visual contrast in both modes.
 - **2026-04-30 (v38b)** — **Pagination Phase 2 (Links + Project Submissions).** Wired the same backward-compatible pagination + infinite-scroll pattern to the remaining high-volume admin lists.
   - **Backend**: `/api/links` and `/api/projects/{pid}/submissions` now accept `?limit=` (alias for `size=`) like the talents/applications endpoints. New `GET /api/projects/{pid}/submissions/stats` returns `{all, pending, approved, hold, rejected, updated}` counts via cheap `count_documents` calls — powers the filter-chip badges without loading the full submission set.
   - **Frontend `LinkHistory.jsx`**: refactored to `useInfiniteList` + `useInfiniteScroll`. Loads 30/page with auto-load + manual "Load more (N remaining)" button + "Showing X of Y" header. `duplicate`/`delete`/`bulk-delete` callbacks rewired through hook's `reload()`.

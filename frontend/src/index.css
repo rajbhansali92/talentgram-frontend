@@ -8,8 +8,8 @@
     --tg-surface-2: #1a1a1a;
     --tg-border: rgba(255, 255, 255, 0.1);
     --tg-border-strong: rgba(255, 255, 255, 0.25);
-    --tg-text: #f5f5f0;
-    --tg-muted: #8a8a8a;
+    --tg-text: #ffffff;
+    --tg-muted: #bbbbbb;
     --tg-success: #34c759;
     --tg-danger: #ff3b30;
     --tg-warning: #ffcc00;
@@ -19,10 +19,10 @@ html.light {
     --tg-bg: #fafaf7;
     --tg-surface: #ffffff;
     --tg-surface-2: #f2f2ec;
-    --tg-border: rgba(0, 0, 0, 0.08);
-    --tg-border-strong: rgba(0, 0, 0, 0.22);
-    --tg-text: #0a0a0a;
-    --tg-muted: #666666;
+    --tg-border: rgba(0, 0, 0, 0.1);
+    --tg-border-strong: rgba(0, 0, 0, 0.25);
+    --tg-text: #111111;
+    --tg-muted: #555555;
     color-scheme: light;
 }
 
@@ -76,7 +76,7 @@ code {
         --secondary: 0 0% 96%;
         --secondary-foreground: 0 0% 9%;
         --muted: 0 0% 96%;
-        --muted-foreground: 0 0% 45%;
+        --muted-foreground: 0 0% 33%;
         --accent: 0 0% 96%;
         --accent-foreground: 0 0% 9%;
         --destructive: 4 90% 58%;
@@ -88,19 +88,19 @@ code {
     }
     .dark {
         --background: 0 0% 2%;
-        --foreground: 60 11% 94%;
+        --foreground: 0 0% 100%;
         --card: 0 0% 7%;
-        --card-foreground: 60 11% 94%;
+        --card-foreground: 0 0% 100%;
         --popover: 0 0% 7%;
-        --popover-foreground: 60 11% 94%;
+        --popover-foreground: 0 0% 100%;
         --primary: 0 0% 100%;
         --primary-foreground: 0 0% 6%;
         --secondary: 0 0% 11%;
-        --secondary-foreground: 60 11% 94%;
+        --secondary-foreground: 0 0% 100%;
         --muted: 0 0% 11%;
-        --muted-foreground: 0 0% 55%;
+        --muted-foreground: 0 0% 73%;
         --accent: 0 0% 14%;
-        --accent-foreground: 60 11% 94%;
+        --accent-foreground: 0 0% 100%;
         --destructive: 4 90% 58%;
         --destructive-foreground: 0 0% 100%;
         --border: 0 0% 16%;
@@ -161,7 +161,7 @@ html.light .tg-grain::before {
     letter-spacing: 0.28em;
     text-transform: uppercase;
     color: var(--tg-muted);
-    font-weight: 500;
+    font-weight: 600;
 }
 
 .tg-scroll::-webkit-scrollbar {
@@ -220,10 +220,13 @@ html.light .tg-grain::before {
 /* ==========================================================================
    LIGHT MODE — global overrides for hardcoded dark palette classes
    (Keeps the same component code working in light theme)
+   Color spec (locked v38c):
+     • Light primary: #111111   • Light secondary: #555555
+     • Dark  primary: #FFFFFF   • Dark  secondary: #BBBBBB
    ========================================================================== */
 html.light body {
     background: #fafaf7;
-    color: #0a0a0a;
+    color: #111111;
 }
 
 /* Surfaces */
@@ -275,43 +278,49 @@ html.light .bg-white\/\[0\.02\] {
 
 /* Primary button: bg-white text-black stays high-contrast — flip to black on light */
 html.light .bg-white {
-    background-color: #0a0a0a !important;
+    background-color: #111111 !important;
     color: #ffffff !important;
 }
 html.light .text-black {
     color: #ffffff !important;
 }
 
-/* Text tones: invert whites to blacks at matching opacity */
+/* Text tones: invert whites to blacks at matching opacity.
+   Secondary text floor in light mode = #555555 (~67% black). Below that
+   we step further toward #555 / #777 for tertiary labels — never lighter
+   than rgba(0,0,0,0.42) so we stay above WCAG AA on white surfaces. */
 html.light .text-white {
-    color: #0a0a0a !important;
+    color: #111111 !important;
 }
 html.light .text-white\/90 {
-    color: rgba(0, 0, 0, 0.9) !important;
+    color: rgba(17, 17, 17, 0.95) !important;
+}
+html.light .text-white\/85 {
+    color: rgba(17, 17, 17, 0.92) !important;
 }
 html.light .text-white\/80 {
-    color: rgba(0, 0, 0, 0.82) !important;
+    color: rgba(17, 17, 17, 0.88) !important;
 }
 html.light .text-white\/70 {
-    color: rgba(0, 0, 0, 0.75) !important;
+    color: rgba(17, 17, 17, 0.78) !important;
 }
 html.light .text-white\/60 {
-    color: rgba(0, 0, 0, 0.65) !important;
+    color: #555555 !important; /* secondary spec */
 }
 html.light .text-white\/50 {
-    color: rgba(0, 0, 0, 0.58) !important;
+    color: #555555 !important; /* clamp to AA floor */
 }
 html.light .text-white\/40 {
-    color: rgba(0, 0, 0, 0.5) !important;
+    color: #6b6b6b !important;
 }
 html.light .text-white\/30 {
-    color: rgba(0, 0, 0, 0.4) !important;
+    color: #777777 !important;
 }
 html.light .text-white\/25 {
-    color: rgba(0, 0, 0, 0.32) !important;
+    color: #7d7d7d !important;
 }
 html.light .text-white\/20 {
-    color: rgba(0, 0, 0, 0.25) !important;
+    color: #888888 !important;
 }
 
 /* Placeholders */
@@ -522,7 +531,25 @@ html.light .tg-divider {
     line-height: 1.55;
 }
 html.light .tg-help {
-    color: rgba(0, 0, 0, 0.6);
+    color: #555555;
+}
+
+/* ---- v38c — Dark-mode secondary text floor.
+        Many components use text-white/40, text-white/50, text-white/60 for
+        labels & helper text. Spec demands secondary = #BBBBBB. We clamp the
+        most common faded variants to that floor in dark mode while leaving
+        primary white intact. Light mode uses its own block above. */
+html.dark .text-white\/60,
+html:not(.light) .text-white\/60 {
+    color: #bbbbbb !important;
+}
+html.dark .text-white\/50,
+html:not(.light) .text-white\/50 {
+    color: #b0b0b0 !important;
+}
+html.dark .text-white\/40,
+html:not(.light) .text-white\/40 {
+    color: #9a9a9a !important;
 }
 
 /* ---- Selected button rings — keep gold accent visible in both modes */

@@ -31,10 +31,13 @@ import Logo from "@/components/Logo";
 export default function BrandHero({ size = "lg", inverted = false, className = "" }) {
     // Per-size base height + a responsive cap on small screens so the hero
     // never pushes CTAs below the fold on iPhone SE (320–375 px wide).
+    // Sizes in HEIGHT (asset aspect ≈ 1.99:1, so width ≈ height × 2):
+    //   md  → 110 mobile / 150 desktop  (≈ 220 / 300 width)
+    //   lg  → 140 mobile / 200 desktop  (≈ 280 / 400 width)
     const config =
         size === "md"
-            ? { logoH: 110, mdLogoH: 140, gap: "mt-6", scout: "text-[11px]", region: "text-base sm:text-lg" }
-            : { logoH: 140, mdLogoH: 220, gap: "mt-7 sm:mt-9", scout: "text-[11px] sm:text-xs", region: "text-base sm:text-lg md:text-xl" };
+            ? { logoH: 110, mdLogoH: 150, gap: "mt-6", scout: "text-[11px]", region: "text-base sm:text-lg" }
+            : { logoH: 140, mdLogoH: 200, gap: "mt-7 sm:mt-9", scout: "text-[11px] sm:text-xs", region: "text-base sm:text-lg md:text-xl" };
 
     return (
         <div

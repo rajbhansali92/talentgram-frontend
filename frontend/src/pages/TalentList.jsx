@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, COVER_URL, isAdmin } from "@/lib/api";
+import { adminApi, COVER_URL, OPTIMIZED_IMAGE_URL, isAdmin } from "@/lib/api";
 import { Search, Plus, Image as ImageIcon, Check } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
@@ -211,7 +211,7 @@ function Inner({ t, coverUrl }) {
             <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
                 {coverUrl ? (
                     <img
-                        src={coverUrl}
+                        src={OPTIMIZED_IMAGE_URL(coverUrl, 400)}
                         alt={t.name}
                         loading="lazy"
                         onError={(e) => { e.currentTarget.style.display = "none"; }}

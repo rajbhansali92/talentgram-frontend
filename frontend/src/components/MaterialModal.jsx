@@ -1,5 +1,5 @@
 import React from "react";
-import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
+import { VIDEO_URL, VIDEO_POSTER_URL, OPTIMIZED_IMAGE_URL, OPTIMIZED_AUDIO_URL } from "@/lib/api";
 import {
     X,
     FileText,
@@ -79,7 +79,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                             className="block aspect-square bg-muted overflow-hidden"
                         >
                             <img
-                                src={m.url}
+                                src={OPTIMIZED_IMAGE_URL(m, 600)}
                                 alt=""
                                 loading="lazy"
                                 className="w-full h-full object-cover"
@@ -96,7 +96,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                         <div className="flex items-center gap-3 flex-1 bg-muted p-3 rounded-lg">
                             <Music className="w-5 h-5 text-muted-foreground shrink-0" />
                             <audio
-                                src={m.url}
+                                src={OPTIMIZED_AUDIO_URL(m)}
                                 controls
                                 className="w-full max-w-md"
                             />

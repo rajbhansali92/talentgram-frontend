@@ -94,6 +94,60 @@ export const VIDEO_POSTER_URL = (media) => {
     return head + "so_2,w_640,h_360,c_fill,q_auto,f_jpg/" + tail;
 };
 
+/**
+ * v37s — Optimized image delivery transform.
+ * Injects Cloudinary's `f_auto,q_auto,w_<width>,c_limit/` into image URLs:
+ *   - `f_auto`: serve WebP/AVIF when the browser supports it, JPEG otherwise
+ *   - `q_auto`: per-image visual-quality optimizer (~75% effective quality
+ *               with no perceptual loss)
+ *   - `w_1080,c_limit`: cap longest edge at 1080px without cropping
+ *
+ * Caller can pass an explicit `width` (e.g. 400 for grid thumbnails, 1600
+ * for full-screen). Default 1080 covers the common portfolio use case.
+ *
+ * Falls back to the raw URL for non-Cloudinary sources.
+ */
+export const OPTIMIZED_IMAGE_URL = (media, width = 1080) => {
+    if (!media) return "";
+    const raw = typeof media === "string" ? media : media.url || "";
+    if (!raw) return "";
+    const marker = "/image/upload/";
+    const idx = raw.indexOf(marker);
+    if (idx === -1) return raw;
+    const transform = `f_auto,q_auto,w_${width},c_limit/`;
+    const head = raw.slice(0, idx + marker.length);
+    const tail = raw.slice(idx + marker.length);
+    // Avoid stacking transforms if one is already there.
+    if (/^[fwqc]_/.test(tail)) return raw;
+    return head + transform + tail;
+};
+
+/**
+ * v37s — Audio delivery transform.
+ * Cloudinary stores audio under the `video/upload/` resource_type. This
+ * helper transcodes any source format (m4a, wav, ogg, opus, aac…) to a
+ * 128 kbps MP3 on delivery — the lowest-common-denominator format that
+ * plays natively on every iOS / Android / desktop browser.
+ *
+ * Specifically fixes iOS Safari's lack of OGG/Opus support which would
+ * otherwise leave talent voice notes silently broken on iPhones.
+ */
+export const OPTIMIZED_AUDIO_URL = (media) => {
+    if (!media) return "";
+    const raw = typeof media === "string" ? media : media.url || "";
+    if (!raw) return "";
+    const marker = "/video/upload/"; // Cloudinary uses this for audio too
+    const idx = raw.indexOf(marker);
+    if (idx === -1) return raw;
+    const transform = "f_mp3,br_128k/";
+    const head = raw.slice(0, idx + marker.length);
+    let tail = raw.slice(idx + marker.length);
+    if (/^[fbq]_/.test(tail)) return raw;
+    // Force .mp3 extension so browsers send the right Accept header.
+    tail = tail.replace(/\.[a-z0-9]{2,5}$/i, ".mp3");
+    return head + transform + tail;
+};
+
 // ================= ADMIN API =================
 
 export const adminApi = axios.create({ baseURL: API });

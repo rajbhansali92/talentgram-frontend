@@ -226,6 +226,28 @@ export default function ProjectEdit() {
                 }
             }
         }
+        // v37s — PDF size guard. We don't have server-side PDF compression on
+        // Cloudinary's free tier, so cap at 10 MB and softly nudge users to
+        // compress anything over 5 MB before upload (TinyPDF / Acrobat / etc.).
+        if (category === "script") {
+            const HARD_CAP = 10 * 1024 * 1024;
+            const SOFT_CAP = 5 * 1024 * 1024;
+            for (const f of files) {
+                if (f.size > HARD_CAP) {
+                    toast.error(
+                        `${f.name} is ${(f.size / 1024 / 1024).toFixed(1)} MB — max 10 MB. Please compress the PDF first.`,
+                    );
+                    return;
+                }
+                if (f.size > SOFT_CAP) {
+                    const mb = (f.size / 1024 / 1024).toFixed(1);
+                    toast.message(
+                        `Large PDF (${mb} MB). Consider compressing for faster client review.`,
+                        { duration: 4500 },
+                    );
+                }
+            }
+        }
         setUploading(category);
         try {
             for (const file of files) {

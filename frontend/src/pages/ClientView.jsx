@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
-import { viewerApi, COVER_URL, IMAGE_URL, VIDEO_URL, VIDEO_POSTER_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { viewerApi, COVER_URL, IMAGE_URL, OPTIMIZED_IMAGE_URL, VIDEO_URL, VIDEO_POSTER_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import FeedbackComposer from "@/components/FeedbackComposer";
@@ -809,7 +809,7 @@ function TalentDetail({
                         {images.length > 0 ? (
                             <div className="relative bg-[#0a0a0a] aspect-[3/4] border border-white/10 overflow-hidden">
                                 <img
-                                    src={IMAGE_URL(images[idx])}
+                                    src={OPTIMIZED_IMAGE_URL(images[idx], 1600)}
                                     alt={privatizeName(talent.name)}
                                     className="w-full h-full object-contain"
                                 />
@@ -1359,7 +1359,7 @@ function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen })
             <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10 group-hover:border-white/30 transition-all relative">
                 {coverUrl ? (
                     <img
-                        src={coverUrl}
+                        src={OPTIMIZED_IMAGE_URL(coverUrl, 600)}
                         alt={privatizeName(talent.name)}
                         loading="lazy"
                         onError={(e) => { e.currentTarget.style.display = "none"; }}

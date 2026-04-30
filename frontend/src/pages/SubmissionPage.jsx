@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
+import { OPTIMIZED_AUDIO_URL } from "@/lib/api";
 import {
     Select,
     SelectContent,
@@ -2803,7 +2804,7 @@ function FeedbackRow({ fb }) {
             </div>
             {isVoice ? (
                 <audio
-                    src={fb.content_url}
+                    src={OPTIMIZED_AUDIO_URL(fb.content_url)}
                     controls
                     className="w-full"
                     data-testid={`talent-feedback-audio-${fb.id}`}

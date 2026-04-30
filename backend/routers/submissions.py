@@ -728,6 +728,7 @@ async def list_submissions(
     status: Optional[str] = None,
     page: Optional[int] = None,
     size: Optional[int] = None,
+    limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
     query: Dict[str, Any] = {"project_id": pid}
@@ -738,12 +739,36 @@ async def list_submissions(
     if status:
         query["status"] = status
     cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1)
-    if page is None:
+    if page is None and limit is None:
         return await cursor.to_list(5000)
-    skip, limit, p, s = _paginate_params(page, size)
+    skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.submissions.count_documents(query)
-    items = await cursor.skip(skip).limit(limit).to_list(limit)
+    items = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated(items, total, p, s)
+
+
+@router.get("/projects/{pid}/submissions/stats")
+async def submissions_stats(
+    pid: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Filter-chip counts for the project review queue."""
+    base = {"project_id": pid}
+    coll = db.submissions
+    all_total = await coll.count_documents(base)
+    pending = await coll.count_documents({**base, "decision": "pending"})
+    approved = await coll.count_documents({**base, "decision": "approved"})
+    hold = await coll.count_documents({**base, "decision": "hold"})
+    rejected = await coll.count_documents({**base, "decision": "rejected"})
+    updated = await coll.count_documents({**base, "status": "updated"})
+    return {
+        "all": all_total,
+        "pending": pending,
+        "approved": approved,
+        "hold": hold,
+        "rejected": rejected,
+        "updated": updated,
+    }
 
 
 @router.post("/projects/{pid}/submissions/{sid}/decision")

@@ -95,15 +95,16 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
 async def list_links(
     page: Optional[int] = None,
     size: Optional[int] = None,
+    limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
     cursor = db.links.find({}, {"_id": 0}).sort("created_at", -1)
-    if page is None:
+    if page is None and limit is None:
         links = await cursor.to_list(2000)
     else:
-        skip, limit, p, s = _paginate_params(page, size)
+        skip, page_size, p, s = _paginate_params(page, size, limit)
         total = await db.links.count_documents({})
-        links = await cursor.skip(skip).limit(limit).to_list(limit)
+        links = await cursor.skip(skip).limit(page_size).to_list(page_size)
     # Bulk-aggregate view stats in a single pipeline — avoids N+1 round-trips
     # on Atlas (2 queries per link was timing out on large datasets).
     link_ids = [link["id"] for link in links]
@@ -125,7 +126,7 @@ async def list_links(
         stats = view_stats.get(link["id"], {})
         link["view_count"] = stats.get("view_count", 0)
         link["unique_viewers"] = stats.get("unique_viewers", 0)
-    if page is None:
+    if page is None and limit is None:
         return links
     return _paginated(links, total, p, s)
 

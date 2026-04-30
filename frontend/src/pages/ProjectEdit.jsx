@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import ForwardToLinkModal from "@/components/ForwardToLinkModal";
 import BudgetLines from "@/components/BudgetLines";
+import useInfiniteList, { useInfiniteScroll } from "@/hooks/useInfiniteList";
 import {
     AVAILABILITY_OPTIONS,
     BUDGET_OPTIONS,
@@ -92,24 +93,64 @@ export default function ProjectEdit() {
     const [uploading, setUploading] = useState(null); // category string
     const [videoInput, setVideoInput] = useState("");
     const [showMaterialModal, setShowMaterialModal] = useState(false);
-    const [submissions, setSubmissions] = useState([]);
     const [reviewingSid, setReviewingSid] = useState(null);
     const [showForwardModal, setShowForwardModal] = useState(false);
+    const [forwardModalSubmissions, setForwardModalSubmissions] = useState([]);
+    const [forwardLoading, setForwardLoading] = useState(false);
     const [submissionFilter, setSubmissionFilter] = useState("all"); // all | pending | approved | rejected | hold | updated
+    const [submissionStats, setSubmissionStats] = useState({
+        all: 0, pending: 0, approved: 0, hold: 0, rejected: 0, updated: 0,
+    });
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
     const videoFileRef = useRef();
 
-    // Stable reference (uses only `pid` param + `setSubmissions` setter)
-    // so adding it to `useEffect` deps never causes spurious re-runs but
-    // still avoids any future stale-closure pitfall under React Strict Mode.
-    const loadSubmissions = useCallback(async (pid) => {
+    // Server-side paginated submissions. Filter chip → backend query param.
+    const fetchSubmissions = useCallback(
+        async ({ page, limit }) => {
+            if (!isEdit) return [];
+            const params = { page, limit };
+            if (submissionFilter === "updated") params.status = "updated";
+            else if (submissionFilter !== "all") params.decision = submissionFilter;
+            const { data } = await adminApi.get(
+                `/projects/${id}/submissions`,
+                { params },
+            );
+            return data;
+        },
+        [id, isEdit, submissionFilter],
+    );
+
+    const {
+        items: submissions,
+        total: submissionsTotal,
+        hasMore: submissionsHasMore,
+        loading: submissionsLoading,
+        loadingMore: submissionsLoadingMore,
+        loadMore: loadMoreSubmissions,
+        reload: reloadSubmissions,
+    } = useInfiniteList(fetchSubmissions, [id, submissionFilter, isEdit], {
+        limit: 30,
+    });
+
+    const submissionsSentinelRef = useInfiniteScroll(loadMoreSubmissions);
+
+    const loadSubmissionStats = useCallback(async () => {
+        if (!isEdit) return;
         try {
-            const { data } = await adminApi.get(`/projects/${pid}/submissions`);
-            setSubmissions(data);
-        } catch (e) { console.error(e); }
-    }, []);
+            const { data } = await adminApi.get(
+                `/projects/${id}/submissions/stats`,
+            );
+            setSubmissionStats(data);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [id, isEdit]);
+
+    useEffect(() => {
+        loadSubmissionStats();
+    }, [loadSubmissionStats]);
 
     useEffect(() => {
         if (!isEdit) return;
@@ -117,25 +158,44 @@ export default function ProjectEdit() {
             try {
                 const { data } = await adminApi.get(`/projects/${id}`);
                 setProject({ ...empty, ...data });
-                loadSubmissions(id);
             } catch {
                 toast.error("Failed to load project");
             }
         })();
-    }, [id, isEdit, loadSubmissions]);
+    }, [id, isEdit]);
 
     const setDecision = async (sid, decision) => {
         await adminApi.post(`/projects/${id}/submissions/${sid}/decision`, {
             decision,
         });
         toast.success(`Marked ${decision}`);
-        loadSubmissions(id);
+        await Promise.all([reloadSubmissions(), loadSubmissionStats()]);
     };
 
     const deleteSubmission = async (sid) => {
         if (!window.confirm("Delete this submission?")) return;
         await adminApi.delete(`/projects/${id}/submissions/${sid}`);
-        loadSubmissions(id);
+        await Promise.all([reloadSubmissions(), loadSubmissionStats()]);
+    };
+
+    const openForwardModal = async () => {
+        setForwardLoading(true);
+        try {
+            // Fetch ALL approved submissions across pages for the modal
+            // (the modal needs the full list, not just the current page).
+            const { data } = await adminApi.get(
+                `/projects/${id}/submissions`,
+                { params: { decision: "approved", page: 0, limit: 200 } },
+            );
+            const list = Array.isArray(data) ? data : data.data || data.items || [];
+            setForwardModalSubmissions(list);
+            setShowForwardModal(true);
+        } catch (e) {
+            console.error(e);
+            toast.error("Failed to load approved submissions");
+        } finally {
+            setForwardLoading(false);
+        }
     };
 
     const submissionUrl = project?.slug
@@ -828,39 +888,28 @@ export default function ProjectEdit() {
                         <div>
                             <p className="eyebrow">Submissions</p>
                             <p className="text-xs text-white/40 mt-1">
-                                {submissions.length} total ·{" "}
-                                {
-                                    submissions.filter(
-                                        (s) => s.decision === "approved",
-                                    ).length
-                                }{" "}
-                                approved ·{" "}
-                                {
-                                    submissions.filter(
-                                        (s) => s.decision === "rejected",
-                                    ).length
-                                }{" "}
-                                rejected
+                                {submissionStats.all} total ·{" "}
+                                {submissionStats.approved} approved ·{" "}
+                                {submissionStats.rejected} rejected
                             </p>
                         </div>
                         <button
-                            onClick={() => setShowForwardModal(true)}
+                            onClick={openForwardModal}
                             disabled={
-                                submissions.filter(
-                                    (s) =>
-                                        s.decision === "approved" &&
-                                        (s.status === "submitted" ||
-                                            s.status === "updated"),
-                                ).length === 0
+                                submissionStats.approved === 0 || forwardLoading
                             }
                             data-testid="create-client-link-btn"
                             className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-white text-black rounded-sm hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed"
                         >
-                            <Sparkles className="w-3.5 h-3.5" /> Create Client
-                            Link from Approved
+                            {forwardLoading ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                                <Sparkles className="w-3.5 h-3.5" />
+                            )}{" "}
+                            Create Client Link from Approved
                         </button>
                     </div>
-                    {submissions.length === 0 ? (
+                    {submissionStats.all === 0 && !submissionsLoading ? (
                         <div className="p-8 text-center text-white/40 text-sm">
                             No submissions yet. Share the link above with
                             talents.
@@ -872,59 +921,35 @@ export default function ProjectEdit() {
                                 data-testid="submission-filters"
                             >
                                 {SUBMISSION_FILTER_TABS.map((tab) => {
-                                    const f = {
-                                        ...tab,
-                                        count:
-                                            tab.key === "all"
-                                                ? submissions.length
-                                                : tab.key === "updated"
-                                                  ? submissions.filter(
-                                                        (s) => s.status === "updated",
-                                                    ).length
-                                                  : submissions.filter(
-                                                        (s) =>
-                                                            (s.decision || "pending") ===
-                                                            tab.key,
-                                                    ).length,
-                                    };
-                                    const active = submissionFilter === f.key;
+                                    const count = submissionStats[tab.key] ?? 0;
+                                    const active = submissionFilter === tab.key;
                                     return (
                                         <button
-                                            key={f.key}
+                                            key={tab.key}
                                             type="button"
-                                            onClick={() => setSubmissionFilter(f.key)}
-                                            data-testid={`filter-chip-${f.key}`}
+                                            onClick={() => setSubmissionFilter(tab.key)}
+                                            data-testid={`filter-chip-${tab.key}`}
                                             className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-all ${active ? "border-white bg-white text-black" : "border-white/15 text-white/60 hover:border-white/40 hover:text-white"}`}
                                         >
-                                            {f.label}
+                                            {tab.label}
                                             <span className={`ml-2 tg-mono ${active ? "text-black/60" : "text-white/40"}`}>
-                                                {f.count}
+                                                {count}
                                             </span>
                                         </button>
                                     );
                                 })}
                             </div>
                             <div className="divide-y divide-white/10">
-                                {submissions
-                                    .filter((s) => {
-                                        if (submissionFilter === "all") return true;
-                                        if (submissionFilter === "updated") return s.status === "updated";
-                                        return (s.decision || "pending") === submissionFilter;
-                                    })
-                                    .map((s) => (
-                                        <SubmissionRow
-                                            key={s.id}
-                                            submission={s}
-                                            onOpen={() => setReviewingSid(s.id)}
-                                            onDecision={(d) => setDecision(s.id, d)}
-                                            onDelete={isAdminRole ? () => deleteSubmission(s.id) : null}
-                                        />
-                                    ))}
-                                {submissions.filter((s) => {
-                                    if (submissionFilter === "all") return true;
-                                    if (submissionFilter === "updated") return s.status === "updated";
-                                    return (s.decision || "pending") === submissionFilter;
-                                }).length === 0 && (
+                                {submissions.map((s) => (
+                                    <SubmissionRow
+                                        key={s.id}
+                                        submission={s}
+                                        onOpen={() => setReviewingSid(s.id)}
+                                        onDecision={(d) => setDecision(s.id, d)}
+                                        onDelete={isAdminRole ? () => deleteSubmission(s.id) : null}
+                                    />
+                                ))}
+                                {submissions.length === 0 && !submissionsLoading && (
                                     <div
                                         className="p-8 text-center text-white/30 text-sm"
                                         data-testid="filter-empty-state"
@@ -932,7 +957,34 @@ export default function ProjectEdit() {
                                         No submissions match this filter.
                                     </div>
                                 )}
+                                {submissionsLoading && (
+                                    <div className="p-8 flex justify-center">
+                                        <Loader2 className="w-4 h-4 animate-spin text-white/40" />
+                                    </div>
+                                )}
                             </div>
+                            {!submissionsLoading && submissionsHasMore && (
+                                <div className="px-6 py-4 border-t border-white/10 flex flex-col items-center gap-2">
+                                    <div ref={submissionsSentinelRef} className="h-px w-px" aria-hidden />
+                                    <button
+                                        type="button"
+                                        onClick={loadMoreSubmissions}
+                                        disabled={submissionsLoadingMore}
+                                        data-testid="submissions-load-more-btn"
+                                        className="inline-flex items-center gap-2 text-[11px] tracking-widest uppercase border border-white/15 hover:border-white/50 transition-colors px-4 py-2 disabled:opacity-50"
+                                    >
+                                        {submissionsLoadingMore ? (
+                                            <>
+                                                <Loader2 className="w-3 h-3 animate-spin" /> Loading...
+                                            </>
+                                        ) : (
+                                            <>
+                                                Load more ({submissionsTotal - submissions.length} remaining)
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            )}
                         </>
                     )}
                 </section>
@@ -963,7 +1015,10 @@ export default function ProjectEdit() {
                     projectId={id}
                     onClose={() => setReviewingSid(null)}
                     onDecision={(d) => setDecision(reviewingSid, d)}
-                    onChanged={() => loadSubmissions(id)}
+                    onChanged={() => {
+                        reloadSubmissions();
+                        loadSubmissionStats();
+                    }}
                 />
             )}
 
@@ -971,7 +1026,7 @@ export default function ProjectEdit() {
             {showForwardModal && (
                 <ForwardToLinkModal
                     project={project}
-                    submissions={submissions}
+                    submissions={forwardModalSubmissions}
                     onClose={() => setShowForwardModal(false)}
                     onDone={(link) => {
                         setShowForwardModal(false);

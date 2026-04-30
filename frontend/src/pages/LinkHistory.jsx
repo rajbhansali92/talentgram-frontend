@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
@@ -12,16 +12,35 @@ import {
     Plus,
     Files,
     Check,
+    Loader2,
 } from "lucide-react";
+import useInfiniteList, { useInfiniteScroll } from "@/hooks/useInfiniteList";
+
+const PAGE_LIMIT = 30;
 
 export default function LinkHistory() {
-    const [links, setLinks] = useState([]);
-    const [loading, setLoading] = useState(true);
     const [pendingDelete, setPendingDelete] = useState(null);
     const [selected, setSelected] = useState(new Set());
     const [bulkConfirm, setBulkConfirm] = useState(false);
     const canDelete = isAdmin();
     const canCreate = isAdmin();
+
+    const fetchPage = useCallback(async ({ page, limit }) => {
+        const { data } = await adminApi.get("/links", { params: { page, limit } });
+        return data;
+    }, []);
+
+    const {
+        items: links,
+        total,
+        hasMore,
+        loading,
+        loadingMore,
+        loadMore,
+        reload,
+    } = useInfiniteList(fetchPage, [], { limit: PAGE_LIMIT });
+
+    const sentinelRef = useInfiniteScroll(loadMore);
 
     const toggle = (id) =>
         setSelected((prev) => {
@@ -44,7 +63,7 @@ export default function LinkHistory() {
             );
             clearSel();
             setBulkConfirm(false);
-            load();
+            reload();
         } catch (err) {
              
             console.error("[bulk-delete links] failed", err?.response?.data || err);
@@ -52,19 +71,6 @@ export default function LinkHistory() {
             throw err;
         }
     };
-
-    const load = async () => {
-        setLoading(true);
-        try {
-            const { data } = await adminApi.get("/links");
-            setLinks(data);
-        } finally {
-            setLoading(false);
-        }
-    };
-    useEffect(() => {
-        load();
-    }, []);
 
     const copyLink = (slug) => {
         const url = `${window.location.origin}/l/${slug}`;
@@ -83,7 +89,7 @@ export default function LinkHistory() {
     const duplicate = async (id) => {
         await adminApi.post(`/links/${id}/duplicate`);
         toast.success("Duplicated");
-        load();
+        reload();
     };
 
     const del = async (id) => {
@@ -94,7 +100,7 @@ export default function LinkHistory() {
             console.info("[delete link]", id, res?.data);
             toast.success("Link deleted");
             setPendingDelete(null);
-            load();
+            reload();
         } catch (err) {
              
             console.error("[delete link] failed", err?.response?.data || err);
@@ -129,10 +135,19 @@ export default function LinkHistory() {
                 </Link>
             </div>
 
+            {!loading && total > 0 && (
+                <p
+                    className="text-white/40 text-xs tracking-wide mb-4"
+                    data-testid="links-count-summary"
+                >
+                    Showing {links.length} of {total}
+                </p>
+            )}
+
             {loading ? (
-                <div className="text-white/40 text-sm">Loading...</div>
+                <div className="text-white/40 text-sm" data-testid="links-loading">Loading...</div>
             ) : links.length === 0 ? (
-                <div className="border border-white/10 p-12 text-center">
+                <div className="border border-white/10 p-12 text-center" data-testid="links-empty">
                     <Files
                         className="w-10 h-10 text-white/20 mx-auto mb-4"
                         strokeWidth={1}
@@ -294,6 +309,28 @@ export default function LinkHistory() {
                     </div>
                 </div>
             )}
+
+            {!loading && hasMore && (
+                <div className="mt-8 flex flex-col items-center gap-3">
+                    <div ref={sentinelRef} className="h-px w-px" aria-hidden />
+                    <button
+                        type="button"
+                        onClick={loadMore}
+                        disabled={loadingMore}
+                        data-testid="links-load-more-btn"
+                        className="inline-flex items-center gap-2 border border-white/20 hover:border-white/60 transition-colors px-5 py-2.5 text-xs tracking-wide disabled:opacity-50"
+                    >
+                        {loadingMore ? (
+                            <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading more...
+                            </>
+                        ) : (
+                            <>Load more ({total - links.length} remaining)</>
+                        )}
+                    </button>
+                </div>
+            )}
+
             <ConfirmDeleteDialog
                 open={!!pendingDelete}
                 title={`Delete "${pendingDelete?.title || "this link"}"?`}

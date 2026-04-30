@@ -529,3 +529,35 @@ html.light .tg-help {
 html.light .shadow-\[0_0_0_1px_rgba\(201\,169\,97\,0\.4\)\] {
     box-shadow: 0 0 0 1px rgba(180, 140, 60, 0.55) !important;
 }
+
+/* ==========================================================================
+   v37p — Mobile submission UX hardening
+   Guarantees the last inputs (Work Links, custom answers) always scroll into
+   view above the sticky bottom action bar on mobile, in both themes.
+   ========================================================================== */
+
+/* Any input/textarea inside the submission/application forms scrolls with
+   extra bottom margin so iOS/Android auto-scroll-on-focus clears the sticky
+   bar (72–96px tall including safe area). */
+@media (max-width: 767px) {
+    [data-testid="submission-page"] input,
+    [data-testid="submission-page"] textarea,
+    [data-testid="submission-page"] [data-testid$="-input"],
+    [data-testid="submission-page"] [data-testid$="-trigger"],
+    [data-testid="apply-page"] input,
+    [data-testid="apply-page"] textarea {
+        scroll-margin-bottom: 140px;
+    }
+}
+
+/* Prevent iOS auto-zoom on focus — forces base input font-size ≥ 16px on
+   mobile even when component styles request smaller text. Keeps labels at
+   their authored size (we scope this to actual input elements). */
+@media (max-width: 767px) {
+    [data-testid="submission-page"] input:not([type="checkbox"]):not([type="radio"]),
+    [data-testid="submission-page"] textarea,
+    [data-testid="apply-page"] input:not([type="checkbox"]):not([type="radio"]),
+    [data-testid="apply-page"] textarea {
+        font-size: 16px !important;
+    }
+}

@@ -950,7 +950,7 @@ export default function SubmissionPage() {
                 )}
             </header>
 
-            <div className="max-w-3xl mx-auto px-5 py-8 md:py-14">
+            <div className="max-w-3xl mx-auto px-5 py-8 md:py-14 pb-28 md:pb-14">
                 {/* SECTION 1 — Project Info */}
                 <section className="mb-10" data-testid="project-info-section" data-step="1">
                     <p className="eyebrow mb-3">Audition Brief</p>
@@ -2068,7 +2068,7 @@ export default function SubmissionPage() {
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
             {emailGateUnlocked && mobileStep < 3 && (
                 <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3"
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
                     data-testid="wizard-bottom-bar"
                 >
                     <div className="flex items-center gap-2 max-w-3xl mx-auto">

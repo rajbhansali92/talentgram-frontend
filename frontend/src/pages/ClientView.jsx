@@ -1120,7 +1120,7 @@ function TalentDetail({
                                     data-testid="client-instagram-link"
                                     className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/20 hover:border-white rounded-sm text-xs"
                                 >
-                                    <Instagram className="w-3.5 h-3.5" />{" "}
+                                    <Instagram className="w-3.5 h-3.5 text-current" />{" "}
                                     {talent.instagram_handle}
                                 </a>
                             )}

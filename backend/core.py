@@ -30,7 +30,6 @@ MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret")
 APP_NAME = os.environ.get("APP_NAME", "talentgram")
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 

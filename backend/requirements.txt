@@ -1,3 +1,9 @@
+# Do NOT add non-PyPI packages like emergentintegrations. Railway builds
+# using the public PyPI index only — anything from a private CloudFront /
+# custom index (e.g. d33sy5i8bnduwe.cloudfront.net) will break deploys.
+# Keep this file pip-freeze-clean. All packages below MUST resolve on
+# https://pypi.org. Run `pip freeze > requirements.txt` after any add.
+
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0
@@ -18,7 +24,6 @@ distro==1.9.0
 dnspython==2.8.0
 ecdsa==0.19.2
 email-validator==2.3.0
-emergentintegrations==0.1.0
 fastapi==0.110.1
 fastuuid==0.14.0
 filelock==3.25.2
@@ -122,4 +127,4 @@ watchfiles==1.1.1
 websockets==16.0
 yarl==1.23.0
 zipp==3.23.0
-cloudinary==1.41.05
+cloudinary==1.44.2

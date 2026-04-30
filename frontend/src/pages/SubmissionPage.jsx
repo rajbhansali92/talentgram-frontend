@@ -1442,24 +1442,43 @@ export default function SubmissionPage() {
                             </div>
                         </div>
 
-                        {/* AVAILABILITY — decision block */}
+                        {/* AVAILABILITY — decision block (v37n: high-emphasis card) */}
                         <div
-                            className="border-t border-white/10 pt-7"
+                            className="border-t border-white/10 pt-8"
                             data-testid="availability-block"
                             data-step="2"
+                            id="availability"
                         >
-                            <p className="eyebrow mb-2">
+                            <p className="eyebrow mb-4">
                                 Availability{" "}
                                 <span className="text-[#FF3B30]">*</span>
                             </p>
+
+                            {/* PROMINENT SHOOT DATES CARD — gold-accented,
+                                parallels the Client Budget card so the two
+                                key project commitments share visual weight. */}
                             {project.shoot_dates && (
-                                <p className="text-xs text-white/50 mb-4 leading-relaxed">
-                                    {project.shoot_dates}
-                                    {" — "}Costume trial and rehearsal dates
-                                    (if any) will be informed.
-                                </p>
+                                <div
+                                    className="border border-[#c9a961]/50 bg-[#c9a961]/[0.07] px-5 py-5 mb-3 rounded-sm"
+                                    data-testid="shoot-dates-card"
+                                >
+                                    <p className="text-[10px] tracking-[0.18em] uppercase text-[#c9a961] mb-1.5">
+                                        Shoot Dates
+                                    </p>
+                                    <p
+                                        className="font-display text-2xl md:text-3xl tracking-tight text-white leading-snug"
+                                        data-testid="shoot-dates-value"
+                                    >
+                                        {project.shoot_dates}
+                                    </p>
+                                    <p className="mt-2 text-[11px] text-white/55 leading-relaxed">
+                                        Costume trial and rehearsal dates (if any) will be informed.
+                                    </p>
+                                </div>
                             )}
-                            <div className="grid grid-cols-2 gap-2 mb-3">
+
+                            {/* Two prominent CTAs — stacked on mobile, ≥sm side-by-side. */}
+                            <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
                                 {AVAILABILITY_OPTIONS.map((opt) => {
                                     const active =
                                         form.availability.status === opt.key;
@@ -1478,32 +1497,52 @@ export default function SubmissionPage() {
                                                 setTimeout(saveForm, 0);
                                             }}
                                             data-testid={`avail-${opt.key}-btn`}
-                                            className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${active ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                            className={`flex-1 px-5 py-4 rounded-sm border tracking-widest uppercase text-[12px] font-semibold transition-all min-h-[56px] active:scale-[0.98] ${
+                                                active
+                                                    ? "bg-white text-black border-white shadow-[0_0_0_1px_rgba(201,169,97,0.4)]"
+                                                    : "bg-transparent border-white/25 hover:border-white/60 text-white"
+                                            }`}
                                         >
                                             {opt.label}
                                         </button>
                                     );
                                 })}
                             </div>
-                            {form.availability.status === "no" && (
-                                <textarea
-                                    value={form.availability.note}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            availability: {
-                                                ...form.availability,
-                                                note: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    rows={3}
-                                    placeholder="Please specify reason / alternate availability"
-                                    data-testid="availability-note-input"
-                                    className="w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
-                                />
-                            )}
+
+                            {/* Smooth reveal — same grid-rows trick as budget. */}
+                            <div
+                                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
+                                    form.availability.status === "no"
+                                        ? "grid-rows-[1fr] opacity-100 mt-4"
+                                        : "grid-rows-[0fr] opacity-0 mt-0"
+                                }`}
+                            >
+                                <div className="overflow-hidden">
+                                    <label className="block text-[11px] tracking-widest uppercase text-white/60 mb-2">
+                                        Provide availability details
+                                    </label>
+                                    <textarea
+                                        value={form.availability.note}
+                                        onChange={(e) =>
+                                            setForm({
+                                                ...form,
+                                                availability: {
+                                                    ...form.availability,
+                                                    note: e.target.value,
+                                                },
+                                            })
+                                        }
+                                        onBlur={saveForm}
+                                        rows={3}
+                                        placeholder="Share alternate dates, conflicts, or window of availability."
+                                        data-testid="availability-note-input"
+                                        autoFocus={
+                                            form.availability.status === "no"
+                                        }
+                                        className="w-full bg-transparent border border-white/25 focus:border-white rounded-sm p-3 text-sm outline-none placeholder-white/35"
+                                    />
+                                </div>
+                            </div>
                         </div>
 
                         {/* BUDGET — decision block (v37n redesign) */}

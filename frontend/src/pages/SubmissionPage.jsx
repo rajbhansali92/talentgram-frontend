@@ -1197,7 +1197,7 @@ export default function SubmissionPage() {
                                             data-testid="form-age-override"
                                             className="mt-3 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-sm placeholder-white/40"
                                         />
-                                        <p className="mt-1.5 text-[10px] text-white/40 leading-snug">
+                                        <p className="mt-1.5 text-[10px] text-white/55 leading-snug">
                                             Age is auto-calculated from DOB. You may adjust it for this project.
                                         </p>
                                     </>
@@ -1472,7 +1472,7 @@ export default function SubmissionPage() {
                                     >
                                         {project.shoot_dates}
                                     </p>
-                                    <p className="mt-2 text-[11px] text-white/55 leading-relaxed">
+                                    <p className="mt-2 text-[11px] text-white/65 leading-relaxed">
                                         Costume trial and rehearsal dates (if any) will be informed.
                                     </p>
                                 </div>
@@ -1694,11 +1694,11 @@ export default function SubmissionPage() {
                                 so it doesn't compete with the primary budget card. */}
                             {project.commission_percent && (
                                 <p
-                                    className="mt-5 text-[11px] tracking-widest uppercase text-white/45"
+                                    className="mt-5 text-[11px] tracking-widest uppercase text-white/55"
                                     data-testid="commission-card"
                                 >
                                     Agency Commission:{" "}
-                                    <span className="tg-mono text-white/70 normal-case tracking-normal">
+                                    <span className="tg-mono text-white/80 normal-case tracking-normal">
                                         {project.commission_percent}
                                     </span>
                                 </p>
@@ -2323,7 +2323,7 @@ function WorkLinksEditor({ links, onChange }) {
                     Add Link
                 </button>
             </div>
-            <p className="mt-1.5 text-[10px] text-white/40 leading-snug">
+            <p className="mt-1.5 text-[10px] text-white/55 leading-snug">
                 Customize links for this project only.
             </p>
         </div>

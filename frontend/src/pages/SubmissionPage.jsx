@@ -83,6 +83,11 @@ export default function SubmissionPage() {
             phone: "",
             dob: "",
             age: "",
+            // Optional per-submission override of the auto-calculated age.
+            // Empty string means "no override — use age derived from DOB".
+            // This rides along in form_data; it is NEVER mirrored to the
+            // global talent profile (only the truthful DOB-derived age is).
+            age_override: "",
             height: "",
             location: "",
             // Phase 2 — schema unification: every talent-facing form writes
@@ -356,6 +361,9 @@ export default function SubmissionPage() {
                     name: `${form.first_name} ${form.last_name}`.trim(),
                     email: form.email.trim().toLowerCase(),
                     phone: form.phone || null,
+                    // Truthful age: DOB-derived if DOB present, else manual entry.
+                    // This is what's mirrored to the global talent record.
+                    // Per-submission overrides live separately in form_data.
                     age: computedAge != null ? String(computedAge) : form.age || null,
                     height: form.height,
                     location: form.location,
@@ -481,6 +489,9 @@ export default function SubmissionPage() {
                     last_name: form.last_name,
                     dob: form.dob || null,
                     age: computedAge != null ? String(computedAge) : "",
+                    // Per-submission age override. Stored alongside the truthful
+                    // age but ignored by the global talent merge in /finalize.
+                    age_override: form.age_override || "",
                     height: form.height,
                     location: form.location,
                     // Phase 2 unified identity (mirrored to talent on finalize)
@@ -1142,36 +1153,75 @@ export default function SubmissionPage() {
                                 value={form.dob}
                                 max={new Date().toISOString().split("T")[0]}
                                 onChange={(v) =>
-                                    setForm({ ...form, dob: v, age: "" })
+                                    setForm({
+                                        ...form,
+                                        dob: v,
+                                        age: "",
+                                        // Editing DOB clears any prior override
+                                        // so the recalculated age takes effect.
+                                        age_override: "",
+                                    })
                                 }
                                 onBlur={saveForm}
                                 testid="form-dob"
                                 className="[color-scheme:dark]"
                             />
                             <div data-testid="form-age-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
-                                    Age {form.dob ? "(auto)" : "*"}
-                                </span>
-                                <input
-                                    type="number"
-                                    value={
-                                        form.dob
-                                            ? computedAge ?? ""
-                                            : form.age
-                                    }
-                                    disabled={!!form.dob}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            age: e.target.value,
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    min={10}
-                                    max={80}
-                                    data-testid="form-age-input"
-                                    className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base disabled:text-white/50"
-                                />
+                                {form.dob ? (
+                                    <>
+                                        <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                            Age (Auto-calculated)
+                                        </span>
+                                        <input
+                                            type="number"
+                                            value={computedAge ?? ""}
+                                            readOnly
+                                            tabIndex={-1}
+                                            data-testid="form-age-auto"
+                                            className="mt-2 w-full bg-transparent border-b border-white/10 outline-none py-3 text-base text-white/70 cursor-not-allowed"
+                                        />
+                                        <input
+                                            type="number"
+                                            placeholder="Override age for this submission (optional)"
+                                            value={form.age_override}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    age_override: e.target.value,
+                                                })
+                                            }
+                                            onBlur={saveForm}
+                                            min={10}
+                                            max={80}
+                                            data-testid="form-age-override"
+                                            className="mt-3 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-sm placeholder-white/40"
+                                        />
+                                        <p className="mt-1.5 text-[10px] text-white/40 leading-snug">
+                                            Age is auto-calculated from DOB. You may adjust it for this project.
+                                        </p>
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                            Age *
+                                        </span>
+                                        <input
+                                            type="number"
+                                            value={form.age}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    age: e.target.value,
+                                                })
+                                            }
+                                            onBlur={saveForm}
+                                            min={10}
+                                            max={80}
+                                            data-testid="form-age-input"
+                                            className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
+                                        />
+                                    </>
+                                )}
                             </div>
                             <div data-testid="form-height-field">
                                 <span className="text-[11px] text-white/60 tracking-widest uppercase">

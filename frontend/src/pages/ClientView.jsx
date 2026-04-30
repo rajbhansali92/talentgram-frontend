@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
-import { viewerApi, COVER_URL, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { viewerApi, COVER_URL, IMAGE_URL, VIDEO_URL, VIDEO_POSTER_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import FeedbackComposer from "@/components/FeedbackComposer";
@@ -775,7 +775,8 @@ function TalentDetail({
                                                 {t.label || `Take ${i + 1}`}
                                             </p>
                                             <video
-                                                src={t.url}
+                                                src={VIDEO_URL(t)}
+                                                poster={VIDEO_POSTER_URL(t)}
                                                 controls
                                                 preload="metadata"
                                                 className="w-full border border-white/10 bg-black rounded-sm"
@@ -791,7 +792,8 @@ function TalentDetail({
                             <div className="mb-8">
                                 <p className="eyebrow mb-3">Introduction</p>
                                 <video
-                                    src={intro.url}
+                                    src={VIDEO_URL(intro)}
+                                    poster={VIDEO_POSTER_URL(intro)}
                                     controls
                                     preload="metadata"
                                     className="w-full border border-white/10 bg-black rounded-sm"

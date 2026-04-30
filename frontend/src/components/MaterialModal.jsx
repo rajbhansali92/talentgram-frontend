@@ -1,4 +1,5 @@
 import React from "react";
+import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import {
     X,
     FileText,
@@ -110,7 +111,8 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     render={(m) => (
                         <div className="flex-1 bg-muted p-2 rounded-lg">
                             <video
-                                src={m.url}
+                                src={VIDEO_URL(m)}
+                                poster={VIDEO_POSTER_URL(m)}
                                 controls
                                 preload="metadata"
                                 className="w-full rounded-sm bg-black"

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { adminApi, COVER_URL } from "@/lib/api";
+import { adminApi, COVER_URL, VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     X,
@@ -334,7 +334,8 @@ function ReviewModal({ app, onClose, onDecide }) {
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
                         <video
-                            src={intro.url}
+                            src={VIDEO_URL(intro)}
+                            poster={VIDEO_POSTER_URL(intro)}
                             controls
                             preload="metadata"
                             className="w-full max-w-3xl border border-white/10 bg-black rounded-sm"

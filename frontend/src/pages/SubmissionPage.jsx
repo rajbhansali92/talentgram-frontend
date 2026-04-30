@@ -554,6 +554,17 @@ export default function SubmissionPage() {
             toast.error(`File too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
             return;
         }
+        // v37r — Soft compression nudge for large videos. Cloudinary will still
+        // serve a 720p compressed copy via URL transforms regardless, but we
+        // warn the user up-front so a 100 MB upload doesn't surprise them on
+        // a slow mobile network. Auto-acknowledged after 4s via the toast.
+        if (isVideoSlot && file && file.size > 25 * 1024 * 1024) {
+            const mb = Math.round(file.size / 1024 / 1024);
+            toast.message(
+                `Large video (${mb} MB) — uploading at full quality. We'll auto-optimize to 720p for viewers.`,
+                { duration: 4500 },
+            );
+        }
         const slotKey = label ? `${category}:${label}` : category;
         setUploading(slotKey);
         setUploadPct(0);

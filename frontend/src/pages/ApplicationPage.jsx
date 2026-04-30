@@ -3,6 +3,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
+import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import {
     Select,
     SelectContent,
@@ -728,7 +729,8 @@ export default function ApplicationPage() {
                             </p>
                             {intro ? (
                                 <video
-                                    src={intro.url}
+                                    src={VIDEO_URL(intro)}
+                                    poster={VIDEO_POSTER_URL(intro)}
                                     controls
                                     preload="metadata"
                                     className="w-full max-w-lg border border-white/10 bg-black rounded-sm"

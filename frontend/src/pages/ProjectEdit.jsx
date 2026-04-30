@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
+import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
@@ -1427,7 +1428,8 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
                         <video
-                            src={intro.url}
+                            src={VIDEO_URL(intro)}
+                            poster={VIDEO_POSTER_URL(intro)}
                             controls
                             className="w-full max-w-3xl border border-border bg-muted rounded-lg"
                             data-testid="review-intro-video"
@@ -1477,7 +1479,8 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             {t.label || `Take ${i + 1}`}
                                         </p>
                                         <video
-                                            src={t.url}
+                                            src={VIDEO_URL(t)}
+                                            poster={VIDEO_POSTER_URL(t)}
                                             controls
                                             preload="metadata"
                                             className="w-full border border-border bg-muted rounded-lg"

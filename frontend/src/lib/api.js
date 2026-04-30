@@ -45,6 +45,55 @@ export const COVER_URL = (subject) => {
     return any?.url || null;
 };
 
+/**
+ * v37r — Video delivery transform.
+ * Inserts Cloudinary's `f_auto,q_auto,w_1280,vc_auto,c_limit` transform into
+ * the URL path so every viewer downloads a 720p-capped, auto-codec, auto-
+ * quality version of the video — regardless of how large the original was.
+ *
+ * Cloudinary applies the transform on the FIRST request and caches the
+ * derivative forever. Subsequent viewers get the cached optimized copy.
+ *
+ * Falls back gracefully if `media` doesn't have a Cloudinary URL.
+ */
+export const VIDEO_URL = (media) => {
+    if (!media) return "";
+    const raw = typeof media === "string" ? media : media.url || "";
+    if (!raw) return "";
+    // Only transform Cloudinary video URLs. Pattern:
+    //   https://res.cloudinary.com/<cloud>/video/upload/<rest>
+    //   https://res.cloudinary.com/<cloud>/video/upload/v123/<rest>
+    const marker = "/video/upload/";
+    const idx = raw.indexOf(marker);
+    if (idx === -1) return raw;
+    const transform = "f_auto,q_auto,w_1280,vc_auto,c_limit/";
+    const head = raw.slice(0, idx + marker.length);
+    const tail = raw.slice(idx + marker.length);
+    // Avoid double-applying if already transformed
+    if (tail.startsWith(transform) || /^[fq]_/.test(tail)) return raw;
+    return head + transform + tail;
+};
+
+/**
+ * v37r — Auto-generated video poster thumbnail.
+ * Uses Cloudinary's `so_2` (start-offset 2s) frame extraction + JPG output
+ * so each video has a fast-loading poster image without uploading one.
+ * Returns "" for non-Cloudinary or non-video URLs.
+ */
+export const VIDEO_POSTER_URL = (media) => {
+    if (!media) return "";
+    const raw = typeof media === "string" ? media : media.url || "";
+    if (!raw) return "";
+    const marker = "/video/upload/";
+    const idx = raw.indexOf(marker);
+    if (idx === -1) return "";
+    // Replace path's extension with .jpg and inject thumbnail transform.
+    const head = raw.slice(0, idx + marker.length);
+    let tail = raw.slice(idx + marker.length);
+    tail = tail.replace(/\.[a-z0-9]{2,5}$/i, ".jpg");
+    return head + "so_2,w_640,h_360,c_fill,q_auto,f_jpg/" + tail;
+};
+
 // ================= ADMIN API =================
 
 export const adminApi = axios.create({ baseURL: API });

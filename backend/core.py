@@ -237,22 +237,58 @@ def cloudinary_upload(
 
     `resource_type="auto"` lets Cloudinary detect image vs video vs raw
     automatically — appropriate for our mixed audition uploads.
+
+    Video pipeline (v37r): when uploading a video, Cloudinary is asked to
+    eagerly produce a 720p H.264 MP4 derivative with auto quality + format
+    selection. The `eager` URL is the canonical URL we render to viewers,
+    so end-users always download the compressed copy regardless of how
+    large the original was. The original is retained by Cloudinary (we
+    can't avoid that on the free tier) but is **never** served.
     """
     _validate_folder(folder)
+    is_video = resource_type == "video" or (
+        resource_type == "auto"
+        and (content_type or "").startswith("video/")
+    )
+    upload_kwargs: Dict[str, Any] = dict(
+        folder=folder,
+        public_id=public_id,
+        resource_type=resource_type,
+        overwrite=True,
+        unique_filename=False,
+    )
+    if is_video:
+        # Synchronous 720p MP4 derivative ready when upload returns.
+        # `q_auto` lets Cloudinary pick the optimal compression curve;
+        # `vc_auto` selects best codec for the requesting client.
+        upload_kwargs["eager"] = [
+            {
+                "format": "mp4",
+                "transformation": [
+                    {"width": 1280, "height": 720, "crop": "limit"},
+                    {"quality": "auto", "video_codec": "auto"},
+                ],
+            }
+        ]
+        upload_kwargs["eager_async"] = False
     try:
-        result = cloudinary.uploader.upload(
-            data,
-            folder=folder,
-            public_id=public_id,
-            resource_type=resource_type,
-            overwrite=True,
-            unique_filename=False,
-        )
+        result = cloudinary.uploader.upload(data, **upload_kwargs)
     except Exception as e:
         logger.error(f"Cloudinary upload failed (folder={folder} pid={public_id}): {e}")
         raise HTTPException(502, "Storage upload failed")
+
+    # Prefer the eager (720p MP4) URL for videos so we serve compressed.
+    # Fall back to the original `secure_url` if eager generation failed.
+    primary_url = result.get("secure_url")
+    eager_list = result.get("eager") or []
+    if is_video and eager_list:
+        compressed = eager_list[0].get("secure_url")
+        if compressed:
+            primary_url = compressed
+
     return {
-        "url": result.get("secure_url"),
+        "url": primary_url,
+        "original_url": result.get("secure_url"),
         "public_id": result.get("public_id"),
         "resource_type": result.get("resource_type"),
         "format": result.get("format"),

@@ -1355,11 +1355,12 @@ function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen })
             className="group relative text-left tg-fade-up"
         >
             <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10 group-hover:border-white/30 transition-all relative">
-                {cover ? (
+                {coverUrl ? (
                     <img
-                        src={IMAGE_URL(cover)}
+                        src={coverUrl}
                         alt={privatizeName(talent.name)}
                         loading="lazy"
+                        onError={(e) => { e.currentTarget.style.display = "none"; }}
                         className="w-full h-full object-cover group-hover:scale-[1.03] transition-all duration-700"
                     />
                 ) : (

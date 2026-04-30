@@ -736,6 +736,30 @@ export default function SubmissionPage() {
         }
     };
 
+    // beforeunload — warn user if they try to close/refresh during an upload.
+    // Modern browsers ignore the custom message (they show their own default),
+    // but any non-empty returnValue still triggers the native confirm dialog.
+    useEffect(() => {
+        if (!uploading) return;
+        const handler = (e) => {
+            e.preventDefault();
+            e.returnValue =
+                "Upload in progress — leaving now will cancel it. Continue?";
+            return e.returnValue;
+        };
+        window.addEventListener("beforeunload", handler);
+        return () => window.removeEventListener("beforeunload", handler);
+    }, [uploading]);
+
+    // Derive "has failed uploads" for the overlay's retry CTA.
+    const failedSlots = useMemo(
+        () =>
+            Object.entries(retryQueue || {})
+                .filter(([, v]) => v && v.failed)
+                .map(([k, v]) => ({ slotKey: k, ...v })),
+        [retryQueue],
+    );
+
     const finalize = async () => {
         await saveForm();
         setFinalizing(true);
@@ -900,6 +924,24 @@ export default function SubmissionPage() {
 
     return (
         <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
+            {/* v37q — Full-screen upload overlay.
+                Renders over everything (z-[100]) while `uploading` is truthy
+                OR while any slot has an unresolved failure. Blocks pointer
+                events on the rest of the page so no form input can be
+                accidentally touched mid-upload. */}
+            <UploadOverlay
+                uploading={uploading}
+                uploadPct={uploadPct}
+                failedSlots={failedSlots}
+                onRetry={retryUpload}
+                onDismissFailure={(slotKey) =>
+                    setRetryQueue((q) => {
+                        const n = { ...q };
+                        delete n[slotKey];
+                        return n;
+                    })
+                }
+            />
             <header className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-white/10">
                 <div className="max-w-3xl mx-auto px-5 py-4 flex items-center justify-between">
                     <Logo size="sm" />
@@ -2777,5 +2819,155 @@ function timeAgo(iso) {
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
 }
+
+// ---------------------------------------------------------------------------
+// UploadOverlay — v37q full-screen upload UX.
+// Visible while an upload is in-flight OR while any previous upload has
+// failed and awaits retry. Blocks the rest of the UI with a backdrop so
+// users can't edit form fields mid-transfer.
+// ---------------------------------------------------------------------------
+function UploadOverlay({
+    uploading,
+    uploadPct,
+    failedSlots,
+    onRetry,
+    onDismissFailure,
+}) {
+    const hasFailed = failedSlots && failedSlots.length > 0;
+    const visible = !!uploading || hasFailed;
+    if (!visible) return null;
+
+    // Prettier label from the internal slot key (e.g. "intro_video" → "Intro video").
+    const prettySlot = (key) =>
+        String(key || "")
+            .split(":")[0]
+            .replace(/_/g, " ")
+            .replace(/^./, (c) => c.toUpperCase());
+
+    return (
+        <div
+            className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 sm:p-6"
+            role="dialog"
+            aria-live="polite"
+            aria-modal="true"
+            data-testid="upload-overlay"
+        >
+            {/* Backdrop — blocks interaction with the rest of the page. */}
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-md" />
+
+            {/* Card */}
+            <div className="relative w-full sm:max-w-md bg-[#0a0a0a] border border-white/15 rounded-lg shadow-2xl p-6 sm:p-7">
+                {!!uploading && !hasFailed && (
+                    <>
+                        <div className="flex items-center gap-3 mb-5">
+                            <div className="relative w-10 h-10 shrink-0">
+                                <Loader2 className="w-10 h-10 animate-spin text-[#c9a961]" strokeWidth={1.5} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                <p className="font-display text-lg tracking-tight text-white">
+                                    Uploading your file…
+                                </p>
+                                <p className="text-[11px] tg-mono text-white/55 mt-0.5 truncate">
+                                    {prettySlot(uploading)}
+                                </p>
+                            </div>
+                            <div
+                                className="tg-mono text-sm text-white/85 tabular-nums shrink-0"
+                                data-testid="upload-overlay-pct"
+                            >
+                                {Math.max(0, Math.min(100, uploadPct || 0))}%
+                            </div>
+                        </div>
+
+                        {/* Large progress bar — 10px tall, rounded, clamp 0-100. */}
+                        <div
+                            className="h-2.5 w-full bg-white/8 rounded-full overflow-hidden"
+                            role="progressbar"
+                            aria-valuenow={uploadPct}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                        >
+                            <div
+                                className="h-full bg-gradient-to-r from-[#c9a961] to-[#e8cd8a] transition-[width] duration-200 ease-out"
+                                style={{
+                                    width: `${Math.max(2, Math.min(100, uploadPct || 0))}%`,
+                                }}
+                                data-testid="upload-overlay-bar"
+                            />
+                        </div>
+
+                        <p className="mt-4 text-[11px] text-white/55 leading-relaxed">
+                            Please keep this tab open. Closing or refreshing will
+                            cancel the transfer. Large videos may take a minute
+                            on slower networks.
+                        </p>
+                    </>
+                )}
+
+                {hasFailed && !uploading && (
+                    <>
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 shrink-0 rounded-full bg-[#FF3B30]/15 border border-[#FF3B30]/50 flex items-center justify-center">
+                                <X className="w-5 h-5 text-[#FF3B30]" strokeWidth={2.2} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                <p className="font-display text-lg tracking-tight text-white">
+                                    Upload failed
+                                </p>
+                                <p className="text-[11px] tg-mono text-white/55 mt-0.5">
+                                    {failedSlots.length === 1
+                                        ? "1 file needs your attention"
+                                        : `${failedSlots.length} files need your attention`}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="space-y-2.5 max-h-[50vh] overflow-y-auto -mx-1 px-1">
+                            {failedSlots.map((f) => (
+                                <div
+                                    key={f.slotKey}
+                                    className="border border-white/12 bg-white/[0.03] rounded-sm p-3"
+                                    data-testid={`upload-failure-${f.slotKey}`}
+                                >
+                                    <p className="text-[12px] text-white/85 font-medium truncate">
+                                        {prettySlot(f.slotKey)}
+                                    </p>
+                                    <p className="text-[10px] tg-mono text-white/50 mt-0.5 break-all">
+                                        {f.fileName || "—"}
+                                    </p>
+                                    {f.error && (
+                                        <p className="text-[11px] text-[#FF8A80] mt-1.5 leading-snug">
+                                            {f.error}
+                                        </p>
+                                    )}
+                                    <div className="mt-2.5 flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => onRetry(f.slotKey)}
+                                            disabled={!f.file}
+                                            data-testid={`upload-retry-btn-${f.slotKey}`}
+                                            className="flex-1 min-h-[40px] px-3 py-2 bg-white text-black text-[11px] tracking-widest uppercase font-semibold rounded-sm disabled:opacity-40 active:scale-[0.98] transition-all"
+                                        >
+                                            {f.file ? "Retry upload" : "Re-select file"}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => onDismissFailure(f.slotKey)}
+                                            data-testid={`upload-dismiss-btn-${f.slotKey}`}
+                                            className="min-h-[40px] px-3 py-2 border border-white/25 hover:border-white text-white/70 hover:text-white text-[11px] tracking-widest uppercase rounded-sm active:scale-[0.98] transition-all"
+                                        >
+                                            Skip
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}
+
 
 

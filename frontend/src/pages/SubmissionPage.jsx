@@ -28,6 +28,7 @@ import {
     Plus,
     Mic,
     MessageSquare,
+    Lightbulb,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -1714,31 +1715,57 @@ export default function SubmissionPage() {
                         )}
 
                         {(project.custom_questions || []).length > 0 && (
-                            <div className="border-t border-white/10 pt-6 space-y-5" data-step="2">
-                                <p className="eyebrow">Additional Questions</p>
-                                {project.custom_questions.map((q) => (
-                                    <FormField
-                                        key={q.id}
-                                        label={q.question}
-                                        value={
-                                            (form.custom_answers || {})[q.id] ||
-                                            ""
-                                        }
-                                        onChange={(v) =>
-                                            setForm({
-                                                ...form,
-                                                custom_answers: {
-                                                    ...(form.custom_answers ||
-                                                        {}),
-                                                    [q.id]: v,
-                                                },
-                                            })
-                                        }
-                                        onBlur={saveForm}
-                                        testid={`form-cq-${q.id}`}
-                                        wide
-                                    />
-                                ))}
+                            <div
+                                className="mt-7 rounded-md border border-[#c9a961]/45 bg-[#c9a961]/[0.06] p-5 md:p-6"
+                                data-testid="custom-questions-block"
+                                data-step="2"
+                            >
+                                <div className="flex items-start gap-3 mb-1">
+                                    <span className="shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full bg-[#c9a961]/15 border border-[#c9a961]/40 text-[#c9a961]">
+                                        <Lightbulb className="w-4 h-4" strokeWidth={1.8} />
+                                    </span>
+                                    <div className="min-w-0 flex-1">
+                                        <h3
+                                            className="font-display text-xl md:text-2xl tracking-tight text-white leading-snug"
+                                            data-testid="custom-questions-heading"
+                                        >
+                                            Important Questions
+                                            <span className="ml-2 text-xs tg-mono align-middle text-[#c9a961] uppercase tracking-widest">
+                                                Recommended
+                                            </span>
+                                        </h3>
+                                        <p className="mt-1.5 text-[13px] md:text-sm text-white/65 leading-relaxed">
+                                            These help us shortlist you better. Not mandatory.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-6 mt-5 pt-5 border-t border-white/10">
+                                    {project.custom_questions.map((q) => (
+                                        <FormField
+                                            key={q.id}
+                                            label={q.question}
+                                            value={
+                                                (form.custom_answers || {})[
+                                                    q.id
+                                                ] || ""
+                                            }
+                                            onChange={(v) =>
+                                                setForm({
+                                                    ...form,
+                                                    custom_answers: {
+                                                        ...(form.custom_answers ||
+                                                            {}),
+                                                        [q.id]: v,
+                                                    },
+                                                })
+                                            }
+                                            onBlur={saveForm}
+                                            testid={`form-cq-${q.id}`}
+                                            wide
+                                        />
+                                    ))}
+                                </div>
                             </div>
                         )}
 

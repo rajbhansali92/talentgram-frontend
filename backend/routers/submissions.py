@@ -25,8 +25,10 @@ from core import (
     _paginate_params,
     _paginated,
     _public_project,
+    _resolve_cover_url,
     _submission_to_client_shape,
     cloudinary_upload,
+    compute_age,
     current_admin,
     current_team_or_admin,
     db,
@@ -75,12 +77,14 @@ async def prefill_for_email(email: str, request: Request):
         return {}
     talent = await db.talents.find_one(
         {"$or": [{"email": email}, {"source.talent_email": email}]},
-        # Strict allowlist projection. Media / storage paths / source / notes
-        # never leave this endpoint.
+        # Strict allowlist projection. Storage paths / source / notes never
+        # leave this endpoint. `media` IS included so the prefill confirmation
+        # card can show a "Is this you?" thumbnail derived via _resolve_cover_url.
         {
             "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
             "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
             "instagram_handle": 1, "instagram_followers": 1, "work_links": 1,
+            "media": 1, "cover_media_id": 1,
         },
     )
     if not talent:
@@ -92,7 +96,7 @@ async def prefill_for_email(email: str, request: Request):
     return {
         "first_name": first,
         "last_name": last,
-        "age": talent.get("age"),
+        "age": talent.get("age") if talent.get("age") is not None else (compute_age(talent.get("dob")) if talent.get("dob") else None),
         "dob": talent.get("dob"),
         "phone": talent.get("phone"),
         "height": talent.get("height"),
@@ -103,6 +107,11 @@ async def prefill_for_email(email: str, request: Request):
         "instagram_handle": talent.get("instagram_handle"),
         "instagram_followers": talent.get("instagram_followers"),
         "work_links": talent.get("work_links") or [],
+        # Cloudinary cover thumbnail for the confirmation prompt. Resolved
+        # via _resolve_cover_url so it picks the cover_media_id, falling
+        # back to the first portfolio/indian/western image. None when the
+        # talent has no usable image — the card hides the thumb gracefully.
+        "image_url": _resolve_cover_url(talent),
     }
 
 

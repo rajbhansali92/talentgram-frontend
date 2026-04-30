@@ -1045,19 +1045,41 @@ export default function SubmissionPage() {
                                 data-testid="prefill-suggestion-card"
                                 data-step="1"
                             >
-                                <div className="min-w-0 flex-1">
-                                    <p className="text-sm text-white">
-                                        We found your profile.{" "}
-                                        <span className="text-white/60">
-                                            Use saved details?
-                                        </span>
-                                    </p>
-                                    <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
-                                        {prefillSuggestion.data.first_name}{" "}
-                                        {prefillSuggestion.data.last_name || ""}
-                                        {prefillSuggestion.data.location ? ` · ${prefillSuggestion.data.location}` : ""}
-                                        {prefillSuggestion.data.height ? ` · ${prefillSuggestion.data.height}` : ""}
-                                    </p>
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                    {prefillSuggestion.data.image_url ? (
+                                        <img
+                                            src={prefillSuggestion.data.image_url}
+                                            alt=""
+                                            loading="lazy"
+                                            onError={(e) => {
+                                                e.currentTarget.style.display =
+                                                    "none";
+                                            }}
+                                            data-testid="prefill-thumb"
+                                            className="w-14 h-14 rounded-sm object-cover bg-[#0a0a0a] border border-white/10 shrink-0"
+                                        />
+                                    ) : null}
+                                    <div className="min-w-0">
+                                        <p className="text-sm text-white">
+                                            Is this you?{" "}
+                                            <span className="text-white/60">
+                                                Use saved details?
+                                            </span>
+                                        </p>
+                                        <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
+                                            {prefillSuggestion.data.first_name}{" "}
+                                            {prefillSuggestion.data.last_name || ""}
+                                            {prefillSuggestion.data.age != null
+                                                ? ` · ${prefillSuggestion.data.age}`
+                                                : ""}
+                                            {prefillSuggestion.data.location
+                                                ? ` · ${prefillSuggestion.data.location}`
+                                                : ""}
+                                            {prefillSuggestion.data.height
+                                                ? ` · ${prefillSuggestion.data.height}`
+                                                : ""}
+                                        </p>
+                                    </div>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <button

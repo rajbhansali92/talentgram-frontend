@@ -42,6 +42,23 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-30 (v38d)** — **Branded favicon + OG/social-share image (UI ONLY).** Premium meta-asset polish so shared `/l/...` links no longer surface as default Emergent badges in WhatsApp/LinkedIn/iMessage previews.
+  - **Favicons** in `/app/frontend/public/`:
+    - `favicon.svg` — theme-aware Talentgram monogram (T flanked by brand slashes), painted via `prefers-color-scheme` media query so the favicon adapts to the user's browser chrome.
+    - `favicon-16x16.png` / `favicon-32x32.png` / `favicon.ico` — multi-resolution PNG fallbacks generated from the brand asset (auto-cropped via alpha bbox).
+    - `apple-touch-icon.png` (180×180) — iOS home-screen icon.
+  - **OG image** `/og-image.png` (1200×630):
+    - Solid `#080808` background with a soft elliptical glow for cinematic depth.
+    - Centered white-ink Talentgram logo + hairline divider + `WE SCOUT · WE MANAGE` mono tagline + `INDIA | UAE` serif region.
+    - Hairline corner ornaments + `PORTFOLIO · CASTING DECISION ENGINE` footer descriptor + small gold accent dot (matches in-app `#c9a961` highlight).
+    - Generated via Python PIL from `talentgram-white.png` so it's pixel-aligned with the in-app logo.
+  - **`index.html` head**:
+    - Added `<link rel="icon">` chain (SVG → PNG → ICO) + `<link rel="apple-touch-icon">`.
+    - Replaced default Emergent description with brand copy: "Talentgram — Casting decision platform. Curated portfolios, decisive presentations. India · UAE."
+    - Theme-color now adaptive: `#050505` dark / `#fafaf7` light via `prefers-color-scheme`.
+    - Full Open Graph tags (`og:type`/`site_name`/`title`/`description`/`image` + dimensions + alt) — required by WhatsApp/LinkedIn/iMessage scrapers.
+    - Twitter Card tags (`twitter:card=summary_large_image` + title/description/image) for X/Twitter previews.
+  - **Verified** — curl returns 200 + correct content-type for all 6 new assets (svg, ico, og-image.png, apple-touch, 16/32 png). HTML head emits all OG/Twitter meta. OG image visually confirmed (cinematic black with centered logo + tagline + corner ornaments + gold accent).
 - **2026-04-30 (v38c)** — **Theme system upgrade — premium contrast & dual-logo polish (UI ONLY).** Tightens the dark/light parity to a locked colour spec without touching any business logic.
   - **Locked colour tokens** (CSS vars in `index.css`):
     - Light: primary `#111111` · secondary `#555555` · border `rgba(0,0,0,0.10)` strong `0.25`

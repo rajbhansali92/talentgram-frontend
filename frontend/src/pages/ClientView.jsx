@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { viewerApi, COVER_URL, IMAGE_URL, OPTIMIZED_IMAGE_URL, VIDEO_URL, VIDEO_POSTER_URL, getViewerToken, saveViewerToken } from "@/lib/api";
-import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import FeedbackComposer from "@/components/FeedbackComposer";
 import axios from "axios";
@@ -243,9 +242,6 @@ export default function ClientView() {
     if (!identified) {
         return (
             <div className="min-h-screen bg-[#050505] relative">
-                <div className="absolute top-5 right-5 z-20">
-                    <ThemeToggle />
-                </div>
                 <div
                     className="absolute inset-0 opacity-30"
                     style={{
@@ -398,7 +394,6 @@ export default function ClientView() {
                             <p className="text-xs text-white/50">Viewing as</p>
                             <p className="text-sm font-medium">{viewer.name}</p>
                         </div>
-                        <ThemeToggle />
                     </div>
                     {/* Mobile-only sticky progress bar — replaces the verbose
                         below-fold card so cards are visible immediately. */}

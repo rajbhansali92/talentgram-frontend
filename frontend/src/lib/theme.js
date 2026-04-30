@@ -1,32 +1,35 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect } from "react";
 
-const applyTheme = (theme) => {
+/**
+ * v38f — Light-mode-only.
+ *
+ * The dark/light toggle was removed app-wide. We keep the `useTheme` API
+ * shape (`{ theme, toggle, isLight }`) so existing callers don't need
+ * updates, but `theme` is locked to `"light"` and `toggle` is a no-op.
+ *
+ * Effect: every render, force `<html>` into the `light` class and clear
+ * any stale `dark` class (e.g. from a prior visit before the change).
+ */
+const applyLight = () => {
     const html = document.documentElement;
-    html.classList.toggle("light", theme === "light");
-    html.classList.toggle("dark", theme !== "light");
+    html.classList.add("light");
+    html.classList.remove("dark");
 };
 
 export function useTheme() {
-    const [theme, setTheme] = useState(() => {
-        try {
-            return localStorage.getItem("tg_theme") === "light"
-                ? "light"
-                : "dark";
-        } catch {
-            return "dark";
-        }
-    });
-
     useEffect(() => {
-        applyTheme(theme);
+        applyLight();
         try {
-            localStorage.setItem("tg_theme", theme);
-        } catch (e) { console.error(e); }
-    }, [theme]);
-
-    const toggle = useCallback(() => {
-        setTheme((t) => (t === "light" ? "dark" : "light"));
+            localStorage.setItem("tg_theme", "light");
+        } catch {
+            // localStorage may be unavailable in private mode — non-fatal.
+        }
     }, []);
 
-    return { theme, toggle, isLight: theme === "light" };
+    const toggle = useCallback(() => {
+        // Intentionally a no-op. Kept for API compatibility with callers
+        // that import { useTheme } and destructure `toggle`.
+    }, []);
+
+    return { theme: "light", toggle, isLight: true };
 }

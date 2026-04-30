@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
-import ThemeToggle from "@/components/ThemeToggle";
 import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import {
     compressVideoIfNeeded,
@@ -936,7 +935,6 @@ function Header() {
     return (
         <header className="flex items-center justify-between px-6 py-5 border-b border-white/10">
             <Logo className="h-8" />
-            <ThemeToggle />
         </header>
     );
 }

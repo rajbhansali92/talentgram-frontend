@@ -4,7 +4,6 @@ import axios from "axios";
 import { toast } from "sonner";
 import { saveAdminSession } from "@/lib/api";
 import Logo from "@/components/Logo";
-import ThemeToggle from "@/components/ThemeToggle";
 import { Loader2, Check, Sparkles } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -79,9 +78,6 @@ export default function SignupPage() {
             className="min-h-screen bg-[#050505] text-white flex items-center justify-center px-4"
             data-testid="signup-page"
         >
-            <div className="absolute top-5 right-5">
-                <ThemeToggle />
-            </div>
             <div className="w-full max-w-md">
                 <div className="text-center mb-10">
                     <Logo size="md" className="mx-auto" />

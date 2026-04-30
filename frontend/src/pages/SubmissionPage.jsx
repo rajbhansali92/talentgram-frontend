@@ -4,7 +4,6 @@ import axios from "axios";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
-import ThemeToggle from "@/components/ThemeToggle";
 import { OPTIMIZED_AUDIO_URL } from "@/lib/api";
 import {
     compressVideoIfNeeded,
@@ -928,9 +927,6 @@ export default function SubmissionPage() {
         const feedback = submission?.client_feedback || [];
         return (
             <div className="min-h-screen bg-[#050505] text-white relative">
-                <div className="absolute top-5 right-5">
-                    <ThemeToggle />
-                </div>
                 <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
                     <div className="text-center">
                         <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
@@ -1013,7 +1009,6 @@ export default function SubmissionPage() {
             <header className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-white/10">
                 <div className="max-w-3xl mx-auto px-5 py-4 flex items-center justify-between">
                     <Logo size="sm" />
-                    <ThemeToggle size="sm" />
                 </div>
                 {/* Mobile-only 3-step indicator. Desktop renders the full
                     form vertically (this bar is hidden via md:hidden).

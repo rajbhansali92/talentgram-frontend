@@ -42,6 +42,21 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-30 (v38f)** — **Light-mode-only — dark mode removed completely (UI only).** Per spec: force consistent light theme everywhere, strip the toggle, no functional or backend changes.
+  - **`/app/frontend/public/index.html`**: pre-React inline script always sets `html.light` and writes `tg_theme=light` to localStorage. No `dark` class is ever added on cold load. Single `theme-color` meta (#fafaf7).
+  - **`/app/frontend/src/lib/theme.js`** (rewritten, ~30 lines): `useTheme()` API kept identical (`{theme, toggle, isLight}`) for caller compatibility — but `theme` is locked to `"light"`, `isLight` is always `true`, `toggle` is a no-op. Effect re-applies `html.light` on every mount in case anything ever stripped it.
+  - **`/app/frontend/src/components/Logo.jsx`**: dropped the `useTheme` dependency. Default ink is now BLACK (`talentgram-black.png`); callers can still pass `forceVariant="white"` for surfaces that paint over a dark hero photo (AdminLogin's left rail).
+  - **`<ThemeToggle>` removed everywhere** — `Landing`, `AdminLogin`, `SignupPage`, `SubmissionPage` (header + thank-you), `ApplicationPage`, `ClientView` (identity gate + main header), `AdminLayout` (sidebar footer + mobile top bar). Component file `ThemeToggle.jsx` deleted.
+  - **CSS unchanged**: the existing v38c `html.light .X` overrides (covering `bg-[#050505]/[#080808]/[#0a0a0a]/[#121212]`, `bg-black/X`, `bg-white/X`, `text-white/X`, `border-white/X`, `placeholder:text-white/30`) are now the **only** rendering path. Hardcoded dark surfaces (e.g. `bg-[#050505]` in `AdminLayout`, sticky `bg-black/80` headers) auto-flip to light because `html.light` is permanent.
+  - **Verified live** (1280×800):
+    - `document.documentElement.className === "light"` on every navigation
+    - `[data-testid="theme-toggle-btn"]` returns `null` on Landing, AdminLogin, Admin Dashboard, Apply
+    - Landing: cream bg + BLACK logo + dark CTAs
+    - Admin Dashboard: light sidebar with dark text + light content area, all stats cards crisp
+    - Talents grid: light cards, talent images intact, all labels readable
+    - AdminLogin: dark hero rail (intentional brand treatment with photo overlay) + light form panel
+    - /apply: cream bg, dark heading, no theme button
+  - **Lint clean** (entire `/app/frontend/src` tree).
 - **2026-04-30 (v38e)** — **Client-side video compression — accept up to 500 MB, upload only the optimised file.** Lifts the 150 MB hard block while keeping the network + Cloudinary store light.
   - **New util** `/app/frontend/src/lib/videoCompress.js`:
     - Lazy-loads ffmpeg.wasm v0.12.15 single-thread core from unpkg via `toBlobURL` (no SAB / COOP-COEP needed). Wasm fetch is one-time and HTTP-cached by the browser.

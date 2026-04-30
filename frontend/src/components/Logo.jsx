@@ -1,10 +1,12 @@
 import React from "react";
-import { useTheme } from "@/lib/theme";
 
 /**
  * Talentgram brand logo — uses the original uploaded asset directly.
- * Two transparent PNG variants (black ink / white ink) are swapped by theme.
- * No CSS filters, no SVG recreation — pixel-perfect to source.
+ *
+ * v38f — Light-mode-only. Default ink is BLACK (talentgram-black.png) for
+ * the standard light surfaces. Callers that paint the logo over a dark
+ * hero photo (e.g. a tinted cover image) can override with
+ * `forceVariant="white"` to use the white-ink asset.
  *
  * Sizes (height in px) — width auto-derives from intrinsic aspect ratio
  * (≈ 1413 × 711 → 1.99:1):
@@ -15,7 +17,7 @@ import { useTheme } from "@/lib/theme";
  *   2xl = 150   (desktop hero per spec — width ≈ 150 × 1.99 ≈ 300px)
  *
  * A subtle drop-shadow is applied so the logo never blends into adjacent
- * surfaces (e.g. white-ink logo on a near-black hero photo).
+ * surfaces of similar luminance.
  */
 const SIZES = {
     sm: 24,
@@ -25,24 +27,19 @@ const SIZES = {
     "2xl": 150,
 };
 
-const SRC_DARK = "/brand/talentgram-white.png"; // white ink → for dark backgrounds
-const SRC_LIGHT = "/brand/talentgram-black.png"; // black ink → for light backgrounds
+const SRC_BLACK = "/brand/talentgram-black.png"; // black ink → for light backgrounds (default)
+const SRC_WHITE = "/brand/talentgram-white.png"; // white ink → only when explicitly forced
 
 export default function Logo({ size = "md", className = "", forceVariant = undefined }) {
-    const { isLight } = useTheme();
     const h = typeof size === "number" ? size : SIZES[size] || SIZES.md;
-    const useLight = forceVariant
-        ? forceVariant === "black"
-        : isLight;
-    const src = useLight ? SRC_LIGHT : SRC_DARK;
-    // Drop-shadow fallback: a faint contrast halo so the logo always
-    // separates from the surface, even on edge-case backgrounds (e.g.
-    // when a hero photo loads slowly and the logo paints on near-same
-    // luminance). Direction is inverted per ink so the halo is always
-    // toward the OPPOSITE colour.
-    const shadow = useLight
-        ? "drop-shadow(0 1px 2px rgba(255,255,255,0.6))"
-        : "drop-shadow(0 1px 2px rgba(0,0,0,0.55))";
+    const useWhite = forceVariant === "white";
+    const src = useWhite ? SRC_WHITE : SRC_BLACK;
+    // Drop-shadow halo points toward the OPPOSITE colour so the logo
+    // separates from any near-luminance background (e.g. white-ink over
+    // a dim hero photo, or black-ink over an off-white card).
+    const shadow = useWhite
+        ? "drop-shadow(0 1px 2px rgba(0,0,0,0.55))"
+        : "drop-shadow(0 1px 2px rgba(255,255,255,0.6))";
     return (
         <img
             src={src}

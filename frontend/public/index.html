@@ -3,8 +3,7 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#050505" media="(prefers-color-scheme: dark)" />
-        <meta name="theme-color" content="#fafaf7" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#fafaf7" />
         <meta name="description" content="Talentgram — Casting decision platform. Curated portfolios, decisive presentations. India · UAE." />
 
         <!-- Favicons (Talentgram monogram) -->
@@ -48,14 +47,15 @@
         -->
         <title>Talentgram — Portfolio Link Engine</title>
         <script>
+            // v38f — Light-mode-only. Force the `light` class on <html>
+            // before React paints so we never see a dark flash on cold loads.
             (function () {
                 try {
-                    var t = localStorage.getItem("tg_theme");
-                    var isLight = t === "light";
-                    document.documentElement.classList.toggle("light", isLight);
-                    document.documentElement.classList.toggle("dark", !isLight);
+                    document.documentElement.classList.add("light");
+                    document.documentElement.classList.remove("dark");
+                    localStorage.setItem("tg_theme", "light");
                 } catch (e) {
-                    document.documentElement.classList.add("dark");
+                    document.documentElement.classList.add("light");
                 }
             })();
         </script>

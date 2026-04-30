@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState, useMemo, useRef } from "react"
 import { useParams } from "react-router-dom";
 import { viewerApi, COVER_URL, IMAGE_URL, OPTIMIZED_IMAGE_URL, VIDEO_URL, VIDEO_POSTER_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import Logo from "@/components/Logo";
+import BrandSplash from "@/components/BrandSplash";
 import FeedbackComposer from "@/components/FeedbackComposer";
 import axios from "axios";
 import { toast } from "sonner";
@@ -241,7 +242,9 @@ export default function ClientView() {
     // ---------------- Identity Gate ----------------
     if (!identified) {
         return (
-            <div className="min-h-screen bg-[#050505] relative">
+            <>
+                <BrandSplash />
+                <div className="min-h-screen bg-[#050505] relative">
                 <div
                     className="absolute inset-0 opacity-30"
                     style={{
@@ -308,6 +311,7 @@ export default function ClientView() {
                     </form>
                 </div>
             </div>
+            </>
         );
     }
 
@@ -374,7 +378,9 @@ export default function ClientView() {
     const reviewedPct = totalCount === 0 ? 0 : Math.round((seenCount / totalCount) * 100);
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white" data-testid="client-view-page">
+        <>
+            <BrandSplash />
+            <div className="min-h-screen bg-[#050505] text-white" data-testid="client-view-page">
             {/* Header — on mobile we collapse the page heading + progress
                 bar into the sticky chrome to maximise above-the-fold cards.
                 Desktop keeps the verbose layout below. */}
@@ -585,6 +591,7 @@ export default function ClientView() {
                 />
             )}
         </div>
+        </>
     );
 }
 

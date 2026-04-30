@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
+import BrandSplash from "@/components/BrandSplash";
 import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
 import {
     compressVideoIfNeeded,
@@ -408,11 +409,13 @@ export default function ApplicationPage() {
     // --- Identity gate -----------------------------------------------------
     if (!started) {
         return (
-            <div
-                className="min-h-screen bg-[#0c0c0c] text-white"
-                data-testid="application-identity-page"
-            >
-                <Header />
+            <>
+                <BrandSplash />
+                <div
+                    className="min-h-screen bg-[#0c0c0c] text-white"
+                    data-testid="application-identity-page"
+                >
+                    <Header />
                 <div className="max-w-xl mx-auto px-6 py-16 md:py-24">
                     <p className="eyebrow mb-3">Talent Application</p>
                     <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-4">
@@ -519,6 +522,7 @@ export default function ApplicationPage() {
                     </button>
                 </div>
             </div>
+            </>
         );
     }
 
@@ -560,11 +564,13 @@ export default function ApplicationPage() {
 
     // --- Main form ---------------------------------------------------------
     return (
-        <div
-            className="min-h-screen bg-[#0c0c0c] text-white"
-            data-testid="application-form-page"
-        >
-            <Header />
+        <>
+            <BrandSplash />
+            <div
+                className="min-h-screen bg-[#0c0c0c] text-white"
+                data-testid="application-form-page"
+            >
+                <Header />
             <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
                 <p className="eyebrow mb-3">Application · {basics.email}</p>
                 <h1 className="font-display text-3xl md:text-5xl tracking-tight mb-8">
@@ -928,6 +934,7 @@ export default function ApplicationPage() {
                 </p>
             </div>
         </div>
+        </>
     );
 }
 

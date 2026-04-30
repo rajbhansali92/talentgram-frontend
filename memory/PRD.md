@@ -42,6 +42,28 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 - **Client layer** — receives computed, filtered, allowlisted output only. Internal admin fields (availability, budget, custom_answers, competitive_brand, form_data, dob, email, phone, notes) can never leak.
 
 ## Recent Updates
+- **2026-04-30 (v38h)** — **Brand splash screen on first entry (UI only).** Premium "brand-first" intro for public surfaces only.
+  - **New component** `/app/frontend/src/components/BrandSplash.jsx` (~115 lines):
+    - Phase machine: `pre → in → hold → out → hidden` (durations: fade-in 400ms · hold 1000ms · fade-out 400ms = 1.8s total).
+    - Two-RAF nudge ensures `opacity:0` initial paint flushes before the CSS transition kicks in (otherwise React batches the state set and skips the animation).
+    - Pure CSS transitions (`opacity` + `transform: scale(0.97 → 1)`), GPU-accelerated via `will-change`. Zero animation-library dependencies.
+    - `pointer-events:none` during fade-out so users can interact with the page underneath the moment the curtain starts lifting.
+    - `sessionStorage` flag (`tg_brand_splash_v1`) prevents replay on internal nav within the same tab session (closing/reopening the tab replays it — correct fresh-entry semantics).
+    - Falls back gracefully when storage is unavailable (private mode) — splash just shows every load instead of dedup'ing.
+  - **Mounted only on public surfaces** (per spec — "DO NOT show on internal navigation"):
+    - `ClientView.jsx` — wrapped both the identity gate `return` AND the main `return` with `<><BrandSplash />…</>`.
+    - `SubmissionPage.jsx` — wrapped the loading skeleton, project-not-found, thank-you, and main wizard returns.
+    - `ApplicationPage.jsx` — wrapped the identity gate and the main multi-step form return.
+  - **Admin internal nav unaffected**: AdminLogin, AdminLayout (Dashboard, Talents, Links, Projects, Applications, Settings, etc.) never mount the splash. Verified via Playwright — `[data-testid="brand-splash"]` returns null on `/admin/login`.
+  - **Backend untouched.** API calls fire in parallel via existing `useEffect` data loaders — by the time the splash finishes (~1.8s), the page below is hydrated, so the reveal is seamless (no spinner flash).
+  - **Asset reused**: paints `/brand/talentgram-black.png` (the cleaned v38g master) at `min(240px, 28vmin)` height so it renders well from iPhone SE to 4K monitors. `decoding="sync"` + `fetchpriority="high"` get the image to first paint instantly.
+  - **Verified live** (1280×800, Chromium):
+    - At 400ms: phase=`hold` opacity=0.93 (mid-fade-in transition)
+    - At 900ms: phase=`hold` opacity=1.0 (full hold)
+    - At 2.4s: splash unmounted, page fully visible
+    - REVISIT same session: splash NOT shown (dedupe works)
+    - `/admin/login`: splash NOT shown (correctly scoped)
+    - Zero console errors, lint clean
 - **2026-04-30 (v38g)** — **New high-res Talentgram logo applied globally.** User-uploaded enhanced asset replaces all logo variants.
   - **Asset processing** (PIL pipeline):
     - Source: 3840×2160 RGBA with white background + "Let's Enhance.io" watermark in bottom-left.

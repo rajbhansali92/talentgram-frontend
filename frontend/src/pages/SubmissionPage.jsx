@@ -4,6 +4,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
+import BrandSplash from "@/components/BrandSplash";
 import { OPTIMIZED_AUDIO_URL } from "@/lib/api";
 import {
     compressVideoIfNeeded,
@@ -855,16 +856,22 @@ export default function SubmissionPage() {
     // ---------------------------------------------------------------
     if (loading) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#050505]">
-                <Loader2 className="w-6 h-6 animate-spin text-white/40" />
-            </div>
+            <>
+                <BrandSplash />
+                <div className="min-h-screen flex items-center justify-center bg-[#050505]">
+                    <Loader2 className="w-6 h-6 animate-spin text-white/40" />
+                </div>
+            </>
         );
     }
     if (!project) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#050505] text-white/60 p-6 text-center">
-                <p>Project not found.</p>
-            </div>
+            <>
+                <BrandSplash />
+                <div className="min-h-screen flex items-center justify-center bg-[#050505] text-white/60 p-6 text-center">
+                    <p>Project not found.</p>
+                </div>
+            </>
         );
     }
 
@@ -926,8 +933,10 @@ export default function SubmissionPage() {
             submission?.status === "updated" ? "Resubmitted" : "Submitted";
         const feedback = submission?.client_feedback || [];
         return (
-            <div className="min-h-screen bg-[#050505] text-white relative">
-                <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
+            <>
+                <BrandSplash />
+                <div className="min-h-screen bg-[#050505] text-white relative">
+                    <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
                     <div className="text-center">
                         <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
                             <Check className="w-6 h-6" />
@@ -981,11 +990,14 @@ export default function SubmissionPage() {
                     </section>
                 </div>
             </div>
+            </>
         );
     }
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
+        <>
+            <BrandSplash />
+            <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
             {/* v37q — Full-screen upload overlay.
                 Renders over everything (z-[100]) while `uploading` is truthy
                 OR while any slot has an unresolved failure. Blocks pointer
@@ -2201,6 +2213,7 @@ export default function SubmissionPage() {
                 </div>
             )}
         </div>
+        </>
     );
 }
 

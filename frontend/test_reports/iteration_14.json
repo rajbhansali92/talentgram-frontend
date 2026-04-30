@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 14 — Phase 3 v37i submission↔global-talent media sync verified end-to-end. Backend pytest 14/14 PASS in /app/backend/tests/test_phase3_sync.py covering: (a) forward sync — uploading category=image/indian/western into a submission whose talent_email has a finalized db.talents record appears within <1s as a new item in /api/talents/{tid}.media[] with matching source_submission_media_id, preserved storage_path and category; (b) idempotency — 3 distinct uploads produce exactly 1 mirror each (no duplicates); (c) non-image categories intro_video and take are NOT mirrored (audition-scope respected); (d) DELETE /api/public/submissions/{sid}/media/{mid} removes the mirror from talent.media[]; (e) edge — submission with talent_email but no talent record yet does NOT crash pre-finalize; on finalize the talent is created with empty media (pre-finalize items are NOT retroactively mirrored, which is the intentional design), and the next upload AFTER finalize does mirror; (f) Siya kale smoke (existing backfilled talent, id=casting-deck-pro) — /api/talents/{id}.media[] contains >=3 indian + >=2 western items, all carrying source_submission_media_id; (g) admin regression — /api/talents, /api/projects, /api/links, /api/applications, /api/submissions/approved all 200. Frontend smoke on /admin/talents/8275939b-... renders the INDIAN LOOK IMAGES and WESTERN LOOK IMAGES sections (previously empty; now populated — 'No files' only appears under ADDITIONAL PORTFOLIO + INTRODUCTION VIDEO). ClientView regression on /l/talentgram-x-comfort-9339a4 still returns Shivani Yadav media_cats={portfolio:4, indian:3, western:1, video:1}.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase3_sync.py",
+    "/app/test_reports/pytest/pytest_phase3_sync.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "core.py sync_media_to_global_talent() L1404: the $ne filter on media.source_submission_media_id is correct for idempotency, but the update silently no-ops when the talent record doesn't exist at all. Current design depends on finalize creating the talent before post-finalize uploads arrive — pre-finalize uploads are silently NOT mirrored and there is no backfill hook inside submission_finalize. If product expects pre-finalize uploads to appear on the global profile as soon as finalize lands, add a post-finalize loop that iterates sub.media and calls sync_media_to_global_talent for each. Otherwise document this as intentional (talents only get mirrors for uploads that happen AFTER their first finalize).",
+    "remove_synced_media_from_global_talent() L1422: uses talent_email from the submission doc, which is correct. However, if a talent's email on db.talents was changed post-finalize (admin edit), the mirror would be orphaned — delete filter by email misses it. Safer: filter on {'media.source_submission_media_id': source_media_id} (no email scoping) — the source id is globally unique.",
+    "backfill_global_talent_media.py: confirm the backfill also preserves resized_storage_path + mime + size on the mirror (core.py does; backfill script should match to keep the global gallery thumbnails consistent).",
+    "No data-testid on the Indian look / Western look / Additional Portfolio section headers or image grids in TalentEdit.jsx — makes the frontend harder to assert automatically. Suggest adding data-testid='talent-media-section-indian/western/portfolio'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase3_sync.py"
+  ],
+  "success_rate": {
+    "backend": "100% (14/14)",
+    "frontend": "Smoke verified — TalentEdit now renders Indian+Western sections with media (no 'No files' under those headers); ClientView unchanged (8 portfolio-carousel images on Shivani Yadav)."
+  },
+  "test_credentials": "admin@talentgram.com / Admin@123 (working)",
+  "seed_data_creation": "Created several TEST_sync_*@example.com + TEST_pre_*@example.com submissions — each finalized into a db.talents entry. Harmless TEST_-prefixed data left in place for next iteration's regression runs.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 3 v37i sync layer is fully wired and idempotent. When testing future phases that change media schema, re-run /app/backend/tests/test_phase3_sync.py to catch any regression in the source_submission_media_id contract. Siya kale (id=casting-deck-pro, email=siyakale25@gmail.com) is the canonical backfilled talent — /api/talents/{id}.media[] returns 3 indian + 2 western with source_submission_media_id. To verify the forward-sync path manually: POST /api/public/projects/{slug}/submission + finalize (creates talent) + POST /api/public/submissions/{sid}/upload?category=indian → within <1s /api/talents/{tid}.media[] carries the mirror. Design note: pre-finalize uploads do NOT backfill at finalize time — only post-finalize uploads mirror. If product expects pre-finalize uploads to mirror too, main agent must add a loop in submission_finalize.",
+  "rca of the issue": "Phase 3 v37i closes the original gap where submission media stayed project-scoped and db.talents[].media[] was populated only by admin-direct uploads. sync_media_to_global_talent now mirrors {image, indian, western} into the talent record using source_submission_media_id as the idempotency key; remove_synced_media_from_global_talent pulls the mirror on submission media delete. All mirror flow verified live against /api/talents/{id}. One design nuance worth escalating: pre-finalize uploads never mirror (because the talent record is created only on finalize and there is no retroactive loop). If that is a product gap, main agent should patch submission_finalize to iterate sub.media and call sync_media_to_global_talent for each eligible category after the talent upsert block."
+}

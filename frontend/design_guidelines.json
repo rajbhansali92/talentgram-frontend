@@ -1,0 +1,123 @@
+{
+  "theme": "dark",
+  "archetype": "5 (Jewel & Luxury)",
+  "vibe": "Cinematic, moody, high-end, decision-focused. Netflix meets Casting Platform.",
+  "colors": {
+    "background": "#050505",
+    "surface": "#121212",
+    "surface_hover": "#1A1A1A",
+    "primary": "#FFFFFF",
+    "primary_foreground": "#000000",
+    "secondary": "#2A2A2A",
+    "secondary_foreground": "#E0E0E0",
+    "border": "rgba(255,255,255,0.1)",
+    "accent": "#F5F5F0",
+    "muted": "#888888",
+    "success": "#34C759",
+    "danger": "#FF3B30",
+    "warning": "#FFCC00"
+  },
+  "typography": {
+    "heading_font": "Outfit, sans-serif",
+    "body_font": "Manrope, sans-serif",
+    "heading_weight": "300, 400, 600",
+    "body_weight": "300, 400, 500",
+    "tracking": "tracking-tight for headings, normal for body"
+  },
+  "layout": {
+    "admin": {
+      "grid": "Control Room Grid (grid-cols-1 md:grid-cols-3 lg:grid-cols-4)",
+      "gap": "gap-4 or gap-6",
+      "surface_style": "Neumorphism & Grid Borders. Flat backgrounds, 1px subtle borders (border-white/10). No soft shadows."
+    },
+    "client": {
+      "grid": "Tetris Grid (grid-cols-1 md:grid-cols-8 lg:grid-cols-12)",
+      "gap": "gap-8 to gap-12",
+      "surface_style": "Crystal Glassmorphism for floating elements (bg-black/60 backdrop-blur-xl border-white/10), pure massive imagery."
+    }
+  },
+  "spacing": {
+    "philosophy": "Generous. Use p-8, p-12, p-16 to create breathing room, especially in the client view.",
+    "containers": "Must have internal padding (p-6 or p-8) if they have borders."
+  },
+  "components": {
+    "buttons": "Sharp corners or very subtle rounding (rounded-md). High contrast (white bg, black text for primary). Hover: opacity-90 or scale-down slightly.",
+    "cards": "Cardless or flat rectangular. Use 1px border (border-white/10). No drop shadows. Hover: subtle border brightness increase.",
+    "inputs": "Shadcn inputs heavily customized. bg-transparent, border-white/20, focus:border-white focus:ring-1 focus:ring-white.",
+    "tables": "Clean, border-collapse. border-b border-white/10 only. Generous padding."
+  },
+  "motion": {
+    "hover": "Subtle brightness changes, transform scale(0.98) for clicks.",
+    "transitions": "transition-all duration-300 ease-in-out",
+    "entrance": "Staggered fade-up for grid items."
+  },
+  "icons": "lucide-react (stroke-width: 1.5 for elegance)",
+  "media": {
+    "admin_login_background": {
+      "url": "https://images.pexels.com/photos/6699772/pexels-photo-6699772.jpeg",
+      "description": "Dark luxury abstract texture for admin login background"
+    },
+    "client_hero_background": {
+      "url": "https://images.pexels.com/photos/15128321/pexels-photo-15128321.jpeg",
+      "description": "Minimalist dark cinematic studio background for hero/empty states"
+    },
+    "client_logos": [
+      {
+        "url": "https://images.unsplash.com/photo-1674978037981-fef8cbf2b3a2",
+        "description": "Nike logo white"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1760037028485-d00dd2b8f6f0",
+        "description": "Apple logo minimal"
+      }
+    ],
+    "talent_portraits": [
+      {
+        "url": "https://images.unsplash.com/photo-1559878541-926091e4c31b",
+        "description": "Female model portrait 1"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1664891408817-bb950dfd0bfd",
+        "description": "Female model portrait 2"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1676286255284-3a5cab9cea19",
+        "description": "Female model portrait 3"
+      },
+      {
+        "url": "https://images.pexels.com/photos/17105116/pexels-photo-17105116.jpeg",
+        "description": "Female model portrait 4"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1688001247541-43bbd88f77b9",
+        "description": "Male actor headshot 1"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1633625576932-348e73c45e82",
+        "description": "Male actor headshot 2"
+      },
+      {
+        "url": "https://images.pexels.com/photos/33523775/pexels-photo-33523775.jpeg",
+        "description": "Male actor headshot 3"
+      }
+    ],
+    "fashion_editorials": [
+      {
+        "url": "https://images.pexels.com/photos/13327309/pexels-photo-13327309.jpeg",
+        "description": "Fashion editorial pose 1"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1664076458686-3449062080ac",
+        "description": "Fashion editorial pose 2"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Install fonts: Outfit and Manrope via Google Fonts in index.html.",
+    "Admin Dashboard: Use pure #050505 backgrounds. Employ 'Control Room Grid' for layout. Keep metrics sharp with 1px border-white/10.",
+    "Client Surface: The talent is the hero. Use full-screen or massive image grids. Apply 'Tetris Grid' for asymmetrical layout. Overlay navigation with Crystal Glassmorphism (bg-black/60 backdrop-blur-xl).",
+    "Interactions: All buttons and interactive cards MUST have clear :hover states (e.g. border brightening, slight scaling) and :focus states (high contrast ring).",
+    "Data Test IDs: All interactive elements MUST have data-testid attributes.",
+    "Do NOT use Inter font or any generic purple/teal gradients. Stick to the monochromatic Obsidian/Pearl palette."
+  ]
+}

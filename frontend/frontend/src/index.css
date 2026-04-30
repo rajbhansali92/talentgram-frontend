@@ -1,0 +1,619 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+    --tg-bg: #050505;
+    --tg-surface: #121212;
+    --tg-surface-2: #1a1a1a;
+    --tg-border: rgba(255, 255, 255, 0.1);
+    --tg-border-strong: rgba(255, 255, 255, 0.25);
+    --tg-text: #ffffff;
+    --tg-muted: #bbbbbb;
+    --tg-success: #34c759;
+    --tg-danger: #ff3b30;
+    --tg-warning: #ffcc00;
+}
+
+html.light {
+    --tg-bg: #fafaf7;
+    --tg-surface: #ffffff;
+    --tg-surface-2: #f2f2ec;
+    --tg-border: rgba(0, 0, 0, 0.1);
+    --tg-border-strong: rgba(0, 0, 0, 0.25);
+    --tg-text: #111111;
+    --tg-muted: #555555;
+    color-scheme: light;
+}
+
+html,
+body,
+#root {
+    height: 100%;
+    background: var(--tg-bg);
+    transition:
+        background-color 0.3s ease,
+        color 0.3s ease;
+}
+
+body {
+    margin: 0;
+    color: var(--tg-text);
+    background: var(--tg-bg);
+    font-family: "Manrope", ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5 {
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    letter-spacing: -0.005em;
+    font-weight: 500;
+}
+
+code {
+    font-family:
+        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* ==========================================================================
+   Shadcn design tokens
+   ========================================================================== */
+@layer base {
+    :root {
+        --background: 0 0% 100%;
+        --foreground: 0 0% 4%;
+        --card: 0 0% 100%;
+        --card-foreground: 0 0% 4%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 0 0% 4%;
+        --primary: 0 0% 9%;
+        --primary-foreground: 0 0% 98%;
+        --secondary: 0 0% 96%;
+        --secondary-foreground: 0 0% 9%;
+        --muted: 0 0% 96%;
+        --muted-foreground: 0 0% 33%;
+        --accent: 0 0% 96%;
+        --accent-foreground: 0 0% 9%;
+        --destructive: 4 90% 58%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 0 0% 90%;
+        --input: 0 0% 90%;
+        --ring: 0 0% 4%;
+        --radius: 0.375rem;
+    }
+    .dark {
+        --background: 0 0% 2%;
+        --foreground: 0 0% 100%;
+        --card: 0 0% 7%;
+        --card-foreground: 0 0% 100%;
+        --popover: 0 0% 7%;
+        --popover-foreground: 0 0% 100%;
+        --primary: 0 0% 100%;
+        --primary-foreground: 0 0% 6%;
+        --secondary: 0 0% 11%;
+        --secondary-foreground: 0 0% 100%;
+        --muted: 0 0% 11%;
+        --muted-foreground: 0 0% 73%;
+        --accent: 0 0% 14%;
+        --accent-foreground: 0 0% 100%;
+        --destructive: 4 90% 58%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 0 0% 16%;
+        --input: 0 0% 16%;
+        --ring: 0 0% 100%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+/* Typography helpers */
+.font-display {
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    letter-spacing: -0.005em;
+    font-weight: 500;
+}
+.font-body {
+    font-family: "Manrope", sans-serif;
+}
+.font-logo {
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+}
+.tg-mono {
+    font-family:
+        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-feature-settings: "ss01";
+}
+
+/* Grain overlay (dark only) */
+.tg-grain::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.06;
+    background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.7'/></svg>");
+    z-index: 9;
+    mix-blend-mode: overlay;
+}
+html.light .tg-grain::before {
+    opacity: 0.03;
+    mix-blend-mode: multiply;
+}
+
+/* Utility: tight uppercase eyebrow */
+.eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--tg-muted);
+    font-weight: 600;
+}
+
+.tg-scroll::-webkit-scrollbar {
+    height: 6px;
+    width: 6px;
+}
+.tg-scroll::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.3);
+    border-radius: 999px;
+}
+
+/* Hide scrollbars on horizontal-scroll mobile chrome (tab strips, nav).
+   Track stays scrollable, just visually clean. */
+.tg-noscrollbar::-webkit-scrollbar { display: none; }
+.tg-noscrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+[data-testid="client-view-tabs"]::-webkit-scrollbar,
+[data-testid="mobile-nav-strip"]::-webkit-scrollbar { display: none; }
+
+/* Mobile-only 3-step submission wizard. Active step's children are visible;
+   others are hidden. Desktop (md+) ignores all of this and renders vertically.
+   `[data-step="1-2"]` containers are wrappers that participate in either
+   step 1 or 2 — their CHILDREN carry the actual `data-step` so we never
+   hide structural wrappers (and break layout). */
+@media (max-width: 767.98px) {
+    [data-mobile-step="1"] [data-step="2"],
+    [data-mobile-step="1"] [data-step="3"] { display: none !important; }
+    [data-mobile-step="2"] [data-step="1"],
+    [data-mobile-step="2"] [data-step="3"] { display: none !important; }
+    [data-mobile-step="3"] [data-step="1"],
+    [data-mobile-step="3"] [data-step="2"] { display: none !important; }
+    /* Reserve room for the sticky bottom action bar so the last form field
+       is never hidden behind it. */
+    [data-testid="submission-page"] main,
+    [data-testid="submission-page"] > div:last-of-type { padding-bottom: 96px; }
+}
+
+@keyframes tgFadeUp {
+    from {
+        opacity: 0;
+        transform: translateY(12px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+.tg-fade-up {
+    animation: tgFadeUp 0.6s ease-out both;
+}
+
+::selection {
+    background: currentColor;
+    color: var(--tg-bg);
+}
+
+/* ==========================================================================
+   LIGHT MODE — global overrides for hardcoded dark palette classes
+   (Keeps the same component code working in light theme)
+   Color spec (locked v38c):
+     • Light primary: #111111   • Light secondary: #555555
+     • Dark  primary: #FFFFFF   • Dark  secondary: #BBBBBB
+   ========================================================================== */
+html.light body {
+    background: #fafaf7;
+    color: #111111;
+}
+
+/* Surfaces */
+html.light .bg-\[\#050505\],
+html.light .bg-\[\#080808\] {
+    background-color: #fafaf7 !important;
+}
+html.light .bg-\[\#0a0a0a\],
+html.light .bg-\[\#0c0c0c\] {
+    background-color: #f0f0ea !important;
+}
+html.light .bg-\[\#121212\] {
+    background-color: #ffffff !important;
+}
+
+/* Translucent blacks → translucent whites */
+html.light .bg-black {
+    background-color: #ffffff !important;
+}
+html.light .bg-black\/95 {
+    background-color: rgba(250, 250, 247, 0.97) !important;
+}
+html.light .bg-black\/80 {
+    background-color: rgba(255, 255, 255, 0.85) !important;
+}
+html.light .bg-black\/60 {
+    background-color: rgba(255, 255, 255, 0.72) !important;
+}
+html.light .bg-black\/50 {
+    background-color: rgba(255, 255, 255, 0.62) !important;
+}
+
+/* Translucent whites (used as hover fills on dark) → translucent blacks */
+html.light .bg-white\/5 {
+    background-color: rgba(0, 0, 0, 0.04) !important;
+}
+html.light .bg-white\/10 {
+    background-color: rgba(0, 0, 0, 0.06) !important;
+}
+html.light .bg-white\/15 {
+    background-color: rgba(0, 0, 0, 0.08) !important;
+}
+html.light .bg-white\/20 {
+    background-color: rgba(0, 0, 0, 0.1) !important;
+}
+html.light .bg-white\/\[0\.02\] {
+    background-color: rgba(0, 0, 0, 0.02) !important;
+}
+
+/* Primary button: bg-white text-black stays high-contrast — flip to black on light */
+html.light .bg-white {
+    background-color: #111111 !important;
+    color: #ffffff !important;
+}
+html.light .text-black {
+    color: #ffffff !important;
+}
+
+/* Text tones: invert whites to blacks at matching opacity.
+   Secondary text floor in light mode = #555555 (~67% black). Below that
+   we step further toward #555 / #777 for tertiary labels — never lighter
+   than rgba(0,0,0,0.42) so we stay above WCAG AA on white surfaces. */
+html.light .text-white {
+    color: #111111 !important;
+}
+html.light .text-white\/90 {
+    color: rgba(17, 17, 17, 0.95) !important;
+}
+html.light .text-white\/85 {
+    color: rgba(17, 17, 17, 0.92) !important;
+}
+html.light .text-white\/80 {
+    color: rgba(17, 17, 17, 0.88) !important;
+}
+html.light .text-white\/70 {
+    color: rgba(17, 17, 17, 0.78) !important;
+}
+html.light .text-white\/60 {
+    color: #555555 !important; /* secondary spec */
+}
+html.light .text-white\/50 {
+    color: #555555 !important; /* clamp to AA floor */
+}
+html.light .text-white\/40 {
+    color: #6b6b6b !important;
+}
+html.light .text-white\/30 {
+    color: #777777 !important;
+}
+html.light .text-white\/25 {
+    color: #7d7d7d !important;
+}
+html.light .text-white\/20 {
+    color: #888888 !important;
+}
+
+/* Placeholders */
+html.light .placeholder\:text-white\/30::placeholder {
+    color: rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Borders */
+html.light .border-white\/5 {
+    border-color: rgba(0, 0, 0, 0.04) !important;
+}
+html.light .border-white\/10 {
+    border-color: rgba(0, 0, 0, 0.08) !important;
+}
+html.light .border-white\/15 {
+    border-color: rgba(0, 0, 0, 0.12) !important;
+}
+html.light .border-white\/20 {
+    border-color: rgba(0, 0, 0, 0.16) !important;
+}
+html.light .border-white\/25 {
+    border-color: rgba(0, 0, 0, 0.22) !important;
+}
+html.light .border-white\/30 {
+    border-color: rgba(0, 0, 0, 0.28) !important;
+}
+html.light .border-white\/40 {
+    border-color: rgba(0, 0, 0, 0.4) !important;
+}
+html.light .border-white {
+    border-color: #0a0a0a !important;
+}
+
+/* Divide */
+html.light .divide-white\/10 > :not([hidden]) ~ :not([hidden]),
+html.light .divide-white\/10 > * + * {
+    border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+/* Hover states */
+html.light .hover\:text-white:hover {
+    color: #0a0a0a !important;
+}
+html.light .hover\:bg-white\/5:hover {
+    background-color: rgba(0, 0, 0, 0.04) !important;
+}
+html.light .hover\:bg-white\/10:hover {
+    background-color: rgba(0, 0, 0, 0.06) !important;
+}
+html.light .hover\:bg-white\/20:hover {
+    background-color: rgba(0, 0, 0, 0.1) !important;
+}
+html.light .hover\:bg-white:hover {
+    background-color: #0a0a0a !important;
+    color: #ffffff !important;
+}
+html.light .hover\:bg-black:hover {
+    background-color: #ffffff !important;
+}
+html.light .hover\:border-white:hover {
+    border-color: #0a0a0a !important;
+}
+html.light .hover\:border-white\/30:hover {
+    border-color: rgba(0, 0, 0, 0.28) !important;
+}
+html.light .hover\:border-white\/40:hover {
+    border-color: rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Focus */
+html.light .focus\:border-white:focus {
+    border-color: #0a0a0a !important;
+}
+html.light .focus\:ring-white:focus {
+    --tw-ring-color: rgba(0, 0, 0, 0.6) !important;
+}
+
+/* Fill */
+html.light .fill-white {
+    fill: #0a0a0a !important;
+}
+
+/* Gradients used on hero/client cards — fade to white in light mode */
+html.light .from-black {
+    --tw-gradient-from: #ffffff var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgba(255, 255, 255, 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-via, var(--tw-gradient-to)), var(--tw-gradient-to) !important;
+}
+html.light .via-black\/40 {
+    --tw-gradient-via: rgba(255, 255, 255, 0.45) var(--tw-gradient-via-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-via), var(--tw-gradient-to) !important;
+}
+html.light .via-black\/70 {
+    --tw-gradient-via: rgba(255, 255, 255, 0.72) var(--tw-gradient-via-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-via), var(--tw-gradient-to) !important;
+}
+html.light .from-black\/30 {
+    --tw-gradient-from: rgba(255, 255, 255, 0.35) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgba(255, 255, 255, 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+html.light .from-black\/40 {
+    --tw-gradient-from: rgba(255, 255, 255, 0.45) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgba(255, 255, 255, 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+html.light .to-black\/80 {
+    --tw-gradient-to: rgba(255, 255, 255, 0.88) var(--tw-gradient-to-position) !important;
+}
+
+/* Landing/Login background images are lifestyle photography — dim with white in light */
+html.light .opacity-40 {
+    opacity: 0.18 !important;
+}
+html.light .opacity-30 {
+    opacity: 0.14 !important;
+}
+
+/* ==========================================================================
+   v37o — Premium polish layer
+   Brand gold accents, placeholder contrast, premium card shadows, dividers.
+   ========================================================================== */
+
+/* ---- Gold accent surfaces (used on Client Budget / Shoot Dates / Important
+        Questions cards). Dark mode: dim warm gold. Light: warm cream amber. */
+html.light .bg-\[\#c9a961\]\/\[0\.06\],
+html.light .bg-\[\#c9a961\]\/\[0\.07\] {
+    background-color: rgba(201, 169, 97, 0.12) !important;
+}
+html.light .border-\[\#c9a961\]\/40,
+html.light .border-\[\#c9a961\]\/45,
+html.light .border-\[\#c9a961\]\/50 {
+    border-color: rgba(180, 140, 60, 0.55) !important;
+}
+html.light .text-\[\#c9a961\] {
+    color: #8a6a1f !important; /* darker gold for light-mode contrast */
+}
+
+/* ---- Placeholder contrast — dark mode floor at white/55, light-mode override.
+        Solves "washed-out grey text" reported as low contrast. */
+::placeholder {
+    color: rgba(255, 255, 255, 0.5);
+}
+.placeholder-white\/35::placeholder,
+.placeholder\:text-white\/35::placeholder {
+    color: rgba(255, 255, 255, 0.55) !important;
+}
+.placeholder-white\/40::placeholder {
+    color: rgba(255, 255, 255, 0.55) !important;
+}
+html.light ::placeholder {
+    color: rgba(0, 0, 0, 0.45) !important;
+}
+html.light .placeholder-white\/35::placeholder,
+html.light .placeholder-white\/40::placeholder,
+html.light .placeholder\:text-white\/30::placeholder {
+    color: rgba(0, 0, 0, 0.42) !important;
+}
+
+/* ---- Premium card-shadow utility. Soft glow in light mode for depth,
+        a subtle 1px highlight in dark for the "Netflix tile" feel.
+        Apply via `className="tg-card"` to any container. */
+.tg-card {
+    transition:
+        box-shadow 0.2s ease,
+        transform 0.2s ease;
+}
+html.dark .tg-card {
+    box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+        0 1px 0 rgba(255, 255, 255, 0.03);
+}
+html.light .tg-card {
+    box-shadow:
+        0 1px 2px rgba(15, 15, 15, 0.04),
+        0 8px 24px -12px rgba(15, 15, 15, 0.10);
+}
+.tg-card:hover {
+    transform: translateY(-1px);
+}
+html.light .tg-card:hover {
+    box-shadow:
+        0 2px 4px rgba(15, 15, 15, 0.06),
+        0 14px 36px -12px rgba(15, 15, 15, 0.16);
+}
+
+/* ---- Section divider — premium hairline that adapts to theme.
+        Pairs with vertical breathing space for clean separation. */
+.tg-divider {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 0;
+}
+html.light .tg-divider {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+/* ---- Strengthen tracking on small uppercase labels for legibility */
+.eyebrow {
+    letter-spacing: 0.18em;
+    font-weight: 600;
+}
+
+/* ---- Dark-mode helper-text floor at white/55 for the smallest text
+        (`text-[10px]` and `text-[11px]`) where below-AA contrast hurts most. */
+.tg-help {
+    color: rgba(255, 255, 255, 0.6);
+    line-height: 1.55;
+}
+html.light .tg-help {
+    color: #555555;
+}
+
+/* ---- v38c — Dark-mode secondary text floor.
+        Many components use text-white/40, text-white/50, text-white/60 for
+        labels & helper text. Spec demands secondary = #BBBBBB. We clamp the
+        most common faded variants to that floor in dark mode while leaving
+        primary white intact. Light mode uses its own block above. */
+html.dark .text-white\/60,
+html:not(.light) .text-white\/60 {
+    color: #bbbbbb !important;
+}
+html.dark .text-white\/50,
+html:not(.light) .text-white\/50 {
+    color: #b0b0b0 !important;
+}
+html.dark .text-white\/40,
+html:not(.light) .text-white\/40 {
+    color: #9a9a9a !important;
+}
+
+/* ---- Selected button rings — keep gold accent visible in both modes */
+html.light .shadow-\[0_0_0_1px_rgba\(201\,169\,97\,0\.4\)\] {
+    box-shadow: 0 0 0 1px rgba(180, 140, 60, 0.55) !important;
+}
+
+/* ---- v37t — Loading skeleton shimmer (used on ClientView grid) */
+@keyframes tg-shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+.tg-skeleton {
+    background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0.04) 0%,
+        rgba(255, 255, 255, 0.08) 50%,
+        rgba(255, 255, 255, 0.04) 100%
+    );
+    background-size: 200% 100%;
+    animation: tg-shimmer 1.6s infinite linear;
+}
+html.light .tg-skeleton {
+    background: linear-gradient(
+        90deg,
+        rgba(0, 0, 0, 0.04) 0%,
+        rgba(0, 0, 0, 0.08) 50%,
+        rgba(0, 0, 0, 0.04) 100%
+    );
+    background-size: 200% 100%;
+}
+
+/* ==========================================================================
+   v37p — Mobile submission UX hardening
+   Guarantees the last inputs (Work Links, custom answers) always scroll into
+   view above the sticky bottom action bar on mobile, in both themes.
+   ========================================================================== */
+
+/* Any input/textarea inside the submission/application forms scrolls with
+   extra bottom margin so iOS/Android auto-scroll-on-focus clears the sticky
+   bar (72–96px tall including safe area). */
+@media (max-width: 767px) {
+    [data-testid="submission-page"] input,
+    [data-testid="submission-page"] textarea,
+    [data-testid="submission-page"] [data-testid$="-input"],
+    [data-testid="submission-page"] [data-testid$="-trigger"],
+    [data-testid="apply-page"] input,
+    [data-testid="apply-page"] textarea {
+        scroll-margin-bottom: 140px;
+    }
+}
+
+/* Prevent iOS auto-zoom on focus — forces base input font-size ≥ 16px on
+   mobile even when component styles request smaller text. Keeps labels at
+   their authored size (we scope this to actual input elements). */
+@media (max-width: 767px) {
+    [data-testid="submission-page"] input:not([type="checkbox"]):not([type="radio"]),
+    [data-testid="submission-page"] textarea,
+    [data-testid="apply-page"] input:not([type="checkbox"]):not([type="radio"]),
+    [data-testid="apply-page"] textarea {
+        font-size: 16px !important;
+    }
+}

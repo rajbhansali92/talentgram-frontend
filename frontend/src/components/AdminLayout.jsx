@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import NotificationBell from "@/components/NotificationBell";
@@ -84,6 +85,7 @@ export default function AdminLayout() {
                                 {admin?.email}
                             </div>
                         </div>
+                        <ThemeToggle size="sm" />
                     </div>
                     <button
                         data-testid="admin-change-password-btn"
@@ -124,6 +126,7 @@ export default function AdminLayout() {
                     >
                         Sign out
                     </button>
+                    <ThemeToggle size="sm" />
                 </div>
             </div>
 

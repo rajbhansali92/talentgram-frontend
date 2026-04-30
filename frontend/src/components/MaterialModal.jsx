@@ -1,5 +1,5 @@
 import React from "react";
-import { VIDEO_URL, VIDEO_POSTER_URL, OPTIMIZED_IMAGE_URL, OPTIMIZED_AUDIO_URL, FILE_URL } from "@/lib/api";
+import { FILE_URL } from "@/lib/api";
 import {
     X,
     FileText,
@@ -14,7 +14,7 @@ import {
  * Theme-aware: respects light/dark mode via shadcn tokens (bg-background, text-foreground, etc.)
  *
  * Props:
- *  - project: { brand_name, materials: [{id, category, url, public_id, content_type, original_filename}], video_links: [] }
+ *  - project: { brand_name, materials: [{id, category, storage_path, content_type, original_filename}], video_links: [] }
  *  - onClose: fn
  *  - onRemove?: (mid) => void   // admin-only; if omitted, trash buttons are hidden
  */
@@ -48,7 +48,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     onRemove={onRemove}
                     render={(m) => (
                         <a
-                            href={FILE_URL(m)}
+                            href={FILE_URL(m.storage_path)}
                             target="_blank"
                             rel="noreferrer"
                             className="flex items-center gap-3 flex-1"
@@ -73,13 +73,13 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     grid
                     render={(m) => (
                         <a
-                            href={m.url}
+                            href={FILE_URL(m.storage_path)}
                             target="_blank"
                             rel="noreferrer"
                             className="block aspect-square bg-muted overflow-hidden"
                         >
                             <img
-                                src={OPTIMIZED_IMAGE_URL(m, 600)}
+                                src={FILE_URL(m.storage_path)}
                                 alt=""
                                 loading="lazy"
                                 className="w-full h-full object-cover"
@@ -96,7 +96,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                         <div className="flex items-center gap-3 flex-1 bg-muted p-3 rounded-lg">
                             <Music className="w-5 h-5 text-muted-foreground shrink-0" />
                             <audio
-                                src={OPTIMIZED_AUDIO_URL(m)}
+                                src={FILE_URL(m.storage_path)}
                                 controls
                                 className="w-full max-w-md"
                             />
@@ -111,8 +111,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     render={(m) => (
                         <div className="flex-1 bg-muted p-2 rounded-lg">
                             <video
-                                src={VIDEO_URL(m)}
-                                poster={VIDEO_POSTER_URL(m)}
+                                src={FILE_URL(m.storage_path)}
                                 controls
                                 preload="metadata"
                                 className="w-full rounded-sm bg-black"

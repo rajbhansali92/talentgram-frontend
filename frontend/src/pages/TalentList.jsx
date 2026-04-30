@@ -1,48 +1,37 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, COVER_URL, OPTIMIZED_IMAGE_URL, isAdmin } from "@/lib/api";
-import { Search, Plus, Image as ImageIcon, Check, Loader2 } from "lucide-react";
+import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
+import { Search, Plus, Image as ImageIcon, Check } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
-import useInfiniteList, { useInfiniteScroll } from "@/hooks/useInfiniteList";
-
-const PAGE_LIMIT = 30;
 
 export default function TalentList() {
+    const [talents, setTalents] = useState([]);
     const [q, setQ] = useState("");
-    const [debouncedQ, setDebouncedQ] = useState("");
+    const [loading, setLoading] = useState(true);
     const [selected, setSelected] = useState(new Set());
     const [confirmOpen, setConfirmOpen] = useState(false);
     const canBulkDelete = isAdmin();
 
-    // Debounce search input.
+    const load = async (qq = "") => {
+        setLoading(true);
+        try {
+            const { data } = await adminApi.get("/talents", {
+                params: qq ? { q: qq } : {},
+            });
+            setTalents(data);
+        } finally {
+            setLoading(false);
+        }
+    };
     useEffect(() => {
-        const t = setTimeout(() => setDebouncedQ(q.trim()), 250);
+        load();
+    }, []);
+    useEffect(() => {
+        const t = setTimeout(() => load(q), 250);
         return () => clearTimeout(t);
     }, [q]);
-
-    const fetchPage = useCallback(
-        async ({ page, limit }) => {
-            const params = { page, limit };
-            if (debouncedQ) params.q = debouncedQ;
-            const { data } = await adminApi.get("/talents", { params });
-            return data;
-        },
-        [debouncedQ],
-    );
-
-    const {
-        items: talents,
-        total,
-        hasMore,
-        loading,
-        loadingMore,
-        loadMore,
-        reload,
-    } = useInfiniteList(fetchPage, [debouncedQ], { limit: PAGE_LIMIT });
-
-    const sentinelRef = useInfiniteScroll(loadMore);
 
     const toggle = (id) => {
         setSelected((prev) => {
@@ -67,7 +56,7 @@ export default function TalentList() {
             );
             clear();
             setConfirmOpen(false);
-            reload();
+            load(q);
         } catch (err) {
              
             console.error("[bulk-delete talents] failed", err?.response?.data || err);
@@ -115,34 +104,21 @@ export default function TalentList() {
                 />
             </div>
 
-            {!loading && total > 0 && (
-                <p
-                    className="text-white/40 text-xs tracking-wide mb-4"
-                    data-testid="talents-count-summary"
-                >
-                    Showing {talents.length} of {total}
-                </p>
-            )}
-
             {loading ? (
-                <div className="text-white/40 text-sm" data-testid="talents-loading">Loading...</div>
+                <div className="text-white/40 text-sm">Loading...</div>
             ) : talents.length === 0 ? (
-                <div className="border border-white/10 p-12 text-center" data-testid="talents-empty">
+                <div className="border border-white/10 p-12 text-center">
                     <ImageIcon
                         className="w-10 h-10 text-white/20 mx-auto mb-4"
                         strokeWidth={1}
                     />
-                    <p className="text-white/60 mb-6">
-                        {debouncedQ ? "No talents match your search" : "No talents yet"}
-                    </p>
-                    {!debouncedQ && (
-                        <Link
-                            to="/admin/talents/new"
-                            className="inline-flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-sm text-xs"
-                        >
-                            Add your first talent
-                        </Link>
-                    )}
+                    <p className="text-white/60 mb-6">No talents yet</p>
+                    <Link
+                        to="/admin/talents/new"
+                        className="inline-flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-sm text-xs"
+                    >
+                        Add your first talent
+                    </Link>
                 </div>
             ) : (
                 <div
@@ -150,7 +126,16 @@ export default function TalentList() {
                     data-testid="talents-grid"
                 >
                     {talents.map((t) => {
-                        const coverUrl = COVER_URL(t);
+                        const cover = (t.media || []).find(
+                            (m) => m.id === t.cover_media_id,
+                        );
+                        const anyImg =
+                            cover ||
+                            (t.media || []).find(
+                                (m) =>
+                                    m.category !== "video" &&
+                                    m.content_type?.startsWith("image/"),
+                            );
                         const checked = selected.has(t.id);
                         const goesToDetail = !isSelectionMode;
                         return (
@@ -184,7 +169,7 @@ export default function TalentList() {
                                     >
                                         <Inner
                                             t={t}
-                                            coverUrl={coverUrl}
+                                            anyImg={anyImg}
                                         />
                                     </Link>
                                 ) : (
@@ -193,33 +178,12 @@ export default function TalentList() {
                                         onClick={() => toggle(t.id)}
                                         className="block w-full text-left"
                                     >
-                                        <Inner t={t} coverUrl={coverUrl} />
+                                        <Inner t={t} anyImg={anyImg} />
                                     </button>
                                 )}
                             </div>
                         );
                     })}
-                </div>
-            )}
-
-            {!loading && hasMore && (
-                <div className="mt-8 flex flex-col items-center gap-3">
-                    <div ref={sentinelRef} className="h-px w-px" aria-hidden />
-                    <button
-                        type="button"
-                        onClick={loadMore}
-                        disabled={loadingMore}
-                        data-testid="talents-load-more-btn"
-                        className="inline-flex items-center gap-2 border border-white/20 hover:border-white/60 transition-colors px-5 py-2.5 text-xs tracking-wide disabled:opacity-50"
-                    >
-                        {loadingMore ? (
-                            <>
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading more...
-                            </>
-                        ) : (
-                            <>Load more ({total - talents.length} remaining)</>
-                        )}
-                    </button>
                 </div>
             )}
 
@@ -250,16 +214,14 @@ export default function TalentList() {
     );
 }
 
-function Inner({ t, coverUrl }) {
+function Inner({ t, anyImg }) {
     return (
         <>
             <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
-                {coverUrl ? (
+                {anyImg ? (
                     <img
-                        src={OPTIMIZED_IMAGE_URL(coverUrl, 400)}
+                        src={FILE_URL(anyImg.storage_path)}
                         alt={t.name}
-                        loading="lazy"
-                        onError={(e) => { e.currentTarget.style.display = "none"; }}
                         className="w-full h-full object-cover group-hover:scale-[1.02] transition-all duration-500"
                     />
                 ) : (

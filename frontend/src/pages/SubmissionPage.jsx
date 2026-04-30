@@ -2,17 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
+import { FILE_URL } from "@/lib/api";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
-import BrandSplash from "@/components/BrandSplash";
-import { OPTIMIZED_AUDIO_URL } from "@/lib/api";
-import {
-    compressVideoIfNeeded,
-    COMPRESS_THRESHOLD,
-    SOFT_LIMIT,
-    HARD_MAX,
-    MB,
-} from "@/lib/videoCompress";
+import ThemeToggle from "@/components/ThemeToggle";
 import {
     Select,
     SelectContent,
@@ -36,7 +29,6 @@ import {
     Plus,
     Mic,
     MessageSquare,
-    Lightbulb,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -92,11 +84,6 @@ export default function SubmissionPage() {
             phone: "",
             dob: "",
             age: "",
-            // Optional per-submission override of the auto-calculated age.
-            // Empty string means "no override — use age derived from DOB".
-            // This rides along in form_data; it is NEVER mirrored to the
-            // global talent profile (only the truthful DOB-derived age is).
-            age_override: "",
             height: "",
             location: "",
             // Phase 2 — schema unification: every talent-facing form writes
@@ -121,12 +108,6 @@ export default function SubmissionPage() {
     const [submission, setSubmission] = useState(null);
     const [uploading, setUploading] = useState(null);
     const [uploadPct, setUploadPct] = useState(0);
-    // v38e — client-side video compression progress.
-    // `compressing` is the slot key currently being transcoded (or null).
-    // `compressPct` is 0–100. Both feed into <UploadOverlay> so the user
-    // sees the optimisation phase BEFORE the network upload begins.
-    const [compressing, setCompressing] = useState(null);
-    const [compressPct, setCompressPct] = useState(0);
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
@@ -376,9 +357,6 @@ export default function SubmissionPage() {
                     name: `${form.first_name} ${form.last_name}`.trim(),
                     email: form.email.trim().toLowerCase(),
                     phone: form.phone || null,
-                    // Truthful age: DOB-derived if DOB present, else manual entry.
-                    // This is what's mirrored to the global talent record.
-                    // Per-submission overrides live separately in form_data.
                     age: computedAge != null ? String(computedAge) : form.age || null,
                     height: form.height,
                     location: form.location,
@@ -504,9 +482,6 @@ export default function SubmissionPage() {
                     last_name: form.last_name,
                     dob: form.dob || null,
                     age: computedAge != null ? String(computedAge) : "",
-                    // Per-submission age override. Stored alongside the truthful
-                    // age but ignored by the global talent merge in /finalize.
-                    age_override: form.age_override || "",
                     height: form.height,
                     location: form.location,
                     // Phase 2 unified identity (mirrored to talent on finalize)
@@ -561,68 +536,18 @@ export default function SubmissionPage() {
     }
 
     const uploadFile = async (file, category, label = null) => {
-        // v38e — Spec: lift the 150 MB hard block but still cap at 500 MB
-        // intake. Anything above the legacy 25 MB compression threshold is
-        // transcoded to 720p H.264 ≈ 15-25 MB CLIENT-SIDE before it ever
-        // touches the network. Only the optimised file is uploaded — never
-        // the original. Images are unchanged (still 25 MB hard cap).
+        // Client-side guard mirrors backend cap (150 MB videos / 25 MB images)
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
+        const CAP_MB = isVideoSlot ? 150 : 25;
+        if (file && file.size > CAP_MB * 1024 * 1024) {
+            toast.error(`File too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
+            return;
+        }
         const slotKey = label ? `${category}:${label}` : category;
-
-        if (!isVideoSlot && file && file.size > 25 * MB) {
-            toast.error(`File too large (${Math.round(file.size / MB)} MB). Max 25 MB.`);
-            return;
-        }
-        if (isVideoSlot && file && file.size > HARD_MAX) {
-            toast.error(
-                `Video too large (${Math.round(file.size / MB)} MB). Max ${Math.round(HARD_MAX / MB)} MB.`,
-            );
-            return;
-        }
-
-        // ⓞ Compression phase — runs only for videos > 25 MB. The user sees
-        //   a dedicated "Optimising..." overlay (compressing + compressPct)
-        //   BEFORE the network upload begins. Failures here abort the whole
-        //   flow — the original is NEVER uploaded as a fallback.
-        let payload = file;
-        if (isVideoSlot && file && file.size > COMPRESS_THRESHOLD) {
-            const mb = Math.round(file.size / MB);
-            if (file.size > SOFT_LIMIT) {
-                toast.message(
-                    `Large file detected (${mb} MB). Optimizing before upload…`,
-                    { duration: 4000 },
-                );
-            } else {
-                toast.message(`Optimising video (${mb} MB → ~720p)…`, { duration: 3000 });
-            }
-            setCompressing(slotKey);
-            setCompressPct(0);
-            try {
-                payload = await compressVideoIfNeeded(file, {
-                    onProgress: (_stage, pct) => setCompressPct(pct),
-                });
-                const newMb = Math.round((payload.size || 0) / MB);
-                toast.success(`Optimised to ${newMb} MB — uploading…`, { duration: 2500 });
-            } catch (e) {
-                console.error("[compress]", e);
-                setCompressing(null);
-                setCompressPct(0);
-                toast.error(
-                    e?.code === "VIDEO_TOO_LARGE"
-                        ? e.message
-                        : "Compression failed. Please try a shorter clip or smaller file.",
-                );
-                return; // FAIL-SAFE: never upload the original
-            } finally {
-                setCompressing(null);
-                setCompressPct(0);
-            }
-        }
-
         setUploading(slotKey);
         setUploadPct(0);
         // Persist the pending file in retryQueue so reload + retry button work.
-        setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: payload.name || file.name, fileSize: payload.size } }));
+        setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size } }));
 
         // Auto-retry loop with exponential backoff (3 attempts, 1s/2s/4s).
         // Solves transient mobile-network disconnects without backend changes.
@@ -632,7 +557,7 @@ export default function SubmissionPage() {
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 const fd = new FormData();
-                fd.append("file", payload);
+                fd.append("file", file);
                 fd.append("category", category);
                 if (label) fd.append("label", label);
                 const { data } = await axios.post(
@@ -673,11 +598,9 @@ export default function SubmissionPage() {
             }
         }
         // Failed after retries — keep entry in retryQueue so user can tap "Retry".
-        // Use the (possibly already-compressed) payload so the user doesn't
-        // pay the transcode cost again on retry.
         setRetryQueue((q) => ({
             ...q,
-            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file: payload },
+            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file },
         }));
         setUploading(null);
         setUploadPct(0);
@@ -802,30 +725,6 @@ export default function SubmissionPage() {
         }
     };
 
-    // beforeunload — warn user if they try to close/refresh during an upload.
-    // Modern browsers ignore the custom message (they show their own default),
-    // but any non-empty returnValue still triggers the native confirm dialog.
-    useEffect(() => {
-        if (!uploading && !compressing) return;
-        const handler = (e) => {
-            e.preventDefault();
-            e.returnValue =
-                "Upload in progress — leaving now will cancel it. Continue?";
-            return e.returnValue;
-        };
-        window.addEventListener("beforeunload", handler);
-        return () => window.removeEventListener("beforeunload", handler);
-    }, [uploading, compressing]);
-
-    // Derive "has failed uploads" for the overlay's retry CTA.
-    const failedSlots = useMemo(
-        () =>
-            Object.entries(retryQueue || {})
-                .filter(([, v]) => v && v.failed)
-                .map(([k, v]) => ({ slotKey: k, ...v })),
-        [retryQueue],
-    );
-
     const finalize = async () => {
         await saveForm();
         setFinalizing(true);
@@ -856,22 +755,16 @@ export default function SubmissionPage() {
     // ---------------------------------------------------------------
     if (loading) {
         return (
-            <>
-                <BrandSplash />
-                <div className="min-h-screen flex items-center justify-center bg-[#050505]">
-                    <Loader2 className="w-6 h-6 animate-spin text-white/40" />
-                </div>
-            </>
+            <div className="min-h-screen flex items-center justify-center bg-[#050505]">
+                <Loader2 className="w-6 h-6 animate-spin text-white/40" />
+            </div>
         );
     }
     if (!project) {
         return (
-            <>
-                <BrandSplash />
-                <div className="min-h-screen flex items-center justify-center bg-[#050505] text-white/60 p-6 text-center">
-                    <p>Project not found.</p>
-                </div>
-            </>
+            <div className="min-h-screen flex items-center justify-center bg-[#050505] text-white/60 p-6 text-center">
+                <p>Project not found.</p>
+            </div>
         );
     }
 
@@ -933,10 +826,11 @@ export default function SubmissionPage() {
             submission?.status === "updated" ? "Resubmitted" : "Submitted";
         const feedback = submission?.client_feedback || [];
         return (
-            <>
-                <BrandSplash />
-                <div className="min-h-screen bg-[#050505] text-white relative">
-                    <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
+            <div className="min-h-screen bg-[#050505] text-white relative">
+                <div className="absolute top-5 right-5">
+                    <ThemeToggle />
+                </div>
+                <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
                     <div className="text-center">
                         <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
                             <Check className="w-6 h-6" />
@@ -990,37 +884,15 @@ export default function SubmissionPage() {
                     </section>
                 </div>
             </div>
-            </>
         );
     }
 
     return (
-        <>
-            <BrandSplash />
-            <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
-            {/* v37q — Full-screen upload overlay.
-                Renders over everything (z-[100]) while `uploading` is truthy
-                OR while any slot has an unresolved failure. Blocks pointer
-                events on the rest of the page so no form input can be
-                accidentally touched mid-upload. */}
-            <UploadOverlay
-                uploading={uploading}
-                uploadPct={uploadPct}
-                compressing={compressing}
-                compressPct={compressPct}
-                failedSlots={failedSlots}
-                onRetry={retryUpload}
-                onDismissFailure={(slotKey) =>
-                    setRetryQueue((q) => {
-                        const n = { ...q };
-                        delete n[slotKey];
-                        return n;
-                    })
-                }
-            />
+        <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
             <header className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-white/10">
                 <div className="max-w-3xl mx-auto px-5 py-4 flex items-center justify-between">
                     <Logo size="sm" />
+                    <ThemeToggle size="sm" />
                 </div>
                 {/* Mobile-only 3-step indicator. Desktop renders the full
                     form vertically (this bar is hidden via md:hidden).
@@ -1067,7 +939,7 @@ export default function SubmissionPage() {
                 )}
             </header>
 
-            <div className="max-w-3xl mx-auto px-5 py-8 md:py-14 pb-28 md:pb-14">
+            <div className="max-w-3xl mx-auto px-5 py-8 md:py-14">
                 {/* SECTION 1 — Project Info */}
                 <section className="mb-10" data-testid="project-info-section" data-step="1">
                     <p className="eyebrow mb-3">Audition Brief</p>
@@ -1174,41 +1046,19 @@ export default function SubmissionPage() {
                                 data-testid="prefill-suggestion-card"
                                 data-step="1"
                             >
-                                <div className="flex items-center gap-3 min-w-0 flex-1">
-                                    {prefillSuggestion.data.image_url ? (
-                                        <img
-                                            src={prefillSuggestion.data.image_url}
-                                            alt=""
-                                            loading="lazy"
-                                            onError={(e) => {
-                                                e.currentTarget.style.display =
-                                                    "none";
-                                            }}
-                                            data-testid="prefill-thumb"
-                                            className="w-14 h-14 rounded-sm object-cover bg-[#0a0a0a] border border-white/10 shrink-0"
-                                        />
-                                    ) : null}
-                                    <div className="min-w-0">
-                                        <p className="text-sm text-white">
-                                            Is this you?{" "}
-                                            <span className="text-white/60">
-                                                Use saved details?
-                                            </span>
-                                        </p>
-                                        <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
-                                            {prefillSuggestion.data.first_name}{" "}
-                                            {prefillSuggestion.data.last_name || ""}
-                                            {prefillSuggestion.data.age != null
-                                                ? ` · ${prefillSuggestion.data.age}`
-                                                : ""}
-                                            {prefillSuggestion.data.location
-                                                ? ` · ${prefillSuggestion.data.location}`
-                                                : ""}
-                                            {prefillSuggestion.data.height
-                                                ? ` · ${prefillSuggestion.data.height}`
-                                                : ""}
-                                        </p>
-                                    </div>
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm text-white">
+                                        We found your profile.{" "}
+                                        <span className="text-white/60">
+                                            Use saved details?
+                                        </span>
+                                    </p>
+                                    <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
+                                        {prefillSuggestion.data.first_name}{" "}
+                                        {prefillSuggestion.data.last_name || ""}
+                                        {prefillSuggestion.data.location ? ` · ${prefillSuggestion.data.location}` : ""}
+                                        {prefillSuggestion.data.height ? ` · ${prefillSuggestion.data.height}` : ""}
+                                    </p>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <button
@@ -1271,75 +1121,36 @@ export default function SubmissionPage() {
                                 value={form.dob}
                                 max={new Date().toISOString().split("T")[0]}
                                 onChange={(v) =>
-                                    setForm({
-                                        ...form,
-                                        dob: v,
-                                        age: "",
-                                        // Editing DOB clears any prior override
-                                        // so the recalculated age takes effect.
-                                        age_override: "",
-                                    })
+                                    setForm({ ...form, dob: v, age: "" })
                                 }
                                 onBlur={saveForm}
                                 testid="form-dob"
                                 className="[color-scheme:dark]"
                             />
                             <div data-testid="form-age-field">
-                                {form.dob ? (
-                                    <>
-                                        <span className="text-[11px] text-white/60 tracking-widest uppercase">
-                                            Age (Auto-calculated)
-                                        </span>
-                                        <input
-                                            type="number"
-                                            value={computedAge ?? ""}
-                                            readOnly
-                                            tabIndex={-1}
-                                            data-testid="form-age-auto"
-                                            className="mt-2 w-full bg-transparent border-b border-white/10 outline-none py-3 text-base text-white/70 cursor-not-allowed"
-                                        />
-                                        <input
-                                            type="number"
-                                            placeholder="Override age for this submission (optional)"
-                                            value={form.age_override}
-                                            onChange={(e) =>
-                                                setForm({
-                                                    ...form,
-                                                    age_override: e.target.value,
-                                                })
-                                            }
-                                            onBlur={saveForm}
-                                            min={10}
-                                            max={80}
-                                            data-testid="form-age-override"
-                                            className="mt-3 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-sm placeholder-white/40"
-                                        />
-                                        <p className="mt-1.5 text-[10px] text-white/55 leading-snug">
-                                            Age is auto-calculated from DOB. You may adjust it for this project.
-                                        </p>
-                                    </>
-                                ) : (
-                                    <>
-                                        <span className="text-[11px] text-white/60 tracking-widest uppercase">
-                                            Age *
-                                        </span>
-                                        <input
-                                            type="number"
-                                            value={form.age}
-                                            onChange={(e) =>
-                                                setForm({
-                                                    ...form,
-                                                    age: e.target.value,
-                                                })
-                                            }
-                                            onBlur={saveForm}
-                                            min={10}
-                                            max={80}
-                                            data-testid="form-age-input"
-                                            className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
-                                        />
-                                    </>
-                                )}
+                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                    Age {form.dob ? "(auto)" : "*"}
+                                </span>
+                                <input
+                                    type="number"
+                                    value={
+                                        form.dob
+                                            ? computedAge ?? ""
+                                            : form.age
+                                    }
+                                    disabled={!!form.dob}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            age: e.target.value,
+                                        })
+                                    }
+                                    onBlur={saveForm}
+                                    min={10}
+                                    max={80}
+                                    data-testid="form-age-input"
+                                    className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base disabled:text-white/50"
+                                />
                             </div>
                             <div data-testid="form-height-field">
                                 <span className="text-[11px] text-white/60 tracking-widest uppercase">
@@ -1560,43 +1371,24 @@ export default function SubmissionPage() {
                             </div>
                         </div>
 
-                        {/* AVAILABILITY — decision block (v37n: high-emphasis card) */}
+                        {/* AVAILABILITY — decision block */}
                         <div
-                            className="border-t border-white/10 pt-8"
+                            className="border-t border-white/10 pt-7"
                             data-testid="availability-block"
                             data-step="2"
-                            id="availability"
                         >
-                            <p className="eyebrow mb-4">
+                            <p className="eyebrow mb-2">
                                 Availability{" "}
                                 <span className="text-[#FF3B30]">*</span>
                             </p>
-
-                            {/* PROMINENT SHOOT DATES CARD — gold-accented,
-                                parallels the Client Budget card so the two
-                                key project commitments share visual weight. */}
                             {project.shoot_dates && (
-                                <div
-                                    className="border border-[#c9a961]/50 bg-[#c9a961]/[0.07] px-5 py-5 mb-3 rounded-sm"
-                                    data-testid="shoot-dates-card"
-                                >
-                                    <p className="text-[10px] tracking-[0.18em] uppercase text-[#c9a961] mb-1.5">
-                                        Shoot Dates
-                                    </p>
-                                    <p
-                                        className="font-display text-2xl md:text-3xl tracking-tight text-white leading-snug"
-                                        data-testid="shoot-dates-value"
-                                    >
-                                        {project.shoot_dates}
-                                    </p>
-                                    <p className="mt-2 text-[11px] text-white/65 leading-relaxed">
-                                        Costume trial and rehearsal dates (if any) will be informed.
-                                    </p>
-                                </div>
+                                <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                                    {project.shoot_dates}
+                                    {" — "}Costume trial and rehearsal dates
+                                    (if any) will be informed.
+                                </p>
                             )}
-
-                            {/* Two prominent CTAs — stacked on mobile, ≥sm side-by-side. */}
-                            <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
+                            <div className="grid grid-cols-2 gap-2 mb-3">
                                 {AVAILABILITY_OPTIONS.map((opt) => {
                                     const active =
                                         form.availability.status === opt.key;
@@ -1615,55 +1407,35 @@ export default function SubmissionPage() {
                                                 setTimeout(saveForm, 0);
                                             }}
                                             data-testid={`avail-${opt.key}-btn`}
-                                            className={`flex-1 px-5 py-4 rounded-sm border tracking-widest uppercase text-[12px] font-semibold transition-all min-h-[56px] active:scale-[0.98] ${
-                                                active
-                                                    ? "bg-white text-black border-white shadow-[0_0_0_1px_rgba(201,169,97,0.4)]"
-                                                    : "bg-transparent border-white/25 hover:border-white/60 text-white"
-                                            }`}
+                                            className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${active ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
                                         >
                                             {opt.label}
                                         </button>
                                     );
                                 })}
                             </div>
-
-                            {/* Smooth reveal — same grid-rows trick as budget. */}
-                            <div
-                                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
-                                    form.availability.status === "no"
-                                        ? "grid-rows-[1fr] opacity-100 mt-4"
-                                        : "grid-rows-[0fr] opacity-0 mt-0"
-                                }`}
-                            >
-                                <div className="overflow-hidden">
-                                    <label className="block text-[11px] tracking-widest uppercase text-white/60 mb-2">
-                                        Provide availability details
-                                    </label>
-                                    <textarea
-                                        value={form.availability.note}
-                                        onChange={(e) =>
-                                            setForm({
-                                                ...form,
-                                                availability: {
-                                                    ...form.availability,
-                                                    note: e.target.value,
-                                                },
-                                            })
-                                        }
-                                        onBlur={saveForm}
-                                        rows={3}
-                                        placeholder="Share alternate dates, conflicts, or window of availability."
-                                        data-testid="availability-note-input"
-                                        autoFocus={
-                                            form.availability.status === "no"
-                                        }
-                                        className="w-full bg-transparent border border-white/25 focus:border-white rounded-sm p-3 text-sm outline-none placeholder-white/35"
-                                    />
-                                </div>
-                            </div>
+                            {form.availability.status === "no" && (
+                                <textarea
+                                    value={form.availability.note}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            availability: {
+                                                ...form.availability,
+                                                note: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    onBlur={saveForm}
+                                    rows={3}
+                                    placeholder="Please specify reason / alternate availability"
+                                    data-testid="availability-note-input"
+                                    className="w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
+                                />
+                            )}
                         </div>
 
-                        {/* BUDGET — decision block (v37n redesign) */}
+                        {/* BUDGET — decision block */}
                         <div
                             className="border-t border-white/10 pt-7"
                             data-testid="budget-block"
@@ -1673,34 +1445,22 @@ export default function SubmissionPage() {
                                 Budget{" "}
                                 <span className="text-[#FF3B30]">*</span>
                             </p>
-
-                            {/* PROMINENT BUDGET CARD — gold-trimmed, high contrast.
-                                Always visible if the project shared a daily rate. */}
-                            {project.budget_per_day && (
+                            {project.commission_percent && (
                                 <div
-                                    className="border border-[#c9a961]/50 bg-[#c9a961]/[0.07] px-5 py-5 mb-3 rounded-sm"
-                                    data-testid="client-budget-card"
+                                    className="flex items-center justify-between border border-white/25 bg-white/[0.04] px-4 py-3 mb-5"
+                                    data-testid="commission-card"
                                 >
-                                    <p className="text-[10px] tracking-[0.18em] uppercase text-[#c9a961] mb-1.5">
-                                        Client Budget
-                                    </p>
-                                    <p
-                                        className="font-display text-3xl md:text-4xl tracking-tight text-white leading-none"
-                                        data-testid="client-budget-amount"
-                                    >
-                                        {project.budget_per_day}
-                                        <span className="text-base text-white/55 font-sans tracking-normal ml-1.5">
-                                            / day
-                                        </span>
-                                    </p>
+                                    <span className="text-[11px] tracking-widest uppercase text-white/70">
+                                        Commission
+                                    </span>
+                                    <span className="font-display text-2xl text-white">
+                                        {project.commission_percent}
+                                    </span>
                                 </div>
                             )}
-
-                            {/* Per-look budget breakdown (project.talent_budget),
-                                kept here as supporting info — same density as before. */}
                             {(project.talent_budget || []).length > 0 && (
                                 <div
-                                    className="border border-white/15 bg-white/[0.03] px-4 py-3 mb-3 rounded-sm"
+                                    className="border border-white/15 bg-white/[0.03] px-4 py-3 mb-5"
                                     data-testid="talent-budget-hint"
                                 >
                                     <div className="text-[10px] tracking-widest uppercase text-white/50 mb-2">
@@ -1724,10 +1484,7 @@ export default function SubmissionPage() {
                                     </div>
                                 </div>
                             )}
-
-                            {/* Two prominent CTAs — stacked on mobile, side-by-side ≥sm.
-                                Each is full-width with a 56px tap target. */}
-                            <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -1741,13 +1498,14 @@ export default function SubmissionPage() {
                                         setTimeout(saveForm, 0);
                                     }}
                                     data-testid="budget-accept-btn"
-                                    className={`flex-1 px-5 py-4 rounded-sm border tracking-widest uppercase text-[12px] font-semibold transition-all min-h-[56px] active:scale-[0.98] ${
-                                        form.budget.status === "accept"
-                                            ? "bg-white text-black border-white shadow-[0_0_0_1px_rgba(201,169,97,0.4)]"
-                                            : "bg-transparent border-white/25 hover:border-white/60 text-white"
-                                    }`}
+                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "accept" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
                                 >
-                                    Accept this budget
+                                    Accept
+                                    {project.budget_per_day && (
+                                        <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
+                                            {project.budget_per_day} / day
+                                        </span>
+                                    )}
                                 </button>
                                 <button
                                     type="button"
@@ -1762,63 +1520,32 @@ export default function SubmissionPage() {
                                         setTimeout(saveForm, 0);
                                     }}
                                     data-testid="budget-custom-btn"
-                                    className={`flex-1 px-5 py-4 rounded-sm border tracking-widest uppercase text-[12px] font-semibold transition-all min-h-[56px] active:scale-[0.98] ${
-                                        form.budget.status === "custom"
-                                            ? "bg-white text-black border-white shadow-[0_0_0_1px_rgba(201,169,97,0.4)]"
-                                            : "bg-transparent border-white/25 hover:border-white/60 text-white"
-                                    }`}
+                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "custom" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
                                 >
-                                    Propose your own
+                                    Not accepting
+                                    <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
+                                        Propose your own
+                                    </span>
                                 </button>
                             </div>
-
-                            {/* Reveal: smooth height + opacity transition without
-                                triggering layout thrash. Uses CSS grid trick:
-                                grid-rows transitions from 0fr → 1fr. */}
-                            <div
-                                className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
-                                    form.budget.status === "custom"
-                                        ? "grid-rows-[1fr] opacity-100 mt-4"
-                                        : "grid-rows-[0fr] opacity-0 mt-0"
-                                }`}
-                            >
-                                <div className="overflow-hidden">
-                                    <label className="block text-[11px] tracking-widest uppercase text-white/60 mb-2">
-                                        Enter your expected budget
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={form.budget.value}
-                                        onChange={(e) =>
-                                            setForm({
-                                                ...form,
-                                                budget: {
-                                                    ...form.budget,
-                                                    value: e.target.value,
-                                                },
-                                            })
-                                        }
-                                        onBlur={saveForm}
-                                        placeholder="e.g. ₹65,000 / day"
-                                        data-testid="budget-value-input"
-                                        autoFocus={form.budget.status === "custom"}
-                                        className="w-full bg-transparent border-b border-white/30 focus:border-white outline-none py-3 text-base placeholder-white/35"
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Commission — secondary; surfaced below the decision
-                                so it doesn't compete with the primary budget card. */}
-                            {project.commission_percent && (
-                                <p
-                                    className="mt-5 text-[11px] tracking-widest uppercase text-white/55"
-                                    data-testid="commission-card"
-                                >
-                                    Agency Commission:{" "}
-                                    <span className="tg-mono text-white/80 normal-case tracking-normal">
-                                        {project.commission_percent}
-                                    </span>
-                                </p>
+                            {form.budget.status === "custom" && (
+                                <input
+                                    type="text"
+                                    value={form.budget.value}
+                                    onChange={(e) =>
+                                        setForm({
+                                            ...form,
+                                            budget: {
+                                                ...form.budget,
+                                                value: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    onBlur={saveForm}
+                                    placeholder="Enter your expected budget per day"
+                                    data-testid="budget-value-input"
+                                    className="w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
+                                />
                             )}
                         </div>
 
@@ -1832,57 +1559,31 @@ export default function SubmissionPage() {
                         )}
 
                         {(project.custom_questions || []).length > 0 && (
-                            <div
-                                className="mt-7 rounded-md border border-[#c9a961]/45 bg-[#c9a961]/[0.06] p-5 md:p-6"
-                                data-testid="custom-questions-block"
-                                data-step="2"
-                            >
-                                <div className="flex items-start gap-3 mb-1">
-                                    <span className="shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full bg-[#c9a961]/15 border border-[#c9a961]/40 text-[#c9a961]">
-                                        <Lightbulb className="w-4 h-4" strokeWidth={1.8} />
-                                    </span>
-                                    <div className="min-w-0 flex-1">
-                                        <h3
-                                            className="font-display text-xl md:text-2xl tracking-tight text-white leading-snug"
-                                            data-testid="custom-questions-heading"
-                                        >
-                                            Important Questions
-                                            <span className="ml-2 text-xs tg-mono align-middle text-[#c9a961] uppercase tracking-widest">
-                                                Recommended
-                                            </span>
-                                        </h3>
-                                        <p className="mt-1.5 text-[13px] md:text-sm text-white/65 leading-relaxed">
-                                            These help us shortlist you better. Not mandatory.
-                                        </p>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-6 mt-5 pt-5 border-t border-white/10">
-                                    {project.custom_questions.map((q) => (
-                                        <FormField
-                                            key={q.id}
-                                            label={q.question}
-                                            value={
-                                                (form.custom_answers || {})[
-                                                    q.id
-                                                ] || ""
-                                            }
-                                            onChange={(v) =>
-                                                setForm({
-                                                    ...form,
-                                                    custom_answers: {
-                                                        ...(form.custom_answers ||
-                                                            {}),
-                                                        [q.id]: v,
-                                                    },
-                                                })
-                                            }
-                                            onBlur={saveForm}
-                                            testid={`form-cq-${q.id}`}
-                                            wide
-                                        />
-                                    ))}
-                                </div>
+                            <div className="border-t border-white/10 pt-6 space-y-5" data-step="2">
+                                <p className="eyebrow">Additional Questions</p>
+                                {project.custom_questions.map((q) => (
+                                    <FormField
+                                        key={q.id}
+                                        label={q.question}
+                                        value={
+                                            (form.custom_answers || {})[q.id] ||
+                                            ""
+                                        }
+                                        onChange={(v) =>
+                                            setForm({
+                                                ...form,
+                                                custom_answers: {
+                                                    ...(form.custom_answers ||
+                                                        {}),
+                                                    [q.id]: v,
+                                                },
+                                            })
+                                        }
+                                        onBlur={saveForm}
+                                        testid={`form-cq-${q.id}`}
+                                        wide
+                                    />
+                                ))}
                             </div>
                         )}
 
@@ -2023,6 +1724,7 @@ export default function SubmissionPage() {
                                 removeMedia={removeMedia}
                                 uploading={uploading}
                                 uploadPct={uploadPct}
+                                FILE_URL={FILE_URL}
                                 testidPrefix="indian"
                             />
 
@@ -2039,6 +1741,7 @@ export default function SubmissionPage() {
                                 removeMedia={removeMedia}
                                 uploading={uploading}
                                 uploadPct={uploadPct}
+                                FILE_URL={FILE_URL}
                                 testidPrefix="western"
                             />
 
@@ -2053,7 +1756,7 @@ export default function SubmissionPage() {
                                         className="relative aspect-square bg-[#0a0a0a] border border-white/10 group"
                                     >
                                         <img
-                                            src={m.url}
+                                            src={FILE_URL(m.storage_path)}
                                             alt=""
                                             className="w-full h-full object-cover"
                                         />
@@ -2185,7 +1888,7 @@ export default function SubmissionPage() {
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
             {emailGateUnlocked && mobileStep < 3 && (
                 <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3"
                     data-testid="wizard-bottom-bar"
                 >
                     <div className="flex items-center gap-2 max-w-3xl mx-auto">
@@ -2213,7 +1916,6 @@ export default function SubmissionPage() {
                 </div>
             )}
         </div>
-        </>
     );
 }
 
@@ -2241,6 +1943,7 @@ function PortfolioGroup({
     removeMedia,
     uploading,
     uploadPct,
+    FILE_URL,
     testidPrefix,
 }) {
     const isUploading = uploading === category;
@@ -2266,7 +1969,7 @@ function PortfolioGroup({
                         data-testid={`${testidPrefix}-image-${m.id}`}
                     >
                         <img
-                            src={m.url}
+                            src={FILE_URL(m.storage_path)}
                             alt=""
                             className="w-full h-full object-cover"
                         />
@@ -2328,122 +2031,57 @@ function PortfolioGroup({
 
 function WorkLinksEditor({ links, onChange }) {
     const [input, setInput] = useState("");
-
-    const addOne = (raw, current) => {
-        const v = (raw || "").trim();
-        if (!v) return current;
-        if (current.includes(v)) return current;
-        return [...current, v];
-    };
-
-    const addFromInput = () => {
-        // Accept whitespace / comma / newline-separated paste.
-        const parts = input
-            .split(/[\s,]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-        if (!parts.length) return;
-        let next = links || [];
-        for (const p of parts) next = addOne(p, next);
-        if (next !== (links || [])) onChange(next);
+    const add = () => {
+        const v = input.trim();
+        if (!v) return;
+        onChange([...(links || []), v]);
         setInput("");
     };
-
     const remove = (i) =>
         onChange((links || []).filter((_, idx) => idx !== i));
-
     return (
-        <div className="mt-2" data-testid="work-links-editor">
-            {/* Chip cloud — flex-wraps so dozens of links never break the layout. */}
-            {(links || []).length > 0 && (
+        <div className="mt-2 space-y-2" data-testid="work-links-editor">
+            {(links || []).map((w, i) => (
                 <div
-                    className="flex flex-wrap gap-2 mb-3"
-                    data-testid="work-links-chips"
+                    key={`${w}-${i}`}
+                    className="flex items-center justify-between gap-2 px-3 py-2 border border-white/10 rounded-sm text-xs tg-mono break-all"
+                    data-testid={`work-link-row-${i}`}
                 >
-                    {(links || []).map((w, i) => {
-                        const href = /^https?:\/\//i.test(w) ? w : `https://${w}`;
-                        return (
-                            <span
-                                key={`${w}-${i}`}
-                                data-testid={`work-link-chip-${i}`}
-                                className="inline-flex items-center gap-1 max-w-full pl-3 pr-1 py-1.5 border border-white/15 bg-white/[0.04] rounded-full text-xs tg-mono hover:border-white/40 transition-colors"
-                            >
-                                <a
-                                    href={href}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="truncate max-w-[180px] sm:max-w-[260px] text-white/85 hover:text-white"
-                                    title={w}
-                                >
-                                    {w}
-                                </a>
-                                <button
-                                    type="button"
-                                    onClick={() => remove(i)}
-                                    aria-label={`Remove ${w}`}
-                                    data-testid={`work-link-remove-${i}`}
-                                    className="w-5 h-5 inline-flex items-center justify-center rounded-full text-white/45 hover:text-white hover:bg-white/10 active:scale-90 transition-all"
-                                >
-                                    <X className="w-3 h-3" />
-                                </button>
-                            </span>
-                        );
-                    })}
+                    <span className="truncate text-white/80">{w}</span>
+                    <button
+                        type="button"
+                        onClick={() => remove(i)}
+                        data-testid={`work-link-remove-${i}`}
+                        className="text-white/40 hover:text-white shrink-0"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
                 </div>
-            )}
-
-            {/* Input + always-visible Add Link button. `min-w-0` on the input
-                prevents flex overflow on mobile so the button never gets pushed
-                off-screen no matter how many chips are above. */}
+            ))}
             <div className="flex items-center gap-2">
                 <input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === ",") {
+                        if (e.key === "Enter") {
                             e.preventDefault();
-                            addFromInput();
-                        } else if (
-                            e.key === "Backspace" &&
-                            !input &&
-                            (links || []).length
-                        ) {
-                            // Quick-remove last chip when input is empty.
-                            e.preventDefault();
-                            remove(links.length - 1);
-                        }
-                    }}
-                    onPaste={(e) => {
-                        const txt = e.clipboardData?.getData("text") || "";
-                        if (/[\s,]/.test(txt)) {
-                            e.preventDefault();
-                            const parts = txt
-                                .split(/[\s,]+/)
-                                .map((s) => s.trim())
-                                .filter(Boolean);
-                            let next = links || [];
-                            for (const p of parts) next = addOne(p, next);
-                            if (next !== (links || [])) onChange(next);
-                            setInput("");
+                            add();
                         }
                     }}
                     inputMode="url"
-                    placeholder="Paste a URL & press Enter"
+                    placeholder="https://… (paste & press Enter)"
                     data-testid="work-link-input"
-                    className="flex-1 min-w-0 bg-transparent border-b border-white/20 focus:border-white outline-none py-2.5 text-sm"
+                    className="flex-1 bg-transparent border-b border-white/20 focus:border-white outline-none py-2 text-sm"
                 />
                 <button
                     type="button"
-                    onClick={addFromInput}
+                    onClick={add}
                     data-testid="work-link-add-btn"
-                    className="shrink-0 text-[11px] tracking-widest uppercase px-3.5 py-2.5 border border-white/25 hover:border-white text-white/85 hover:text-white rounded-sm min-h-[44px] active:scale-[0.97] transition-all"
+                    className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm min-h-[44px] active:scale-[0.97] transition-transform"
                 >
-                    Add Link
+                    Add
                 </button>
             </div>
-            <p className="mt-1.5 text-[10px] text-white/55 leading-snug">
-                Customize links for this project only.
-            </p>
         </div>
     );
 }
@@ -2868,7 +2506,7 @@ function FeedbackRow({ fb }) {
             </div>
             {isVoice ? (
                 <audio
-                    src={OPTIMIZED_AUDIO_URL(fb.content_url)}
+                    src={FILE_URL(fb.content_url)}
                     controls
                     className="w-full"
                     data-testid={`talent-feedback-audio-${fb.id}`}
@@ -2895,203 +2533,5 @@ function timeAgo(iso) {
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
 }
-
-// ---------------------------------------------------------------------------
-// UploadOverlay — v37q full-screen upload UX.
-// Visible while an upload is in-flight OR while any previous upload has
-// failed and awaits retry. Blocks the rest of the UI with a backdrop so
-// users can't edit form fields mid-transfer.
-// ---------------------------------------------------------------------------
-function UploadOverlay({
-    uploading,
-    uploadPct,
-    compressing,
-    compressPct,
-    failedSlots,
-    onRetry,
-    onDismissFailure,
-}) {
-    const hasFailed = failedSlots && failedSlots.length > 0;
-    const visible = !!uploading || !!compressing || hasFailed;
-    if (!visible) return null;
-
-    // Prettier label from the internal slot key (e.g. "intro_video" → "Intro video").
-    const prettySlot = (key) =>
-        String(key || "")
-            .split(":")[0]
-            .replace(/_/g, " ")
-            .replace(/^./, (c) => c.toUpperCase());
-
-    // Phase priority: compress → upload → failure. Only one card is shown.
-    const phase = compressing ? "compress" : uploading ? "upload" : "failure";
-
-    return (
-        <div
-            className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 sm:p-6"
-            role="dialog"
-            aria-live="polite"
-            aria-modal="true"
-            data-testid="upload-overlay"
-        >
-            {/* Backdrop — blocks interaction with the rest of the page. */}
-            <div className="absolute inset-0 bg-black/80 backdrop-blur-md" />
-
-            {/* Card */}
-            <div className="relative w-full sm:max-w-md bg-[#0a0a0a] border border-white/15 rounded-lg shadow-2xl p-6 sm:p-7">
-                {phase === "compress" && (
-                    <>
-                        <div className="flex items-center gap-3 mb-5">
-                            <div className="relative w-10 h-10 shrink-0">
-                                <Sparkles className="w-10 h-10 text-[#c9a961]" strokeWidth={1.5} />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                                <p className="font-display text-lg tracking-tight text-white">
-                                    Optimising your video…
-                                </p>
-                                <p className="text-[11px] tg-mono text-white/55 mt-0.5 truncate">
-                                    {prettySlot(compressing)}  ·  720p compression
-                                </p>
-                            </div>
-                            <div
-                                className="tg-mono text-sm text-white/85 tabular-nums shrink-0"
-                                data-testid="compress-overlay-pct"
-                            >
-                                {Math.max(0, Math.min(100, compressPct || 0))}%
-                            </div>
-                        </div>
-                        <div
-                            className="h-2.5 w-full bg-white/8 rounded-full overflow-hidden"
-                            role="progressbar"
-                            aria-valuenow={compressPct}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                        >
-                            <div
-                                className="h-full bg-gradient-to-r from-[#c9a961] to-[#e8cd8a] transition-[width] duration-200 ease-out"
-                                style={{ width: `${Math.max(2, Math.min(100, compressPct || 0))}%` }}
-                                data-testid="compress-overlay-bar"
-                            />
-                        </div>
-                        <p className="mt-4 text-[11px] text-white/55 leading-relaxed">
-                            Large file detected — we're compressing it to ~720p
-                            in your browser before uploading. This keeps your
-                            wait short on slow networks. Please keep this tab
-                            open.
-                        </p>
-                    </>
-                )}
-
-                {phase === "upload" && (
-                    <>
-                        <div className="flex items-center gap-3 mb-5">
-                            <div className="relative w-10 h-10 shrink-0">
-                                <Loader2 className="w-10 h-10 animate-spin text-[#c9a961]" strokeWidth={1.5} />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                                <p className="font-display text-lg tracking-tight text-white">
-                                    Uploading your file…
-                                </p>
-                                <p className="text-[11px] tg-mono text-white/55 mt-0.5 truncate">
-                                    {prettySlot(uploading)}
-                                </p>
-                            </div>
-                            <div
-                                className="tg-mono text-sm text-white/85 tabular-nums shrink-0"
-                                data-testid="upload-overlay-pct"
-                            >
-                                {Math.max(0, Math.min(100, uploadPct || 0))}%
-                            </div>
-                        </div>
-
-                        {/* Large progress bar — 10px tall, rounded, clamp 0-100. */}
-                        <div
-                            className="h-2.5 w-full bg-white/8 rounded-full overflow-hidden"
-                            role="progressbar"
-                            aria-valuenow={uploadPct}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                        >
-                            <div
-                                className="h-full bg-gradient-to-r from-[#c9a961] to-[#e8cd8a] transition-[width] duration-200 ease-out"
-                                style={{
-                                    width: `${Math.max(2, Math.min(100, uploadPct || 0))}%`,
-                                }}
-                                data-testid="upload-overlay-bar"
-                            />
-                        </div>
-
-                        <p className="mt-4 text-[11px] text-white/55 leading-relaxed">
-                            Please keep this tab open. Closing or refreshing will
-                            cancel the transfer. Large videos may take a minute
-                            on slower networks.
-                        </p>
-                    </>
-                )}
-
-                {phase === "failure" && (
-                    <>
-                        <div className="flex items-center gap-3 mb-4">
-                            <div className="w-10 h-10 shrink-0 rounded-full bg-[#FF3B30]/15 border border-[#FF3B30]/50 flex items-center justify-center">
-                                <X className="w-5 h-5 text-[#FF3B30]" strokeWidth={2.2} />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                                <p className="font-display text-lg tracking-tight text-white">
-                                    Upload failed
-                                </p>
-                                <p className="text-[11px] tg-mono text-white/55 mt-0.5">
-                                    {failedSlots.length === 1
-                                        ? "1 file needs your attention"
-                                        : `${failedSlots.length} files need your attention`}
-                                </p>
-                            </div>
-                        </div>
-
-                        <div className="space-y-2.5 max-h-[50vh] overflow-y-auto -mx-1 px-1">
-                            {failedSlots.map((f) => (
-                                <div
-                                    key={f.slotKey}
-                                    className="border border-white/12 bg-white/[0.03] rounded-sm p-3"
-                                    data-testid={`upload-failure-${f.slotKey}`}
-                                >
-                                    <p className="text-[12px] text-white/85 font-medium truncate">
-                                        {prettySlot(f.slotKey)}
-                                    </p>
-                                    <p className="text-[10px] tg-mono text-white/50 mt-0.5 break-all">
-                                        {f.fileName || "—"}
-                                    </p>
-                                    {f.error && (
-                                        <p className="text-[11px] text-[#FF8A80] mt-1.5 leading-snug">
-                                            {f.error}
-                                        </p>
-                                    )}
-                                    <div className="mt-2.5 flex gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => onRetry(f.slotKey)}
-                                            disabled={!f.file}
-                                            data-testid={`upload-retry-btn-${f.slotKey}`}
-                                            className="flex-1 min-h-[40px] px-3 py-2 bg-white text-black text-[11px] tracking-widest uppercase font-semibold rounded-sm disabled:opacity-40 active:scale-[0.98] transition-all"
-                                        >
-                                            {f.file ? "Retry upload" : "Re-select file"}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => onDismissFailure(f.slotKey)}
-                                            data-testid={`upload-dismiss-btn-${f.slotKey}`}
-                                            className="min-h-[40px] px-3 py-2 border border-white/25 hover:border-white text-white/70 hover:text-white text-[11px] tracking-widest uppercase rounded-sm active:scale-[0.98] transition-all"
-                                        >
-                                            Skip
-                                        </button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </>
-                )}
-            </div>
-        </div>
-    );
-}
-
 
 

@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Sparkles } from "lucide-react";
+import ThemeToggle from "@/components/ThemeToggle";
 import BrandHero from "@/components/BrandHero";
 
 /**
@@ -43,6 +44,7 @@ export default function Landing() {
                     >
                         Admin Sign in
                     </Link>
+                    <ThemeToggle />
                 </header>
 
                 <main className="flex-1 flex flex-col items-center justify-center px-6 md:px-12">

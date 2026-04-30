@@ -8,8 +8,8 @@
     --tg-surface-2: #1a1a1a;
     --tg-border: rgba(255, 255, 255, 0.1);
     --tg-border-strong: rgba(255, 255, 255, 0.25);
-    --tg-text: #ffffff;
-    --tg-muted: #bbbbbb;
+    --tg-text: #f5f5f0;
+    --tg-muted: #8a8a8a;
     --tg-success: #34c759;
     --tg-danger: #ff3b30;
     --tg-warning: #ffcc00;
@@ -19,10 +19,10 @@ html.light {
     --tg-bg: #fafaf7;
     --tg-surface: #ffffff;
     --tg-surface-2: #f2f2ec;
-    --tg-border: rgba(0, 0, 0, 0.1);
-    --tg-border-strong: rgba(0, 0, 0, 0.25);
-    --tg-text: #111111;
-    --tg-muted: #555555;
+    --tg-border: rgba(0, 0, 0, 0.08);
+    --tg-border-strong: rgba(0, 0, 0, 0.22);
+    --tg-text: #0a0a0a;
+    --tg-muted: #666666;
     color-scheme: light;
 }
 
@@ -76,7 +76,7 @@ code {
         --secondary: 0 0% 96%;
         --secondary-foreground: 0 0% 9%;
         --muted: 0 0% 96%;
-        --muted-foreground: 0 0% 33%;
+        --muted-foreground: 0 0% 45%;
         --accent: 0 0% 96%;
         --accent-foreground: 0 0% 9%;
         --destructive: 4 90% 58%;
@@ -88,19 +88,19 @@ code {
     }
     .dark {
         --background: 0 0% 2%;
-        --foreground: 0 0% 100%;
+        --foreground: 60 11% 94%;
         --card: 0 0% 7%;
-        --card-foreground: 0 0% 100%;
+        --card-foreground: 60 11% 94%;
         --popover: 0 0% 7%;
-        --popover-foreground: 0 0% 100%;
+        --popover-foreground: 60 11% 94%;
         --primary: 0 0% 100%;
         --primary-foreground: 0 0% 6%;
         --secondary: 0 0% 11%;
-        --secondary-foreground: 0 0% 100%;
+        --secondary-foreground: 60 11% 94%;
         --muted: 0 0% 11%;
-        --muted-foreground: 0 0% 73%;
+        --muted-foreground: 0 0% 55%;
         --accent: 0 0% 14%;
-        --accent-foreground: 0 0% 100%;
+        --accent-foreground: 60 11% 94%;
         --destructive: 4 90% 58%;
         --destructive-foreground: 0 0% 100%;
         --border: 0 0% 16%;
@@ -161,7 +161,7 @@ html.light .tg-grain::before {
     letter-spacing: 0.28em;
     text-transform: uppercase;
     color: var(--tg-muted);
-    font-weight: 600;
+    font-weight: 500;
 }
 
 .tg-scroll::-webkit-scrollbar {
@@ -220,13 +220,10 @@ html.light .tg-grain::before {
 /* ==========================================================================
    LIGHT MODE — global overrides for hardcoded dark palette classes
    (Keeps the same component code working in light theme)
-   Color spec (locked v38c):
-     • Light primary: #111111   • Light secondary: #555555
-     • Dark  primary: #FFFFFF   • Dark  secondary: #BBBBBB
    ========================================================================== */
 html.light body {
     background: #fafaf7;
-    color: #111111;
+    color: #0a0a0a;
 }
 
 /* Surfaces */
@@ -278,49 +275,43 @@ html.light .bg-white\/\[0\.02\] {
 
 /* Primary button: bg-white text-black stays high-contrast — flip to black on light */
 html.light .bg-white {
-    background-color: #111111 !important;
+    background-color: #0a0a0a !important;
     color: #ffffff !important;
 }
 html.light .text-black {
     color: #ffffff !important;
 }
 
-/* Text tones: invert whites to blacks at matching opacity.
-   Secondary text floor in light mode = #555555 (~67% black). Below that
-   we step further toward #555 / #777 for tertiary labels — never lighter
-   than rgba(0,0,0,0.42) so we stay above WCAG AA on white surfaces. */
+/* Text tones: invert whites to blacks at matching opacity */
 html.light .text-white {
-    color: #111111 !important;
+    color: #0a0a0a !important;
 }
 html.light .text-white\/90 {
-    color: rgba(17, 17, 17, 0.95) !important;
-}
-html.light .text-white\/85 {
-    color: rgba(17, 17, 17, 0.92) !important;
+    color: rgba(0, 0, 0, 0.9) !important;
 }
 html.light .text-white\/80 {
-    color: rgba(17, 17, 17, 0.88) !important;
+    color: rgba(0, 0, 0, 0.82) !important;
 }
 html.light .text-white\/70 {
-    color: rgba(17, 17, 17, 0.78) !important;
+    color: rgba(0, 0, 0, 0.75) !important;
 }
 html.light .text-white\/60 {
-    color: #555555 !important; /* secondary spec */
+    color: rgba(0, 0, 0, 0.65) !important;
 }
 html.light .text-white\/50 {
-    color: #555555 !important; /* clamp to AA floor */
+    color: rgba(0, 0, 0, 0.58) !important;
 }
 html.light .text-white\/40 {
-    color: #6b6b6b !important;
+    color: rgba(0, 0, 0, 0.5) !important;
 }
 html.light .text-white\/30 {
-    color: #777777 !important;
+    color: rgba(0, 0, 0, 0.4) !important;
 }
 html.light .text-white\/25 {
-    color: #7d7d7d !important;
+    color: rgba(0, 0, 0, 0.32) !important;
 }
 html.light .text-white\/20 {
-    color: #888888 !important;
+    color: rgba(0, 0, 0, 0.25) !important;
 }
 
 /* Placeholders */
@@ -437,183 +428,4 @@ html.light .opacity-40 {
 }
 html.light .opacity-30 {
     opacity: 0.14 !important;
-}
-
-/* ==========================================================================
-   v37o — Premium polish layer
-   Brand gold accents, placeholder contrast, premium card shadows, dividers.
-   ========================================================================== */
-
-/* ---- Gold accent surfaces (used on Client Budget / Shoot Dates / Important
-        Questions cards). Dark mode: dim warm gold. Light: warm cream amber. */
-html.light .bg-\[\#c9a961\]\/\[0\.06\],
-html.light .bg-\[\#c9a961\]\/\[0\.07\] {
-    background-color: rgba(201, 169, 97, 0.12) !important;
-}
-html.light .border-\[\#c9a961\]\/40,
-html.light .border-\[\#c9a961\]\/45,
-html.light .border-\[\#c9a961\]\/50 {
-    border-color: rgba(180, 140, 60, 0.55) !important;
-}
-html.light .text-\[\#c9a961\] {
-    color: #8a6a1f !important; /* darker gold for light-mode contrast */
-}
-
-/* ---- Placeholder contrast — dark mode floor at white/55, light-mode override.
-        Solves "washed-out grey text" reported as low contrast. */
-::placeholder {
-    color: rgba(255, 255, 255, 0.5);
-}
-.placeholder-white\/35::placeholder,
-.placeholder\:text-white\/35::placeholder {
-    color: rgba(255, 255, 255, 0.55) !important;
-}
-.placeholder-white\/40::placeholder {
-    color: rgba(255, 255, 255, 0.55) !important;
-}
-html.light ::placeholder {
-    color: rgba(0, 0, 0, 0.45) !important;
-}
-html.light .placeholder-white\/35::placeholder,
-html.light .placeholder-white\/40::placeholder,
-html.light .placeholder\:text-white\/30::placeholder {
-    color: rgba(0, 0, 0, 0.42) !important;
-}
-
-/* ---- Premium card-shadow utility. Soft glow in light mode for depth,
-        a subtle 1px highlight in dark for the "Netflix tile" feel.
-        Apply via `className="tg-card"` to any container. */
-.tg-card {
-    transition:
-        box-shadow 0.2s ease,
-        transform 0.2s ease;
-}
-html.dark .tg-card {
-    box-shadow:
-        inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-        0 1px 0 rgba(255, 255, 255, 0.03);
-}
-html.light .tg-card {
-    box-shadow:
-        0 1px 2px rgba(15, 15, 15, 0.04),
-        0 8px 24px -12px rgba(15, 15, 15, 0.10);
-}
-.tg-card:hover {
-    transform: translateY(-1px);
-}
-html.light .tg-card:hover {
-    box-shadow:
-        0 2px 4px rgba(15, 15, 15, 0.06),
-        0 14px 36px -12px rgba(15, 15, 15, 0.16);
-}
-
-/* ---- Section divider — premium hairline that adapts to theme.
-        Pairs with vertical breathing space for clean separation. */
-.tg-divider {
-    height: 1px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 0;
-}
-html.light .tg-divider {
-    background: rgba(0, 0, 0, 0.08);
-}
-
-/* ---- Strengthen tracking on small uppercase labels for legibility */
-.eyebrow {
-    letter-spacing: 0.18em;
-    font-weight: 600;
-}
-
-/* ---- Dark-mode helper-text floor at white/55 for the smallest text
-        (`text-[10px]` and `text-[11px]`) where below-AA contrast hurts most. */
-.tg-help {
-    color: rgba(255, 255, 255, 0.6);
-    line-height: 1.55;
-}
-html.light .tg-help {
-    color: #555555;
-}
-
-/* ---- v38c — Dark-mode secondary text floor.
-        Many components use text-white/40, text-white/50, text-white/60 for
-        labels & helper text. Spec demands secondary = #BBBBBB. We clamp the
-        most common faded variants to that floor in dark mode while leaving
-        primary white intact. Light mode uses its own block above. */
-html.dark .text-white\/60,
-html:not(.light) .text-white\/60 {
-    color: #bbbbbb !important;
-}
-html.dark .text-white\/50,
-html:not(.light) .text-white\/50 {
-    color: #b0b0b0 !important;
-}
-html.dark .text-white\/40,
-html:not(.light) .text-white\/40 {
-    color: #9a9a9a !important;
-}
-
-/* ---- Selected button rings — keep gold accent visible in both modes */
-html.light .shadow-\[0_0_0_1px_rgba\(201\,169\,97\,0\.4\)\] {
-    box-shadow: 0 0 0 1px rgba(180, 140, 60, 0.55) !important;
-}
-
-/* ---- v37t — Loading skeleton shimmer (used on ClientView grid) */
-@keyframes tg-shimmer {
-    0% {
-        background-position: -200% 0;
-    }
-    100% {
-        background-position: 200% 0;
-    }
-}
-.tg-skeleton {
-    background: linear-gradient(
-        90deg,
-        rgba(255, 255, 255, 0.04) 0%,
-        rgba(255, 255, 255, 0.08) 50%,
-        rgba(255, 255, 255, 0.04) 100%
-    );
-    background-size: 200% 100%;
-    animation: tg-shimmer 1.6s infinite linear;
-}
-html.light .tg-skeleton {
-    background: linear-gradient(
-        90deg,
-        rgba(0, 0, 0, 0.04) 0%,
-        rgba(0, 0, 0, 0.08) 50%,
-        rgba(0, 0, 0, 0.04) 100%
-    );
-    background-size: 200% 100%;
-}
-
-/* ==========================================================================
-   v37p — Mobile submission UX hardening
-   Guarantees the last inputs (Work Links, custom answers) always scroll into
-   view above the sticky bottom action bar on mobile, in both themes.
-   ========================================================================== */
-
-/* Any input/textarea inside the submission/application forms scrolls with
-   extra bottom margin so iOS/Android auto-scroll-on-focus clears the sticky
-   bar (72–96px tall including safe area). */
-@media (max-width: 767px) {
-    [data-testid="submission-page"] input,
-    [data-testid="submission-page"] textarea,
-    [data-testid="submission-page"] [data-testid$="-input"],
-    [data-testid="submission-page"] [data-testid$="-trigger"],
-    [data-testid="apply-page"] input,
-    [data-testid="apply-page"] textarea {
-        scroll-margin-bottom: 140px;
-    }
-}
-
-/* Prevent iOS auto-zoom on focus — forces base input font-size ≥ 16px on
-   mobile even when component styles request smaller text. Keeps labels at
-   their authored size (we scope this to actual input elements). */
-@media (max-width: 767px) {
-    [data-testid="submission-page"] input:not([type="checkbox"]):not([type="radio"]),
-    [data-testid="submission-page"] textarea,
-    [data-testid="apply-page"] input:not([type="checkbox"]):not([type="radio"]),
-    [data-testid="apply-page"] textarea {
-        font-size: 16px !important;
-    }
 }

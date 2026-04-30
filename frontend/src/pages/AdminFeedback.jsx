@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
-import { adminApi, OPTIMIZED_AUDIO_URL } from "@/lib/api";
+import { adminApi, FILE_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     Mic,
@@ -297,7 +297,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
             <div className="mt-4 bg-white/[0.03] border border-white/5 p-4 rounded-sm">
                 {isVoice ? (
                     <audio
-                        src={OPTIMIZED_AUDIO_URL(fb.content_url)}
+                        src={FILE_URL(fb.content_url)}
                         controls
                         className="w-full"
                         data-testid={`feedback-audio-${fb.id}`}

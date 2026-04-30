@@ -1,16 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
+import { FILE_URL } from "@/lib/api";
 import Logo from "@/components/Logo";
-import BrandSplash from "@/components/BrandSplash";
-import { VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
-import {
-    compressVideoIfNeeded,
-    COMPRESS_THRESHOLD,
-    SOFT_LIMIT,
-    HARD_MAX,
-    MB,
-} from "@/lib/videoCompress";
+import ThemeToggle from "@/components/ThemeToggle";
 import {
     Select,
     SelectContent,
@@ -301,50 +294,11 @@ export default function ApplicationPage() {
             }
             files = Array.from(files).slice(0, remaining);
         }
-        const isVideo = category === "intro_video";
         setUploading(category);
         try {
             for (const file of files) {
-                let payload = file;
-                // v38e — Client-side compression for large videos.
-                // Hard cap 500 MB; transcode anything > 25 MB to ~720p.
-                if (isVideo) {
-                    if (file.size > HARD_MAX) {
-                        toast.error(
-                            `Video too large (${Math.round(file.size / MB)} MB). Max ${Math.round(HARD_MAX / MB)} MB.`,
-                        );
-                        continue;
-                    }
-                    if (file.size > COMPRESS_THRESHOLD) {
-                        const mb = Math.round(file.size / MB);
-                        toast.message(
-                            file.size > SOFT_LIMIT
-                                ? `Large file detected (${mb} MB). Optimizing before upload…`
-                                : `Optimising video (${mb} MB → ~720p)…`,
-                            { duration: 3500 },
-                        );
-                        setUploading("intro_video_compressing");
-                        try {
-                            payload = await compressVideoIfNeeded(file, {
-                                onProgress: () => {},
-                            });
-                            const newMb = Math.round((payload.size || 0) / MB);
-                            toast.success(`Optimised to ${newMb} MB — uploading…`, { duration: 2000 });
-                        } catch (e) {
-                            console.error("[apply compress]", e);
-                            toast.error(
-                                e?.code === "VIDEO_TOO_LARGE"
-                                    ? e.message
-                                    : "Compression failed. Please try a shorter clip.",
-                            );
-                            continue; // FAIL-SAFE: skip the original
-                        } finally {
-                            setUploading(category);
-                        }
-                    }
-                }
                 const fd = new FormData();
-                fd.append("file", payload);
+                fd.append("file", file);
                 fd.append("category", category);
                 const { data } = await axios.post(
                     `${API}/public/apply/${aid}/upload`,
@@ -354,7 +308,6 @@ export default function ApplicationPage() {
                             Authorization: `Bearer ${token}`,
                             "Content-Type": "multipart/form-data",
                         },
-                        timeout: 0, // no per-request timeout for slow mobile networks
                     },
                 );
                 setMedia(data.media || []);
@@ -409,13 +362,11 @@ export default function ApplicationPage() {
     // --- Identity gate -----------------------------------------------------
     if (!started) {
         return (
-            <>
-                <BrandSplash />
-                <div
-                    className="min-h-screen bg-[#0c0c0c] text-white"
-                    data-testid="application-identity-page"
-                >
-                    <Header />
+            <div
+                className="min-h-screen bg-[#0c0c0c] text-white"
+                data-testid="application-identity-page"
+            >
+                <Header />
                 <div className="max-w-xl mx-auto px-6 py-16 md:py-24">
                     <p className="eyebrow mb-3">Talent Application</p>
                     <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-4">
@@ -522,7 +473,6 @@ export default function ApplicationPage() {
                     </button>
                 </div>
             </div>
-            </>
         );
     }
 
@@ -564,13 +514,11 @@ export default function ApplicationPage() {
 
     // --- Main form ---------------------------------------------------------
     return (
-        <>
-            <BrandSplash />
-            <div
-                className="min-h-screen bg-[#0c0c0c] text-white"
-                data-testid="application-form-page"
-            >
-                <Header />
+        <div
+            className="min-h-screen bg-[#0c0c0c] text-white"
+            data-testid="application-form-page"
+        >
+            <Header />
             <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
                 <p className="eyebrow mb-3">Application · {basics.email}</p>
                 <h1 className="font-display text-3xl md:text-5xl tracking-tight mb-8">
@@ -781,8 +729,7 @@ export default function ApplicationPage() {
                             </p>
                             {intro ? (
                                 <video
-                                    src={VIDEO_URL(intro)}
-                                    poster={VIDEO_POSTER_URL(intro)}
+                                    src={FILE_URL(intro.storage_path)}
                                     controls
                                     preload="metadata"
                                     className="w-full max-w-lg border border-white/10 bg-black rounded-sm"
@@ -792,21 +739,15 @@ export default function ApplicationPage() {
                                 <button
                                     onClick={() => videoRef.current?.click()}
                                     data-testid="apply-intro-upload-btn"
-                                    disabled={uploading === "intro_video" || uploading === "intro_video_compressing"}
+                                    disabled={uploading === "intro_video"}
                                     className="w-full max-w-lg border border-dashed border-white/20 hover:border-white/50 py-10 flex flex-col items-center gap-2 text-sm text-white/60"
                                 >
-                                    {uploading === "intro_video" || uploading === "intro_video_compressing" ? (
+                                    {uploading === "intro_video" ? (
                                         <Loader2 className="w-5 h-5 animate-spin" />
                                     ) : (
                                         <Video className="w-5 h-5" />
                                     )}
-                                    <span>
-                                        {uploading === "intro_video_compressing"
-                                            ? "Optimising video…"
-                                            : uploading === "intro_video"
-                                              ? "Uploading…"
-                                              : "Upload video"}
-                                    </span>
+                                    <span>Upload video</span>
                                 </button>
                             )}
                             <input
@@ -832,6 +773,7 @@ export default function ApplicationPage() {
                             upload={upload}
                             removeMedia={removeMedia}
                             uploading={uploading}
+                            FILE_URL={FILE_URL}
                             testidPrefix="indian"
                         />
                         <ApplyLookGroup
@@ -845,6 +787,7 @@ export default function ApplicationPage() {
                             upload={upload}
                             removeMedia={removeMedia}
                             uploading={uploading}
+                            FILE_URL={FILE_URL}
                             testidPrefix="western"
                         />
 
@@ -896,7 +839,7 @@ export default function ApplicationPage() {
                                             className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
                                         >
                                             <img
-                                                src={m.url}
+                                                src={FILE_URL(m.storage_path)}
                                                 alt=""
                                                 loading="lazy"
                                                 className="w-full h-full object-cover"
@@ -934,7 +877,6 @@ export default function ApplicationPage() {
                 </p>
             </div>
         </div>
-        </>
     );
 }
 
@@ -942,6 +884,7 @@ function Header() {
     return (
         <header className="flex items-center justify-between px-6 py-5 border-b border-white/10">
             <Logo className="h-8" />
+            <ThemeToggle />
         </header>
     );
 }
@@ -1000,6 +943,7 @@ function ApplyLookGroup({
     upload,
     removeMedia,
     uploading,
+    FILE_URL,
     testidPrefix,
 }) {
     const isUploading = uploading === category;
@@ -1031,7 +975,7 @@ function ApplyLookGroup({
                         className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
                     >
                         <img
-                            src={m.url}
+                            src={FILE_URL(m.storage_path)}
                             alt=""
                             loading="lazy"
                             className="w-full h-full object-cover"

@@ -1,5 +1,545 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+<<<<<<< HEAD
+# IDE and editors
+.idea/
+.vscode/
+
+# Dependencies
+node_modules/
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Testing
+/coverage
+
+# Next.js
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Production builds
+/build
+dist/
+dist
+
+# Environment files (comprehensive coverage)
+
+*token.json*
+*credentials.json*
+# Google Drive service-account JSON (never commit — use GOOGLE_DRIVE_SA_KEY_JSON env var instead)
+.gdrive-sa.json
+*gdrive-sa*.json
+*service-account*.json
+
+# Logs and debug files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dump.rdb
+
+# System files
+.DS_Store
+*.pem
+
+# Python
+__pycache__/
+*pyc*
+venv/
+.venv/
+
+# Development tools
+chainlit.md
+.chainlit
+.ipynb_checkpoints/
+.ac
+
+# Deployment
+.vercel
+
+# Data and databases
+agenthub/agents/youtube/db
+
+# Archive files and large assets
+**/*.zip
+**/*.tar.gz
+**/*.tar
+**/*.tgz
+*.pack
+*.deb
+*.dylib
+
+# Build caches
+.cache/
+
+memory/test_credentials.md
+
+# Mobile development
+android-sdk/-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+frontend.zip
+frontend/frontend.zip
+frontend/.git/objects/4b/c2e994f6c7668a4e3f04cf91b9d2d39072e4f8
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+frontend/node_modules/.cache/default-development/0.pack
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+frontend/node_modules/.cache/default-development/11.pack
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+=======
 # dependencies
 /node_modules
 /.pnp
@@ -21,3 +561,4 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+>>>>>>> 6fcce45 (initial frontend)

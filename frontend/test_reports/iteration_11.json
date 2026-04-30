@@ -1,0 +1,42 @@
+{
+  "summary": "Phase 2 (Schema Unification across Admin TalentEdit, /apply, /submit) verified end-to-end. Backend pytest 7/7 PASS in /app/backend/tests/test_phase2_unification.py: phone round-trips through TalentIn (regression GREEN — phone-was-stripped bug FIXED), dup-email merge fills empty only, /api/public/prefill exposes gender/ethnicity/bio/work_links and never leaks media/source/notes/created_by, submission upload accepts category=indian and category=western, MAX_SUBMISSION_IMAGES (8) is enforced ACROSS image+indian+western combined, /apply upload accepts indian+western, finalize fill-empty-only sync preserves admin's pre-set gender while filling blank ethnicity+bio, application-approval merges phone/work_links/ethnicity/gender into the talent record. Frontend smoke-tested at 1280x1080: Admin /admin/talents/new shows talent-email-input + talent-phone-input + 4 gender pills + ethnicity-select-trigger with 9 options; /apply renders 4 gender pills, ethnicity dropdown, work-links editor, indian+western look groups; /submit/pantaloons-with-a-celebrity-11ccd4 renders unified-identity-block with all 4 form-gender-* testids, form-ethnicity-trigger with 9 options, form-instagram-followers-trigger, form-bio, work-links-editor. Schema parity across all 3 forms is confirmed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase2_unification.py",
+    "/app/test_reports/pytest/pytest_phase2.xml"
+  ],
+  "action_items": [
+    "Spec-vs-code drift (LOW): review-request states FOLLOWER_TIERS has 30 buckets across 4 groups, but talentSchema.js currently exports 25 (Early=6, Mid=7, High=6, Premium=6). Either add 5 more tiers to match spec or update the spec/PRD to reflect 25.",
+    "DOC-only: /app/backend/routers/submissions.py PUT /public/submissions/{sid} could also accept PATCH for symmetry with REST conventions (currently only PUT — a passing 'patch' style call returns 405). Not a bug.",
+    "Phase 2 may be marked DONE — no functional bugs found."
+  ],
+  "critical_code_review_comments": [
+    "FILL-EMPTY-ONLY sync at /app/backend/routers/submissions.py:498-528 correctly guards admin's hand-edits — verified by precreating a talent with gender=female and submitting a finalize with gender=male: gender stayed female, while empty ethnicity got filled. Pattern matches the application-approval merge in /app/backend/routers/applications.py:330-344, so both entry points share the same merge contract.",
+    "PORTFOLIO_IMAGE_CATEGORIES = {image, indian, western} drives both the MIN(5) gate at finalize and the MAX(8) cap at upload — verified: a submission with only indian+western images (no generic 'image') finalizes successfully when total ≥ 5. The `existing` count is computed as `sum(1 for m in sub.media if m.category in PORTFOLIO_IMAGE_CATEGORIES)` which is the correct unified count.",
+    "Talent /api/talents?q= only matches name (regex), not email. Found while writing tests — minor dev-experience friction; documented in iter10 already.",
+    "Public submission/apply start endpoints return `id` (not `submission_id`/`application_id` as the review-request spec said). Tests adjusted; flag for spec drift only.",
+    "FOLLOWER_TIERS in /app/frontend/src/lib/talentSchema.js totals 25, not 30 as stated in the review-request — SPEC vs CODE drift, low risk (UI uses what the file exports; backend accepts any string).",
+    "Object storage at integrations.emergentagent.com returned 503 transient on one upload during testing — added retry-with-1s-backoff in the test harness; not a production bug, just infra noise."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase2_unification.py (NEW — 7 tests covering Phase 2 unification)"
+  ],
+  "success_rate": {
+    "backend": "100% (7/7 phase 2 tests PASS)",
+    "frontend": "100% — all expected testids rendered on Admin TalentEdit + /apply + /submit; schema parity verified (4 genders, 9 ethnicities)"
+  },
+  "test_credentials": "admin@talentgram.com / Admin@123 (POST /api/auth/login → {token: ...}). Public seed slug: pantaloons-with-a-celebrity-11ccd4 (only public-form-enabled project in DB).",
+  "seed_data_creation": "Created ~10 transient TEST_ records (test_p2_phone_*, test_p2_merge_*, test_p2_prefill_*, test_p2_up_*, test_p2_apply_*, test_p2_fin_*, test_p2_appapprov_*, test_p2_fe_apply, test_p2_fe_sub) — all bear test_p2_ prefix for cleanup.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 2 schema unification is GREEN. Public start endpoints return key 'id' (not submission_id/application_id). PUT (not PATCH) for /public/submissions/{sid} and /public/apply/{aid}. Public project slug for testing: pantaloons-with-a-celebrity-11ccd4 (autoflow-c66e26 from prior iters no longer exists). FOLLOWER_TIERS has 25 items (not 30 — spec drift). MAX_SUBMISSION_IMAGES=8 and MIN_SUBMISSION_IMAGES=5 are counted across image+indian+western combined. Object-storage 503s are transient — wrap uploads in retry. /api/talents?q= matches name only, not email — fetch by talent_id from decision response instead.",
+  "rca_of_the_issue": "N/A — no functional bugs found in Phase 2."
+}

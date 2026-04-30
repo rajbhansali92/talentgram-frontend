@@ -1,0 +1,46 @@
+{
+  "summary": "End-to-end verification of M5 Client Viewing Intelligence System on the live Atlas preview (casting-deck-pro.preview.emergentagent.com). Backend: re-ran /app/backend/tests/test_client_intelligence.py against the deployed API — 6/6 passed in 42.99s. Frontend: scripted three Playwright passes over freshly-created links and verified all 11 review_request bullets — identity gate, 5 tabs with live counts, progress bar increment, badge-seen on overlay-open, badge-seen via 5s IntersectionObserver auto-fire, badge-shortlisted via overlay action, empty-state in Shortlisted, badge-new on second visit (subject_added_at > prev_visit_at), and tab membership transitions (Pending -> Seen, none in New on first visit). 0 functional bugs found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_client_intelligence.py",
+    "/app/test_reports/pytest/pytest_iteration7_client_intel.xml"
+  ],
+  "verified_checks": {
+    "backend_seen_endpoint": "POST /api/public/links/{slug}/seen with viewer Bearer token returns 200 and idempotently $addToSet's into client_states.seen_talent_ids (verified by test_seen_endpoint_is_idempotent and test_seen_requires_viewer_token).",
+    "backend_seen_401": "POST /seen without Authorization returns 401 (test_seen_requires_viewer_token).",
+    "backend_subject_added_at_create": "POST /api/links stamps subject_added_at for every talent_id in DB; subsequent GET surfaces the dict (verified live: timestamps written, GET /links/{id} returns iso strings).",
+    "backend_subject_added_at_preserved_on_put": "PUT /api/links/{lid} preserves existing ids' timestamps verbatim and stamps NEW ids with a fresh time (test_subject_added_at_preserved_on_update + verified live: orig 07:20:28, new 07:21:12).",
+    "backend_identify_rotation": "First identify -> prev_visit_at=null; second identify -> prev_visit_at == previous last_visit_at (test_identify_rotates_visit_timestamps).",
+    "backend_public_payload": "GET /api/public/links/{slug} (with viewer token) includes client_state {seen_talent_ids, last_visit_at, prev_visit_at} AND subject_added_at: {id: iso} (test_subject_added_at_in_public_payload).",
+    "frontend_5_tabs": "client-tab-all, client-tab-pending, client-tab-seen, client-tab-shortlisted, client-tab-new all render with live count chips (e.g. 'ALL 2', 'NEW 1').",
+    "frontend_progress_bar": "review-progress-bar + review-progress-label start at '0 of N reviewed' and increment to '1 of N' / '2 of 2' as talents are marked seen.",
+    "frontend_overlay_seen": "Click talent card -> overlay opens AND POST /api/public/links/{slug}/seen fires (200) AND badge-seen-{id} renders on the card. Network capture confirms exactly 1 POST.",
+    "frontend_intersection_observer": "Card kept in viewport for 6.5s without click triggers POST /seen (200) AND badge-seen-{id} renders AND progress increments to '1 of 1 reviewed'. IntersectionObserver 5s threshold works.",
+    "frontend_shortlist_flow": "action-shortlist-{id} inside detail overlay -> closes overlay -> badge-shortlisted-{id} appears AND talent shows under client-tab-shortlisted.",
+    "frontend_empty_state": "client-tab-empty renders with the correct contextual copy on each empty tab (Shortlisted on first visit shows 'No shortlists yet — open a card and tap Shortlist to add one.').",
+    "frontend_new_tab": "On FIRST visit prev_visit_at=null so isNew() returns false for everyone -> NEW count = 0 (correct). After re-identify with the same email, prev_visit_at is rotated, and a talent_id added AFTER the previous visit appears in NEW tab with badge-new-{id}; the older talent does NOT appear. NEW count chip shows 1.",
+    "regression_identify_gate": "identity-gate-form renders pre-identify; submission with name+email transitions to client-view-page successfully on both fresh and returning visits.",
+    "regression_overlay_actions": "talent-detail-overlay opens, action-shortlist-{id} works, detail-close-btn closes the overlay; viewerActions persists round-trip."
+  },
+  "action_items": [],
+  "critical_code_review_comments": [
+    "ClientView.jsx is now ~1003 lines — close to the 700-line guideline. Recommend extracting (a) IdentityGate, (b) TalentCard + IntersectionObserver hook, (c) DetailOverlay, and (d) Tabs/ProgressBar into separate components for maintainability. No behaviour change needed.",
+    "markSeen swallows all errors silently with `catch {}` — fine for UX but a console.warn behind a debug flag would help future debugging if the endpoint ever 4xx's mid-session.",
+    "isNew() compares Date.parse on every render for every talent; with N>200 cards this is fine but consider memoising newIds = useMemo(...) keyed off [prevVisitAt, subjectAddedAt] for hygiene.",
+    "Backend POST /api/links response does NOT echo subject_added_at in the create response body (only GET /links/{id} returns it). Not a bug — the frontend doesn't rely on it on create — but echoing it would make the API more self-describing and let admin-side UIs render 'just added' badges without a follow-up GET.",
+    "test_client_intelligence.py uses module-scoped admin_token but per-test fixture link_with_two; fine for isolation but the 6-test run takes ~43s on the live preview because each test triggers fresh talent CREATE + DELETE. Consider session-scoped seed for CI throughput. Not blocking."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (6/6 pytest)", "frontend": "100% (11/11 review_request bullets verified)"},
+  "test_credentials": "admin@talentgram.com / Admin@123 (working)",
+  "seed_data_creation": "Created 2 throwaway links during the run (TEST_M5_ClientIntel f69d46d4-..., TEST_M5_AutoSeen 31b9b9e4-...). Both DELETE'd at end of run with 200 status. No residual test data. (Note: admin-created CIS Alpha/Beta/Gamma talent fixtures inside test_client_intelligence.py are auto-cleaned by the fixture teardown.)",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "M5 is fully shipped and passing on live Atlas. Useful test slugs are ephemeral (created+deleted per run); use POST /api/links to mint fresh ones. The IntersectionObserver fires at >=50% visibility for 5+s — ensure cards are scrolled-into-view via element.scroll_into_view_if_needed() and use page.wait_for_timeout(6500) to give a comfortable margin. Re-identifying the same viewer email is the ONLY way to populate the NEW tab; otherwise prev_visit_at stays null and isNew() returns false for everyone. POST /api/links DOES persist subject_added_at but does NOT echo it in the response body — verify via GET /api/links/{id} or via the public payload.",
+  "rca of the issue": "N/A — no functional bugs found in the M5 implementation. All 6 backend pytests and all 11 frontend review_request bullets pass."
+}

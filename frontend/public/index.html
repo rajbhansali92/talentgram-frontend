@@ -3,32 +3,8 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#fafaf7" />
-        <meta name="description" content="Talentgram — Casting decision platform. Curated portfolios, decisive presentations. India · UAE." />
-
-        <!-- Favicons (Talentgram monogram) -->
-        <link rel="icon" type="image/svg+xml" href="%PUBLIC_URL%/favicon.svg" />
-        <link rel="icon" type="image/png" sizes="32x32" href="%PUBLIC_URL%/favicon-32x32.png" />
-        <link rel="icon" type="image/png" sizes="16x16" href="%PUBLIC_URL%/favicon-16x16.png" />
-        <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico" />
-        <link rel="apple-touch-icon" sizes="180x180" href="%PUBLIC_URL%/apple-touch-icon.png" />
-
-        <!-- Open Graph / WhatsApp / LinkedIn -->
-        <meta property="og:type" content="website" />
-        <meta property="og:site_name" content="Talentgram" />
-        <meta property="og:title" content="Talentgram — Portfolio Link Engine" />
-        <meta property="og:description" content="Curated portfolios. Decisive presentations. India · UAE." />
-        <meta property="og:image" content="%PUBLIC_URL%/og-image.png" />
-        <meta property="og:image:width" content="1200" />
-        <meta property="og:image:height" content="630" />
-        <meta property="og:image:alt" content="Talentgram — We scout, we manage. India | UAE." />
-
-        <!-- Twitter / X -->
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content="Talentgram — Portfolio Link Engine" />
-        <meta name="twitter:description" content="Curated portfolios. Decisive presentations. India · UAE." />
-        <meta name="twitter:image" content="%PUBLIC_URL%/og-image.png" />
-
+        <meta name="theme-color" content="#000000" />
+        <meta name="description" content="A product of emergent.sh" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600;700&family=Manrope:wght@300;400;500;600;700&family=Inter:wght@600&display=swap" rel="stylesheet" />
@@ -47,15 +23,14 @@
         -->
         <title>Talentgram — Portfolio Link Engine</title>
         <script>
-            // v38f — Light-mode-only. Force the `light` class on <html>
-            // before React paints so we never see a dark flash on cold loads.
             (function () {
                 try {
-                    document.documentElement.classList.add("light");
-                    document.documentElement.classList.remove("dark");
-                    localStorage.setItem("tg_theme", "light");
+                    var t = localStorage.getItem("tg_theme");
+                    var isLight = t === "light";
+                    document.documentElement.classList.toggle("light", isLight);
+                    document.documentElement.classList.toggle("dark", !isLight);
                 } catch (e) {
-                    document.documentElement.classList.add("light");
+                    document.documentElement.classList.add("dark");
                 }
             })();
         </script>

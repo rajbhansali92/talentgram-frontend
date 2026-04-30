@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { adminApi, COVER_URL, VIDEO_URL, VIDEO_POSTER_URL } from "@/lib/api";
+import React, { useEffect, useMemo, useState } from "react";
+import { adminApi, FILE_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     X,
@@ -15,9 +15,6 @@ import {
     UserPlus,
     Filter,
 } from "lucide-react";
-import useInfiniteList, { useInfiniteScroll } from "@/hooks/useInfiniteList";
-
-const PAGE_LIMIT = 30;
 
 const STATUS_FILTERS = [
     { key: "all", label: "All" },
@@ -28,50 +25,29 @@ const STATUS_FILTERS = [
 ];
 
 export default function Applications() {
+    const [items, setItems] = useState([]);
+    const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState("pending");
     const [active, setActive] = useState(null);
-    const [counts, setCounts] = useState({
-        all: 0,
-        pending: 0,
-        approved: 0,
-        rejected: 0,
-        drafts: 0,
-    });
 
-    const fetchPage = useCallback(
-        async ({ page, limit }) => {
-            const f = STATUS_FILTERS.find((s) => s.key === filter);
-            const params = { page, limit, ...(f?.query || {}) };
-            const { data } = await adminApi.get("/applications", { params });
-            return data;
-        },
-        [filter],
-    );
-
-    const {
-        items,
-        total,
-        hasMore,
-        loading,
-        loadingMore,
-        loadMore,
-        reload,
-    } = useInfiniteList(fetchPage, [filter], { limit: PAGE_LIMIT });
-
-    const sentinelRef = useInfiniteScroll(loadMore);
-
-    const loadCounts = useCallback(async () => {
+    const load = async () => {
+        setLoading(true);
         try {
-            const { data } = await adminApi.get("/applications/stats");
-            setCounts(data);
-        } catch {
-            // non-blocking; chips just hide their counts
+            const f = STATUS_FILTERS.find((s) => s.key === filter);
+            const params = f?.query || {};
+            const { data } = await adminApi.get("/applications", { params });
+            setItems(data);
+        } catch (e) {
+            toast.error("Failed to load applications");
+        } finally {
+            setLoading(false);
         }
-    }, []);
+    };
 
     useEffect(() => {
-        loadCounts();
-    }, [loadCounts]);
+        load();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filter]);
 
     const decide = async (aid, decision) => {
         try {
@@ -87,11 +63,22 @@ export default function Applications() {
                     : "Rejected",
             );
             setActive(null);
-            await Promise.all([reload(), loadCounts()]);
+            await load();
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed");
         }
     };
+
+    const counts = useMemo(() => {
+        const c = { all: items.length, pending: 0, approved: 0, rejected: 0, drafts: 0 };
+        for (const i of items) {
+            if (i.status === "draft") c.drafts++;
+            else if (i.decision === "approved") c.approved++;
+            else if (i.decision === "rejected") c.rejected++;
+            else if (i.status === "submitted" && i.decision === "pending") c.pending++;
+        }
+        return c;
+    }, [items]);
 
     return (
         <div
@@ -135,70 +122,33 @@ export default function Applications() {
                         }`}
                     >
                         {f.label}
-                        {typeof counts?.[f.key] === "number" && (
-                            <span className="ml-1.5 opacity-60">{counts[f.key]}</span>
-                        )}
                     </button>
                 ))}
             </div>
 
-            {!loading && total > 0 && (
-                <p
-                    className="text-white/40 text-xs tracking-wide mb-4"
-                    data-testid="applications-count-summary"
-                >
-                    Showing {items.length} of {total}
-                </p>
-            )}
-
             {loading ? (
-                <div className="py-20 flex justify-center" data-testid="applications-loading">
+                <div className="py-20 flex justify-center">
                     <Loader2 className="w-5 h-5 animate-spin text-white/40" />
                 </div>
             ) : items.length === 0 ? (
-                <div
-                    className="border border-dashed border-white/10 py-20 text-center text-white/40 text-sm"
-                    data-testid="applications-empty"
-                >
+                <div className="border border-dashed border-white/10 py-20 text-center text-white/40 text-sm">
                     No applications match this filter.
                 </div>
             ) : (
-                <>
-                    <div
-                        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
-                        data-testid="applications-grid"
-                    >
-                        {items.map((a) => (
-                            <ApplicationCard
-                                key={a.id}
-                                app={a}
-                                onReview={() => setActive(a)}
-                                onDecide={(d) => decide(a.id, d)}
-                                counts={counts}
-                            />
-                        ))}
-                    </div>
-                    {hasMore && (
-                        <div className="mt-8 flex flex-col items-center gap-3">
-                            <div ref={sentinelRef} className="h-px w-px" aria-hidden />
-                            <button
-                                type="button"
-                                onClick={loadMore}
-                                disabled={loadingMore}
-                                data-testid="applications-load-more-btn"
-                                className="inline-flex items-center gap-2 border border-white/20 hover:border-white/60 transition-colors px-5 py-2.5 text-xs tracking-wide disabled:opacity-50"
-                            >
-                                {loadingMore ? (
-                                    <>
-                                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading more...
-                                    </>
-                                ) : (
-                                    <>Load more ({total - items.length} remaining)</>
-                                )}
-                            </button>
-                        </div>
-                    )}
-                </>
+                <div
+                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
+                    data-testid="applications-grid"
+                >
+                    {items.map((a) => (
+                        <ApplicationCard
+                            key={a.id}
+                            app={a}
+                            onReview={() => setActive(a)}
+                            onDecide={(d) => decide(a.id, d)}
+                            counts={counts}
+                        />
+                    ))}
+                </div>
             )}
 
             {active && (
@@ -215,7 +165,7 @@ export default function Applications() {
 function ApplicationCard({ app, onReview, onDecide }) {
     const fd = app.form_data || {};
     const imgs = (app.media || []).filter((m) => m.category === "image");
-    const coverUrl = COVER_URL(app);
+    const cover = imgs[0];
     const badge = getStatusBadge(app);
     return (
         <div
@@ -223,9 +173,9 @@ function ApplicationCard({ app, onReview, onDecide }) {
             data-testid={`app-card-${app.id}`}
         >
             <div className="relative aspect-[4/5] bg-[#0a0a0a] overflow-hidden">
-                {coverUrl ? (
+                {cover ? (
                     <img
-                        src={coverUrl}
+                        src={FILE_URL(cover.storage_path)}
                         alt={app.talent_name}
                         loading="lazy"
                         className="w-full h-full object-cover"
@@ -384,8 +334,7 @@ function ReviewModal({ app, onClose, onDecide }) {
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
                         <video
-                            src={VIDEO_URL(intro)}
-                            poster={VIDEO_POSTER_URL(intro)}
+                            src={FILE_URL(intro.storage_path)}
                             controls
                             preload="metadata"
                             className="w-full max-w-3xl border border-white/10 bg-black rounded-sm"
@@ -411,13 +360,13 @@ function ReviewModal({ app, onClose, onDecide }) {
                             {images.map((m) => (
                                 <a
                                     key={m.id}
-                                    href={m.url}
+                                    href={FILE_URL(m.storage_path)}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10"
                                 >
                                     <img
-                                        src={m.url}
+                                        src={FILE_URL(m.storage_path)}
                                         alt=""
                                         loading="lazy"
                                         className="w-full h-full object-cover"

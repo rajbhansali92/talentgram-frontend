@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
-import { FILE_URL } from "@/lib/api";
+// FILE_URL import removed — media objects now carry canonical `.url` (Cloudinary)
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -1756,7 +1756,7 @@ export default function SubmissionPage() {
                                         className="relative aspect-square bg-[#0a0a0a] border border-white/10 group"
                                     >
                                         <img
-                                            src={FILE_URL(m.storage_path)}
+                                            src={m.url}
                                             alt=""
                                             className="w-full h-full object-cover"
                                         />
@@ -1969,7 +1969,7 @@ function PortfolioGroup({
                         data-testid={`${testidPrefix}-image-${m.id}`}
                     >
                         <img
-                            src={FILE_URL(m.storage_path)}
+                            src={m.url}
                             alt=""
                             className="w-full h-full object-cover"
                         />
@@ -2506,7 +2506,7 @@ function FeedbackRow({ fb }) {
             </div>
             {isVoice ? (
                 <audio
-                    src={FILE_URL(fb.content_url)}
+                    src={fb.content_url}
                     controls
                     className="w-full"
                     data-testid={`talent-feedback-audio-${fb.id}`}

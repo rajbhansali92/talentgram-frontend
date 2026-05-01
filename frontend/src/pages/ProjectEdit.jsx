@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
+import { adminApi, isAdmin } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
@@ -1427,7 +1427,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
                         <video
-                            src={FILE_URL(intro.storage_path)}
+                            src={intro.url}
                             controls
                             className="w-full max-w-3xl border border-border bg-muted rounded-lg"
                             data-testid="review-intro-video"
@@ -1477,7 +1477,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             {t.label || `Take ${i + 1}`}
                                         </p>
                                         <video
-                                            src={FILE_URL(t.storage_path)}
+                                            src={t.url}
                                             controls
                                             preload="metadata"
                                             className="w-full border border-border bg-muted rounded-lg"
@@ -1500,13 +1500,13 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             {indianImages.map((m) => (
                                 <a
                                     key={m.id}
-                                    href={FILE_URL(m.storage_path)}
+                                    href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="aspect-square bg-muted overflow-hidden border border-border"
                                 >
                                     <img
-                                        src={FILE_URL(m.storage_path)}
+                                        src={m.url}
                                         alt=""
                                         loading="lazy"
                                         className="w-full h-full object-cover"
@@ -1525,13 +1525,13 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             {westernImages.map((m) => (
                                 <a
                                     key={m.id}
-                                    href={FILE_URL(m.storage_path)}
+                                    href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="aspect-square bg-muted overflow-hidden border border-border"
                                 >
                                     <img
-                                        src={FILE_URL(m.storage_path)}
+                                        src={m.url}
                                         alt=""
                                         loading="lazy"
                                         className="w-full h-full object-cover"
@@ -1550,13 +1550,13 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             {portfolioImages.map((m) => (
                                 <a
                                     key={m.id}
-                                    href={FILE_URL(m.storage_path)}
+                                    href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="aspect-square bg-muted overflow-hidden border border-border"
                                 >
                                     <img
-                                        src={FILE_URL(m.storage_path)}
+                                        src={m.url}
                                         alt=""
                                         loading="lazy"
                                         className="w-full h-full object-cover"

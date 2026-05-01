@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
+import { adminApi, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import {
@@ -612,9 +612,7 @@ export default function TalentEdit() {
                                                 </div>
                                             ) : (
                                                 <img
-                                                    src={FILE_URL(
-                                                        m.storage_path,
-                                                    )}
+                                                    src={m.url}
                                                     alt=""
                                                     className="w-full h-full object-cover"
                                                 />

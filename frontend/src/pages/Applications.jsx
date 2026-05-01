@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { adminApi, FILE_URL } from "@/lib/api";
+import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import {
     X,
@@ -175,7 +175,7 @@ function ApplicationCard({ app, onReview, onDecide }) {
             <div className="relative aspect-[4/5] bg-[#0a0a0a] overflow-hidden">
                 {cover ? (
                     <img
-                        src={FILE_URL(cover.storage_path)}
+                        src={cover.url}
                         alt={app.talent_name}
                         loading="lazy"
                         className="w-full h-full object-cover"
@@ -334,7 +334,7 @@ function ReviewModal({ app, onClose, onDecide }) {
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
                         <video
-                            src={FILE_URL(intro.storage_path)}
+                            src={intro.url}
                             controls
                             preload="metadata"
                             className="w-full max-w-3xl border border-white/10 bg-black rounded-sm"
@@ -360,13 +360,13 @@ function ReviewModal({ app, onClose, onDecide }) {
                             {images.map((m) => (
                                 <a
                                     key={m.id}
-                                    href={FILE_URL(m.storage_path)}
+                                    href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden border border-white/10"
                                 >
                                     <img
-                                        src={FILE_URL(m.storage_path)}
+                                        src={m.url}
                                         alt=""
                                         loading="lazy"
                                         className="w-full h-full object-cover"

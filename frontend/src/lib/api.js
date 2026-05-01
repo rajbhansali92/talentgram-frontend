@@ -15,14 +15,21 @@ console.log("🚀 API URL:", API);
 export const FILE_URL = (path) => `${API}/files/${path}`;
 
 /**
- * Prefer the 1600px JPEG copy if available
+ * Resolve the best display URL for a media object.
+ *
+ * Post-Cloudinary migration every media record carries a canonical
+ * `url` field with the full `https://res.cloudinary.com/talentgram/...`
+ * address, so we simply return that. We preserve a couple of fallbacks
+ * for the rare case where an older record hasn't been backfilled yet
+ * (legacy `resized_storage_path` / `storage_path` get routed through
+ * the deprecated `/api/files/` proxy so the card doesn't render broken).
  */
 export const IMAGE_URL = (media) => {
-    const p =
-        (media &&
-            (media.resized_storage_path || media.storage_path)) ||
-        media;
-    return FILE_URL(p);
+    if (!media) return "";
+    if (typeof media === "string") return media;
+    if (media.url) return media.url;
+    const legacy = media.resized_storage_path || media.storage_path;
+    return legacy ? FILE_URL(legacy) : "";
 };
 
 // ================= ADMIN API =================

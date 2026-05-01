@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, FILE_URL, isAdmin } from "@/lib/api";
+import { adminApi, isAdmin } from "@/lib/api";
 import { Search, Plus, Image as ImageIcon, Check } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
@@ -220,7 +220,7 @@ function Inner({ t, anyImg }) {
             <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
                 {anyImg ? (
                     <img
-                        src={FILE_URL(anyImg.storage_path)}
+                        src={anyImg.url}
                         alt={t.name}
                         className="w-full h-full object-cover group-hover:scale-[1.02] transition-all duration-500"
                     />

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, FILE_URL } from "@/lib/api";
+import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import BudgetLines from "@/components/BudgetLines";
 import {
@@ -565,9 +565,7 @@ export default function LinkGenerator() {
                                                 <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
                                                     {cover ? (
                                                         <img
-                                                            src={FILE_URL(
-                                                                cover.storage_path,
-                                                            )}
+                                                            src={cover.url}
                                                             alt={t.name}
                                                             className="w-full h-full object-cover"
                                                         />
@@ -656,9 +654,7 @@ export default function LinkGenerator() {
                                             <div className="aspect-[3/4] bg-[#0a0a0a] overflow-hidden">
                                                 {cover ? (
                                                     <img
-                                                        src={FILE_URL(
-                                                            cover.storage_path,
-                                                        )}
+                                                        src={cover.url}
                                                         alt={s.talent_name}
                                                         className="w-full h-full object-cover"
                                                     />

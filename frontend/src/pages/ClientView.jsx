@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
-import { viewerApi, FILE_URL, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { viewerApi, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 import FeedbackComposer from "@/components/FeedbackComposer";
@@ -723,7 +723,7 @@ function TalentDetail({
 
     const download = async (m) => {
         await logDownload(talent.id, m.id);
-        const url = FILE_URL(m.storage_path);
+        const url = m.url;
         const a = document.createElement("a");
         a.href = url;
         a.download = m.original_filename || "file";
@@ -775,7 +775,7 @@ function TalentDetail({
                                                 {t.label || `Take ${i + 1}`}
                                             </p>
                                             <video
-                                                src={FILE_URL(t.storage_path)}
+                                                src={t.url}
                                                 controls
                                                 preload="metadata"
                                                 className="w-full border border-white/10 bg-black rounded-sm"
@@ -791,7 +791,7 @@ function TalentDetail({
                             <div className="mb-8">
                                 <p className="eyebrow mb-3">Introduction</p>
                                 <video
-                                    src={FILE_URL(intro.storage_path)}
+                                    src={intro.url}
                                     controls
                                     preload="metadata"
                                     className="w-full border border-white/10 bg-black rounded-sm"

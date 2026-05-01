@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
-// FILE_URL import removed — media objects now carry canonical `.url` (Cloudinary)
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -1724,7 +1723,6 @@ export default function SubmissionPage() {
                                 removeMedia={removeMedia}
                                 uploading={uploading}
                                 uploadPct={uploadPct}
-                                FILE_URL={FILE_URL}
                                 testidPrefix="indian"
                             />
 
@@ -1741,7 +1739,6 @@ export default function SubmissionPage() {
                                 removeMedia={removeMedia}
                                 uploading={uploading}
                                 uploadPct={uploadPct}
-                                FILE_URL={FILE_URL}
                                 testidPrefix="western"
                             />
 
@@ -1943,7 +1940,6 @@ function PortfolioGroup({
     removeMedia,
     uploading,
     uploadPct,
-    FILE_URL,
     testidPrefix,
 }) {
     const isUploading = uploading === category;

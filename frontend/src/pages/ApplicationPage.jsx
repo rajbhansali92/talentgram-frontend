@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-// FILE_URL import removed — media objects now carry a canonical `.url`
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
 import {

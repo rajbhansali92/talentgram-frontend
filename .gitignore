@@ -539,3 +539,12 @@ credentials.json
 *.key
 .credentials
 .env
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

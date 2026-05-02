@@ -548,3 +548,5 @@ credentials.json
 *.pem
 *.key
 .credentials
+project.zip
+project.zip

@@ -246,9 +246,20 @@ def cloudinary_upload(
     can't avoid that on the free tier) but is **never** served.
     """
     _validate_folder(folder)
+    ct = (content_type or "").lower()
+    # PDFs (and any future "raw" documents like .zip/.docx) must be
+    # uploaded with resource_type="raw". Cloudinary's "auto" detection
+    # silently routes PDFs to resource_type="image", which then requires
+    # the account-level "Deliver PDF and ZIP files" toggle to be enabled
+    # — without it, the public URL returns a 401/Not Found. Forcing raw
+    # sidesteps that restriction entirely and the delivery URL becomes
+    # `https://res.cloudinary.com/.../raw/upload/...` (public by default).
+    is_pdf = ct == "application/pdf" or ct.startswith("application/pdf")
+    if is_pdf and resource_type == "auto":
+        resource_type = "raw"
     is_video = resource_type == "video" or (
         resource_type == "auto"
-        and (content_type or "").startswith("video/")
+        and ct.startswith("video/")
     )
     upload_kwargs: Dict[str, Any] = dict(
         folder=folder,

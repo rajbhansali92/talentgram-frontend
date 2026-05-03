@@ -84,8 +84,8 @@ export default function MarketingHub() {
             className="max-w-6xl mx-auto px-6 py-8"
             data-testid="marketing-hub-page"
         >
-            <div className="flex items-center justify-between mb-6">
-                <div>
+            <div className="flex items-center justify-between gap-3 mb-6 flex-wrap">
+                <div className="min-w-0">
                     <h1 className="font-display text-3xl tracking-tight">
                         Marketing Hub
                     </h1>
@@ -97,10 +97,11 @@ export default function MarketingHub() {
                     type="button"
                     onClick={() => setAddOpen(true)}
                     data-testid="marketing-add-client-btn"
-                    className="inline-flex items-center gap-2 bg-white text-black px-4 py-2.5 rounded-sm text-xs tracking-wide hover:opacity-90 transition-opacity"
+                    className="shrink-0 inline-flex items-center gap-2 bg-white text-black px-4 py-2.5 rounded-sm text-xs tracking-wide hover:opacity-90 transition-opacity whitespace-nowrap"
                 >
                     <Plus className="w-3.5 h-3.5" />
-                    Add Client
+                    <span className="hidden sm:inline">Add Client</span>
+                    <span className="sm:hidden">Add</span>
                 </button>
             </div>
 

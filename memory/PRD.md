@@ -463,3 +463,26 @@ Submission (Raw)   →   Admin (Decision)    →   Client (Presentation)
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
+
+## v38k — Marketing CRM Hub Wired + CRUD Complete (May 3, 2026) ✅ COMPLETE
+- **Wired MarketingHub into the app**: route added at `/admin/marketing` (App.js) and sidebar nav entry "Marketing" added to AdminLayout (between Links and Feedback).
+- **Add Client flow**: `+ Add Client` button opens a shadcn Dialog with name (required) / company / phone fields. Submits to `POST /api/marketing/clients`; on success the new row prepends to the table without a reload. Mobile-optimised header (button collapses to "+ Add" on narrow viewports).
+- **Client drawer now full CRM surface**: when a row is clicked the side Sheet shows client details + an **interaction logger** (type picker: call / email / meeting / whatsapp, notes textarea) and a live **history list** of past touchpoints. Logging an interaction POSTs to `/api/marketing/interactions`, prepends to history, and bumps the client's `last_contacted_date` so the parent table re-sorts to surface the freshly-contacted lead at the top.
+- **Backend unchanged** — reused the existing `/api/marketing/{clients,interactions}` router shipped in v38j (ObjectId-safe serialisation, sequential non-transactional bump acceptable for Atlas free-tier).
+- **Validation**: testing_agent_v3_fork iteration 18 → **13/13 pytest pass + 100% frontend Playwright** (login, navigate to /admin/marketing, load clients, Add Client form submits, drawer opens, log interaction updates history + re-sorts table, regression pass on Talents/Applications/Projects/Links/Feedback).
+
+## Phase 2 — Updated Backlog
+### P1 (high-value)
+- [ ] Private link permissions (per-email ACL, password-protected links)
+- [ ] Budget form per project (editable pricing per talent)
+- [ ] Project-based auto talent selection (tags/categories → auto multi-select)
+- [ ] Server-side validation on media uploads (max size, MIME allowlist)
+- [ ] Marketing CRM v2: client search/filter, CSV export, follow-up reminders
+
+### P2 (nice-to-have)
+- [ ] Advanced analytics charts (daily views, action funnel)
+- [ ] Refactor `SubmissionPage.jsx` (~3000 lines) into modular sub-components (PrefillCard, UploadStep, ThankYouScreen, etc.)
+- [ ] Bulk import talents (CSV)
+- [ ] Email notification when client completes review
+- [ ] Presigned/tokenized file URLs for stricter privacy
+- [ ] Activity timeline on Results page

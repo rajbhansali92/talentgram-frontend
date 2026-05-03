@@ -17,6 +17,7 @@ from routers import (
     drive_admin,
     feedback,
     links,
+    marketing as marketing_router,
     notifications as notifications_router,
     password,
     projects,
@@ -69,6 +70,7 @@ app.include_router(users.router)
 app.include_router(password.router)
 app.include_router(drive_admin.router)
 app.include_router(notifications_router.router)
+app.include_router(marketing_router.router)
 app.include_router(feedback.router)
 
 # Middleware

@@ -81,6 +81,9 @@ const TABS = [
 
 export default function ClientView() {
   const { slug } = useParams();
+  const isSafari =
+    typeof navigator !== "undefined" &&
+    /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   const [identified, setIdentified] = useState(!!getViewerToken(slug));
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -206,7 +209,9 @@ export default function ClientView() {
           },
         },
       );
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   // Mark a subject as "seen" — fires from IntersectionObserver (5s in
@@ -304,9 +309,7 @@ export default function ClientView() {
               data-testid="identity-submit-btn"
               className="w-full bg-white text-black py-3.5 rounded-sm text-sm font-medium hover:opacity-90 inline-flex items-center justify-center gap-2"
             >
-              {loading && (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              )}
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
               Enter Review
             </button>
           </form>
@@ -707,7 +710,11 @@ function TalentDetail({
     if (busyAction) return;
     setBusyAction(key);
     // Subtle haptic on supported devices (Android Chrome).
-    try { navigator.vibrate?.(10); } catch (e) { console.error(e); }
+    try {
+      navigator.vibrate?.(10);
+    } catch (e) {
+      console.error(e);
+    }
     try {
       await setAction(talent.id, key);
       // Tiny delay so the action confirmation toast registers + the
@@ -723,12 +730,16 @@ function TalentDetail({
 
   const download = async (m) => {
     await logDownload(talent.id, m.id);
-    const url = m.url;
+
+    const url = m.url.replace("/upload/", "/upload/fl_attachment/");
+
     const a = document.createElement("a");
     a.href = url;
     a.download = m.original_filename || "file";
-    a.target = "_blank";
+
+    document.body.appendChild(a);   // ✅ important
     a.click();
+    document.body.removeChild(a);   // ✅ cleanup
   };
 
   return (
@@ -783,16 +794,14 @@ function TalentDetail({
                             preload="metadata"
                             className="w-full border border-white/10 bg-black rounded-sm"
                           />
-
                           <a
                             href={downloadUrl}
                             download
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={() => logDownload(activeTalent?.id, t.id)}
-                            className="absolute top-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded hover:bg-black"
+                            {...(isSafari ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                            onClick={() => logDownload(talent.id, t.id)}
+                            className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/20 hover:bg-white hover:text-black flex items-center justify-center"
                           >
-                            ⬇
+                            <Download className="w-4 h-4" />
                           </a>
                         </div>
                       </div>
@@ -818,10 +827,11 @@ function TalentDetail({
                   <a
                     href={intro.url.replace("/upload/", "/upload/fl_attachment/")}
                     download
-                    onClick={() => logDownload(activeTalent?.id, intro.id)}
-                    className="absolute top-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded hover:bg-black"
+                    {...(isSafari ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                    onClick={() => logDownload(talent.id, intro.id)}
+                    className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/20 hover:bg-white hover:text-black flex items-center justify-center"
                   >
-                    ⬇
+                    <Download className="w-4 h-4" />
                   </a>
                 </div>
               </div>

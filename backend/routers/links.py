@@ -35,6 +35,20 @@ router = APIRouter(prefix="/api", tags=["links"])
 logger = logging.getLogger(__name__)
 
 
+def _require_active_link(link: dict) -> None:
+    """Enforce is_public on public client endpoints.
+
+    Called AFTER `link = await db.links.find_one(...)` has already
+    established the link exists. If `is_public` is explicitly False,
+    we reject with 403 so the client-facing page stops working the
+    instant an admin flips the toggle. Missing/absent `is_public`
+    still counts as active to preserve backwards compatibility with
+    links created before the field was introduced.
+    """
+    if link.get("is_public") is False:
+        raise HTTPException(status_code=403, detail="This link is no longer active")
+
+
 # --------------------------------------------------------------------------
 # Admin link CRUD
 # --------------------------------------------------------------------------
@@ -339,6 +353,7 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
+    _require_active_link(link)
     viewer_id = str(uuid.uuid4())
     email = payload.email.lower()
     now = _now()
@@ -395,9 +410,10 @@ async def mark_seen(
     viewer = decode_viewer(authorization)
     if not viewer or viewer.get("slug") != slug:
         raise HTTPException(401, "Identity required")
-    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1})
+    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1, "is_public": 1})
     if not link:
         raise HTTPException(404, "Link not found")
+    _require_active_link(link)
     await db.client_states.update_one(
         {"link_id": link["id"], "viewer_email": viewer["email"]},
         {
@@ -417,6 +433,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
+    _require_active_link(link)
     visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
     talent_field_visibility = link.get("talent_field_visibility") or {}
 
@@ -579,6 +596,7 @@ async def record_action(
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
+    _require_active_link(link)
 
     filt = {
         "link_id": link["id"],
@@ -612,6 +630,7 @@ async def log_download(
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
+    _require_active_link(link)
     if not link.get("visibility", {}).get("download"):
         raise HTTPException(403, "Downloads disabled")
     await db.link_downloads.insert_one({

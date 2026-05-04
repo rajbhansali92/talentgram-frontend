@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import ForwardToLinkModal from "@/components/ForwardToLinkModal";
 import BudgetLines from "@/components/BudgetLines";
+import ProjectPipeline from "@/pages/ProjectPipeline"; // ✅ IMPORT PIPELINE
 import {
     AVAILABILITY_OPTIONS,
     BUDGET_OPTIONS,
@@ -913,6 +914,21 @@ export default function ProjectEdit() {
                         </>
                     )}
                 </section>
+            )}
+
+            {/* 🔥 CASTING PIPELINE - ADDED HERE */}
+            {id && (
+                <div className="mt-12">
+                    <div className="border-t border-white/10 pt-8 mb-6">
+                        <h2 className="text-2xl font-display tracking-tight mb-2">
+                            Casting Pipeline
+                        </h2>
+                        <p className="text-sm text-white/40">
+                            Manage talents through the casting workflow
+                        </p>
+                    </div>
+                    <ProjectPipeline projectId={id} />
+                </div>
             )}
 
             {/* Material viewer modal */}

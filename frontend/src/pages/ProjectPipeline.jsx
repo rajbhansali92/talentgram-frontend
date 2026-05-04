@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import axios from "axios";
 
 const STAGES = [
@@ -22,7 +22,6 @@ const getStageLabel = (stage) => {
   return labels[stage] || stage.replaceAll("_", " ").toUpperCase();
 };
 
-// ✅ FIXED: Accept projectId as prop instead of using useParams
 export default function ProjectPipeline({ projectId }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -39,9 +38,10 @@ export default function ProjectPipeline({ projectId }) {
   const [searchLoading, setSearchLoading] = useState(false);
   const [selectedTalents, setSelectedTalents] = useState(new Set());
 
-  const fetchPipeline = async () => {
+  // ✅ WRAPPED WITH useCallback
+  const fetchPipeline = useCallback(async () => {
     if (!projectId) return;
-    
+
     try {
       setError(null);
       const res = await axios.get(`/pipeline/project/${projectId}`);
@@ -52,13 +52,12 @@ export default function ProjectPipeline({ projectId }) {
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    if (projectId) {
-      fetchPipeline();
-    }
   }, [projectId]);
+
+  // ✅ DEPENDENCY IS [fetchPipeline]
+  useEffect(() => {
+    fetchPipeline();
+  }, [fetchPipeline]);
 
   // SEARCH FUNCTION with /api prefix
   const searchTalents = async (q) => {

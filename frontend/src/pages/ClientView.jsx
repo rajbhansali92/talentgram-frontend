@@ -543,7 +543,7 @@ export default function ClientView() {
           slug={slug}
           projectBudget={projectBudget}
           projectShootDates={projectShootDates}
-          viewerAction={viewerActions[activeTalent.id]}
+          viewerAction={viewerActions?.[activeTalent.id]}
           onClose={() => setActiveTalent(null)}
           onNavigate={(t) => {
             setActiveTalent(t);
@@ -1086,11 +1086,16 @@ function TalentDetail({
                           !lines.length
                         ) {
                           return (
-                            <p className="text-sm">
+                            <div className="text-sm text-white/90 space-y-1">
+                              {talent.budget?.value && (
+                                <p data-testid="client-budget-value">
+                                  {talent.budget.value}
+                                </p>
+                              )}
                               <span className="inline-block px-2 py-0.5 text-[10px] tg-mono uppercase rounded-sm bg-[#34C759]/15 text-[#34C759]">
                                 Agreed
                               </span>
-                            </p>
+                            </div>
                           );
                         }
                         // 4) No talent response, project lines only.

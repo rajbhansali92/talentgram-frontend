@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
 import axios from "axios";
 
 const STAGES = [
@@ -23,8 +22,8 @@ const getStageLabel = (stage) => {
   return labels[stage] || stage.replaceAll("_", " ").toUpperCase();
 };
 
-export default function ProjectPipeline() {
-  const { id: projectId } = useParams();
+// ✅ FIXED: Accept projectId as prop instead of using useParams
+export default function ProjectPipeline({ projectId }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [bulkIds, setBulkIds] = useState(new Set());
@@ -41,6 +40,8 @@ export default function ProjectPipeline() {
   const [selectedTalents, setSelectedTalents] = useState(new Set());
 
   const fetchPipeline = async () => {
+    if (!projectId) return;
+    
     try {
       setError(null);
       const res = await axios.get(`/pipeline/project/${projectId}`);
@@ -59,7 +60,7 @@ export default function ProjectPipeline() {
     }
   }, [projectId]);
 
-  // ✅ SEARCH FUNCTION - FIXED with /api prefix
+  // SEARCH FUNCTION with /api prefix
   const searchTalents = async (q) => {
     if (!q) {
       setSearchResults([]);
@@ -68,7 +69,6 @@ export default function ProjectPipeline() {
 
     setSearchLoading(true);
     try {
-      // ✅ CRITICAL FIX: Added /api prefix and encodeURIComponent
       const res = await axios.get(`/api/talents/search?q=${encodeURIComponent(q)}`);
       setSearchResults(res.data.data || []);
     } catch (e) {

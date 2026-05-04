@@ -24,7 +24,7 @@ const getStageLabel = (stage) => {
 };
 
 export default function ProjectPipeline() {
-  const { id: projectId } = useParams(); // ✅ FIXED: proper routing
+  const { id: projectId } = useParams();
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [bulkIds, setBulkIds] = useState(new Set());
@@ -33,6 +33,12 @@ export default function ProjectPipeline() {
   const [bulkTalentsInput, setBulkTalentsInput] = useState("");
   const [bulkAdding, setBulkAdding] = useState(false);
   const [error, setError] = useState(null);
+  
+  // Search State
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [selectedTalents, setSelectedTalents] = useState(new Set());
 
   const fetchPipeline = async () => {
     try {
@@ -53,12 +59,74 @@ export default function ProjectPipeline() {
     }
   }, [projectId]);
 
+  // ✅ SEARCH FUNCTION - FIXED with /api prefix
+  const searchTalents = async (q) => {
+    if (!q) {
+      setSearchResults([]);
+      return;
+    }
+
+    setSearchLoading(true);
+    try {
+      // ✅ CRITICAL FIX: Added /api prefix and encodeURIComponent
+      const res = await axios.get(`/api/talents/search?q=${encodeURIComponent(q)}`);
+      setSearchResults(res.data.data || []);
+    } catch (e) {
+      console.error("Search failed", e);
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  // Debounce search to avoid too many requests
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (searchQuery) {
+        searchTalents(searchQuery);
+      } else {
+        setSearchResults([]);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // SELECT TOGGLE
+  const toggleTalentSelect = (id) => {
+    const newSet = new Set(selectedTalents);
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
+    setSelectedTalents(newSet);
+  };
+
+  // ADD TO PIPELINE
+  const addSelectedToPipeline = async () => {
+    if (selectedTalents.size === 0) return;
+
+    try {
+      await axios.post("/pipeline/add", {
+        project_id: projectId,
+        talent_ids: Array.from(selectedTalents),
+      });
+
+      setSelectedTalents(new Set());
+      setSearchResults([]);
+      setSearchQuery("");
+
+      fetchPipeline();
+      alert(`Added ${selectedTalents.size} talent(s) to pipeline`);
+    } catch (error) {
+      console.error("Failed to add talents:", error);
+      alert("Failed to add talents to pipeline");
+    }
+  };
+
   const handleBulkAdd = async () => {
-    // ✅ FIXED: better ID parsing (supports UUIDs, numbers, etc.)
     const talentIds = bulkTalentsInput
       .split(/[\n,]/)
       .map(id => id.trim())
-      .filter(id => id.length > 0 && id !== ','); // ✅ removes empty strings, keeps all valid IDs
+      .filter(id => id.length > 0 && id !== ',');
 
     if (talentIds.length === 0) {
       alert("Please enter at least one talent ID");
@@ -67,7 +135,6 @@ export default function ProjectPipeline() {
 
     setBulkAdding(true);
     try {
-      // ✅ FIXED: correct endpoint and payload
       await axios.post("/pipeline/add", {
         project_id: projectId,
         talent_ids: talentIds,
@@ -75,7 +142,7 @@ export default function ProjectPipeline() {
       
       setBulkTalentsInput("");
       setShowBulkAdd(false);
-      await fetchPipeline(); // refresh after add
+      await fetchPipeline();
       alert(`Successfully added ${talentIds.length} talent(s)`);
     } catch (error) {
       console.error("Bulk add failed:", error);
@@ -95,7 +162,6 @@ export default function ProjectPipeline() {
     if (!confirmed) return;
 
     try {
-      // ✅ FIXED: correct endpoint
       await axios.patch("/pipeline/move", {
         ids: Array.from(bulkIds),
         stage: targetStage,
@@ -103,7 +169,7 @@ export default function ProjectPipeline() {
       
       setBulkIds(new Set());
       setBulkMode(false);
-      await fetchPipeline(); // refresh after move
+      await fetchPipeline();
     } catch (error) {
       console.error("Bulk move failed:", error);
       alert("Failed to move talents");
@@ -185,6 +251,93 @@ export default function ProjectPipeline() {
                 + Bulk Add
               </button>
             </>
+          )}
+        </div>
+      </div>
+
+      {/* SEARCH UI SECTION - Above Kanban */}
+      <div className="mb-6">
+        <div className="bg-black/40 border border-white/10 rounded-lg p-4">
+          <h3 className="text-white/80 text-sm font-medium mb-3">
+            🔍 Quick Add Talents
+          </h3>
+          
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by name or email..."
+            className="w-full bg-black/50 border border-white/20 rounded px-3 py-2 text-white placeholder-white/40 focus:outline-none focus:border-white/40"
+          />
+
+          {/* Search Results */}
+          {searchQuery && (
+            <div className="mt-4">
+              {searchLoading && (
+                <div className="text-white/60 text-sm text-center py-4">
+                  Searching...
+                </div>
+              )}
+              
+              {!searchLoading && searchResults.length === 0 && searchQuery && (
+                <div className="text-white/40 text-sm text-center py-4">
+                  No talents found matching "{searchQuery}"
+                </div>
+              )}
+              
+              {!searchLoading && searchResults.length > 0 && (
+                <>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-white/60 text-xs">
+                      {searchResults.length} result(s)
+                    </span>
+                    {selectedTalents.size > 0 && (
+                      <button
+                        onClick={addSelectedToPipeline}
+                        className="text-xs bg-green-500/20 hover:bg-green-500/30 text-green-300 px-2 py-1 rounded"
+                      >
+                        Add {selectedTalents.size}
+                      </button>
+                    )}
+                  </div>
+                  
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {searchResults.map((talent) => (
+                      <div
+                        key={talent.id}
+                        className={`bg-white/5 border rounded p-2 cursor-pointer transition-all ${
+                          selectedTalents.has(talent.id)
+                            ? "border-blue-400 bg-blue-500/20"
+                            : "border-white/10 hover:bg-white/10"
+                        }`}
+                        onClick={() => toggleTalentSelect(talent.id)}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedTalents.has(talent.id)}
+                            onChange={() => {}}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-4 h-4"
+                          />
+                          <div className="flex-1">
+                            <p className="text-white text-sm font-medium">
+                              {talent.name || "Unnamed Talent"}
+                            </p>
+                            {talent.email && (
+                              <p className="text-white/40 text-xs">{talent.email}</p>
+                            )}
+                            <p className="text-white/30 text-xs mt-0.5">
+                              ID: {talent.id}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -275,7 +428,7 @@ function Column({ stage, items, refresh, bulkMode, bulkIds, onToggleBulkSelect }
   );
 }
 
-// Card Component - FIXED: shows talent data properly
+// Card Component
 function Card({ item, refresh, bulkMode, isSelected, onToggleSelect }) {
   const [moving, setMoving] = useState(false);
 
@@ -324,7 +477,6 @@ function Card({ item, refresh, bulkMode, isSelected, onToggleSelect }) {
           />
           <div className="flex-1">
             <p className="font-mono text-white/90">{item.talent_id}</p>
-            {/* ✅ FIXED: shows talent name if available */}
             {item.talent_name && (
               <p className="text-white/60 truncate text-[10px] mt-0.5">
                 {item.talent_name}
@@ -334,7 +486,6 @@ function Card({ item, refresh, bulkMode, isSelected, onToggleSelect }) {
         </div>
       ) : (
         <>
-          {/* ✅ FIXED: better talent display */}
           <div className="mb-1">
             <p className="font-mono text-white/90 font-medium">
               {item.talent_name || item.talent_id}
@@ -346,7 +497,6 @@ function Card({ item, refresh, bulkMode, isSelected, onToggleSelect }) {
             )}
           </div>
           
-          {/* Optional: show additional talent data */}
           {item.email && (
             <p className="text-white/40 truncate text-[10px]">{item.email}</p>
           )}

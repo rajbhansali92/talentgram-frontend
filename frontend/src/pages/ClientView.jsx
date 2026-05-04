@@ -771,12 +771,9 @@ function TalentDetail({
         <div className="grid lg:grid-cols-5 gap-8 lg:gap-12">
           {/* Left column — strict display order: TAKES → INTRO → IMAGES */}
           <div className="lg:col-span-3">
-            {/* AUDITION TAKES — FIRST PRIORITY per product spec */}
+            {/* AUDITION TAKES */}
             {vis.takes !== false && takes.length > 0 && (
-              <div
-                className="mb-8"
-                data-testid="client-takes-section"
-              >
+              <div className="mb-8" data-testid="client-takes-section">
                 <p className="eyebrow mb-3">Audition Takes</p>
 
                 <div className="grid md:grid-cols-2 gap-4">
@@ -796,15 +793,17 @@ function TalentDetail({
                             preload="metadata"
                             className="w-full border border-white/10 bg-black rounded-sm"
                           />
-                          <a
-                            href={downloadUrl}
-                            download
-                            {...(isSafari ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-                            onClick={() => logDownload(talent.id, t.id)}
-                            className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/20 hover:bg-white hover:text-black flex items-center justify-center"
-                          >
-                            <Download className="w-4 h-4" />
-                          </a>
+                          {vis.download && (
+                            <a
+                              href={downloadUrl}
+                              download
+                              {...(isSafari ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                              onClick={() => logDownload(talent.id, t.id)}
+                              className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/20 hover:bg-white hover:text-black flex items-center justify-center"
+                            >
+                              <Download className="w-4 h-4" />
+                            </a>
+                          )}
                         </div>
                       </div>
                     );
@@ -812,6 +811,7 @@ function TalentDetail({
                 </div>
               </div>
             )}
+
             {/* INTRODUCTION VIDEO */}
             {vis.intro_video && intro && (
               <div className="mb-8">
@@ -826,15 +826,17 @@ function TalentDetail({
                     data-testid="client-intro-video"
                   />
 
-                  <a
-                    href={intro.url.replace("/upload/", "/upload/fl_attachment/")}
-                    download
-                    {...(isSafari ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-                    onClick={() => logDownload(talent.id, intro.id)}
-                    className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/20 hover:bg-white hover:text-black flex items-center justify-center"
-                  >
-                    <Download className="w-4 h-4" />
-                  </a>
+                  {vis.download && (
+                    <a
+                      href={intro.url.replace("/upload/", "/upload/fl_attachment/")}
+                      download
+                      {...(isSafari ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                      onClick={() => logDownload(talent.id, intro.id)}
+                      className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/20 hover:bg-white hover:text-black flex items-center justify-center"
+                    >
+                      <Download className="w-4 h-4" />
+                    </a>
+                  )}
                 </div>
               </div>
             )}

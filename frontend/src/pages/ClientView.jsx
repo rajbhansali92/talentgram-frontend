@@ -563,6 +563,7 @@ export default function ClientView() {
           }
           saveComment={() => saveComment(activeTalent.id)}
           logDownload={logDownload}
+          isSafari={isSafari}
         />
       )}
     </div>
@@ -584,6 +585,7 @@ function TalentDetail({
   setCommentDraft,
   saveComment,
   logDownload,
+  isSafari,
 }) {
   const vis = link.visibility || {};
   // Split media by explicit category. Backend normalises all takes (new +

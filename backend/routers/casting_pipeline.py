@@ -141,6 +141,92 @@ async def _project_exists(project_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Submission → pipeline sync
+#
+# Called from `submissions.set_decision` whenever an admin approves / holds /
+# rejects a submission. Behaviour:
+#
+#   • Only updates an EXISTING pipeline row — never creates one. The kanban
+#     is a curated list; we don't want decisions to silently auto-populate
+#     it for projects the casting team hasn't started yet.
+#
+#   • Only mutates rows currently in {ask_to_test, approved, hold, rejected}
+#     — the four "fluid" lanes. Locked, shortlisted, already_tested are
+#     protected: those represent later human curation that an upstream
+#     decision change must not silently overwrite.
+#
+#   • Touches at most ONE row (the (project_id, talent_id) pair). No fanout,
+#     no batch.
+#
+#   • Errors are swallowed and logged — never block the user-facing
+#     submission decision response on a pipeline sync failure.
+# ---------------------------------------------------------------------------
+SUBMISSION_DECISION_TO_STAGE = {
+    "approved": "approved",
+    "hold": "hold",
+    "rejected": "rejected",
+}
+
+# Only these stages may be auto-overwritten by a submission decision.
+# Adding `follow_up` here when the stage is introduced will make the cleanup
+# requirement ("automatically remove the talent from … future follow_up
+# stage") work without further changes.
+AUTO_SYNC_OVERWRITABLE_STAGES = {
+    "ask_to_test",
+    "approved",
+    "hold",
+    "rejected",
+    "follow_up",  # not yet implemented; safe to list pre-emptively
+}
+
+
+async def sync_pipeline_from_submission(
+    project_id: Optional[str],
+    talent_id: Optional[str],
+    decision: Optional[str],
+) -> None:
+    """Best-effort: bump the existing pipeline row to the stage implied by
+    the submission decision. No-op on any of:
+
+      • missing project_id / talent_id (submission not yet linked to a talent)
+      • decision not in the mapping (e.g. 'pending' — nothing to sync)
+      • no existing pipeline row for (project_id, talent_id)
+      • current stage is protected (locked / shortlisted / already_tested / pitch)
+
+    The function NEVER raises — it returns silently and logs at WARNING.
+    """
+    try:
+        if not project_id or not talent_id:
+            return
+        target_stage = SUBMISSION_DECISION_TO_STAGE.get(decision)
+        if not target_stage:
+            return
+
+        # Single round-trip conditional update: matches only rows whose
+        # current stage is in the overwritable set. Locked / shortlisted /
+        # already_tested / pitch rows simply fail the filter → no update.
+        res = await db.casting_pipeline.update_one(
+            {
+                "project_id": project_id,
+                "talent_id": talent_id,
+                "stage": {"$in": list(AUTO_SYNC_OVERWRITABLE_STAGES)},
+            },
+            {"$set": {"stage": target_stage, "updated_at": _now()}},
+        )
+        if res.modified_count:
+            logger.info(
+                "pipeline.auto-sync project=%s talent=%s decision=%s → stage=%s",
+                project_id, talent_id, decision, target_stage,
+            )
+    except Exception:
+        # Pipeline sync is an enrichment — never break the submission flow.
+        logger.exception(
+            "pipeline.auto-sync failed project=%s talent=%s decision=%s",
+            project_id, talent_id, decision,
+        )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/projects/{project_id}/pipeline
 # ---------------------------------------------------------------------------
 @router.get("/{project_id}/pipeline")

@@ -792,6 +792,18 @@ async def set_decision(
         raise HTTPException(404, "Submission not found")
     # Fanout — only when the decision actually changes (avoid noise on idempotent calls)
     if prev != payload.decision:
+        # Auto-sync casting pipeline: bump the matching pipeline row to the
+        # decision's canonical stage. Best-effort — never blocks the response.
+        # See `casting_pipeline.sync_pipeline_from_submission` for the
+        # exact overwrite-protection rules (locked / shortlisted /
+        # already_tested / pitch are protected).
+        from routers.casting_pipeline import sync_pipeline_from_submission
+        await sync_pipeline_from_submission(
+            project_id=pid,
+            talent_id=sub.get("talent_id"),
+            decision=payload.decision,
+        )
+
         project = await db.projects.find_one({"id": pid}, {"_id": 0, "brand_name": 1})
         brand = (project or {}).get("brand_name") or "Project"
         talent_name = sub.get("talent_name") or sub.get("talent_email") or "Submission"

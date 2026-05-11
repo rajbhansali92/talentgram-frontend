@@ -271,17 +271,44 @@ async def list_pipeline(
             if tid:
                 by_id[tid] = _talent_merge_fields(t)
 
-    hydrated = [
-        {
+    # Submission-aware follow_up computation (PATCH 3C).
+    #
+    # `follow_up` is a virtual, read-only lane — NOT a stored DB stage. A
+    # row is "in follow_up" when:
+    #     stage == ask_to_test  AND  talent has no submission for this project
+    #
+    # One query covers all rows. `talent_id` is intentionally chosen as the
+    # match key (not email) because pipeline rows and submissions are
+    # already linked-by-talent_id once a talent reaches a project.
+    submitted_talent_ids: set = set()
+    if talent_ids:
+        sub_cursor = db.submissions.find(
+            {"project_id": project_id, "talent_id": {"$in": talent_ids}},
+            {"_id": 0, "talent_id": 1},
+        )
+        async for s in sub_cursor:
+            tid = s.get("talent_id")
+            if tid:
+                submitted_talent_ids.add(tid)
+
+    hydrated = []
+    for row in rows:
+        canonical_stage = _normalise_stage(row.get("stage")) or row.get("stage")
+        tid = row.get("talent_id")
+        is_follow_up = (
+            canonical_stage == "ask_to_test"
+            and bool(tid)
+            and tid not in submitted_talent_ids
+        )
+        hydrated.append({
             **row,
             # Normalise legacy stages (`sent` → `approved`) at read time so
             # the frontend never sees deprecated values. The underlying
             # document is not rewritten — a future backfill can clean up.
-            "stage": _normalise_stage(row.get("stage")) or row.get("stage"),
-            **by_id.get(row.get("talent_id"), _EMPTY_MERGE),
-        }
-        for row in rows
-    ]
+            "stage": canonical_stage,
+            "is_follow_up": is_follow_up,
+            **by_id.get(tid, _EMPTY_MERGE),
+        })
     return {"success": True, "data": hydrated}
 
 

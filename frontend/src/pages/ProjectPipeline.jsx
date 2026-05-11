@@ -60,7 +60,15 @@ const STAGE_LABELS = {
     not_available: "NOT AVAILABLE",
     not_interested: "NOT INTERESTED",
     pitch: "PITCH",
+    // Virtual read-only lane (PATCH 3C). Never stored in DB.
+    follow_up: "FOLLOW-UP",
 };
+
+// Stable references used by the read-only follow-up lane. Defining them
+// at module scope (not inside render) keeps the `memo` comparators on
+// Column/Card from invalidating every render.
+const EMPTY_BULK_SET = new Set();
+const NOOP = () => {};
 
 // Per-stage next-step suggestions for the card action buttons. `pitch`,
 // terminal stages, and `locked` are intentionally empty — no automatic
@@ -453,6 +461,31 @@ function ProjectPipeline({ projectId }) {
                 ))}
             </div>
 
+            {/* Follow-up — virtual read-only lane (PATCH 3C).
+                Items rendered here ALSO appear in their canonical stage
+                (typically `ask_to_test`) — this lane is a visibility
+                reminder, not ownership. Driven entirely by the
+                backend-computed `is_follow_up` flag — no client logic. */}
+            <div className="mt-6">
+                <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
+                    Follow-up (test pending)
+                </h3>
+                <div
+                    className="grid grid-cols-1 md:grid-cols-2 gap-4"
+                    data-testid="pipeline-follow-up"
+                >
+                    <Column
+                        stage="follow_up"
+                        items={data.filter((i) => i.is_follow_up === true)}
+                        refresh={fetchPipeline}
+                        bulkMode={false}
+                        bulkIds={EMPTY_BULK_SET}
+                        onToggleBulkSelect={NOOP}
+                        readOnly
+                    />
+                </div>
+            </div>
+
             {/* Outcome stages — terminal states, rendered below the funnel */}
             <div className="mt-6">
                 <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
@@ -592,6 +625,7 @@ const Column = memo(function Column({
     bulkMode,
     bulkIds,
     onToggleBulkSelect,
+    readOnly = false,
 }) {
     return (
         <div
@@ -605,12 +639,13 @@ const Column = memo(function Column({
             <div className="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar">
                 {items.map((item) => (
                     <Card
-                        key={item.id}
+                        key={`${stage}-${item.id}`}
                         item={item}
                         refresh={refresh}
-                        bulkMode={bulkMode}
+                        bulkMode={bulkMode && !readOnly}
                         isSelected={bulkIds.has(item.id)}
                         onToggleSelect={onToggleBulkSelect}
+                        readOnly={readOnly}
                     />
                 ))}
                 {items.length === 0 && (
@@ -629,6 +664,7 @@ const Card = memo(function Card({
     bulkMode,
     isSelected,
     onToggleSelect,
+    readOnly = false,
 }) {
     const [moving, setMoving] = useState(false);
 
@@ -714,7 +750,9 @@ const Card = memo(function Card({
                         </p>
                     )}
 
-                    {nextStages.length > 0 && (
+                    {/* Onward-stage action buttons. Suppressed in readOnly
+                        mode (e.g. the virtual `follow_up` lane — PATCH 3C). */}
+                    {!readOnly && nextStages.length > 0 && (
                         <div className="flex gap-1 mt-2 flex-wrap">
                             {nextStages.map((stage) => (
                                 <button

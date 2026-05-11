@@ -40,6 +40,7 @@ const PipelineColumn = memo(function PipelineColumn({
     onCardDragStart,
     onCardDragEnd,
     onCardDrop,
+    compact = false,
 }) {
     const accent = STAGE_ACCENTS[stage] || DEFAULT_ACCENT;
     const emptyCopy = EMPTY_STATE_COPY[stage] || "Nothing here yet";
@@ -96,11 +97,11 @@ const PipelineColumn = memo(function PipelineColumn({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             className={`
-                relative shrink-0 w-[280px] md:w-[300px]
+                relative shrink-0 w-[300px] min-w-[300px] max-w-[300px]
                 rounded-xl overflow-hidden
-                bg-gradient-to-b from-white/[0.04] to-white/[0.015]
+                bg-[#0f0f0f]
                 border transition-all duration-200
-                backdrop-blur-xl
+                backdrop-blur-sm
                 ${
                     isDragOver
                         ? "border-white/30 ring-1 ring-white/10 shadow-[0_12px_36px_-12px_rgba(0,0,0,0.7),inset_0_0_0_1px_rgba(255,255,255,0.05)]"
@@ -120,8 +121,8 @@ const PipelineColumn = memo(function PipelineColumn({
             <div
                 className="
                     sticky top-0 z-10
-                    px-4 py-3
-                    bg-black/40 backdrop-blur-md
+                    px-4 py-2.5
+                    bg-[#121212]
                     border-b border-white/[0.05]
                     flex items-center justify-between gap-2
                 "
@@ -177,11 +178,17 @@ const PipelineColumn = memo(function PipelineColumn({
 
             {/* Card stream — independent vertical scroll. The fixed
                 viewport height keeps the board cinematic and predictable. */}
-            <div className="
-                px-3 py-3 space-y-2
-                max-h-[68vh] min-h-[180px]
-                overflow-y-auto tg-pipeline-scroll
-            ">
+            <div
+                className={`
+                    px-3 py-3 space-y-2
+                    overflow-y-auto tg-pipeline-scroll
+                    ${
+                        compact
+                            ? "min-h-[220px] max-h-[320px]"
+                            : "min-h-[340px] max-h-[68vh]"
+                    }
+                `}
+            >
                 {items.length === 0 ? (
                     <EmptyLane label={emptyCopy} />
                 ) : (
@@ -198,6 +205,7 @@ const PipelineColumn = memo(function PipelineColumn({
                             isDragging={dragId === item.id}
                             onDragStart={onCardDragStart}
                             onDragEnd={onCardDragEnd}
+                            compact={compact}
                         />
                     ))
                 )}

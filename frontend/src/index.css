@@ -429,3 +429,44 @@ html.light .opacity-40 {
 html.light .opacity-30 {
     opacity: 0.14 !important;
 }
+
+/* -------------------------------------------------------------------------
+ * Casting Pipeline — cinematic scrollbar (PATCH 4A)
+ * Thin, calm, premium. Applied to both the horizontal board strip and the
+ * vertical card streams inside columns. Falls back to native scrollbars on
+ * browsers that don't support `::-webkit-scrollbar` (Firefox uses the
+ * `scrollbar-*` properties instead).
+ * ----------------------------------------------------------------------- */
+.tg-pipeline-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.tg-pipeline-scroll::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+.tg-pipeline-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+.tg-pipeline-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    transition: background 200ms ease;
+}
+.tg-pipeline-scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.16);
+}
+.tg-pipeline-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.24);
+}
+/* Light theme — invert to soft slate so the scrollbar reads cleanly */
+html.light .tg-pipeline-scroll {
+    scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+html.light .tg-pipeline-scroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.08);
+}
+html.light .tg-pipeline-scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.16);
+}
+

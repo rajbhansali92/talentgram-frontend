@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import React, { memo, useCallback, useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -67,6 +67,40 @@ const STAGE_LABELS = {
 // Stable references used by the read-only follow-up lane. Defining them
 // at module scope (not inside render) keeps the `memo` comparators on
 // Column/Card from invalidating every render.
+// Per-stage accent colours. Used as a thin top bar on the column header
+// (cinematic stage indicator). Kept muted on purpose — no neon, no rainbow.
+// Outcome lanes share a deep slate, follow-up gets a soft amber pulse so it
+// reads as "attention needed" without screaming.
+const STAGE_ACCENTS = {
+    ask_to_test: "from-sky-300/60 to-sky-500/0",
+    approved: "from-emerald-300/60 to-emerald-500/0",
+    hold: "from-amber-300/60 to-amber-500/0",
+    shortlisted: "from-violet-300/60 to-violet-500/0",
+    already_tested: "from-fuchsia-300/60 to-fuchsia-500/0",
+    locked: "from-yellow-200/70 to-yellow-500/0",
+    rejected: "from-rose-300/40 to-rose-500/0",
+    not_available: "from-zinc-300/30 to-zinc-500/0",
+    not_interested: "from-zinc-300/30 to-zinc-500/0",
+    pitch: "from-teal-300/60 to-teal-500/0",
+    follow_up: "from-amber-300/70 to-amber-500/0",
+};
+const DEFAULT_ACCENT = "from-white/30 to-white/0";
+
+// Cinematic empty-state copy keyed by stage. Falls back to a generic line.
+const EMPTY_STATE_COPY = {
+    ask_to_test: "Awaiting first invitations",
+    approved: "No approvals yet",
+    hold: "Nothing on hold",
+    shortlisted: "Empty shortlist",
+    already_tested: "No prior tests",
+    locked: "Not finalised yet",
+    rejected: "Cleanly clear",
+    not_available: "Everyone's available",
+    not_interested: "All in",
+    pitch: "No pitches in flight",
+    follow_up: "All caught up",
+};
+
 const EMPTY_BULK_SET = new Set();
 const NOOP = () => {};
 
@@ -441,39 +475,42 @@ function ProjectPipeline({ projectId }) {
                 </div>
             )}
 
-            {/* Kanban — main flow (progression funnel) */}
-            <div
-                className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 overflow-x-auto"
-                data-testid="pipeline-main-flow"
+            {/* ------------------------------------------------------------
+                Cinematic Kanban — Main flow (progression funnel).
+                Horizontal scroll on viewports narrower than the full row
+                so a 6-stage funnel never compresses awkwardly. Mobile
+                stacks via swipe-snap. Each column holds its own vertical
+                scroll, so the board never grows taller than the viewport.
+                ------------------------------------------------------------ */}
+            <BoardSection
+                eyebrow="Main flow"
+                helper={`${MAIN_FLOW_STAGES.length} stages · progression funnel`}
             >
-                {MAIN_FLOW_STAGES.map((stage) => (
-                    <Column
-                        key={stage}
-                        stage={stage}
-                        items={data.filter(
-                            (i) => normaliseStage(i.stage) === stage,
-                        )}
-                        refresh={fetchPipeline}
-                        bulkMode={bulkMode}
-                        bulkIds={bulkIds}
-                        onToggleBulkSelect={toggleBulkSelect}
-                    />
-                ))}
-            </div>
+                <BoardRow testid="pipeline-main-flow">
+                    {MAIN_FLOW_STAGES.map((stage) => (
+                        <Column
+                            key={stage}
+                            stage={stage}
+                            items={data.filter(
+                                (i) => normaliseStage(i.stage) === stage,
+                            )}
+                            refresh={fetchPipeline}
+                            bulkMode={bulkMode}
+                            bulkIds={bulkIds}
+                            onToggleBulkSelect={toggleBulkSelect}
+                        />
+                    ))}
+                </BoardRow>
+            </BoardSection>
 
-            {/* Follow-up — virtual read-only lane (PATCH 3C).
-                Items rendered here ALSO appear in their canonical stage
-                (typically `ask_to_test`) — this lane is a visibility
-                reminder, not ownership. Driven entirely by the
-                backend-computed `is_follow_up` flag — no client logic. */}
-            <div className="mt-6">
-                <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
-                    Follow-up (test pending)
-                </h3>
-                <div
-                    className="grid grid-cols-1 md:grid-cols-2 gap-4"
-                    data-testid="pipeline-follow-up"
-                >
+            {/* Follow-up — virtual read-only lane (PATCH 3C). Quietly
+                separated under its own eyebrow with an amber accent. */}
+            <BoardSection
+                eyebrow="Follow-up"
+                helper="Test pending · auto-cleared on submission"
+                muted
+            >
+                <BoardRow testid="pipeline-follow-up">
                     <Column
                         stage="follow_up"
                         items={data.filter((i) => i.is_follow_up === true)}
@@ -483,18 +520,13 @@ function ProjectPipeline({ projectId }) {
                         onToggleBulkSelect={NOOP}
                         readOnly
                     />
-                </div>
-            </div>
+                </BoardRow>
+            </BoardSection>
 
-            {/* Outcome stages — terminal states, rendered below the funnel */}
-            <div className="mt-6">
-                <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
-                    Outcomes
-                </h3>
-                <div
-                    className="grid grid-cols-1 md:grid-cols-3 gap-4"
-                    data-testid="pipeline-outcomes"
-                >
+            {/* Outcome stages — terminal states. Visually de-emphasised
+                with a dimmer eyebrow and muted accent. */}
+            <BoardSection eyebrow="Outcomes" helper="Terminal states" muted>
+                <BoardRow testid="pipeline-outcomes">
                     {OUTCOME_STAGES.map((stage) => (
                         <Column
                             key={stage}
@@ -508,18 +540,18 @@ function ProjectPipeline({ projectId }) {
                             onToggleBulkSelect={toggleBulkSelect}
                         />
                     ))}
-                </div>
-            </div>
+                </BoardRow>
+            </BoardSection>
 
-            {/* Pitch — independent sourcing lane. Not part of the funnel. */}
-            <div className="mt-6">
-                <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
-                    Pitch (sourcing)
-                </h3>
-                <div
-                    className="grid grid-cols-1 md:grid-cols-2 gap-4"
-                    data-testid="pipeline-pitch"
-                >
+            {/* Pitch — independent sourcing lane. Separated by a faint
+                divider so the eye understands this is a different
+                workflow, not the next funnel step. */}
+            <BoardSection
+                eyebrow="Pitch"
+                helper="Sourcing · independent of funnel"
+                divider
+            >
+                <BoardRow testid="pipeline-pitch">
                     {INDEPENDENT_STAGES.map((stage) => (
                         <Column
                             key={stage}
@@ -533,8 +565,63 @@ function ProjectPipeline({ projectId }) {
                             onToggleBulkSelect={toggleBulkSelect}
                         />
                     ))}
-                </div>
+                </BoardRow>
+            </BoardSection>
+        </div>
+    );
+}
+
+/* ---------------------------------------------------------------------
+ * Cinematic board section helpers — pure layout, no state.
+ *   BoardSection: eyebrow + helper + optional faint top divider.
+ *   BoardRow:     horizontally scrolling flex strip + custom scrollbar.
+ * ------------------------------------------------------------------- */
+function BoardSection({ eyebrow, helper, children, muted = false, divider = false }) {
+    return (
+        <section
+            className={`mt-10 ${divider ? "pt-10 border-t border-white/[0.05]" : ""}`}
+        >
+            <div className="flex items-baseline justify-between mb-4 px-1">
+                <h3
+                    className={`text-[10px] tracking-[0.28em] uppercase font-medium ${
+                        muted ? "text-white/40" : "text-white/70"
+                    }`}
+                >
+                    {eyebrow}
+                </h3>
+                {helper && (
+                    <span className="text-[10px] tg-mono text-white/30 hidden sm:inline">
+                        {helper}
+                    </span>
+                )}
             </div>
+            {children}
+        </section>
+    );
+}
+
+function BoardRow({ children, testid }) {
+    // Horizontal scroll mechanism — pure CSS, no library. Columns set their
+    // own fixed widths; `flex-nowrap + overflow-x-auto` does the rest.
+    // Snap points only on small viewports so swiping feels deliberate on
+    // mobile; on desktop free-scroll feels more cinematic.
+    return (
+        <div
+            data-testid={testid}
+            className="
+                flex gap-4 pb-3
+                overflow-x-auto tg-pipeline-scroll
+                flex-nowrap
+                snap-x snap-mandatory md:snap-none
+                -mx-1 px-1
+            "
+            style={{ scrollBehavior: "smooth" }}
+        >
+            {React.Children.map(children, (child, idx) => (
+                <div key={idx} className="snap-start md:snap-none shrink-0">
+                    {child}
+                </div>
+            ))}
         </div>
     );
 }
@@ -627,33 +714,102 @@ const Column = memo(function Column({
     onToggleBulkSelect,
     readOnly = false,
 }) {
+    // Cinematic column: a glass-panelled card with a thin stage-accent line
+    // at the very top, a sticky header that survives vertical scroll, and a
+    // calm empty state. No bright colours, no heavy borders.
+    const accent = STAGE_ACCENTS[stage] || DEFAULT_ACCENT;
+    const emptyCopy = EMPTY_STATE_COPY[stage] || "Nothing here yet";
+
     return (
         <div
-            className="bg-black/40 border border-white/10 rounded-lg p-3 min-w-[200px]"
             data-testid={`pipeline-column-${stage}`}
+            className="
+                relative shrink-0 w-[280px] md:w-[300px]
+                rounded-xl overflow-hidden
+                bg-gradient-to-b from-white/[0.04] to-white/[0.015]
+                border border-white/[0.06]
+                backdrop-blur-xl
+                shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]
+            "
         >
-            <h3 className="text-xs font-semibold uppercase text-white/60 mb-3">
-                {getStageLabel(stage)}
-                <span className="ml-2 text-white/40">({items.length})</span>
-            </h3>
-            <div className="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar">
-                {items.map((item) => (
-                    <Card
-                        key={`${stage}-${item.id}`}
-                        item={item}
-                        refresh={refresh}
-                        bulkMode={bulkMode && !readOnly}
-                        isSelected={bulkIds.has(item.id)}
-                        onToggleSelect={onToggleBulkSelect}
-                        readOnly={readOnly}
-                    />
-                ))}
-                {items.length === 0 && (
-                    <div className="text-white/20 text-xs text-center py-4">
-                        No talents
-                    </div>
+            {/* Stage accent — paper-thin gradient line that gives each lane
+                a quiet sense of identity without colouring the whole card. */}
+            <div
+                className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r ${accent} pointer-events-none`}
+                aria-hidden
+            />
+
+            {/* Sticky header — survives vertical scroll inside the column.
+                Slight backdrop-blur so cards passing under it stay legible. */}
+            <div
+                className="
+                    sticky top-0 z-10
+                    px-4 py-3
+                    bg-black/40 backdrop-blur-md
+                    border-b border-white/[0.05]
+                    flex items-center justify-between gap-2
+                "
+            >
+                <div className="min-w-0 flex items-center gap-2">
+                    <span className="text-[10px] tracking-[0.22em] uppercase text-white/70 font-medium truncate">
+                        {getStageLabel(stage)}
+                    </span>
+                    {readOnly && (
+                        <span className="text-[9px] tracking-[0.18em] uppercase text-amber-200/60 tg-mono">
+                            read-only
+                        </span>
+                    )}
+                </div>
+                <span
+                    className="
+                        text-[10px] tg-mono text-white/50
+                        px-2 py-0.5 rounded-full
+                        bg-white/[0.04] border border-white/[0.06]
+                        shrink-0
+                    "
+                    data-testid={`pipeline-column-count-${stage}`}
+                >
+                    {items.length}
+                </span>
+            </div>
+
+            {/* Card stream — independent vertical scroll. The fixed
+                viewport height keeps the board cinematic and predictable. */}
+            <div className="
+                px-3 py-3 space-y-2
+                max-h-[68vh] min-h-[180px]
+                overflow-y-auto tg-pipeline-scroll
+            ">
+                {items.length === 0 ? (
+                    <EmptyLane label={emptyCopy} />
+                ) : (
+                    items.map((item) => (
+                        <Card
+                            key={`${stage}-${item.id}`}
+                            item={item}
+                            refresh={refresh}
+                            bulkMode={bulkMode && !readOnly}
+                            isSelected={bulkIds.has(item.id)}
+                            onToggleSelect={onToggleBulkSelect}
+                            readOnly={readOnly}
+                        />
+                    ))
                 )}
             </div>
+        </div>
+    );
+});
+
+// Cinematic empty state — replaces the old dashed placeholder. Soft,
+// quiet, no UI noise. Sits centred in the column so the eye rests rather
+// than searches for the missing data.
+const EmptyLane = memo(function EmptyLane({ label }) {
+    return (
+        <div className="py-10 flex flex-col items-center justify-center gap-2 text-center">
+            <div className="w-8 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+            <p className="text-[11px] tracking-wide text-white/30 italic">
+                {label}
+            </p>
         </div>
     );
 });

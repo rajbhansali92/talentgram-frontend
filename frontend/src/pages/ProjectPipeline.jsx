@@ -28,4 +28,6 @@
  * ------------------------------------------------------------------- */
 import PipelineBoard from "@/components/pipeline/PipelineBoard";
 
-export default PipelineBoard;
+export default function ProjectPipeline(props) {
+    return <PipelineBoard {...props} />;
+}

@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -103,6 +103,41 @@ const EMPTY_STATE_COPY = {
 
 const EMPTY_BULK_SET = new Set();
 const NOOP = () => {};
+
+/* ---------------------------------------------------------------------
+ * Filter primitives (PATCH 4E)
+ *
+ * `STATUS_FOCUS_OPTIONS` — segmented quick-filter at the top of the
+ * board. `follow_up` is special: it collapses every other section so the
+ * casting team can drill into "needs attention" in one click.
+ * `pending`  → ask_to_test + hold (everything awaiting a decision)
+ * Other entries map 1:1 to the canonical stage.
+ *
+ * `TRISTATE_OPTIONS` — used by Has-submission / Has-Instagram filters.
+ * Three states keeps the control compact (no extra dropdown surface).
+ * ------------------------------------------------------------------- */
+const STATUS_FOCUS_OPTIONS = [
+    { value: "all", label: "All" },
+    { value: "follow_up", label: "Follow-up only" },
+    { value: "pending", label: "Pending" },
+    { value: "approved", label: "Approved" },
+    { value: "shortlisted", label: "Shortlisted" },
+    { value: "locked", label: "Locked" },
+    { value: "rejected", label: "Rejected" },
+];
+
+const TRISTATE_OPTIONS = [
+    { value: "any", label: "Any" },
+    { value: "yes", label: "Yes" },
+    { value: "no", label: "No" },
+];
+
+const DEFAULT_FILTERS = {
+    search: "",
+    statusFocus: "all",
+    hasSubmission: "any",
+    hasIg: "any",
+};
 
 /* ---------------------------------------------------------------------
  * Status tones (PATCH 4B)
@@ -275,6 +310,102 @@ function ProjectPipeline({ projectId }) {
         setBulkIds(new Set());
         setBulkMode(false);
     }, []);
+
+    /* -----------------------------------------------------------------
+     * Filtering (PATCH 4E) — view-layer only.
+     *
+     * Filters NEVER mutate `data`. We compute `filteredData` lazily via
+     * useMemo, keyed on the four filter inputs. `hiddenStages` is a Set
+     * applied at the section/column render level (column stops being
+     * rendered, not filtered out of `data`). `statusFocus === "follow_up"`
+     * is special: it collapses every section except the follow-up lane,
+     * giving the casting team a single-click "needs attention" view.
+     *
+     * `has_submission` is a best-effort inference from the existing API
+     * surface — we use `is_follow_up` as the proxy (true ⇒ no submission;
+     * false ⇒ submission has been received OR the talent has progressed
+     * beyond ask_to_test). Reasonable because once a talent leaves
+     * ask_to_test, they were necessarily acted on by an admin or by
+     * Patch 3B's auto-sync, which requires a submission.
+     * --------------------------------------------------------------- */
+    const [search, setSearch] = useState(DEFAULT_FILTERS.search);
+    const [statusFocus, setStatusFocus] = useState(DEFAULT_FILTERS.statusFocus);
+    const [hasSubmission, setHasSubmission] = useState(DEFAULT_FILTERS.hasSubmission);
+    const [hasIg, setHasIg] = useState(DEFAULT_FILTERS.hasIg);
+    const [hiddenStages, setHiddenStages] = useState(() => new Set());
+
+    const filtersActive =
+        Boolean(search) ||
+        statusFocus !== DEFAULT_FILTERS.statusFocus ||
+        hasSubmission !== DEFAULT_FILTERS.hasSubmission ||
+        hasIg !== DEFAULT_FILTERS.hasIg ||
+        hiddenStages.size > 0;
+
+    const filteredData = useMemo(() => {
+        let rows = data;
+
+        if (search) {
+            const q = search.toLowerCase().trim();
+            if (q) {
+                rows = rows.filter((r) => {
+                    const hay = [
+                        r.talent_name,
+                        r.instagram_handle,
+                        r.talent_email,
+                        r.email,
+                        r.talent_phone,
+                    ]
+                        .filter(Boolean)
+                        .join(" ")
+                        .toLowerCase();
+                    return hay.includes(q);
+                });
+            }
+        }
+
+        if (statusFocus !== "all") {
+            rows = rows.filter((r) => {
+                if (statusFocus === "follow_up") return r.is_follow_up === true;
+                const s = normaliseStage(r.stage);
+                if (statusFocus === "pending") return s === "ask_to_test" || s === "hold";
+                return s === statusFocus;
+            });
+        }
+
+        if (hasSubmission !== "any") {
+            rows = rows.filter((r) =>
+                hasSubmission === "yes" ? r.is_follow_up === false : r.is_follow_up === true,
+            );
+        }
+
+        if (hasIg !== "any") {
+            rows = rows.filter((r) =>
+                hasIg === "yes" ? Boolean(r.instagram_handle) : !r.instagram_handle,
+            );
+        }
+
+        return rows;
+    }, [data, search, statusFocus, hasSubmission, hasIg]);
+
+    const toggleStageVisibility = useCallback((stage) => {
+        setHiddenStages((prev) => {
+            const next = new Set(prev);
+            if (next.has(stage)) next.delete(stage);
+            else next.add(stage);
+            return next;
+        });
+    }, []);
+
+    const clearAllFilters = useCallback(() => {
+        setSearch(DEFAULT_FILTERS.search);
+        setStatusFocus(DEFAULT_FILTERS.statusFocus);
+        setHasSubmission(DEFAULT_FILTERS.hasSubmission);
+        setHasIg(DEFAULT_FILTERS.hasIg);
+        setHiddenStages(new Set());
+    }, []);
+
+    const showOnlyFollowUp = statusFocus === "follow_up";
+    const hasZeroAfterFilter = filteredData.length === 0 && filtersActive;
 
     /* -----------------------------------------------------------------
      * Drag & Drop (PATCH 4D) — native HTML5, no library.
@@ -654,22 +785,41 @@ function ProjectPipeline({ projectId }) {
             )}
 
             {/* ------------------------------------------------------------
-                Cinematic Kanban — Main flow (progression funnel).
-                Horizontal scroll on viewports narrower than the full row
-                so a 6-stage funnel never compresses awkwardly. Mobile
-                stacks via swipe-snap. Each column holds its own vertical
-                scroll, so the board never grows taller than the viewport.
+                Pipeline Control Bar (PATCH 4E) — sticky search + filters.
                 ------------------------------------------------------------ */}
+            <PipelineControlBar
+                search={search}
+                onSearch={setSearch}
+                statusFocus={statusFocus}
+                onStatusFocus={setStatusFocus}
+                hasSubmission={hasSubmission}
+                onHasSubmission={setHasSubmission}
+                hasIg={hasIg}
+                onHasIg={setHasIg}
+                filtersActive={filtersActive}
+                onClearAll={clearAllFilters}
+                totalCount={data.length}
+                filteredCount={filteredData.length}
+            />
+
+            {/* Empty filter state — replaces board sections when active
+                filters resolve to zero matches. */}
+            {hasZeroAfterFilter && (
+                <FilterEmptyState onReset={clearAllFilters} />
+            )}
+
+            {/* Main flow — hidden when showOnlyFollowUp or empty. */}
+            {!hasZeroAfterFilter && !showOnlyFollowUp && (
             <BoardSection
                 eyebrow="Main flow"
                 helper={`${MAIN_FLOW_STAGES.length} stages · progression funnel`}
             >
                 <BoardRow testid="pipeline-main-flow">
-                    {MAIN_FLOW_STAGES.map((stage) => (
+                    {MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
                         <Column
                             key={stage}
                             stage={stage}
-                            items={data.filter(
+                            items={filteredData.filter(
                                 (i) => normaliseStage(i.stage) === stage,
                             )}
                             refresh={fetchPipeline}
@@ -686,9 +836,11 @@ function ProjectPipeline({ projectId }) {
                     ))}
                 </BoardRow>
             </BoardSection>
+            )}
 
-            {/* Follow-up — virtual read-only lane (PATCH 3C). Quietly
-                separated under its own eyebrow with an amber accent. */}
+            {/* Follow-up — virtual read-only lane. Always shown unless the
+                board was filtered to zero results. */}
+            {!hasZeroAfterFilter && (
             <BoardSection
                 eyebrow="Follow-up"
                 helper="Test pending · auto-cleared on submission"
@@ -697,7 +849,7 @@ function ProjectPipeline({ projectId }) {
                 <BoardRow testid="pipeline-follow-up">
                     <Column
                         stage="follow_up"
-                        items={data.filter((i) => i.is_follow_up === true)}
+                        items={filteredData.filter((i) => i.is_follow_up === true)}
                         refresh={fetchPipeline}
                         bulkMode={false}
                         bulkIds={EMPTY_BULK_SET}
@@ -706,16 +858,19 @@ function ProjectPipeline({ projectId }) {
                     />
                 </BoardRow>
             </BoardSection>
+            )}
 
             {/* Outcome stages — terminal states. Visually de-emphasised
                 with a dimmer eyebrow and muted accent. */}
+            {/* Outcomes — hidden when showOnlyFollowUp / empty filter */}
+            {!hasZeroAfterFilter && !showOnlyFollowUp && (
             <BoardSection eyebrow="Outcomes" helper="Terminal states" muted>
                 <BoardRow testid="pipeline-outcomes">
-                    {OUTCOME_STAGES.map((stage) => (
+                    {OUTCOME_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
                         <Column
                             key={stage}
                             stage={stage}
-                            items={data.filter(
+                            items={filteredData.filter(
                                 (i) => normaliseStage(i.stage) === stage,
                             )}
                             refresh={fetchPipeline}
@@ -732,21 +887,22 @@ function ProjectPipeline({ projectId }) {
                     ))}
                 </BoardRow>
             </BoardSection>
+            )}
 
-            {/* Pitch — independent sourcing lane. Separated by a faint
-                divider so the eye understands this is a different
-                workflow, not the next funnel step. */}
+            {/* Pitch — independent sourcing lane. Hidden when
+                showOnlyFollowUp / empty filter. */}
+            {!hasZeroAfterFilter && !showOnlyFollowUp && (
             <BoardSection
                 eyebrow="Pitch"
                 helper="Sourcing · independent of funnel"
                 divider
             >
                 <BoardRow testid="pipeline-pitch">
-                    {INDEPENDENT_STAGES.map((stage) => (
+                    {INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
                         <Column
                             key={stage}
                             stage={stage}
-                            items={data.filter(
+                            items={filteredData.filter(
                                 (i) => normaliseStage(i.stage) === stage,
                             )}
                             refresh={fetchPipeline}
@@ -763,6 +919,7 @@ function ProjectPipeline({ projectId }) {
                     ))}
                 </BoardRow>
             </BoardSection>
+            )}
 
             {/* Floating cinematic bulk action bar (PATCH 4C). Mounted last
                 so it sits on top of everything via z-index. Renders only
@@ -1531,3 +1688,250 @@ const BulkActionBar = memo(function BulkActionBar({ count, onClear, onMove }) {
         </div>
     );
 });
+
+/* ---------------------------------------------------------------------
+ * PipelineControlBar (PATCH 4E)
+ *
+ * Sticky search + filter surface. Sits directly under the page header
+ * and stays put while the board scrolls beneath it. Glassmorphism +
+ * compact pills — same visual system as the rest of the kanban.
+ *
+ * Layout (desktop):
+ *   [search input — flex-grow] [status focus segmented] [submission?] [ig?] [clear]
+ * Layout (mobile):
+ *   [search input — full row]
+ *   [horizontal scrolling filter pills]
+ *
+ * Memoised so search keystrokes don't re-render the entire board context.
+ * ------------------------------------------------------------------- */
+const PipelineControlBar = memo(function PipelineControlBar({
+    search,
+    onSearch,
+    statusFocus,
+    onStatusFocus,
+    hasSubmission,
+    onHasSubmission,
+    hasIg,
+    onHasIg,
+    filtersActive,
+    onClearAll,
+    totalCount,
+    filteredCount,
+}) {
+    const showingCount = filteredCount !== totalCount;
+
+    return (
+        <div
+            data-testid="pipeline-control-bar"
+            className="
+                sticky top-0 z-30
+                mt-4 mb-6
+                rounded-2xl
+                bg-gradient-to-b from-black/50 to-black/30
+                backdrop-blur-xl
+                border border-white/[0.06]
+                shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]
+            "
+        >
+            <div className="flex flex-col lg:flex-row lg:items-center gap-3 lg:gap-4 px-3 py-2.5 lg:px-4 lg:py-3">
+                {/* Search input — anchors the bar on desktop, full-width on mobile */}
+                <div className="relative flex-1 min-w-0">
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => onSearch(e.target.value)}
+                        placeholder="Search talents — name, email, phone, instagram…"
+                        data-testid="pipeline-filter-search"
+                        className="
+                            w-full
+                            bg-black/40 border border-white/[0.08]
+                            rounded-full
+                            pl-9 pr-3 py-1.5
+                            text-[12.5px] text-white/90 placeholder-white/30
+                            tg-mono
+                            focus:outline-none focus:border-white/30 focus:bg-black/60
+                            transition-colors duration-200
+                        "
+                    />
+                    <span
+                        aria-hidden
+                        className="absolute left-3 top-1/2 -translate-y-1/2 text-white/35 text-[11px] tg-mono pointer-events-none"
+                    >
+                        ⌕
+                    </span>
+                    {search && (
+                        <button
+                            type="button"
+                            onClick={() => onSearch("")}
+                            aria-label="Clear search"
+                            className="
+                                absolute right-1.5 top-1/2 -translate-y-1/2
+                                w-6 h-6 rounded-full
+                                flex items-center justify-center
+                                text-white/40 hover:text-white/80
+                                bg-white/[0.04] hover:bg-white/[0.08]
+                                transition-colors
+                            "
+                        >
+                            ×
+                        </button>
+                    )}
+                </div>
+
+                {/* Filter pills — horizontally scrollable on small viewports */}
+                <div className="flex items-center gap-2 overflow-x-auto tg-pipeline-scroll lg:overflow-visible -mx-1 px-1">
+                    <FilterSegmented
+                        label="Focus"
+                        value={statusFocus}
+                        onChange={onStatusFocus}
+                        options={STATUS_FOCUS_OPTIONS}
+                        testid="pipeline-filter-focus"
+                    />
+                    <FilterSegmented
+                        label="Submitted"
+                        value={hasSubmission}
+                        onChange={onHasSubmission}
+                        options={TRISTATE_OPTIONS}
+                        testid="pipeline-filter-submitted"
+                        compact
+                    />
+                    <FilterSegmented
+                        label="Has IG"
+                        value={hasIg}
+                        onChange={onHasIg}
+                        options={TRISTATE_OPTIONS}
+                        testid="pipeline-filter-ig"
+                        compact
+                    />
+                </div>
+
+                {/* Count + clear */}
+                <div className="flex items-center gap-2 shrink-0">
+                    <span
+                        className={`text-[10px] tg-mono ${
+                            showingCount ? "text-white/70" : "text-white/35"
+                        }`}
+                        data-testid="pipeline-filter-count"
+                    >
+                        {showingCount
+                            ? `${filteredCount}/${totalCount}`
+                            : `${totalCount} total`}
+                    </span>
+                    {filtersActive && (
+                        <button
+                            type="button"
+                            onClick={onClearAll}
+                            data-testid="pipeline-filter-clear"
+                            className="
+                                px-2.5 py-1 rounded-full
+                                text-[10px] tracking-[0.18em] uppercase
+                                text-white/55 hover:text-rose-200
+                                bg-white/[0.03] hover:bg-rose-300/10
+                                border border-white/[0.08] hover:border-rose-300/20
+                                transition-all duration-200
+                            "
+                            title="Clear all filters"
+                        >
+                            Clear
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+});
+
+/* ---------------------------------------------------------------------
+ * FilterSegmented — small segmented control. Compact mode shrinks the
+ * label and uses dots-only on narrow viewports. Pure presentational.
+ * ------------------------------------------------------------------- */
+function FilterSegmented({ label, value, onChange, options, testid, compact = false }) {
+    return (
+        <div
+            data-testid={testid}
+            className="
+                shrink-0 flex items-center gap-1.5
+                bg-white/[0.03] border border-white/[0.06]
+                rounded-full pl-2.5 pr-1 py-1
+            "
+        >
+            <span
+                className={`text-[9px] tracking-[0.18em] uppercase text-white/40 shrink-0 ${
+                    compact ? "hidden xl:inline" : ""
+                }`}
+            >
+                {label}
+            </span>
+            <div className="flex items-center gap-0.5">
+                {options.map((opt) => {
+                    const active = value === opt.value;
+                    return (
+                        <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() => onChange(opt.value)}
+                            data-testid={`${testid}-${opt.value}`}
+                            className={`
+                                shrink-0
+                                px-2.5 py-0.5 rounded-full
+                                text-[10px] tracking-[0.1em] uppercase
+                                transition-all duration-200
+                                ${
+                                    active
+                                        ? "bg-white/90 text-black font-medium"
+                                        : "text-white/55 hover:text-white/90 hover:bg-white/[0.04]"
+                                }
+                            `}
+                        >
+                            {opt.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+/* ---------------------------------------------------------------------
+ * FilterEmptyState — renders in place of the board sections when active
+ * filters resolve to zero matches. Quiet, elegant, single CTA.
+ * ------------------------------------------------------------------- */
+const FilterEmptyState = memo(function FilterEmptyState({ onReset }) {
+    return (
+        <div
+            data-testid="pipeline-filter-empty"
+            className="
+                mt-12 mb-8
+                flex flex-col items-center justify-center text-center
+                py-20 px-6
+                rounded-2xl
+                bg-gradient-to-b from-white/[0.02] to-transparent
+                border border-white/[0.05]
+                backdrop-blur-md
+            "
+        >
+            <div className="w-12 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent mb-4" />
+            <p className="text-[11px] tracking-[0.22em] uppercase text-white/40 mb-2">
+                No talents match
+            </p>
+            <p className="text-sm text-white/55 max-w-md leading-relaxed">
+                Try widening the search, switching focus to{" "}
+                <span className="text-white/80">All</span>, or clearing the active filters.
+            </p>
+            <button
+                type="button"
+                onClick={onReset}
+                data-testid="pipeline-filter-empty-reset"
+                className="
+                    mt-6 px-4 py-2 rounded-full
+                    text-[10px] tracking-[0.18em] uppercase font-medium
+                    text-black bg-white/95 hover:bg-white
+                    transition-colors duration-200
+                "
+            >
+                Clear filters
+            </button>
+        </div>
+    );
+});
+

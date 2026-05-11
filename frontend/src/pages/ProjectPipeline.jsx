@@ -276,6 +276,88 @@ function ProjectPipeline({ projectId }) {
         setBulkMode(false);
     }, []);
 
+    /* -----------------------------------------------------------------
+     * Drag & Drop (PATCH 4D) — native HTML5, no library.
+     *
+     * Architecture:
+     *   • `dragId` state — which pipeline row id is currently being
+     *     dragged. Stored at the parent so every Column can render its
+     *     own drag-over highlight without prop-drilling complex state.
+     *   • `dragSupported` — gated by `matchMedia('(hover:hover) and
+     *     (pointer:fine)')` so touch devices fall back to taps + buttons.
+     *     This is the cleanest way to disable DnD on mobile while keeping
+     *     the rest of the UX intact.
+     *   • `handleCardDrop(targetStage, droppedId)` — optimistic update:
+     *     mutate local `data` in-place (set new stage), call backend,
+     *     refetch on failure to roll back cleanly.
+     * --------------------------------------------------------------- */
+    const [dragId, setDragId] = useState(null);
+
+    const dragSupported =
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+    const handleCardDragStart = useCallback((id) => {
+        setDragId(id);
+    }, []);
+
+    const handleCardDragEnd = useCallback(() => {
+        setDragId(null);
+    }, []);
+
+    const handleCardDrop = useCallback(
+        async (targetStage, droppedId) => {
+            // Hard-clear drag state up front — independent of network result.
+            setDragId(null);
+            if (!droppedId || !targetStage) return;
+
+            // Capture pre-move snapshot for clean rollback if backend fails.
+            let snapshot = null;
+            let toastUndo = null;
+            setData((prev) => {
+                snapshot = prev;
+                const row = prev.find((r) => r.id === droppedId);
+                if (!row) return prev;
+                const current = normaliseStage(row.stage);
+                if (current === targetStage) return prev; // no-op drops
+                toastUndo = `Moving ${row.talent_name || "talent"} → ${getStageLabel(
+                    targetStage,
+                )}`;
+                // Functional setter: clone the row with the new stage; leave
+                // other rows untouched so memoised Cards skip re-render.
+                return prev.map((r) =>
+                    r.id === droppedId ? { ...r, stage: targetStage } : r,
+                );
+            });
+            if (!toastUndo) return; // no-op drop (same stage or row not found)
+
+            try {
+                await adminApi.patch("/pipeline/move", {
+                    ids: [droppedId],
+                    stage: targetStage,
+                });
+                // Soft confirmation — single line, no spam.
+                toast.success(
+                    `Moved to ${getStageLabel(targetStage)}`,
+                );
+                // Refresh in background to pick up `is_follow_up`
+                // recomputation + updated_at — no await so the drop feels
+                // instant.
+                fetchPipeline();
+            } catch (e) {
+                console.error("Drag move failed:", e);
+                // Roll back to the pre-drop snapshot. Cheap because we
+                // captured the exact reference before mutation.
+                if (snapshot) setData(snapshot);
+                toast.error(
+                    e?.response?.data?.detail || "Move failed — reverted",
+                );
+            }
+        },
+        [fetchPipeline],
+    );
+
     const addSelectedToPipeline = async () => {
         if (selectedTalents.size === 0) return;
         try {
@@ -595,6 +677,11 @@ function ProjectPipeline({ projectId }) {
                             bulkIds={bulkIds}
                             onToggleBulkSelect={toggleBulkSelect}
                             onSelectAll={selectAllInColumn}
+                            dragSupported={dragSupported}
+                            dragId={dragId}
+                            onCardDragStart={handleCardDragStart}
+                            onCardDragEnd={handleCardDragEnd}
+                            onCardDrop={handleCardDrop}
                         />
                     ))}
                 </BoardRow>
@@ -636,6 +723,11 @@ function ProjectPipeline({ projectId }) {
                             bulkIds={bulkIds}
                             onToggleBulkSelect={toggleBulkSelect}
                             onSelectAll={selectAllInColumn}
+                            dragSupported={dragSupported}
+                            dragId={dragId}
+                            onCardDragStart={handleCardDragStart}
+                            onCardDragEnd={handleCardDragEnd}
+                            onCardDrop={handleCardDrop}
                         />
                     ))}
                 </BoardRow>
@@ -662,6 +754,11 @@ function ProjectPipeline({ projectId }) {
                             bulkIds={bulkIds}
                             onToggleBulkSelect={toggleBulkSelect}
                             onSelectAll={selectAllInColumn}
+                            dragSupported={dragSupported}
+                            dragId={dragId}
+                            onCardDragStart={handleCardDragStart}
+                            onCardDragEnd={handleCardDragEnd}
+                            onCardDrop={handleCardDrop}
                         />
                     ))}
                 </BoardRow>
@@ -839,6 +936,11 @@ const Column = memo(function Column({
     onToggleBulkSelect,
     onSelectAll,
     readOnly = false,
+    dragSupported = false,
+    dragId = null,
+    onCardDragStart,
+    onCardDragEnd,
+    onCardDrop,
 }) {
     // Cinematic column: a glass-panelled card with a thin stage-accent line
     // at the very top, a sticky header that survives vertical scroll, and a
@@ -854,17 +956,74 @@ const Column = memo(function Column({
     const allInColumnSelected =
         canSelectAll && items.every((i) => bulkIds.has(i.id));
 
+    /* -----------------------------------------------------------------
+     * Drag & Drop (PATCH 4D) — column = droppable target
+     *
+     * A column is "droppable" when:
+     *   • drag is supported (pointer-fine device)
+     *   • the lane is not read-only (follow-up is opt-out)
+     *   • there's an active drag (`dragId` set in parent)
+     *   • a drop callback is wired
+     *
+     * `isDragOver` is local — only this column re-renders during hover,
+     * not the entire kanban. We compare incoming dragId against null to
+     * decide whether to react to dragenter at all.
+     * --------------------------------------------------------------- */
+    const isDroppable =
+        dragSupported && !readOnly && Boolean(dragId) && typeof onCardDrop === "function";
+
+    const [isDragOver, setIsDragOver] = useState(false);
+
+    const handleDragOver = (e) => {
+        if (!isDroppable) return;
+        // preventDefault is what tells the browser "yes, this is a drop
+        // target". Without it the onDrop handler never fires.
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+    };
+
+    const handleDragEnter = (e) => {
+        if (!isDroppable) return;
+        e.preventDefault();
+        setIsDragOver(true);
+    };
+
+    const handleDragLeave = (e) => {
+        if (!isDroppable) return;
+        // Only clear when the pointer truly leaves the column shell —
+        // dragenter/leave bubble through every child, so we guard with
+        // currentTarget vs relatedTarget.
+        if (e.currentTarget.contains(e.relatedTarget)) return;
+        setIsDragOver(false);
+    };
+
+    const handleDrop = (e) => {
+        if (!isDroppable) return;
+        e.preventDefault();
+        setIsDragOver(false);
+        const droppedId = e.dataTransfer.getData("text/plain");
+        if (droppedId) onCardDrop(stage, droppedId);
+    };
+
     return (
         <div
             data-testid={`pipeline-column-${stage}`}
-            className="
+            onDragOver={handleDragOver}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`
                 relative shrink-0 w-[280px] md:w-[300px]
                 rounded-xl overflow-hidden
                 bg-gradient-to-b from-white/[0.04] to-white/[0.015]
-                border border-white/[0.06]
+                border transition-all duration-200
                 backdrop-blur-xl
-                shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]
-            "
+                ${
+                    isDragOver
+                        ? "border-white/30 ring-1 ring-white/10 shadow-[0_12px_36px_-12px_rgba(0,0,0,0.7),inset_0_0_0_1px_rgba(255,255,255,0.05)]"
+                        : "border-white/[0.06] shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]"
+                }
+            `}
         >
             {/* Stage accent — paper-thin gradient line that gives each lane
                 a quiet sense of identity without colouring the whole card. */}
@@ -954,6 +1113,10 @@ const Column = memo(function Column({
                             isSelected={bulkIds.has(item.id)}
                             onToggleSelect={onToggleBulkSelect}
                             readOnly={readOnly}
+                            dragSupported={dragSupported}
+                            isDragging={dragId === item.id}
+                            onDragStart={onCardDragStart}
+                            onDragEnd={onCardDragEnd}
                         />
                     ))
                 )}
@@ -983,6 +1146,10 @@ const Card = memo(function Card({
     isSelected,
     onToggleSelect,
     readOnly = false,
+    dragSupported = false,
+    isDragging = false,
+    onDragStart,
+    onDragEnd,
 }) {
     const [moving, setMoving] = useState(false);
 
@@ -1016,8 +1183,37 @@ const Card = memo(function Card({
     const displayPhone = item.talent_phone || null;
     const displayIg = item.instagram_handle || null;
 
+    /* -----------------------------------------------------------------
+     * Drag & Drop (PATCH 4D) — card = draggable source
+     *
+     * Native HTML5 only. Disabled in three cases:
+     *   • pointer-coarse device (touch) — `dragSupported` is false
+     *   • read-only lane (follow-up) — drag is meaningless here
+     *   • bulk mode is active — drag would conflict with multi-select
+     * --------------------------------------------------------------- */
+    const draggable = dragSupported && !readOnly && !bulkMode;
+
+    const handleDragStart = (e) => {
+        if (!draggable) return;
+        // text/plain so any drop target — including outside the app — can
+        // read the id without us having to guess MIME types.
+        e.dataTransfer.setData("text/plain", item.id);
+        e.dataTransfer.effectAllowed = "move";
+        // Notify parent so all columns can react to the drag context.
+        // Wrap in a microtask so the drag image is already snapshotted
+        // before the visual state changes (otherwise the ghost image
+        // shows the half-faded card).
+        setTimeout(() => onDragStart && onDragStart(item.id), 0);
+    };
+
+    const handleDragEnd = () => {
+        if (!draggable) return;
+        if (onDragEnd) onDragEnd();
+    };
+
     // Cinematic shell — glass card with luxury hover lift. Follow-up
     // (readOnly) cards stay quieter: no hover lift, dimmer surface.
+    // During drag: slight scale-down + opacity dim + elevated shadow.
     const shellClass = [
         "group relative rounded-xl overflow-hidden",
         "border transition-all duration-300",
@@ -1031,6 +1227,10 @@ const Card = memo(function Card({
             ? "opacity-80"
             : "hover:border-white/15 hover:-translate-y-[1px] hover:shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.06)]",
         moving ? "opacity-40 pointer-events-none" : "",
+        isDragging
+            ? "opacity-60 scale-[0.97] ring-1 ring-white/15 shadow-[0_18px_48px_-12px_rgba(0,0,0,0.8)]"
+            : "",
+        draggable ? "cursor-grab active:cursor-grabbing" : "",
     ].join(" ");
 
     /* -----------------------------------------------------------------
@@ -1042,6 +1242,9 @@ const Card = memo(function Card({
             <div
                 data-testid={`pipeline-card-${item.id}`}
                 onClick={() => onToggleSelect(item.id)}
+                draggable={draggable}
+                onDragStart={handleDragStart}
+                onDragEnd={handleDragEnd}
                 className={`${shellClass} px-3 py-2.5 cursor-pointer`}
             >
                 <div className="flex items-center gap-2.5">
@@ -1081,6 +1284,9 @@ const Card = memo(function Card({
     return (
         <div
             data-testid={`pipeline-card-${item.id}`}
+            draggable={draggable}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
             className={shellClass}
         >
             {/* Subtle inner accent stripe that lights up on hover.

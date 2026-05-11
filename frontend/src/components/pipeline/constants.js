@@ -11,6 +11,7 @@
  * row with stage="sent" renders into the Approved column without a
  * data migration.
  * ------------------------------------------------------------------- */
+
 export const MAIN_FLOW_STAGES = [
     "ask_to_test",
     "approved",
@@ -60,24 +61,22 @@ export const STAGE_LABELS = {
     follow_up: "FOLLOW-UP",
 };
 
-// Per-stage accent colours. Used as a thin top bar on the column header
-// (cinematic stage indicator). Kept muted on purpose — no neon, no rainbow.
-// Outcome lanes share a deep slate, follow-up gets a soft amber pulse so it
-// reads as "attention needed" without screaming.
+// Per-stage accent colours. Used as a thin top bar on the column header.
+// Enhanced: Opacity tuned down for a more luxury, cinematic indicator.
 export const STAGE_ACCENTS = {
-    ask_to_test: "from-sky-300/60 to-sky-500/0",
-    approved: "from-emerald-300/60 to-emerald-500/0",
-    hold: "from-amber-300/60 to-amber-500/0",
-    shortlisted: "from-violet-300/60 to-violet-500/0",
-    already_tested: "from-fuchsia-300/60 to-fuchsia-500/0",
-    locked: "from-yellow-200/70 to-yellow-500/0",
-    rejected: "from-rose-300/40 to-rose-500/0",
-    not_available: "from-zinc-300/30 to-zinc-500/0",
-    not_interested: "from-zinc-300/30 to-zinc-500/0",
-    pitch: "from-teal-300/60 to-teal-500/0",
-    follow_up: "from-amber-300/70 to-amber-500/0",
+    ask_to_test: "from-sky-400/40 to-sky-500/0",
+    approved: "from-emerald-400/40 to-emerald-500/0",
+    hold: "from-amber-400/40 to-amber-500/0",
+    shortlisted: "from-violet-400/40 to-violet-500/0",
+    already_tested: "from-fuchsia-400/40 to-fuchsia-500/0",
+    locked: "from-yellow-300/40 to-yellow-500/0",
+    rejected: "from-rose-400/25 to-rose-500/0",
+    not_available: "from-zinc-400/20 to-zinc-500/0",
+    not_interested: "from-zinc-400/20 to-zinc-500/0",
+    pitch: "from-teal-400/40 to-teal-500/0",
+    follow_up: "from-amber-400/50 to-amber-500/0",
 };
-export const DEFAULT_ACCENT = "from-white/30 to-white/0";
+export const DEFAULT_ACCENT = "from-white/10 to-white/0";
 
 // Cinematic empty-state copy keyed by stage. Falls back to a generic line.
 export const EMPTY_STATE_COPY = {
@@ -94,23 +93,12 @@ export const EMPTY_STATE_COPY = {
     follow_up: "All caught up",
 };
 
-// Stable references used by the read-only follow-up lane. Defining them
-// at module scope (not inside render) keeps the `memo` comparators on
-// Column/Card from invalidating every render.
+// Stable references used by the read-only follow-up lane.
 export const EMPTY_BULK_SET = new Set();
 export const NOOP = () => {};
 
 /* ---------------------------------------------------------------------
  * Filter primitives (PATCH 4E)
- *
- * STATUS_FOCUS_OPTIONS — segmented quick-filter at the top of the
- * board. `follow_up` is special: it collapses every other section so the
- * casting team can drill into "needs attention" in one click.
- * `pending`  → ask_to_test + hold (everything awaiting a decision)
- * Other entries map 1:1 to the canonical stage.
- *
- * TRISTATE_OPTIONS — used by Has-submission / Has-Instagram filters.
- * Three states keeps the control compact (no extra dropdown surface).
  * ------------------------------------------------------------------- */
 export const STATUS_FOCUS_OPTIONS = [
     { value: "all", label: "All" },
@@ -138,52 +126,48 @@ export const DEFAULT_FILTERS = {
 /* ---------------------------------------------------------------------
  * Status tones (PATCH 4B)
  * Used by the Card footer for terminal/locked states. All tones stay
- * muted on purpose — luxury, not dashboard. Borders are 8-12% opacity,
- * backgrounds 5-8%, text 60-70%.
+ * muted on purpose — luxury, not dashboard. 
  * ------------------------------------------------------------------- */
 export const STATUS_TONES = {
     locked: {
-        // Elegant finalised state — soft gold, no neon.
         label: "Finalised",
-        dot: "bg-yellow-200/80",
-        text: "text-yellow-200/75",
-        chip: "border-yellow-200/15 bg-yellow-200/[0.04]",
+        dot: "bg-yellow-200/60",
+        text: "text-yellow-200/70",
+        chip: "border-yellow-200/12 bg-yellow-200/[0.03]",
     },
     approved: {
         label: "Approved",
-        dot: "bg-emerald-300/80",
-        text: "text-emerald-300/75",
-        chip: "border-emerald-300/15 bg-emerald-300/[0.04]",
+        dot: "bg-emerald-300/60",
+        text: "text-emerald-300/70",
+        chip: "border-emerald-300/12 bg-emerald-300/[0.03]",
     },
     hold: {
         label: "On hold",
-        dot: "bg-amber-300/80",
-        text: "text-amber-200/75",
-        chip: "border-amber-300/15 bg-amber-300/[0.04]",
+        dot: "bg-amber-300/60",
+        text: "text-amber-200/70",
+        chip: "border-amber-300/12 bg-amber-300/[0.03]",
     },
     rejected: {
         label: "Rejected",
-        dot: "bg-rose-300/70",
-        text: "text-rose-300/70",
-        chip: "border-rose-300/15 bg-rose-300/[0.04]",
+        dot: "bg-rose-300/50",
+        text: "text-rose-300/60",
+        chip: "border-rose-300/12 bg-rose-300/[0.03]",
     },
     not_available: {
         label: "Not available",
-        dot: "bg-zinc-300/60",
-        text: "text-zinc-300/65",
-        chip: "border-zinc-300/15 bg-zinc-300/[0.04]",
+        dot: "bg-zinc-300/40",
+        text: "text-zinc-300/55",
+        chip: "border-zinc-300/12 bg-zinc-300/[0.03]",
     },
     not_interested: {
         label: "Not interested",
-        dot: "bg-zinc-300/60",
-        text: "text-zinc-300/65",
-        chip: "border-zinc-300/15 bg-zinc-300/[0.04]",
+        dot: "bg-zinc-300/40",
+        text: "text-zinc-300/55",
+        chip: "border-zinc-300/12 bg-zinc-300/[0.03]",
     },
 };
 
-// Per-stage next-step suggestions for the card action buttons. `pitch`,
-// terminal stages, and `locked` are intentionally empty — no automatic
-// onward transitions, but admins can still bulk-move via the toolbar.
+// Sugessted next-steps for card action buttons.
 export const NEXT_STAGE_FLOW = {
     ask_to_test: ["approved", "not_interested", "not_available"],
     approved: ["shortlisted", "hold", "rejected"],

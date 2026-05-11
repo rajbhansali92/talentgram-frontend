@@ -91,25 +91,25 @@ const PipelineCard = memo(function PipelineCard({
         if (onDragEnd) onDragEnd();
     };
 
-    // Cinematic shell — solid dark card with luxury hover lift.
+    // Cinematic shell — layered charcoal card with soft elevation.
     // Follow-up (readOnly) cards stay quieter: no hover lift, dimmer surface.
     // During drag: slight scale-down + opacity dim + elevated shadow.
     const shellClass = [
         "group relative rounded-xl overflow-hidden",
         "transition-all duration-300",
-        "bg-[#111111]",
-        "shadow-[0_10px_40px_rgba(0,0,0,0.45)]",
-        "border border-white/[0.08]",
-        compact ? "min-h-[110px]" : "min-h-[150px]",
+        "bg-[#131313]",
+        "shadow-[0_4px_18px_rgba(0,0,0,0.22)]",
+        "border border-white/[0.05]", // Refined border
+        compact ? "min-h-[96px]" : "min-h-[132px]", // Density fix
         isSelected
             ? "border-white/40 ring-1 ring-white/20"
-            : "border-white/[0.07]",
+            : "border-white/[0.05]",
         readOnly
             ? ""
-            : "hover:border-white/15 hover:-translate-y-[1px] hover:shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.06)]",
+            : "hover:border-white/12 hover:-translate-y-[1px] hover:shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)]",
         moving ? "opacity-40 pointer-events-none" : "",
         isDragging
-            ? "opacity-60 scale-[0.97] ring-1 ring-white/15 shadow-[0_18px_48px_-12px_rgba(0,0,0,0.8)]"
+            ? "opacity-60 scale-[0.97] ring-1 ring-white/15 shadow-[0_12px_28px_-10px_rgba(0,0,0,0.5)]"
             : "",
         draggable ? "cursor-grab active:cursor-grabbing" : "",
     ].join(" ");
@@ -122,7 +122,7 @@ const PipelineCard = memo(function PipelineCard({
                 draggable={draggable}
                 onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
-                className={`${shellClass} px-3 py-2.5 cursor-pointer`}
+                className={`${shellClass} px-3 py-2 cursor-pointer`}
             >
                 <div className="flex items-center gap-2.5">
                     <input
@@ -138,7 +138,7 @@ const PipelineCard = memo(function PipelineCard({
                         size="sm"
                     />
                     <div className="flex-1 min-w-0">
-                        <p className="text-[13px] text-white/95 font-medium truncate leading-tight">
+                        <p className="text-[13px] text-white/88 font-medium truncate leading-tight">
                             {displayName}
                         </p>
                         {displayEmail && (
@@ -160,14 +160,13 @@ const PipelineCard = memo(function PipelineCard({
             onDragEnd={handleDragEnd}
             className={shellClass}
         >
-            {/* Subtle inner accent stripe that lights up on hover.
-                Pure CSS, no JS animation. */}
+            {/* Subtle inner accent stripe that lights up on hover. */}
             <div
                 aria-hidden
-                className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"
+                className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"
             />
 
-            <div className="p-3 space-y-2.5">
+            <div className="p-2.5 space-y-2">
                 {/* TOP — identity */}
                 <div className="flex items-start gap-3">
                     <TalentAvatar
@@ -177,7 +176,7 @@ const PipelineCard = memo(function PipelineCard({
                     />
                     <div className="flex-1 min-w-0">
                         <p
-                            className="text-[13px] text-white/95 font-medium truncate leading-tight"
+                            className="text-[13px] text-white/88 font-medium truncate leading-tight"
                             title={displayName}
                         >
                             {displayName}
@@ -197,10 +196,7 @@ const PipelineCard = memo(function PipelineCard({
                         )}
                     </div>
 
-                    {/* Status chip — only on terminal/locked lanes.
-                        Mid-funnel stages (ask_to_test, shortlisted,
-                        already_tested, pitch) intentionally stay
-                        un-chipped to keep the eye on the next action. */}
+                    {/* Status chip — only on terminal/locked lanes. */}
                     {statusTone && (
                         <span
                             className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border ${statusTone.chip}`}
@@ -218,9 +214,7 @@ const PipelineCard = memo(function PipelineCard({
                     )}
                 </div>
 
-                {/* MIDDLE — metadata. Each row is a single line, truncate,
-                    monospaced for that "casting CRM" feel. Hidden entirely
-                    when there's no data → keeps the card compact. */}
+                {/* MIDDLE — metadata. */}
                 {(displayEmail || displayPhone) && (
                     <div className="space-y-0.5 pt-0.5">
                         {displayEmail && (
@@ -236,11 +230,9 @@ const PipelineCard = memo(function PipelineCard({
                     </div>
                 )}
 
-                {/* BOTTOM — action pills. Suppressed for the readOnly
-                    follow-up lane (Patch 3C) and for stages that have no
-                    onward transitions (locked / terminal lanes). */}
+                {/* BOTTOM — action pills. */}
                 {!readOnly && nextStages.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-1.5 border-t border-white/[0.05]">
+                    <div className="flex flex-wrap gap-1 pt-1.5 border-t border-white/[0.04]">
                         {nextStages.map((stage) => (
                             <button
                                 key={stage}
@@ -254,9 +246,9 @@ const PipelineCard = memo(function PipelineCard({
                                     text-[9.5px] tracking-[0.12em] uppercase
                                     text-white/75 hover:text-white
                                     bg-white/[0.06] hover:bg-white/[0.12]
-                                    border border-white/[0.06] hover:border-white/15
+                                    border border-white/[0.05] hover:border-white/12
                                     transition-all duration-200
-                                    hover:shadow-[0_0_0_3px_rgba(255,255,255,0.03)]
+                                    hover:shadow-[0_0_0_3px_rgba(255,255,255,0.02)]
                                     disabled:opacity-40 disabled:cursor-not-allowed
                                 "
                             >

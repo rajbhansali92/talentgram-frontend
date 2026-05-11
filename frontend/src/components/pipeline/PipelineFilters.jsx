@@ -37,16 +37,16 @@ const PipelineFilters = memo(function PipelineFilters({
         <div
             data-testid="pipeline-control-bar"
             className="
-                sticky top-0 z-30
-                mt-4 mb-6
-                rounded-2xl
+                sticky top-2 z-30
+                mt-3 mb-4
+                rounded-xl
                 bg-gradient-to-b from-black/50 to-black/30
-                backdrop-blur-xl
+                backdrop-blur-md
                 border border-white/[0.06]
                 shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]
             "
         >
-            <div className="flex flex-col lg:flex-row lg:items-center gap-3 lg:gap-4 px-3 py-2.5 lg:px-4 lg:py-3">
+            <div className="flex flex-col lg:flex-row lg:items-center gap-3 lg:gap-4 px-3 py-2 lg:px-4 lg:py-2">
                 {/* Search input — anchors the bar on desktop, full-width on mobile */}
                 <div className="relative flex-1 min-w-0">
                     <input

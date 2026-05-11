@@ -37,6 +37,7 @@ const PipelineCard = memo(function PipelineCard({
     isDragging = false,
     onDragStart,
     onDragEnd,
+    compact = false,
 }) {
     const [moving, setMoving] = useState(false);
 
@@ -90,20 +91,21 @@ const PipelineCard = memo(function PipelineCard({
         if (onDragEnd) onDragEnd();
     };
 
-    // Cinematic shell — glass card with luxury hover lift. Follow-up
-    // (readOnly) cards stay quieter: no hover lift, dimmer surface.
+    // Cinematic shell — solid dark card with luxury hover lift.
+    // Follow-up (readOnly) cards stay quieter: no hover lift, dimmer surface.
     // During drag: slight scale-down + opacity dim + elevated shadow.
     const shellClass = [
         "group relative rounded-xl overflow-hidden",
-        "border transition-all duration-300",
-        "bg-gradient-to-b from-white/[0.05] to-white/[0.02]",
-        "backdrop-blur-md",
-        "shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_0_0_rgba(255,255,255,0.04)]",
+        "transition-all duration-300",
+        "bg-[#111111]",
+        "shadow-[0_10px_40px_rgba(0,0,0,0.45)]",
+        "border border-white/[0.08]",
+        compact ? "min-h-[110px]" : "min-h-[150px]",
         isSelected
             ? "border-white/40 ring-1 ring-white/20"
             : "border-white/[0.07]",
         readOnly
-            ? "opacity-80"
+            ? ""
             : "hover:border-white/15 hover:-translate-y-[1px] hover:shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.06)]",
         moving ? "opacity-40 pointer-events-none" : "",
         isDragging
@@ -136,11 +138,11 @@ const PipelineCard = memo(function PipelineCard({
                         size="sm"
                     />
                     <div className="flex-1 min-w-0">
-                        <p className="text-[13px] text-white/90 font-medium truncate leading-tight">
+                        <p className="text-[13px] text-white/95 font-medium truncate leading-tight">
                             {displayName}
                         </p>
                         {displayEmail && (
-                            <p className="text-[10px] text-white/45 truncate tg-mono mt-0.5">
+                            <p className="text-[10px] text-white/60 truncate tg-mono mt-0.5">
                                 {displayEmail}
                             </p>
                         )}
@@ -181,13 +183,13 @@ const PipelineCard = memo(function PipelineCard({
                             {displayName}
                         </p>
                         {displayIg && (
-                            <p className="text-[10px] text-white/45 truncate tg-mono mt-0.5">
+                            <p className="text-[10px] text-white/72 truncate tg-mono mt-0.5">
                                 {displayIg}
                             </p>
                         )}
                         {!displayIg && item.talent_name && (
                             <p
-                                className="text-[10px] text-white/30 truncate tg-mono mt-0.5"
+                                className="text-[10px] text-white/60 truncate tg-mono mt-0.5"
                                 title={item.talent_id}
                             >
                                 {item.talent_id?.slice(0, 8)}…
@@ -222,12 +224,12 @@ const PipelineCard = memo(function PipelineCard({
                 {(displayEmail || displayPhone) && (
                     <div className="space-y-0.5 pt-0.5">
                         {displayEmail && (
-                            <p className="text-[10.5px] text-white/55 truncate tg-mono">
+                            <p className="text-[10.5px] text-white/72 truncate tg-mono">
                                 {displayEmail}
                             </p>
                         )}
                         {displayPhone && (
-                            <p className="text-[10.5px] text-white/40 truncate tg-mono">
+                            <p className="text-[10.5px] text-white/72 truncate tg-mono">
                                 {displayPhone}
                             </p>
                         )}
@@ -250,8 +252,8 @@ const PipelineCard = memo(function PipelineCard({
                                 className="
                                     px-2 py-1 rounded-full
                                     text-[9.5px] tracking-[0.12em] uppercase
-                                    text-white/65 hover:text-white
-                                    bg-white/[0.04] hover:bg-white/[0.08]
+                                    text-white/75 hover:text-white
+                                    bg-white/[0.06] hover:bg-white/[0.12]
                                     border border-white/[0.06] hover:border-white/15
                                     transition-all duration-200
                                     hover:shadow-[0_0_0_3px_rgba(255,255,255,0.03)]

@@ -325,10 +325,11 @@ function ProjectPipeline({ projectId }) {
 
     const handleBulkMove = async (targetStage) => {
         if (bulkIds.size === 0) return;
-        const ok = window.confirm(
-            `Move ${bulkIds.size} talent(s) to ${getStageLabel(targetStage)}?`,
-        );
-        if (!ok) return;
+        // The deliberate click on a floating pill is itself the confirm —
+        // no `window.confirm` (it blocked the main thread and felt jarring).
+        // Errors are toasted; failed moves keep the selection intact so the
+        // user can retry or cancel cleanly.
+        const count = bulkIds.size;
         try {
             await adminApi.patch("/pipeline/move", {
                 ids: Array.from(bulkIds),
@@ -337,12 +338,54 @@ function ProjectPipeline({ projectId }) {
             setBulkIds(new Set());
             setBulkMode(false);
             await fetchPipeline();
-            toast.success(`Moved ${bulkIds.size} talent(s)`);
+            toast.success(
+                `Moved ${count} ${count === 1 ? "talent" : "talents"} to ${getStageLabel(targetStage)}`,
+            );
         } catch (e) {
             console.error("Bulk move failed:", e);
             toast.error(e?.response?.data?.detail || "Failed to move talents");
         }
     };
+
+    // Select-all-in-column — passed down to Column header. Toggles intelligently:
+    // if every visible row in that column is already selected, deselect all
+    // those rows; otherwise add them to the selection set. The function is
+    // pure (no closure over column items) — Column passes its own items in.
+    const selectAllInColumn = useCallback((items) => {
+        // Filter defensively — Column already filters out readOnly lanes
+        // before invoking, but a defensive check keeps the contract robust.
+        const visibleIds = (items || []).map((i) => i.id).filter(Boolean);
+        if (visibleIds.length === 0) return;
+        // Enter bulk mode automatically — saves a click.
+        setBulkMode(true);
+        setBulkIds((prev) => {
+            const next = new Set(prev);
+            const allSelected = visibleIds.every((id) => next.has(id));
+            if (allSelected) {
+                // Toggle off: deselect just this column's visible rows.
+                visibleIds.forEach((id) => next.delete(id));
+            } else {
+                visibleIds.forEach((id) => next.add(id));
+            }
+            return next;
+        });
+    }, []);
+
+    // ESC clears selection — only attached when a selection exists, so the
+    // global key listener doesn't fight other shortcuts on the page when
+    // bulk mode is idle. Clicking outside the toolbar does NOT clear (per
+    // spec: only ESC is a destructive shortcut).
+    useEffect(() => {
+        if (bulkIds.size === 0) return;
+        const onKey = (e) => {
+            if (e.key === "Escape") {
+                setBulkIds(new Set());
+                setBulkMode(false);
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [bulkIds.size]);
 
     if (loading) {
         return (
@@ -368,53 +411,60 @@ function ProjectPipeline({ projectId }) {
 
     return (
         <div className="p-4" data-testid="project-pipeline">
-            {/* Header */}
-            <div className="mb-4 flex justify-between items-center flex-wrap gap-2">
+            {/* Header — slimmed in Patch 4C. The bulk action surface
+                lives in a floating bottom-center toolbar that only
+                appears when there's a selection. Header now only carries
+                the two persistent entry points: enter bulk-mode, open
+                the bulk-add modal. */}
+            <div className="mb-4 flex justify-between items-start flex-wrap gap-3">
                 <div>
-                    <h2 className="text-white font-semibold">Casting Pipeline</h2>
-                    <p className="text-white/40 text-xs mt-1 tg-mono">
+                    <h2 className="text-white font-semibold tracking-tight">
+                        Casting Pipeline
+                    </h2>
+                    <p className="text-white/40 text-[11px] mt-1 tg-mono">
                         Project ID: {projectId}
                     </p>
                 </div>
                 <div className="flex gap-2 flex-wrap">
-                    {bulkMode ? (
-                        <>
-                            <button
-                                onClick={clearBulkSelection}
-                                data-testid="pipeline-bulk-cancel"
-                                className="px-3 py-1 text-sm bg-white/10 hover:bg-white/20 text-white rounded transition-colors"
-                            >
-                                Cancel ({bulkIds.size} selected)
-                            </button>
-                            {BULK_MOVE_TARGETS.map((stage) => (
-                                <button
-                                    key={stage}
-                                    onClick={() => handleBulkMove(stage)}
-                                    data-testid={`pipeline-bulk-move-${stage}`}
-                                    className="px-3 py-1 text-sm bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 rounded transition-colors"
-                                >
-                                    Move to {getStageLabel(stage)}
-                                </button>
-                            ))}
-                        </>
-                    ) : (
-                        <>
-                            <button
-                                onClick={() => setBulkMode(true)}
-                                data-testid="pipeline-bulk-mode"
-                                className="px-3 py-1 text-sm bg-white/10 hover:bg-white/20 text-white rounded transition-colors"
-                            >
-                                Bulk Select
-                            </button>
-                            <button
-                                onClick={() => setShowBulkAdd(true)}
-                                data-testid="pipeline-bulk-add-open"
-                                className="px-3 py-1 text-sm bg-green-500/20 hover:bg-green-500/30 text-green-300 rounded transition-colors"
-                            >
-                                + Bulk Add
-                            </button>
-                        </>
-                    )}
+                    <button
+                        type="button"
+                        onClick={() => {
+                            // Toggle: leaving bulk mode also clears the
+                            // selection so it's a single mental action.
+                            if (bulkMode) {
+                                setBulkMode(false);
+                                setBulkIds(new Set());
+                            } else {
+                                setBulkMode(true);
+                            }
+                        }}
+                        data-testid="pipeline-bulk-mode"
+                        aria-pressed={bulkMode}
+                        className={`
+                            px-3 py-1.5 text-[11px] tracking-[0.16em] uppercase
+                            rounded-full border transition-all duration-200
+                            ${
+                                bulkMode
+                                    ? "border-white/30 bg-white/[0.08] text-white/90"
+                                    : "border-white/10 bg-white/[0.03] text-white/65 hover:text-white hover:border-white/20"
+                            }
+                        `}
+                    >
+                        {bulkMode ? "Exit Select" : "Bulk Select"}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setShowBulkAdd(true)}
+                        data-testid="pipeline-bulk-add-open"
+                        className="
+                            px-3 py-1.5 text-[11px] tracking-[0.16em] uppercase
+                            rounded-full border border-white/10 bg-white/[0.03]
+                            text-white/65 hover:text-white hover:border-white/20
+                            transition-all duration-200
+                        "
+                    >
+                        + Bulk Add
+                    </button>
                 </div>
             </div>
 
@@ -544,6 +594,7 @@ function ProjectPipeline({ projectId }) {
                             bulkMode={bulkMode}
                             bulkIds={bulkIds}
                             onToggleBulkSelect={toggleBulkSelect}
+                            onSelectAll={selectAllInColumn}
                         />
                     ))}
                 </BoardRow>
@@ -584,6 +635,7 @@ function ProjectPipeline({ projectId }) {
                             bulkMode={bulkMode}
                             bulkIds={bulkIds}
                             onToggleBulkSelect={toggleBulkSelect}
+                            onSelectAll={selectAllInColumn}
                         />
                     ))}
                 </BoardRow>
@@ -609,10 +661,23 @@ function ProjectPipeline({ projectId }) {
                             bulkMode={bulkMode}
                             bulkIds={bulkIds}
                             onToggleBulkSelect={toggleBulkSelect}
+                            onSelectAll={selectAllInColumn}
                         />
                     ))}
                 </BoardRow>
             </BoardSection>
+
+            {/* Floating cinematic bulk action bar (PATCH 4C). Mounted last
+                so it sits on top of everything via z-index. Renders only
+                when there's a selection — slides up otherwise. */}
+            <BulkActionBar
+                count={bulkIds.size}
+                onClear={() => {
+                    setBulkIds(new Set());
+                    setBulkMode(false);
+                }}
+                onMove={handleBulkMove}
+            />
         </div>
     );
 }
@@ -772,6 +837,7 @@ const Column = memo(function Column({
     bulkMode,
     bulkIds,
     onToggleBulkSelect,
+    onSelectAll,
     readOnly = false,
 }) {
     // Cinematic column: a glass-panelled card with a thin stage-accent line
@@ -779,6 +845,14 @@ const Column = memo(function Column({
     // calm empty state. No bright colours, no heavy borders.
     const accent = STAGE_ACCENTS[stage] || DEFAULT_ACCENT;
     const emptyCopy = EMPTY_STATE_COPY[stage] || "Nothing here yet";
+
+    // Patch 4C — per-column "Select all" affordance. Only surfaces when
+    // we're in bulk mode AND the lane is mutable (read-only lanes like
+    // follow_up are explicitly excluded by the spec).
+    const canSelectAll =
+        bulkMode && !readOnly && items.length > 0 && typeof onSelectAll === "function";
+    const allInColumnSelected =
+        canSelectAll && items.every((i) => bulkIds.has(i.id));
 
     return (
         <div
@@ -832,6 +906,34 @@ const Column = memo(function Column({
                     {items.length}
                 </span>
             </div>
+
+            {/* Per-column Select-all affordance (PATCH 4C). Only shown in
+                bulk mode on mutable lanes. Toggles intelligently — if every
+                row is already selected, it deselects this column instead. */}
+            {canSelectAll && (
+                <div className="px-4 py-2 border-b border-white/[0.04] bg-black/20">
+                    <button
+                        type="button"
+                        onClick={() => onSelectAll(items)}
+                        data-testid={`pipeline-select-all-${stage}`}
+                        className="
+                            w-full text-left flex items-center justify-between gap-2
+                            text-[10px] tracking-[0.18em] uppercase
+                            text-white/55 hover:text-white/90
+                            transition-colors duration-200
+                        "
+                    >
+                        <span>
+                            {allInColumnSelected
+                                ? "Deselect column"
+                                : "Select all in column"}
+                        </span>
+                        <span className="tg-mono text-white/35">
+                            {items.length}
+                        </span>
+                    </button>
+                </div>
+            )}
 
             {/* Card stream — independent vertical scroll. The fixed
                 viewport height keeps the board cinematic and predictable. */}
@@ -1087,6 +1189,139 @@ const Card = memo(function Card({
                     </div>
                 )}
             </div>
+        </div>
+    );
+});
+
+
+/* ---------------------------------------------------------------------
+ * BulkActionBar (PATCH 4C)
+ *
+ * Floating cinematic action bar anchored to the bottom-center of the
+ * viewport. Surfaces only when `count > 0`. Slides up via CSS transform
+ * + opacity (no animation library). ESC clears at the page level.
+ *
+ * Layout: [count badge] [Move to →] [pill, pill, pill, ...] [× clear]
+ *
+ * Pills are horizontally scrollable on mobile so any number of stages
+ * fits on a single line without breaking the bar's visual rhythm.
+ * ------------------------------------------------------------------- */
+const BulkActionBar = memo(function BulkActionBar({ count, onClear, onMove }) {
+    const visible = count > 0;
+
+    // Local "in-flight" state prevents double-click duplicates. Parent's
+    // loading state doesn't surface mid-mutation state for bulk ops.
+    const [busy, setBusy] = useState(false);
+
+    const handleMove = async (stage) => {
+        if (busy) return;
+        setBusy(true);
+        try {
+            await onMove(stage);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <div
+            aria-hidden={!visible}
+            data-testid="pipeline-bulk-bar"
+            className={`
+                fixed z-40 left-1/2 -translate-x-1/2
+                bottom-4 sm:bottom-6
+                w-[min(94vw,720px)]
+                transition-all duration-300 ease-out
+                ${visible
+                    ? "opacity-100 translate-y-0 pointer-events-auto"
+                    : "opacity-0 translate-y-3 pointer-events-none"}
+            `}
+        >
+            <div
+                className="
+                    flex items-center gap-2 sm:gap-3
+                    px-3 py-2 sm:px-4 sm:py-2.5
+                    rounded-full
+                    bg-black/70 backdrop-blur-xl
+                    border border-white/10
+                    shadow-[0_18px_48px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.05)]
+                "
+            >
+                {/* Count badge — anchors the eye to the selection size */}
+                <div
+                    className="
+                        shrink-0 flex items-center gap-1.5
+                        px-2.5 py-1 rounded-full
+                        bg-white text-black
+                        text-[11px] tracking-[0.16em] uppercase font-medium
+                    "
+                    data-testid="pipeline-bulk-bar-count"
+                >
+                    <span className="tg-mono">{count}</span>
+                    <span className="opacity-60">selected</span>
+                </div>
+
+                <div className="hidden sm:block w-px h-5 bg-white/10" />
+
+                <span className="hidden sm:inline text-[10px] tracking-[0.18em] uppercase text-white/40 shrink-0">
+                    Move to
+                </span>
+
+                <div
+                    className="
+                        flex-1 min-w-0 flex items-center gap-1.5
+                        overflow-x-auto tg-pipeline-scroll
+                        scroll-smooth
+                    "
+                >
+                    {BULK_MOVE_TARGETS.map((stage) => (
+                        <button
+                            key={stage}
+                            type="button"
+                            onClick={() => handleMove(stage)}
+                            disabled={busy}
+                            data-testid={`pipeline-bulk-move-${stage}`}
+                            title={`Move ${count} to ${getStageLabel(stage)}`}
+                            className="
+                                shrink-0
+                                px-3 py-1.5 rounded-full
+                                text-[10.5px] tracking-[0.12em] uppercase
+                                text-white/75 hover:text-white
+                                bg-white/[0.05] hover:bg-white/[0.10]
+                                border border-white/[0.08] hover:border-white/20
+                                transition-all duration-200
+                                disabled:opacity-40 disabled:cursor-not-allowed
+                                hover:shadow-[0_0_0_3px_rgba(255,255,255,0.04)]
+                            "
+                        >
+                            {STAGE_LABELS[stage] || getStageLabel(stage)}
+                        </button>
+                    ))}
+                </div>
+
+                <button
+                    type="button"
+                    onClick={onClear}
+                    data-testid="pipeline-bulk-bar-clear"
+                    title="Clear selection · ESC"
+                    className="
+                        shrink-0
+                        w-8 h-8 rounded-full
+                        flex items-center justify-center
+                        text-white/55 hover:text-rose-200
+                        bg-white/[0.03] hover:bg-rose-300/10
+                        border border-white/[0.08] hover:border-rose-300/20
+                        transition-all duration-200
+                        text-base leading-none
+                    "
+                >
+                    ×
+                </button>
+            </div>
+
+            <p className="text-center mt-2 text-[9px] tracking-[0.22em] uppercase text-white/25 hidden sm:block">
+                Press ESC to clear
+            </p>
         </div>
     );
 });

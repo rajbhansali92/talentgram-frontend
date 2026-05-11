@@ -20,22 +20,24 @@ function FollowUpLane({ items, refresh }) {
             eyebrow="Follow-up"
             helper="Test pending · auto-cleared on submission"
             muted
-            className="mt-6"
+            className="mt-4" // Fixed spacing
         >
-            <div className="overflow-x-hidden">
-                <BoardRow testid="pipeline-follow-up">
-                    <PipelineColumn
-                        stage="follow_up"
-                        items={items}
-                        refresh={refresh}
-                        bulkMode={false}
-                        bulkIds={EMPTY_BULK_SET}
-                        onToggleBulkSelect={NOOP}
-                        readOnly
-                        compact
-                    />
-                </BoardRow>
-            </div>
+            {/* 
+               CRITICAL FIX: Removed the <div className="overflow-x-hidden"> 
+               that was causing column clipping and layout compression.
+            */}
+            <BoardRow testid="pipeline-follow-up">
+                <PipelineColumn
+                    stage="follow_up"
+                    items={items}
+                    refresh={refresh}
+                    bulkMode={false}
+                    bulkIds={EMPTY_BULK_SET}
+                    onToggleBulkSelect={NOOP}
+                    readOnly
+                    compact
+                />
+            </BoardRow>
         </BoardSection>
     );
 }

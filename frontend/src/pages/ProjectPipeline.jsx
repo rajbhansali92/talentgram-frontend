@@ -104,6 +104,52 @@ const EMPTY_STATE_COPY = {
 const EMPTY_BULK_SET = new Set();
 const NOOP = () => {};
 
+/* ---------------------------------------------------------------------
+ * Status tones (PATCH 4B)
+ * Used by the Card footer for terminal/locked states. All tones stay
+ * muted on purpose — luxury, not dashboard. Borders are 8-12% opacity,
+ * backgrounds 5-8%, text 60-70%.
+ * ------------------------------------------------------------------- */
+const STATUS_TONES = {
+    locked: {
+        // Elegant finalised state — soft gold, no neon.
+        label: "Finalised",
+        dot: "bg-yellow-200/80",
+        text: "text-yellow-200/75",
+        chip: "border-yellow-200/15 bg-yellow-200/[0.04]",
+    },
+    approved: {
+        label: "Approved",
+        dot: "bg-emerald-300/80",
+        text: "text-emerald-300/75",
+        chip: "border-emerald-300/15 bg-emerald-300/[0.04]",
+    },
+    hold: {
+        label: "On hold",
+        dot: "bg-amber-300/80",
+        text: "text-amber-200/75",
+        chip: "border-amber-300/15 bg-amber-300/[0.04]",
+    },
+    rejected: {
+        label: "Rejected",
+        dot: "bg-rose-300/70",
+        text: "text-rose-300/70",
+        chip: "border-rose-300/15 bg-rose-300/[0.04]",
+    },
+    not_available: {
+        label: "Not available",
+        dot: "bg-zinc-300/60",
+        text: "text-zinc-300/65",
+        chip: "border-zinc-300/15 bg-zinc-300/[0.04]",
+    },
+    not_interested: {
+        label: "Not interested",
+        dot: "bg-zinc-300/60",
+        text: "text-zinc-300/65",
+        chip: "border-zinc-300/15 bg-zinc-300/[0.04]",
+    },
+};
+
 // Per-stage next-step suggestions for the card action buttons. `pitch`,
 // terminal stages, and `locked` are intentionally empty — no automatic
 // onward transitions, but admins can still bulk-move via the toolbar.
@@ -636,25 +682,39 @@ export default memo(ProjectPipeline);
 /* doesn't re-render the entire kanban.                                   */
 /* --------------------------------------------------------------------- */
 
-const TalentAvatar = memo(function TalentAvatar({ src, name }) {
-    // 24px square thumbnail next to the talent name. Falls back to the
-    // first letter on a coloured tile when no image_url is available
-    // (talents without a cover photo, or pre-hydration loading state).
+const TalentAvatar = memo(function TalentAvatar({ src, name, size = "md" }) {
+    // Premium cinematic avatar with an elegant initial-letter fallback.
+    // Three sizes:
+    //   sm — 24px  (legacy thumb, used in SearchResultRow)
+    //   md — 44px  (default Card avatar)
+    //   lg — 56px  (reserved for compact-mode hero rows)
+    // Initial is computed once; fallback tile uses a soft radial gradient
+    // so the empty state still reads "premium", not "broken image".
     const initial = (name || "?").trim().charAt(0).toUpperCase() || "?";
+    const dims =
+        size === "sm"
+            ? "w-6 h-6 text-[10px] rounded"
+            : size === "lg"
+              ? "w-14 h-14 text-base rounded-xl"
+              : "w-11 h-11 text-sm rounded-lg";
+
     if (src) {
         return (
             <img
                 src={src}
                 alt=""
                 loading="lazy"
-                className="w-6 h-6 rounded object-cover shrink-0 bg-white/5"
+                className={`${dims} object-cover shrink-0 bg-white/5 ring-1 ring-white/10 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)]`}
             />
         );
     }
     return (
         <div
             aria-hidden
-            className="w-6 h-6 rounded shrink-0 bg-white/10 flex items-center justify-center text-[10px] text-white/70 font-medium"
+            className={`${dims} shrink-0 flex items-center justify-center font-medium text-white/75
+                bg-gradient-to-br from-white/[0.08] to-white/[0.02]
+                ring-1 ring-white/10
+                shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.05)]`}
         >
             {initial}
         </div>
@@ -684,7 +744,7 @@ const SearchResultRow = memo(function SearchResultRow({
                     onClick={(e) => e.stopPropagation()}
                     className="w-4 h-4"
                 />
-                <TalentAvatar src={talent.image_url} name={talent.name} />
+                <TalentAvatar src={talent.image_url} name={talent.name} size="sm" />
                 <div className="flex-1 min-w-0">
                     <p className="text-white text-sm font-medium truncate">
                         {talent.name || "Unnamed Talent"}
@@ -840,105 +900,193 @@ const Card = memo(function Card({
         }
     };
 
-    // Treat legacy `sent` rows as `approved` so the action buttons match
-    // the column the card is rendered in, and terminal/locked rows expose
-    // no onward transitions.
+    // Legacy `sent` rows render as `approved` so action buttons match the
+    // column the card sits in, and terminal/locked rows expose no onward
+    // transitions.
     const canonicalStage = normaliseStage(item.stage);
     const nextStages = NEXT_STAGE_FLOW[canonicalStage] || [];
+    const statusTone = STATUS_TONES[canonicalStage];
 
-    return (
-        <div
-            data-testid={`pipeline-card-${item.id}`}
-            className={`bg-white/5 border rounded p-2 text-xs transition-all ${
-                isSelected ? "border-blue-400 bg-blue-500/20" : "border-white/10"
-            } ${moving ? "opacity-50" : ""}`}
-        >
-            {bulkMode ? (
-                <div className="flex items-center gap-2">
+    // Display fields with sensible fallbacks. `talent_email` is the new
+    // hydrated field (Patch 2); `email` is the legacy pre-hydration alias.
+    const displayName = item.talent_name || item.talent_id || "Unknown";
+    const displayEmail = item.talent_email || item.email || null;
+    const displayPhone = item.talent_phone || null;
+    const displayIg = item.instagram_handle || null;
+
+    // Cinematic shell — glass card with luxury hover lift. Follow-up
+    // (readOnly) cards stay quieter: no hover lift, dimmer surface.
+    const shellClass = [
+        "group relative rounded-xl overflow-hidden",
+        "border transition-all duration-300",
+        "bg-gradient-to-b from-white/[0.05] to-white/[0.02]",
+        "backdrop-blur-md",
+        "shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_0_0_rgba(255,255,255,0.04)]",
+        isSelected
+            ? "border-white/40 ring-1 ring-white/20"
+            : "border-white/[0.07]",
+        readOnly
+            ? "opacity-80"
+            : "hover:border-white/15 hover:-translate-y-[1px] hover:shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.06)]",
+        moving ? "opacity-40 pointer-events-none" : "",
+    ].join(" ");
+
+    /* -----------------------------------------------------------------
+     * BULK MODE — compact row, checkbox + small avatar + name + email.
+     * No actions, no metadata. Designed for fast multi-select scanning.
+     * --------------------------------------------------------------- */
+    if (bulkMode) {
+        return (
+            <div
+                data-testid={`pipeline-card-${item.id}`}
+                onClick={() => onToggleSelect(item.id)}
+                className={`${shellClass} px-3 py-2.5 cursor-pointer`}
+            >
+                <div className="flex items-center gap-2.5">
                     <input
                         type="checkbox"
                         checked={isSelected}
                         onChange={() => onToggleSelect(item.id)}
-                        className="w-4 h-4"
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-4 h-4 accent-white/80 shrink-0"
                     />
                     <TalentAvatar
                         src={item.image_url}
-                        name={item.talent_name || item.talent_id}
+                        name={displayName}
+                        size="sm"
                     />
                     <div className="flex-1 min-w-0">
-                        <p className="font-mono text-white/90 truncate">
-                            {item.talent_name || item.talent_id}
+                        <p className="text-[13px] text-white/90 font-medium truncate leading-tight">
+                            {displayName}
                         </p>
-                        {item.talent_email && (
-                            <p className="text-white/60 truncate text-[10px] mt-0.5">
-                                {item.talent_email}
+                        {displayEmail && (
+                            <p className="text-[10px] text-white/45 truncate tg-mono mt-0.5">
+                                {displayEmail}
                             </p>
                         )}
                     </div>
                 </div>
-            ) : (
-                <>
-                    <div className="flex items-start gap-2 mb-1">
-                        <TalentAvatar
-                            src={item.image_url}
-                            name={item.talent_name || item.talent_id}
-                        />
-                        <div className="flex-1 min-w-0">
-                            <p className="font-mono text-white/90 font-medium truncate">
-                                {item.talent_name || item.talent_id}
+            </div>
+        );
+    }
+
+    /* -----------------------------------------------------------------
+     * NORMAL MODE — premium cinematic card with three zones:
+     *   Top    — avatar + name + instagram + optional status chip
+     *   Middle — email + phone metadata rows
+     *   Bottom — action pills (suppressed in readOnly mode)
+     * --------------------------------------------------------------- */
+    return (
+        <div
+            data-testid={`pipeline-card-${item.id}`}
+            className={shellClass}
+        >
+            {/* Subtle inner accent stripe that lights up on hover.
+                Pure CSS, no JS animation. */}
+            <div
+                aria-hidden
+                className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"
+            />
+
+            <div className="p-3 space-y-2.5">
+                {/* TOP — identity */}
+                <div className="flex items-start gap-3">
+                    <TalentAvatar
+                        src={item.image_url}
+                        name={displayName}
+                        size="md"
+                    />
+                    <div className="flex-1 min-w-0">
+                        <p
+                            className="text-[13px] text-white/95 font-medium truncate leading-tight"
+                            title={displayName}
+                        >
+                            {displayName}
+                        </p>
+                        {displayIg && (
+                            <p className="text-[10px] text-white/45 truncate tg-mono mt-0.5">
+                                {displayIg}
                             </p>
-                            {item.talent_name && (
-                                <p className="text-white/40 truncate text-[10px] mt-0.5 tg-mono">
-                                    ID: {item.talent_id}
-                                </p>
-                            )}
-                        </div>
+                        )}
+                        {!displayIg && item.talent_name && (
+                            <p
+                                className="text-[10px] text-white/30 truncate tg-mono mt-0.5"
+                                title={item.talent_id}
+                            >
+                                {item.talent_id?.slice(0, 8)}…
+                            </p>
+                        )}
                     </div>
 
-                    {(item.talent_email || item.email) && (
-                        <p className="text-white/40 truncate text-[10px]">
-                            {item.talent_email || item.email}
-                        </p>
+                    {/* Status chip — only on terminal/locked lanes.
+                        Mid-funnel stages (ask_to_test, shortlisted,
+                        already_tested, pitch) intentionally stay
+                        un-chipped to keep the eye on the next action. */}
+                    {statusTone && (
+                        <span
+                            className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border ${statusTone.chip}`}
+                            title={statusTone.label}
+                        >
+                            <span
+                                className={`w-1 h-1 rounded-full ${statusTone.dot}`}
+                            />
+                            <span
+                                className={`text-[9px] tracking-[0.14em] uppercase ${statusTone.text}`}
+                            >
+                                {statusTone.label}
+                            </span>
+                        </span>
                     )}
-                    {item.instagram_handle && (
-                        <p className="text-white/40 truncate text-[10px] tg-mono">
-                            {item.instagram_handle}
-                        </p>
-                    )}
+                </div>
 
-                    {/* Onward-stage action buttons. Suppressed in readOnly
-                        mode (e.g. the virtual `follow_up` lane — PATCH 3C). */}
-                    {!readOnly && nextStages.length > 0 && (
-                        <div className="flex gap-1 mt-2 flex-wrap">
-                            {nextStages.map((stage) => (
-                                <button
-                                    key={stage}
-                                    onClick={() => move(stage)}
-                                    disabled={moving}
-                                    data-testid={`pipeline-card-move-${item.id}-${stage}`}
-                                    className="px-2 py-1 bg-white/10 hover:bg-white/20 rounded text-[10px] transition-colors"
-                                >
-                                    {getStageLabel(stage)}
-                                </button>
-                            ))}
-                        </div>
-                    )}
+                {/* MIDDLE — metadata. Each row is a single line, truncate,
+                    monospaced for that "casting CRM" feel. Hidden entirely
+                    when there's no data → keeps the card compact. */}
+                {(displayEmail || displayPhone) && (
+                    <div className="space-y-0.5 pt-0.5">
+                        {displayEmail && (
+                            <p className="text-[10.5px] text-white/55 truncate tg-mono">
+                                {displayEmail}
+                            </p>
+                        )}
+                        {displayPhone && (
+                            <p className="text-[10.5px] text-white/40 truncate tg-mono">
+                                {displayPhone}
+                            </p>
+                        )}
+                    </div>
+                )}
 
-                    {canonicalStage === "locked" && (
-                        <div className="mt-2 text-yellow-500/60 text-[10px]">
-                            ✓ Finalized
-                        </div>
-                    )}
-
-                    {(canonicalStage === "not_interested" ||
-                        canonicalStage === "not_available" ||
-                        canonicalStage === "rejected") && (
-                        <div className="mt-2 text-red-500/60 text-[10px]">
-                            ✗ {getStageLabel(canonicalStage)}
-                        </div>
-                    )}
-                </>
-            )}
+                {/* BOTTOM — action pills. Suppressed for the readOnly
+                    follow-up lane (Patch 3C) and for stages that have no
+                    onward transitions (locked / terminal lanes). */}
+                {!readOnly && nextStages.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-1.5 border-t border-white/[0.05]">
+                        {nextStages.map((stage) => (
+                            <button
+                                key={stage}
+                                type="button"
+                                onClick={() => move(stage)}
+                                disabled={moving}
+                                data-testid={`pipeline-card-move-${item.id}-${stage}`}
+                                title={`Move to ${getStageLabel(stage)}`}
+                                className="
+                                    px-2 py-1 rounded-full
+                                    text-[9.5px] tracking-[0.12em] uppercase
+                                    text-white/65 hover:text-white
+                                    bg-white/[0.04] hover:bg-white/[0.08]
+                                    border border-white/[0.06] hover:border-white/15
+                                    transition-all duration-200
+                                    hover:shadow-[0_0_0_3px_rgba(255,255,255,0.03)]
+                                    disabled:opacity-40 disabled:cursor-not-allowed
+                                "
+                            >
+                                {STAGE_LABELS[stage] || getStageLabel(stage)}
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
         </div>
     );
 });

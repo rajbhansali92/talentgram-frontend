@@ -14,6 +14,7 @@ from notifications import ensure_indexes as ensure_notifications_indexes
 from routers import (
     applications,
     auth,
+    casting_pipeline,
     drive_admin,
     feedback,
     links,
@@ -72,6 +73,7 @@ app.include_router(drive_admin.router)
 app.include_router(notifications_router.router)
 app.include_router(marketing_router.router)
 app.include_router(feedback.router)
+app.include_router(casting_pipeline.router)
 
 # Middleware
 app.add_middleware(SecurityHeadersMiddleware)

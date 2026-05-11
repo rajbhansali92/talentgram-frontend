@@ -44,17 +44,54 @@ router = APIRouter(
 
 
 # ---------------------------------------------------------------------------
-# Stages — kept centralised here so future stage edits live in one place.
+# Stages — centralised registry.
+#
+# `PIPELINE_STAGES`    : full set of accepted stage values (validation).
+# `PIPELINE_STAGE_ORDER`: canonical render order for the kanban. `pitch` is
+#                        intentionally placed last because it is an
+#                        independent "sourcing" lane, not part of the
+#                        progression flow (no inbound/outbound transitions
+#                        from the main funnel).
+# `DEFAULT_STAGE`      : where new pipeline rows land on add.
+#
+# Legacy normalisation: the deprecated `sent` value is folded into
+# `approved` at the I/O boundary (read on GET, normalised on POST/PATCH).
+# Existing `sent` documents stay in the DB untouched — we rewrite them at
+# read time, so a backfill is not required for the feature to ship.
 # ---------------------------------------------------------------------------
-PIPELINE_STAGES = {
+PIPELINE_STAGE_ORDER = [
     "ask_to_test",
-    "sent",
+    "approved",
+    "hold",
     "shortlisted",
+    "already_tested",
     "locked",
-    "not_interested",
+    "rejected",
     "not_available",
+    "not_interested",
+    "pitch",
+]
+
+PIPELINE_STAGES = set(PIPELINE_STAGE_ORDER)
+
+# Legacy → canonical alias map. Applied at every I/O boundary.
+LEGACY_STAGE_ALIASES = {
+    "sent": "approved",
 }
+
 DEFAULT_STAGE = "ask_to_test"
+
+
+def _normalise_stage(raw: Optional[str]) -> Optional[str]:
+    """Fold legacy/aliased stage values into their canonical equivalents.
+
+    Returns ``None`` for falsy input so callers can decide whether to fall
+    back to ``DEFAULT_STAGE`` (on add) or reject (on move).
+    """
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    return LEGACY_STAGE_ALIASES.get(s, s)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +186,14 @@ async def list_pipeline(
                 by_id[tid] = _talent_merge_fields(t)
 
     hydrated = [
-        {**row, **by_id.get(row.get("talent_id"), _EMPTY_MERGE)}
+        {
+            **row,
+            # Normalise legacy stages (`sent` → `approved`) at read time so
+            # the frontend never sees deprecated values. The underlying
+            # document is not rewritten — a future backfill can clean up.
+            "stage": _normalise_stage(row.get("stage")) or row.get("stage"),
+            **by_id.get(row.get("talent_id"), _EMPTY_MERGE),
+        }
         for row in rows
     ]
     return {"success": True, "data": hydrated}
@@ -188,7 +232,20 @@ async def add_to_pipeline(
     if not talent_ids:
         return {"success": True, "added": 0, "skipped": 0, "data": []}
 
-    stage = payload.stage if payload.stage in PIPELINE_STAGES else DEFAULT_STAGE
+    # Stage normalisation: accept legacy aliases (e.g. `sent` → `approved`),
+    # validate against the canonical registry, fall back to default if
+    # caller omits the field. Reject explicitly unknown stages with 400
+    # so a typo doesn't silently create rows in the default lane.
+    if payload.stage is None:
+        stage = DEFAULT_STAGE
+    else:
+        normalised = _normalise_stage(payload.stage)
+        if normalised not in PIPELINE_STAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stage. Must be one of: {PIPELINE_STAGE_ORDER}",
+            )
+        stage = normalised
 
     # One round-trip to find existing pairs — cheaper than per-id `update_one`
     # with upsert because the duplicate set is usually small.
@@ -243,10 +300,13 @@ async def move_pipeline(
     to reference rows from another project simply won't match and returns
     ``moved: 0``.
     """
-    if payload.stage not in PIPELINE_STAGES:
+    # Normalise legacy aliases (`sent` → `approved`) before validating, so
+    # frontends transitioning during the rollout keep working.
+    target_stage = _normalise_stage(payload.stage)
+    if target_stage not in PIPELINE_STAGES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid stage. Must be one of: {sorted(PIPELINE_STAGES)}",
+            detail=f"Invalid stage. Must be one of: {PIPELINE_STAGE_ORDER}",
         )
 
     ids = [i for i in (payload.ids or []) if isinstance(i, str) and i.strip()]
@@ -255,11 +315,11 @@ async def move_pipeline(
 
     res = await db.casting_pipeline.update_many(
         {"project_id": project_id, "id": {"$in": ids}},
-        {"$set": {"stage": payload.stage, "updated_at": _now()}},
+        {"$set": {"stage": target_stage, "updated_at": _now()}},
     )
     logger.info(
         "pipeline.move project=%s stage=%s requested=%d matched=%d modified=%d",
-        project_id, payload.stage, len(ids), res.matched_count, res.modified_count,
+        project_id, target_stage, len(ids), res.matched_count, res.modified_count,
     )
     return {
         "success": True,

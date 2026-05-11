@@ -2,31 +2,80 @@ import { memo, useCallback, useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 
-const STAGES = [
+/* ---------------------------------------------------------------------
+ * Stage registry — single source of truth for the kanban.
+ *
+ * `MAIN_FLOW_STAGES`     : the progression funnel (rendered first)
+ * `OUTCOME_STAGES`       : terminal states (rendered after the funnel)
+ * `INDEPENDENT_STAGES`   : `pitch` lives in its own section — not part of
+ *                          the progression flow, sourcing-only
+ * `PIPELINE_STAGE_ORDER` : flat array used by the kanban grid renderer
+ *
+ * Legacy `sent` is folded into `approved` at read-time so any stored
+ * row with stage="sent" renders into the Approved column without a
+ * data migration.
+ * ------------------------------------------------------------------- */
+const MAIN_FLOW_STAGES = [
     "ask_to_test",
-    "sent",
+    "approved",
+    "hold",
     "shortlisted",
+    "already_tested",
     "locked",
-    "not_interested",
-    "not_available",
 ];
+
+const OUTCOME_STAGES = ["rejected", "not_available", "not_interested"];
+
+const INDEPENDENT_STAGES = ["pitch"];
+
+const PIPELINE_STAGE_ORDER = [
+    ...MAIN_FLOW_STAGES,
+    ...OUTCOME_STAGES,
+    ...INDEPENDENT_STAGES,
+];
+
+// Bulk-action toolbar exposes only the funnel destinations (no
+// terminal/independent stages — those are still reachable via per-card
+// buttons but rarely needed in bulk).
+const BULK_MOVE_TARGETS = ["ask_to_test", "approved", "shortlisted", "locked"];
+
+const LEGACY_STAGE_ALIASES = {
+    sent: "approved",
+};
+
+const normaliseStage = (raw) => {
+    if (!raw) return raw;
+    const s = String(raw).trim().toLowerCase();
+    return LEGACY_STAGE_ALIASES[s] || s;
+};
 
 const STAGE_LABELS = {
     ask_to_test: "ASK TO TEST",
-    sent: "SENT",
+    approved: "APPROVED",
+    hold: "HOLD",
     shortlisted: "SHORTLISTED",
+    already_tested: "ALREADY TESTED",
     locked: "LOCKED",
-    not_interested: "NOT INTERESTED",
+    rejected: "REJECTED",
     not_available: "NOT AVAILABLE",
+    not_interested: "NOT INTERESTED",
+    pitch: "PITCH",
 };
 
+// Per-stage next-step suggestions for the card action buttons. `pitch`,
+// terminal stages, and `locked` are intentionally empty — no automatic
+// onward transitions, but admins can still bulk-move via the toolbar.
 const NEXT_STAGE_FLOW = {
-    ask_to_test: ["sent", "not_interested", "not_available"],
-    sent: ["shortlisted", "not_interested", "not_available"],
-    shortlisted: ["locked", "not_interested", "not_available"],
+    ask_to_test: ["approved", "not_interested", "not_available"],
+    approved: ["shortlisted", "hold", "rejected"],
+    hold: ["approved", "shortlisted", "rejected"],
+    shortlisted: ["locked", "already_tested", "rejected"],
+    already_tested: ["shortlisted", "locked", "rejected"],
     locked: [],
-    not_interested: [],
+    rejected: [],
     not_available: [],
+    not_interested: [],
+    pitch: ["ask_to_test", "rejected"],
 };
 
 const getStageLabel = (stage) =>
@@ -249,7 +298,7 @@ function ProjectPipeline({ projectId }) {
                             >
                                 Cancel ({bulkIds.size} selected)
                             </button>
-                            {STAGES.slice(0, 4).map((stage) => (
+                            {BULK_MOVE_TARGETS.map((stage) => (
                                 <button
                                     key={stage}
                                     onClick={() => handleBulkMove(stage)}
@@ -384,19 +433,74 @@ function ProjectPipeline({ projectId }) {
                 </div>
             )}
 
-            {/* Kanban */}
-            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 overflow-x-auto">
-                {STAGES.map((stage) => (
+            {/* Kanban — main flow (progression funnel) */}
+            <div
+                className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 overflow-x-auto"
+                data-testid="pipeline-main-flow"
+            >
+                {MAIN_FLOW_STAGES.map((stage) => (
                     <Column
                         key={stage}
                         stage={stage}
-                        items={data.filter((i) => i.stage === stage)}
+                        items={data.filter(
+                            (i) => normaliseStage(i.stage) === stage,
+                        )}
                         refresh={fetchPipeline}
                         bulkMode={bulkMode}
                         bulkIds={bulkIds}
                         onToggleBulkSelect={toggleBulkSelect}
                     />
                 ))}
+            </div>
+
+            {/* Outcome stages — terminal states, rendered below the funnel */}
+            <div className="mt-6">
+                <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
+                    Outcomes
+                </h3>
+                <div
+                    className="grid grid-cols-1 md:grid-cols-3 gap-4"
+                    data-testid="pipeline-outcomes"
+                >
+                    {OUTCOME_STAGES.map((stage) => (
+                        <Column
+                            key={stage}
+                            stage={stage}
+                            items={data.filter(
+                                (i) => normaliseStage(i.stage) === stage,
+                            )}
+                            refresh={fetchPipeline}
+                            bulkMode={bulkMode}
+                            bulkIds={bulkIds}
+                            onToggleBulkSelect={toggleBulkSelect}
+                        />
+                    ))}
+                </div>
+            </div>
+
+            {/* Pitch — independent sourcing lane. Not part of the funnel. */}
+            <div className="mt-6">
+                <h3 className="text-[10px] tracking-[0.2em] uppercase text-white/40 mb-2">
+                    Pitch (sourcing)
+                </h3>
+                <div
+                    className="grid grid-cols-1 md:grid-cols-2 gap-4"
+                    data-testid="pipeline-pitch"
+                >
+                    {INDEPENDENT_STAGES.map((stage) => (
+                        <Column
+                            key={stage}
+                            stage={stage}
+                            items={data.filter(
+                                (i) => normaliseStage(i.stage) === stage,
+                            )}
+                            refresh={fetchPipeline}
+                            bulkMode={bulkMode}
+                            bulkIds={bulkIds}
+                            onToggleBulkSelect={toggleBulkSelect}
+                        />
+                    ))}
+                </div>
             </div>
         </div>
     );
@@ -544,7 +648,11 @@ const Card = memo(function Card({
         }
     };
 
-    const nextStages = NEXT_STAGE_FLOW[item.stage] || [];
+    // Treat legacy `sent` rows as `approved` so the action buttons match
+    // the column the card is rendered in, and terminal/locked rows expose
+    // no onward transitions.
+    const canonicalStage = normaliseStage(item.stage);
+    const nextStages = NEXT_STAGE_FLOW[canonicalStage] || [];
 
     return (
         <div
@@ -622,16 +730,17 @@ const Card = memo(function Card({
                         </div>
                     )}
 
-                    {item.stage === "locked" && (
+                    {canonicalStage === "locked" && (
                         <div className="mt-2 text-yellow-500/60 text-[10px]">
                             ✓ Finalized
                         </div>
                     )}
 
-                    {(item.stage === "not_interested" ||
-                        item.stage === "not_available") && (
+                    {(canonicalStage === "not_interested" ||
+                        canonicalStage === "not_available" ||
+                        canonicalStage === "rejected") && (
                         <div className="mt-2 text-red-500/60 text-[10px]">
-                            ✗ Rejected
+                            ✗ {getStageLabel(canonicalStage)}
                         </div>
                     )}
                 </>

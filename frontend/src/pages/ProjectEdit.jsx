@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import ForwardToLinkModal from "@/components/ForwardToLinkModal";
 import BudgetLines from "@/components/BudgetLines";
+import ProjectPipeline from "@/pages/ProjectPipeline";
 import {
     AVAILABILITY_OPTIONS,
     BUDGET_OPTIONS,
@@ -913,6 +914,11 @@ export default function ProjectEdit() {
                         </>
                     )}
                 </section>
+            )}
+
+            {/* Casting Pipeline */}
+            {isEdit && (
+                <ProjectPipeline projectId={id} />
             )}
 
             {/* Material viewer modal */}

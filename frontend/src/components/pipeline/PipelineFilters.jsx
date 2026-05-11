@@ -39,14 +39,14 @@ const PipelineFilters = memo(function PipelineFilters({
             className="
                 sticky top-2 z-30
                 mt-3 mb-4
-                rounded-xl
-                bg-gradient-to-b from-black/50 to-black/30
+                rounded-2xl
+                bg-gradient-to-b from-[#171717]/95 to-[#111111]/92
                 backdrop-blur-md
                 border border-white/[0.06]
-                shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]
+                shadow-[0_4px_16px_-8px_rgba(0,0,0,0.5),inset_0_1px_0_0_rgba(255,255,255,0.03)]
             "
         >
-            <div className="flex flex-col lg:flex-row lg:items-center gap-3 lg:gap-4 px-3 py-2 lg:px-4 lg:py-2">
+            <div className="flex flex-col lg:flex-row lg:items-center gap-2 lg:gap-3 px-3 py-2 lg:px-4 lg:py-2">
                 {/* Search input — anchors the bar on desktop, full-width on mobile */}
                 <div className="relative flex-1 min-w-0">
                     <input
@@ -57,18 +57,18 @@ const PipelineFilters = memo(function PipelineFilters({
                         data-testid="pipeline-filter-search"
                         className="
                             w-full
-                            bg-black/40 border border-white/[0.08]
-                            rounded-full
-                            pl-9 pr-3 py-1.5
-                            text-[12.5px] text-white/90 placeholder-white/30
+                            bg-black/30 border border-white/[0.06]
+                            rounded-[999px]
+                            pl-9 pr-3 py-1.25
+                            text-[12.5px] text-white/90 placeholder-white/25
                             tg-mono
-                            focus:outline-none focus:border-white/30 focus:bg-black/60
+                            focus:outline-none focus:border-white/25 focus:bg-black/40
                             transition-colors duration-200
                         "
                     />
                     <span
                         aria-hidden
-                        className="absolute left-3 top-1/2 -translate-y-1/2 text-white/35 text-[11px] tg-mono pointer-events-none"
+                        className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-[11px] tg-mono pointer-events-none"
                     >
                         ⌕
                     </span>
@@ -139,8 +139,8 @@ const PipelineFilters = memo(function PipelineFilters({
                                 px-2.5 py-1 rounded-full
                                 text-[10px] tracking-[0.18em] uppercase
                                 text-white/55 hover:text-rose-200
-                                bg-white/[0.03] hover:bg-rose-300/10
-                                border border-white/[0.08] hover:border-rose-300/20
+                                bg-white/[0.02] hover:bg-rose-300/8
+                                border border-white/[0.06] hover:border-rose-300/15
                                 transition-all duration-200
                             "
                             title="Clear all filters"
@@ -164,12 +164,12 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
             data-testid={testid}
             className="
                 shrink-0 flex items-center gap-1.5
-                bg-white/[0.03] border border-white/[0.06]
+                bg-white/[0.02] border border-white/[0.05]
                 rounded-full pl-2.5 pr-1 py-1
             "
         >
             <span
-                className={`text-[9px] tracking-[0.18em] uppercase text-white/40 shrink-0 ${
+                className={`text-[9px] tracking-[0.18em] uppercase text-white/35 shrink-0 ${
                     compact ? "hidden xl:inline" : ""
                 }`}
             >
@@ -186,7 +186,7 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
                             data-testid={`${testid}-${opt.value}`}
                             className={`
                                 shrink-0
-                                px-2.5 py-0.5 rounded-full
+                                px-2 py-[3px] rounded-full
                                 text-[10px] tracking-[0.1em] uppercase
                                 transition-all duration-200
                                 ${

@@ -412,6 +412,31 @@ export default memo(ProjectPipeline);
 /* doesn't re-render the entire kanban.                                   */
 /* --------------------------------------------------------------------- */
 
+const TalentAvatar = memo(function TalentAvatar({ src, name }) {
+    // 24px square thumbnail next to the talent name. Falls back to the
+    // first letter on a coloured tile when no image_url is available
+    // (talents without a cover photo, or pre-hydration loading state).
+    const initial = (name || "?").trim().charAt(0).toUpperCase() || "?";
+    if (src) {
+        return (
+            <img
+                src={src}
+                alt=""
+                loading="lazy"
+                className="w-6 h-6 rounded object-cover shrink-0 bg-white/5"
+            />
+        );
+    }
+    return (
+        <div
+            aria-hidden
+            className="w-6 h-6 rounded shrink-0 bg-white/10 flex items-center justify-center text-[10px] text-white/70 font-medium"
+        >
+            {initial}
+        </div>
+    );
+});
+
 const SearchResultRow = memo(function SearchResultRow({
     talent,
     selected,
@@ -435,6 +460,7 @@ const SearchResultRow = memo(function SearchResultRow({
                     onClick={(e) => e.stopPropagation()}
                     className="w-4 h-4"
                 />
+                <TalentAvatar src={talent.image_url} name={talent.name} />
                 <div className="flex-1 min-w-0">
                     <p className="text-white text-sm font-medium truncate">
                         {talent.name || "Unnamed Talent"}
@@ -444,9 +470,11 @@ const SearchResultRow = memo(function SearchResultRow({
                             {talent.email}
                         </p>
                     )}
-                    <p className="text-white/30 text-xs mt-0.5 tg-mono truncate">
-                        ID: {talent.id}
-                    </p>
+                    {talent.instagram_handle && (
+                        <p className="text-white/30 text-xs truncate tg-mono">
+                            {talent.instagram_handle}
+                        </p>
+                    )}
                 </div>
             </div>
         </div>
@@ -533,33 +561,48 @@ const Card = memo(function Card({
                         onChange={() => onToggleSelect(item.id)}
                         className="w-4 h-4"
                     />
+                    <TalentAvatar
+                        src={item.image_url}
+                        name={item.talent_name || item.talent_id}
+                    />
                     <div className="flex-1 min-w-0">
                         <p className="font-mono text-white/90 truncate">
-                            {item.talent_id}
+                            {item.talent_name || item.talent_id}
                         </p>
-                        {item.talent_name && (
+                        {item.talent_email && (
                             <p className="text-white/60 truncate text-[10px] mt-0.5">
-                                {item.talent_name}
+                                {item.talent_email}
                             </p>
                         )}
                     </div>
                 </div>
             ) : (
                 <>
-                    <div className="mb-1">
-                        <p className="font-mono text-white/90 font-medium truncate">
-                            {item.talent_name || item.talent_id}
-                        </p>
-                        {item.talent_name && (
-                            <p className="text-white/40 truncate text-[10px] mt-0.5 tg-mono">
-                                ID: {item.talent_id}
+                    <div className="flex items-start gap-2 mb-1">
+                        <TalentAvatar
+                            src={item.image_url}
+                            name={item.talent_name || item.talent_id}
+                        />
+                        <div className="flex-1 min-w-0">
+                            <p className="font-mono text-white/90 font-medium truncate">
+                                {item.talent_name || item.talent_id}
                             </p>
-                        )}
+                            {item.talent_name && (
+                                <p className="text-white/40 truncate text-[10px] mt-0.5 tg-mono">
+                                    ID: {item.talent_id}
+                                </p>
+                            )}
+                        </div>
                     </div>
 
-                    {item.email && (
+                    {(item.talent_email || item.email) && (
                         <p className="text-white/40 truncate text-[10px]">
-                            {item.email}
+                            {item.talent_email || item.email}
+                        </p>
+                    )}
+                    {item.instagram_handle && (
+                        <p className="text-white/40 truncate text-[10px] tg-mono">
+                            {item.instagram_handle}
                         </p>
                     )}
 

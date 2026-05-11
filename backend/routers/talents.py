@@ -1,9 +1,11 @@
 """Talent CRUD + media management."""
 import logging
+import re
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 from core import (
     APP_NAME,
@@ -112,6 +114,109 @@ async def list_talents(
     total = await db.talents.count_documents(query)
     talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated([enrich_talent(t) for t in talents], total, p, s)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight search + bulk-by-id helpers — power the Casting Pipeline's
+# Quick Add (live search) and pipeline-row hydration. Kept lightweight: only
+# the fields the kanban card needs, capped at 30 hits, two-char minimum.
+# Routes are declared BEFORE `/talents/{tid}` so FastAPI matches the literal
+# path first and doesn't treat "search"/"bulk" as a talent id.
+# ---------------------------------------------------------------------------
+def _talent_lite(t: dict) -> dict:
+    """Trim a talent doc to the fields the pipeline UI actually renders."""
+    enriched = enrich_talent(t) or {}
+    return {
+        "id": enriched.get("id"),
+        "name": enriched.get("name"),
+        "email": enriched.get("email"),
+        "phone": enriched.get("phone"),
+        "instagram_handle": enriched.get("instagram_handle"),
+        "image_url": enriched.get("image_url"),
+    }
+
+
+@router.get("/talents/search")
+async def search_talents(
+    q: str = "",
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Multi-field talent lookup for the pipeline Quick Add.
+
+    Matches against `name`, `email`, `phone`, `instagram_handle` (case
+    insensitive, substring). Returns up to 30 lightweight records. A short
+    query (<2 chars after strip) returns an empty list rather than every
+    talent in the database — keeps the UI snappy and avoids accidental
+    full-table reads.
+    """
+    needle = (q or "").strip()
+    if len(needle) < 2:
+        return {"success": True, "data": []}
+
+    rgx = {"$regex": re.escape(needle), "$options": "i"}
+    query = {
+        "$or": [
+            {"name": rgx},
+            {"email": rgx},
+            {"phone": rgx},
+            {"instagram_handle": rgx},
+        ]
+    }
+    cursor = db.talents.find(
+        query,
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "email": 1,
+            "phone": 1,
+            "instagram_handle": 1,
+            "cover_media_id": 1,
+            "media": 1,
+        },
+    ).limit(30)
+    docs = await cursor.to_list(30)
+    return {"success": True, "data": [_talent_lite(t) for t in docs]}
+
+
+class BulkIdsIn(BaseModel):
+    """Body for /talents/bulk — list of talent UUIDs to hydrate."""
+    ids: List[str] = Field(default_factory=list)
+
+
+@router.post("/talents/bulk")
+async def bulk_talents(
+    payload: BulkIdsIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Hydrate a list of talent ids in one round-trip.
+
+    Used by the pipeline frontend to enrich kanban rows (which store only
+    `talent_id`) with name/email/image. Preserves the **input order** so the
+    caller doesn't have to re-sort client-side. Missing ids are silently
+    dropped; the response stays well-formed.
+    """
+    ids = [i for i in (payload.ids or []) if isinstance(i, str) and i]
+    if not ids:
+        return {"success": True, "data": []}
+
+    cursor = db.talents.find(
+        {"id": {"$in": ids}},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "email": 1,
+            "phone": 1,
+            "instagram_handle": 1,
+            "cover_media_id": 1,
+            "media": 1,
+        },
+    )
+    docs = await cursor.to_list(len(ids))
+    by_id = {d["id"]: _talent_lite(d) for d in docs if d.get("id")}
+    ordered = [by_id[i] for i in ids if i in by_id]
+    return {"success": True, "data": ordered}
 
 
 @router.get("/talents/{tid}")

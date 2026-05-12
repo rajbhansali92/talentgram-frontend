@@ -65,48 +65,50 @@ export default function Dashboard() {
 
     return (
         <div
-            className="p-6 md:p-12 max-w-7xl mx-auto"
+            className="p-6 md:p-10 max-w-7xl mx-auto"
             data-testid="admin-dashboard"
         >
-            <div className="flex items-end justify-between flex-wrap gap-4 mb-12">
+            <div className="flex items-end justify-between flex-wrap gap-4 mb-10">
                 <div>
                     <p className="eyebrow mb-3">Overview</p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight">
-                        Control Room
+                    <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
+                        Operations
                     </h1>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-3">
                     <Link
                         to="/admin/talents/new"
                         data-testid="dash-new-talent-btn"
-                        className="px-4 py-2.5 border border-white/20 hover:border-white rounded-sm text-xs tracking-wide transition-all"
+                        className="px-4 py-2.5 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-xs font-medium text-black/70 hover:text-black transition-colors duration-150"
                     >
                         + New Talent
                     </Link>
                     <Link
                         to="/admin/links/new"
                         data-testid="dash-new-link-btn"
-                        className="px-4 py-2.5 bg-white text-black rounded-sm text-xs tracking-wide hover:opacity-90 transition-all"
+                        className="px-4 py-2.5 bg-black text-white rounded-lg text-xs font-medium hover:bg-black/90 transition-colors duration-150"
                     >
                         + Generate Link
                     </Link>
                 </div>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
                 {cards.map((c) => (
                     <div
                         key={c.label}
-                        className="border border-white/10 p-6 md:p-8 hover:border-white/25 transition-all tg-fade-up"
+                        className="bg-white border border-black/[0.08] rounded-xl p-5 md:p-6 transition-colors duration-150 hover:border-black/[0.12]"
                     >
                         <c.icon
-                            className="w-4 h-4 text-white/40 mb-6"
+                            className="w-4 h-4 text-black/40 mb-4"
                             strokeWidth={1.5}
                         />
-                        <div className="font-display text-4xl md:text-5xl tracking-tight">
+                        <div className="font-display text-3xl md:text-4xl tracking-tight text-black/85">
                             {c.value}
                         </div>
-                        <div className="eyebrow mt-3">{c.label}</div>
+                        <div className="text-[11px] text-black/45 tracking-widest uppercase mt-2">
+                            {c.label}
+                        </div>
                     </div>
                 ))}
             </div>
@@ -115,54 +117,54 @@ export default function Dashboard() {
 
             <OnboardingLinkCard />
 
-            <div className="border border-white/10">
-                <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+            <div className="bg-white border border-black/[0.08] rounded-xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-black/[0.08] flex items-center justify-between">
                     <p className="eyebrow">Recent Links</p>
                     <Link
                         to="/admin/links"
-                        className="text-xs text-white/60 hover:text-white inline-flex items-center gap-1"
+                        className="text-xs text-black/60 hover:text-black inline-flex items-center gap-1 transition-colors duration-150"
                     >
                         View all <ArrowRight className="w-3 h-3" />
                     </Link>
                 </div>
                 {recent.length === 0 ? (
-                    <div className="p-12 text-center text-white/40 text-sm">
+                    <div className="p-12 text-center text-black/45 text-sm">
                         No links yet. Generate your first link.
                     </div>
                 ) : (
-                    <div className="divide-y divide-white/10">
+                    <div className="divide-y divide-black/[0.06]">
                         {recent.map((l) => (
                             <Link
                                 key={l.id}
                                 to={`/admin/links/${l.id}/results`}
-                                className="flex items-center justify-between px-6 py-4 hover:bg-white/5 transition-all"
+                                className="flex items-center justify-between px-6 py-4 hover:bg-black/[0.02] transition-colors duration-150"
                             >
                                 <div>
-                                    <div className="font-display text-lg">
+                                    <div className="font-display text-base text-black/85">
                                         {l.title}
                                     </div>
-                                    <div className="text-xs text-white/40 mt-1 tg-mono">
+                                    <div className="text-xs text-black/45 mt-1 font-mono">
                                         /l/{l.slug}
                                     </div>
                                 </div>
-                                <div className="flex gap-8 text-xs text-white/60">
+                                <div className="flex gap-6 text-xs text-black/60">
                                     <span>
                                         {l.view_count || 0}
-                                        <span className="text-white/30">
+                                        <span className="text-black/30">
                                             {" "}
                                             views
                                         </span>
                                     </span>
                                     <span>
                                         {l.unique_viewers || 0}
-                                        <span className="text-white/30">
+                                        <span className="text-black/30">
                                             {" "}
                                             viewers
                                         </span>
                                     </span>
                                     <span>
                                         {(l.talent_ids || []).length}
-                                        <span className="text-white/30">
+                                        <span className="text-black/30">
                                             {" "}
                                             talents
                                         </span>
@@ -210,26 +212,26 @@ function OnboardingLinkCard() {
     return (
         <div
             data-testid="onboarding-link-card"
-            className="border border-white/10 mb-6 p-6 md:p-7 flex flex-col md:flex-row md:items-center gap-5 md:gap-6"
+            className="bg-white border border-black/[0.08] rounded-xl mb-6 p-6 md:p-7 flex flex-col md:flex-row md:items-center gap-5 md:gap-6 transition-colors duration-150 hover:border-black/[0.12]"
         >
             <div className="flex items-start gap-4 min-w-0 flex-1">
-                <div className="hidden md:flex shrink-0 w-11 h-11 items-center justify-center border border-white/15 rounded-sm">
+                <div className="hidden md:flex shrink-0 w-11 h-11 items-center justify-center border border-black/[0.08] rounded-lg bg-[#fafaf8]">
                     <UserPlus
-                        className="w-4 h-4 text-white/70"
+                        className="w-4 h-4 text-black/60"
                         strokeWidth={1.5}
                     />
                 </div>
                 <div className="min-w-0">
                     <p className="eyebrow mb-2">Public Application Link</p>
-                    <h3 className="font-display text-xl md:text-2xl tracking-tight mb-1">
+                    <h3 className="font-display text-xl md:text-2xl tracking-tight text-black/85 mb-1">
                         Invite new talent
                     </h3>
-                    <p className="text-xs text-white/50 mb-2">
+                    <p className="text-xs text-black/60 mb-2">
                         Share this link with anyone who wants to join Talentgram
                         — they self-onboard and you review on{" "}
                         <Link
                             to="/admin/applications"
-                            className="underline underline-offset-2 hover:text-white"
+                            className="underline underline-offset-2 hover:text-black transition-colors duration-150"
                         >
                             Applications
                         </Link>
@@ -237,7 +239,7 @@ function OnboardingLinkCard() {
                     </p>
                     <code
                         data-testid="onboarding-link-url"
-                        className="block text-[11px] md:text-xs tg-mono text-white/70 truncate bg-white/5 border border-white/10 rounded-sm px-2.5 py-1.5"
+                        className="block text-[11px] md:text-xs font-mono text-black/60 bg-[#fafaf8] border border-black/[0.08] rounded-md px-2.5 py-1.5"
                     >
                         {url}
                     </code>
@@ -248,7 +250,7 @@ function OnboardingLinkCard() {
                     type="button"
                     onClick={copy}
                     data-testid="onboarding-copy-btn"
-                    className="inline-flex items-center justify-center gap-2 bg-white text-black px-4 py-2.5 rounded-sm text-xs tracking-wide hover:opacity-90 active:scale-[0.97] transition-all min-h-[44px] flex-1 md:flex-none"
+                    className="inline-flex items-center justify-center gap-2 bg-black text-white px-4 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 active:scale-[0.98] transition-all min-h-[44px] flex-1 md:flex-none"
                 >
                     <Copy className="w-3.5 h-3.5" /> Copy
                 </button>
@@ -256,7 +258,7 @@ function OnboardingLinkCard() {
                     type="button"
                     onClick={share}
                     data-testid="onboarding-whatsapp-btn"
-                    className="inline-flex items-center justify-center gap-2 border border-white/20 hover:border-white px-4 py-2.5 rounded-sm text-xs tracking-wide active:scale-[0.97] transition-all min-h-[44px] flex-1 md:flex-none"
+                    className="inline-flex items-center justify-center gap-2 border border-black/[0.08] hover:border-black/[0.16] px-4 py-2.5 rounded-md text-xs font-medium text-black/70 hover:text-black transition-colors duration-150 active:scale-[0.98] min-h-[44px] flex-1 md:flex-none"
                 >
                     <Send className="w-3.5 h-3.5" /> WhatsApp
                 </button>

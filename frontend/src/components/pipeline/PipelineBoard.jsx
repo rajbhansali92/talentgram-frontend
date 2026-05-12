@@ -158,9 +158,9 @@ function PipelineBoard({ projectId }) {
 
     if (loading) {
         return (
-            <div className="flex items-center justify-center h-64" data-testid="pipeline-loading">
-                <div className="text-white/30 text-xs animate-pulse">
-                    Loading pipeline...
+            <div className="min-h-screen bg-[#0b0b0b] flex items-center justify-center" data-testid="pipeline-loading">
+                <div className="text-white/20 text-sm animate-pulse tracking-wide">
+                    Preparing casting board
                 </div>
             </div>
         );
@@ -168,8 +168,10 @@ function PipelineBoard({ projectId }) {
 
     if (error) {
         return (
-            <div className="flex items-center justify-center h-64" data-testid="pipeline-error">
-                <div className="text-rose-400/50 text-xs">{error}</div>
+            <div className="min-h-screen bg-[#0b0b0b] flex items-center justify-center" data-testid="pipeline-error">
+                <div className="text-white/35 text-sm tracking-wide">
+                    Unable to load casting workflow
+                </div>
             </div>
         );
     }
@@ -191,113 +193,125 @@ function PipelineBoard({ projectId }) {
         filteredData.filter((i) => normaliseStage(i.stage) === stage);
 
     return (
-        <div className="p-4" data-testid="project-pipeline">
-            <PipelineToolbar
-                projectId={projectId}
-                bulkMode={bulkMode}
-                onToggleBulkMode={handleToggleBulkMode}
-                onOpenBulkAdd={() => setShowBulkAdd(true)}
-            />
+        <div 
+            className="min-h-screen bg-[#0b0b0b] px-4 md:px-6 py-5 md:py-6 pb-24 relative"
+            data-testid="project-pipeline"
+            style={{
+                backgroundImage: 'radial-gradient(circle at top, rgba(255,255,255,0.03), transparent 45%)'
+            }}
+        >
+            {/* Atmospheric top fade */}
+            <div className="absolute top-0 left-0 right-0 h-24 pointer-events-none bg-gradient-to-b from-white/[0.015] to-transparent" />
+            
+            {/* Premium max-width container */}
+            <div className="max-w-[1900px] mx-auto relative">
+                {/* Orchestration spacing - top controls */}
+                <div className="space-y-5">
+                    <PipelineToolbar
+                        projectId={projectId}
+                        bulkMode={bulkMode}
+                        onToggleBulkMode={handleToggleBulkMode}
+                        onOpenBulkAdd={() => setShowBulkAdd(true)}
+                    />
 
-            <QuickAddTalents
-                searchQuery={searchQuery}
-                onSearchQueryChange={setSearchQuery}
-                searchLoading={searchLoading}
-                searchResults={searchResults}
-                selectedTalents={selectedTalents}
-                onToggleTalent={toggleTalentSelect}
-                onAddSelected={addSelectedToPipeline}
-            />
+                    <QuickAddTalents
+                        searchQuery={searchQuery}
+                        onSearchQueryChange={setSearchQuery}
+                        searchLoading={searchLoading}
+                        searchResults={searchResults}
+                        selectedTalents={selectedTalents}
+                        onToggleTalent={toggleTalentSelect}
+                        onAddSelected={addSelectedToPipeline}
+                    />
 
-            {showBulkAdd && (
-                <BulkAddModal
-                    value={bulkTalentsInput}
-                    onChange={setBulkTalentsInput}
-                    busy={bulkAdding}
-                    onCancel={() => setShowBulkAdd(false)}
-                    onSubmit={handleBulkAdd}
+                    <PipelineFilters
+                        search={search}
+                        onSearch={setSearch}
+                        statusFocus={statusFocus}
+                        onStatusFocus={setStatusFocus}
+                        hasSubmission={hasSubmission}
+                        onHasSubmission={setHasSubmission}
+                        hasIg={hasIg}
+                        onHasIg={setHasIg}
+                        filtersActive={filtersActive}
+                        onClearAll={clearAllFilters}
+                        totalCount={data.length}
+                        filteredCount={filteredData.length}
+                    />
+                </div>
+
+                {/* Workflow content with orchestrated spacing */}
+                <div className="space-y-8 mt-6">
+                    {hasZeroAfterFilter && (
+                        <div className="mt-16">
+                            <FilterEmptyState onReset={clearAllFilters} />
+                        </div>
+                    )}
+
+                    {!hasZeroAfterFilter && !showOnlyFollowUp && (
+                        <BoardSection
+                            eyebrow="Pipeline"
+                            helper={`${MAIN_FLOW_STAGES.length} stages`}
+                        >
+                            <BoardRow testid="pipeline-main-flow">
+                                {MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
+                                    <PipelineColumn
+                                        key={stage}
+                                        stage={stage}
+                                        items={itemsForStage(stage)}
+                                        {...columnCommons}
+                                    />
+                                ))}
+                            </BoardRow>
+                        </BoardSection>
+                    )}
+
+                    {!hasZeroAfterFilter && (
+                        <div className="mt-2">
+                            <FollowUpLane
+                                items={filteredData.filter((i) => i.is_follow_up === true)}
+                                refresh={fetchPipeline}
+                            />
+                        </div>
+                    )}
+
+                    {!hasZeroAfterFilter && !showOnlyFollowUp && (
+                        <BoardSection eyebrow="Outcomes" muted>
+                            <BoardRow testid="pipeline-outcomes">
+                                {OUTCOME_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
+                                    <PipelineColumn
+                                        key={stage}
+                                        stage={stage}
+                                        items={itemsForStage(stage)}
+                                        {...columnCommons}
+                                    />
+                                ))}
+                            </BoardRow>
+                        </BoardSection>
+                    )}
+
+                    {!hasZeroAfterFilter && !showOnlyFollowUp && (
+                        <BoardSection eyebrow="Pitch" divider>
+                            <BoardRow testid="pipeline-pitch">
+                                {INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
+                                    <PipelineColumn
+                                        key={stage}
+                                        stage={stage}
+                                        items={itemsForStage(stage)}
+                                        {...columnCommons}
+                                    />
+                                ))}
+                            </BoardRow>
+                        </BoardSection>
+                    )}
+                </div>
+
+                <BulkActionBar
+                    count={bulkIds.size}
+                    onClear={handleClearBulk}
+                    onMove={handleBulkMove}
                 />
-            )}
-
-            <PipelineFilters
-                search={search}
-                onSearch={setSearch}
-                statusFocus={statusFocus}
-                onStatusFocus={setStatusFocus}
-                hasSubmission={hasSubmission}
-                onHasSubmission={setHasSubmission}
-                hasIg={hasIg}
-                onHasIg={setHasIg}
-                filtersActive={filtersActive}
-                onClearAll={clearAllFilters}
-                totalCount={data.length}
-                filteredCount={filteredData.length}
-            />
-
-            {hasZeroAfterFilter && (
-                <FilterEmptyState onReset={clearAllFilters} />
-            )}
-
-            {!hasZeroAfterFilter && !showOnlyFollowUp && (
-                <BoardSection
-                    eyebrow="Pipeline"
-                    helper={`${MAIN_FLOW_STAGES.length} stages`}
-                >
-                    <BoardRow testid="pipeline-main-flow">
-                        {MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
-                            <PipelineColumn
-                                key={stage}
-                                stage={stage}
-                                items={itemsForStage(stage)}
-                                {...columnCommons}
-                            />
-                        ))}
-                    </BoardRow>
-                </BoardSection>
-            )}
-
-            {!hasZeroAfterFilter && (
-                <FollowUpLane
-                    items={filteredData.filter((i) => i.is_follow_up === true)}
-                    refresh={fetchPipeline}
-                />
-            )}
-
-            {!hasZeroAfterFilter && !showOnlyFollowUp && (
-                <BoardSection eyebrow="Archived" muted>
-                    <BoardRow testid="pipeline-outcomes">
-                        {OUTCOME_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
-                            <PipelineColumn
-                                key={stage}
-                                stage={stage}
-                                items={itemsForStage(stage)}
-                                {...columnCommons}
-                            />
-                        ))}
-                    </BoardRow>
-                </BoardSection>
-            )}
-
-            {!hasZeroAfterFilter && !showOnlyFollowUp && (
-                <BoardSection eyebrow="Sourcing" divider>
-                    <BoardRow testid="pipeline-pitch">
-                        {INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
-                            <PipelineColumn
-                                key={stage}
-                                stage={stage}
-                                items={itemsForStage(stage)}
-                                {...columnCommons}
-                            />
-                        ))}
-                    </BoardRow>
-                </BoardSection>
-            )}
-
-            <BulkActionBar
-                count={bulkIds.size}
-                onClear={handleClearBulk}
-                onMove={handleBulkMove}
-            />
+            </div>
         </div>
     );
 }

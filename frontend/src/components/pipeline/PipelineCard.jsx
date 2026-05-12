@@ -138,22 +138,24 @@ const PipelineCard = memo(function PipelineCard({
     }, [move]);
 
     const shellClass = [
-        "group relative rounded-md overflow-hidden",
+        "group relative rounded-xl overflow-hidden",
         "transition-all duration-200",
-        "bg-[#131313]",
+        "bg-gradient-to-b from-[#171717] to-[#121212]",
+        "shadow-[0_6px_18px_-10px_rgba(0,0,0,0.45)]",
         "border",
-        "min-h-[112px]",
+        "min-h-[132px]",
         isSelected
-            ? "border-white/30 ring-1 ring-white/10"
+            ? "border-white/18 ring-1 ring-white/10"
             : "border-white/[0.05]",
         readOnly
             ? ""
-            : "hover:border-white/10",
+            : "hover:border-white/[0.08] hover:-translate-y-[1px]",
         moving ? "opacity-40 pointer-events-none" : "",
         isDragging
-            ? "opacity-60 scale-[0.98]"
+            ? "opacity-75 scale-[0.995]"
             : "",
         draggable ? "cursor-grab active:cursor-grabbing" : "",
+        "before:absolute before:inset-0 before:bg-gradient-to-b before:from-white/[0.015] before:to-transparent before:pointer-events-none",
     ].join(" ");
 
     if (bulkMode) {
@@ -165,31 +167,47 @@ const PipelineCard = memo(function PipelineCard({
                 draggable={draggable}
                 onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
-                className={`${shellClass} px-2 py-2 cursor-pointer`}
+                className={`${shellClass} px-3 py-2.5 cursor-pointer`}
                 role="checkbox"
                 aria-checked={isSelected}
                 tabIndex={0}
             >
-                <div className="flex items-center gap-2">
-                    <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => onToggleSelect(item.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-3.5 h-3.5 rounded border-white/20 bg-transparent"
-                        aria-label={`Select ${displayName}`}
-                    />
+                <div className="flex items-center gap-3">
+                    <div className="relative flex-shrink-0">
+                        <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => onToggleSelect(item.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="
+                                appearance-none w-4 h-4 rounded-[4px]
+                                border border-white/20 bg-transparent
+                                checked:bg-white checked:border-white
+                                checked:ring-1 checked:ring-white/20
+                                transition-all duration-150
+                                cursor-pointer
+                                focus:outline-none focus:ring-1 focus:ring-white/30
+                            "
+                            style={{
+                                backgroundImage: isSelected ? `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'%3E%3C/polyline%3E%3C/svg%3E")` : 'none',
+                                backgroundSize: '10px',
+                                backgroundPosition: 'center',
+                                backgroundRepeat: 'no-repeat',
+                            }}
+                            aria-label={`Select ${displayName}`}
+                        />
+                    </div>
                     <TalentAvatar
                         src={item.image_url}
                         name={displayName}
-                        size="sm"
+                        size="md"
                     />
                     <div className="flex-1 min-w-0">
-                        <p className="text-[11px] text-white/85 font-medium truncate">
+                        <p className="text-[13px] text-white/85 font-medium leading-[1.25] truncate">
                             {displayName}
                         </p>
                         {displayEmail && (
-                            <p className="text-[8px] text-white/45 truncate font-mono mt-0.5">
+                            <p className="text-[9px] text-white/40 truncate font-mono mt-1">
                                 {displayEmail}
                             </p>
                         )}
@@ -208,28 +226,28 @@ const PipelineCard = memo(function PipelineCard({
             className={shellClass}
             aria-label={`Talent: ${displayName}`}
         >
-            <div className="p-2.5 space-y-2">
+            <div className="p-3 space-y-2.5">
                 {/* Identity row */}
-                <div className="flex items-start gap-2.5">
+                <div className="flex items-start gap-3">
                     <TalentAvatar
                         src={item.image_url}
                         name={displayName}
-                        size="sm"
+                        size="md"
                     />
                     <div className="flex-1 min-w-0">
                         <p
-                            className="text-[12px] text-white/85 font-medium truncate"
+                            className="text-[13px] text-white/90 font-medium leading-[1.25] truncate"
                             title={displayName}
                         >
                             {displayName}
                         </p>
                         {displayIg && (
-                            <p className="text-[8px] text-white/55 truncate font-mono mt-0.5">
+                            <p className="text-[8.5px] text-white/55 truncate font-mono mt-1">
                                 @{displayIg}
                             </p>
                         )}
                         {!displayIg && item.talent_name && (
-                            <p className="text-[8px] text-white/35 truncate font-mono mt-0.5">
+                            <p className="text-[8.5px] text-white/35 truncate font-mono mt-1">
                                 {item.talent_id?.slice(0, 8)}…
                             </p>
                         )}
@@ -238,7 +256,7 @@ const PipelineCard = memo(function PipelineCard({
                     {/* Status chip */}
                     {statusTone && (
                         <span
-                            className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border ${statusTone.chip}`}
+                            className={`shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border ${statusTone.chip}`}
                             title={statusTone.label}
                             role="status"
                             aria-label={`Status: ${statusTone.label}`}
@@ -248,7 +266,7 @@ const PipelineCard = memo(function PipelineCard({
                                 aria-hidden="true"
                             />
                             <span
-                                className={`text-[7px] tracking-wide uppercase ${statusTone.text}`}
+                                className={`text-[7.5px] tracking-wide uppercase ${statusTone.text}`}
                             >
                                 {statusTone.label}
                             </span>
@@ -258,14 +276,14 @@ const PipelineCard = memo(function PipelineCard({
 
                 {/* Metadata - compact */}
                 {(displayEmail || displayPhone) && (
-                    <div className="space-y-0.5" aria-label="Contact information">
+                    <div className="space-y-1" aria-label="Contact information">
                         {displayEmail && (
-                            <p className="text-[9px] text-white/55 truncate font-mono" title={displayEmail}>
+                            <p className="text-[9.5px] text-white/45 truncate font-mono" title={displayEmail}>
                                 {displayEmail}
                             </p>
                         )}
                         {displayPhone && (
-                            <p className="text-[9px] text-white/55 truncate font-mono" title={displayPhone}>
+                            <p className="text-[9.5px] text-white/35 truncate font-mono" title={displayPhone}>
                                 {displayPhone}
                             </p>
                         )}
@@ -275,7 +293,7 @@ const PipelineCard = memo(function PipelineCard({
                 {/* Action pills - max 2 visible */}
                 {!readOnly && visibleActions.length > 0 && (
                     <div 
-                        className="flex flex-wrap items-center gap-1 pt-1 border-t border-white/[0.03]"
+                        className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/[0.04]"
                         role="group"
                         aria-label="Stage actions"
                     >
@@ -288,11 +306,11 @@ const PipelineCard = memo(function PipelineCard({
                                 data-testid={`pipeline-card-move-${item.id}-${stage}`}
                                 aria-label={`Move to ${getStageLabel(stage)}`}
                                 className="
-                                    px-2 py-0.5 rounded-sm
-                                    text-[8px] tracking-wide uppercase
-                                    text-white/55 hover:text-white/80
-                                    bg-white/[0.04] hover:bg-white/[0.07]
-                                    border border-white/[0.03] hover:border-white/8
+                                    px-2.5 py-1 rounded-full
+                                    text-[9px] tracking-[0.12em] uppercase
+                                    text-white/55 hover:text-white/85
+                                    bg-white/[0.05] hover:bg-white/[0.08]
+                                    border border-white/[0.04] hover:border-white/10
                                     transition-all duration-150
                                     disabled:opacity-40
                                 "
@@ -313,18 +331,23 @@ const PipelineCard = memo(function PipelineCard({
                                     aria-expanded={showMoreActions}
                                     aria-haspopup="true"
                                     className="
-                                        px-1.5 py-0.5 rounded-sm
-                                        text-[8px] tracking-wide
-                                        text-white/40 hover:text-white/60
-                                        hover:bg-white/[0.04]
+                                        flex items-center justify-center
+                                        w-6 h-6 rounded-full
+                                        text-[9px] font-mono
+                                        text-white/45 hover:text-white/70
+                                        hover:bg-white/[0.05]
                                         transition-colors
+                                        focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/20
                                     "
                                 >
                                     ⋯
                                 </button>
                                 {showMoreActions && (
                                     <div 
-                                        className="absolute bottom-full right-0 mb-1 z-20 bg-[#1a1a1a] border border-white/10 rounded-md shadow-lg py-1 min-w-[80px]"
+                                        className="absolute bottom-full right-0 mb-1.5 z-20 
+                                            bg-gradient-to-b from-[#1c1c1c] to-[#141414] 
+                                            backdrop-blur-xl
+                                            border border-white/10 rounded-xl shadow-lg py-1.5 min-w-[110px]"
                                         role="menu"
                                         aria-label="More stage actions"
                                     >
@@ -334,9 +357,10 @@ const PipelineCard = memo(function PipelineCard({
                                                 type="button"
                                                 onClick={() => handleOverflowAction(stage)}
                                                 className="
-                                                    w-full text-left px-2 py-1
-                                                    text-[8px] tracking-wide uppercase
+                                                    w-full text-left px-3 py-1.5
+                                                    text-[9px] tracking-[0.12em] uppercase
                                                     text-white/60 hover:text-white/90 hover:bg-white/5
+                                                    transition-colors
                                                 "
                                                 role="menuitem"
                                                 aria-label={`Move to ${getStageLabel(stage)}`}

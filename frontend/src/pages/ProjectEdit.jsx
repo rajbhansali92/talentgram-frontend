@@ -67,14 +67,14 @@ const empty = {
 function TextField({ label, value, onChange, type = "text", ...rest }) {
     return (
         <label className="block">
-            <span className="text-[11px] text-white/50 tracking-widest uppercase">
+            <span className="text-[11px] text-black/45 tracking-widest uppercase">
                 {label}
             </span>
             <input
                 type={type}
                 value={value || ""}
                 onChange={(e) => onChange(e.target.value)}
-                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                className="mt-2 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30"
                 {...rest}
             />
         </label>
@@ -282,22 +282,22 @@ export default function ProjectEdit() {
 
     return (
         <div
-            className="p-6 md:p-12 max-w-6xl mx-auto"
+            className="p-6 md:p-10 max-w-7xl mx-auto text-black/85"
             data-testid="project-edit-page"
         >
             <Link
                 to="/admin/projects"
-                className="inline-flex items-center gap-2 text-xs text-white/50 hover:text-white mb-6"
+                className="inline-flex items-center gap-2 text-xs text-black/45 hover:text-black/80 mb-6"
             >
                 <ArrowLeft className="w-3 h-3" /> Back to projects
             </Link>
 
-            <div className="flex items-end justify-between flex-wrap gap-4 mb-10">
+            <div className="flex items-end justify-between flex-wrap gap-4 mb-8">
                 <div>
                     <p className="eyebrow mb-3">
                         {isEdit ? "Edit Project" : "New Project"}
                     </p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight">
+                    <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
                         {project.brand_name || "Untitled"}
                     </h1>
                 </div>
@@ -307,14 +307,14 @@ export default function ProjectEdit() {
                             <button
                                 onClick={() => setShowMaterialModal(true)}
                                 data-testid="view-audition-material-btn"
-                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/15 hover:border-white rounded-sm text-xs transition-all"
+                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs transition-all"
                             >
                                 <FolderOpen className="w-3.5 h-3.5" /> View Audition
                                 Material ({materialsCount})
                             </button>
                             <button
                                 onClick={() => setConfirmDeleteOpen(true)}
-                                className={`inline-flex items-center gap-2 px-4 py-2.5 border border-white/15 text-white/60 hover:text-[var(--tg-danger)] hover:border-[var(--tg-danger)]/40 rounded-sm text-xs ${isAdminRole ? "" : "hidden"}`}
+                                className={`inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-sm text-xs ${isAdminRole ? "" : "hidden"}`}
                                 data-testid="delete-project-btn"
                             >
                                 <Trash2 className="w-3 h-3" /> Delete
@@ -325,7 +325,7 @@ export default function ProjectEdit() {
                         onClick={save}
                         disabled={saving}
                         data-testid="save-project-btn"
-                        className="inline-flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-sm text-xs font-medium hover:opacity-90"
+                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-sm text-xs font-medium hover:bg-black/90"
                     >
                         {saving && <Loader2 className="w-3 h-3 animate-spin" />}
                         {isEdit ? "Save changes" : "Create project"}
@@ -334,7 +334,7 @@ export default function ProjectEdit() {
             </div>
 
             {/* Project details */}
-            <section className="border border-white/10 p-6 md:p-8 mb-6">
+            <section className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6">
                 <p className="eyebrow mb-6">Project Details</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
                     <TextField
@@ -378,7 +378,7 @@ export default function ProjectEdit() {
                         placeholder="e.g. ₹50,000"
                     />
                     <div>
-                        <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Commission %
                         </span>
                         <div className="mt-2">
@@ -393,15 +393,16 @@ export default function ProjectEdit() {
                             >
                                 <SelectTrigger
                                     data-testid="commission-select-trigger"
-                                    className="bg-transparent border-0 border-b border-white/15 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-2.5"
+                                    className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
                                 >
                                     <SelectValue placeholder="Select commission" />
                                 </SelectTrigger>
-                                <SelectContent>
+                                <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl">
                                     {COMMISSION_OPTIONS.map((c) => (
                                         <SelectItem
                                             key={c}
                                             value={c}
+                                            className="focus:bg-black/5 focus:text-black"
                                             data-testid={`commission-option-${c}`}
                                         >
                                             {c}
@@ -435,7 +436,7 @@ export default function ProjectEdit() {
                     />
                 </div>
                 <div className="mt-6">
-                    <span className="text-[11px] text-white/50 tracking-widest uppercase">
+                    <span className="text-[11px] text-black/45 tracking-widest uppercase">
                         Additional Details
                     </span>
                     <textarea
@@ -447,7 +448,7 @@ export default function ProjectEdit() {
                             })
                         }
                         rows={3}
-                        className="mt-2 w-full bg-transparent border border-white/15 focus:border-white outline-none p-3 text-sm rounded-sm"
+                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
                     />
                 </div>
             </section>
@@ -455,13 +456,13 @@ export default function ProjectEdit() {
             {/* Audition Material uploads */}
             {isEdit && (
                 <section
-                    className="border border-white/10 p-6 md:p-8"
+                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8"
                     data-testid="audition-material-section"
                 >
                     <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
                         <div>
                             <p className="eyebrow">Audition Material</p>
-                            <p className="text-xs text-white/40 mt-1">
+                            <p className="text-xs text-black/45 mt-1">
                                 Attach script (PDF), reference images, audio
                                 notes, and video links
                             </p>
@@ -514,20 +515,20 @@ export default function ProjectEdit() {
                     {/* Video links list */}
                     <div>
                         <div className="flex items-center gap-2 mb-3">
-                            <PlayCircle className="w-3.5 h-3.5 text-white/60" />
+                            <PlayCircle className="w-3.5 h-3.5 text-black/60" />
                             <p className="eyebrow">Video Links</p>
                         </div>
                         <div className="space-y-2 mb-3">
                             {(project.video_links || []).map((v, i) => (
                                 <div
                                     key={v}
-                                    className="flex items-center gap-2 border-b border-white/10 pb-2"
+                                    className="flex items-center gap-2 border-b border-black/[0.06] pb-2"
                                 >
                                     <a
                                         href={v}
                                         target="_blank"
                                         rel="noreferrer"
-                                        className="flex-1 text-sm text-white/75 tg-mono truncate hover:text-white"
+                                        className="flex-1 text-sm text-black/75 tg-mono truncate hover:text-black"
                                     >
                                         {v}
                                     </a>
@@ -541,7 +542,7 @@ export default function ProjectEdit() {
                                                     ),
                                             })
                                         }
-                                        className="text-white/40 hover:text-[var(--tg-danger)]"
+                                        className="text-black/40 hover:text-red-600"
                                     >
                                         <X className="w-3.5 h-3.5" />
                                     </button>
@@ -554,23 +555,23 @@ export default function ProjectEdit() {
                                 value={videoInput}
                                 onChange={(e) => setVideoInput(e.target.value)}
                                 placeholder="https://youtube.com/..."
-                                className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
                             />
                             <button
                                 onClick={addVideoLink}
-                                className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm inline-flex items-center gap-1"
+                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black"
                             >
                                 <Plus className="w-3 h-3" /> Add link
                             </button>
                         </div>
-                        <p className="text-[10px] text-white/30 mt-3 tg-mono">
+                        <p className="text-[10px] text-black/35 mt-3 tg-mono">
                             Save project after adding video links
                         </p>
                     </div>
                 </section>
             )}
             {!isEdit && (
-                <p className="text-xs text-white/40 italic">
+                <p className="text-xs text-black/45 italic">
                     Save this project first to upload audition materials.
                 </p>
             )}
@@ -585,21 +586,21 @@ export default function ProjectEdit() {
                 changes. */}
             {false && isEdit && (
                 <section
-                    className="border border-white/10 p-6 md:p-8 mt-6"
+                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="budget-config-section"
                 >
                     <p className="eyebrow mb-2">Project Budget</p>
-                    <p className="text-xs text-white/40 mb-6">
+                    <p className="text-xs text-black/45 mb-6">
                         Keep the talent-facing and client-facing breakdowns separate.
                         Talents see only the talent budget; clients see only the client
                         budget (gated by the link's Budget visibility toggle).
                     </p>
 
                     <div className="mb-8">
-                        <p className="text-sm text-white/80 mb-1">
+                        <p className="text-sm text-black/80 mb-1">
                             Talent-Facing Budget
                         </p>
-                        <p className="text-xs text-white/40 mb-3">
+                        <p className="text-xs text-black/45 mb-3">
                             Hint shown on the audition submission form so talents
                             understand the offer before they quote.
                         </p>
@@ -612,11 +613,11 @@ export default function ProjectEdit() {
                         />
                     </div>
 
-                    <div className="border-t border-white/10 pt-6">
-                        <p className="text-sm text-white/80 mb-1">
+                    <div className="border-t border-black/[0.08] pt-6">
+                        <p className="text-sm text-black/80 mb-1">
                             Client-Facing Budget
                         </p>
-                        <p className="text-xs text-white/40 mb-3">
+                        <p className="text-xs text-black/45 mb-3">
                             Shown to clients on the shared link view. Individual
                             links can still override this via the Link Generator.
                         </p>
@@ -629,7 +630,7 @@ export default function ProjectEdit() {
                         />
                     </div>
 
-                    <p className="text-[10px] text-white/30 mt-6 tg-mono">
+                    <p className="text-[10px] text-black/35 mt-6 tg-mono">
                         Save project to apply changes
                     </p>
                 </section>
@@ -638,16 +639,16 @@ export default function ProjectEdit() {
             {/* Submission Form Configuration */}
             {isEdit && (
                 <section
-                    className="border border-white/10 p-6 md:p-8 mt-6"
+                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="form-config-section"
                 >
                     <p className="eyebrow mb-6">Submission Form Configuration</p>
                     <label className="flex items-center justify-between cursor-pointer mb-6">
                         <div>
-                            <div className="text-sm text-white/80">
+                            <div className="text-sm text-black/80">
                                 Re-approval required on edit
                             </div>
-                            <div className="text-[11px] text-white/40 tg-mono mt-0.5">
+                            <div className="text-[11px] text-black/45 tg-mono mt-0.5">
                                 When ON, any retake or form edit after a decision moves the submission back to Pending. Turn OFF to silently keep the existing decision.
                             </div>
                         </div>
@@ -661,15 +662,15 @@ export default function ProjectEdit() {
                                 })
                             }
                             data-testid="require-reapproval-toggle"
-                            className="w-5 h-5 accent-white"
+                            className="w-5 h-5 accent-black"
                         />
                     </label>
                     <label className="flex items-center justify-between cursor-pointer mb-6">
                         <div>
-                            <div className="text-sm text-white/80">
+                            <div className="text-sm text-black/80">
                                 Ask "Competitive Brand" field
                             </div>
-                            <div className="text-xs text-white/40 mt-1">
+                            <div className="text-xs text-black/45 mt-1">
                                 When enabled, talents must declare any brand
                                 conflicts
                             </div>
@@ -684,19 +685,19 @@ export default function ProjectEdit() {
                                 })
                             }
                             data-testid="toggle-competitive-brand"
-                            className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${project.competitive_brand_enabled ? "bg-white" : "bg-white/15"}`}
+                            className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${project.competitive_brand_enabled ? "translate-x-5 bg-black" : "bg-white"}`}
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${project.competitive_brand_enabled ? "translate-x-5 bg-white" : "bg-black"}`}
                             />
                         </button>
                     </label>
 
-                    <div className="border-t border-white/10 pt-6">
-                        <p className="text-sm text-white/80 mb-1">
+                    <div className="border-t border-black/[0.08] pt-6">
+                        <p className="text-sm text-black/80 mb-1">
                             Custom Questions
                         </p>
-                        <p className="text-xs text-white/40 mb-4">
+                        <p className="text-xs text-black/45 mb-4">
                             Ask project-specific questions. Shown on the talent
                             submission form.
                         </p>
@@ -704,10 +705,10 @@ export default function ProjectEdit() {
                             {(project.custom_questions || []).map((q, i) => (
                                 <div
                                     key={q.id}
-                                    className="flex items-center gap-2 border-b border-white/10 pb-2"
+                                    className="flex items-center gap-2 border-b border-black/[0.06] pb-2"
                                     data-testid={`cq-row-${i}`}
                                 >
-                                    <span className="text-sm text-white/75 flex-1 truncate">
+                                    <span className="text-sm text-black/75 flex-1 truncate">
                                         {q.question}
                                     </span>
                                     <button
@@ -720,7 +721,7 @@ export default function ProjectEdit() {
                                                     ),
                                             })
                                         }
-                                        className="text-white/40 hover:text-[var(--tg-danger)]"
+                                        className="text-black/40 hover:text-red-600"
                                     >
                                         <X className="w-3.5 h-3.5" />
                                     </button>
@@ -733,17 +734,17 @@ export default function ProjectEdit() {
                                 onChange={(e) => setCqInput(e.target.value)}
                                 placeholder="e.g. Can you ride a bike?"
                                 data-testid="cq-input"
-                                className="flex-1 bg-transparent border-b border-white/15 focus:border-white outline-none py-2 text-sm"
+                                className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
                             />
                             <button
                                 onClick={addCustomQuestion}
                                 data-testid="cq-add-btn"
-                                className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm inline-flex items-center gap-1"
+                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black"
                             >
                                 <Plus className="w-3 h-3" /> Add
                             </button>
                         </div>
-                        <p className="text-[10px] text-white/30 mt-3 tg-mono">
+                        <p className="text-[10px] text-black/35 mt-3 tg-mono">
                             Save project to apply changes
                         </p>
                     </div>
@@ -753,13 +754,13 @@ export default function ProjectEdit() {
             {/* Share submission link */}
             {isEdit && (
                 <section
-                    className="border border-white/10 p-6 md:p-8 mt-6"
+                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="submission-link-section"
                 >
                     <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
                         <div>
                             <p className="eyebrow">Talent Submission Link</p>
-                            <p className="text-xs text-white/40 mt-1">
+                            <p className="text-xs text-black/45 mt-1">
                                 Share this public link with talents. They can
                                 submit intro video, takes and images.
                             </p>
@@ -769,14 +770,14 @@ export default function ProjectEdit() {
                                 href={submissionUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black"
                             >
                                 <ExternalLink className="w-3.5 h-3.5" /> Preview
                             </a>
                             <button
                                 onClick={copySubmitLink}
                                 data-testid="copy-submit-link-btn"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black"
                             >
                                 <Copy className="w-3.5 h-3.5" /> Copy
                             </button>
@@ -790,7 +791,7 @@ export default function ProjectEdit() {
                             </button>
                         </div>
                     </div>
-                    <div className="border border-white/10 bg-white/[0.02] px-4 py-3 tg-mono text-xs text-white/70 break-all">
+                    <div className="border border-black/[0.08] bg-[#fafaf8] px-4 py-3 tg-mono text-xs text-black/70 break-all">
                         {submissionUrl}
                     </div>
                 </section>
@@ -799,13 +800,13 @@ export default function ProjectEdit() {
             {/* Submissions Review */}
             {isEdit && (
                 <section
-                    className="border border-white/10 mt-6"
+                    className="border border-black/[0.08] bg-white rounded-xl mt-6"
                     data-testid="submissions-review-section"
                 >
-                    <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="px-6 py-4 border-b border-black/[0.08] flex items-center justify-between gap-3 flex-wrap">
                         <div>
                             <p className="eyebrow">Submissions</p>
-                            <p className="text-xs text-white/40 mt-1">
+                            <p className="text-xs text-black/45 mt-1">
                                 {submissions.length} total ·{" "}
                                 {
                                     submissions.filter(
@@ -832,21 +833,21 @@ export default function ProjectEdit() {
                                 ).length === 0
                             }
                             data-testid="create-client-link-btn"
-                            className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-white text-black rounded-sm hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed"
+                            className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-black text-white rounded-sm hover:bg-black/90 disabled:opacity-30 disabled:cursor-not-allowed"
                         >
                             <Sparkles className="w-3.5 h-3.5" /> Create Client
                             Link from Approved
                         </button>
                     </div>
                     {submissions.length === 0 ? (
-                        <div className="p-8 text-center text-white/40 text-sm">
+                        <div className="p-8 text-center text-black/40 text-sm">
                             No submissions yet. Share the link above with
                             talents.
                         </div>
                     ) : (
                         <>
                             <div
-                                className="px-6 py-3 border-b border-white/10 flex items-center gap-2 flex-wrap"
+                                className="px-6 py-3 border-b border-black/[0.08] flex items-center gap-2 flex-wrap"
                                 data-testid="submission-filters"
                             >
                                 {SUBMISSION_FILTER_TABS.map((tab) => {
@@ -872,17 +873,17 @@ export default function ProjectEdit() {
                                             type="button"
                                             onClick={() => setSubmissionFilter(f.key)}
                                             data-testid={`filter-chip-${f.key}`}
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-all ${active ? "border-white bg-white text-black" : "border-white/15 text-white/60 hover:border-white/40 hover:text-white"}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-all ${active ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
                                         >
                                             {f.label}
-                                            <span className={`ml-2 tg-mono ${active ? "text-black/60" : "text-white/40"}`}>
+                                            <span className={`ml-2 tg-mono ${active ? "text-white/60" : "text-black/40"}`}>
                                                 {f.count}
                                             </span>
                                         </button>
                                     );
                                 })}
                             </div>
-                            <div className="divide-y divide-white/10">
+                            <div className="divide-y divide-black/[0.06]">
                                 {submissions
                                     .filter((s) => {
                                         if (submissionFilter === "all") return true;
@@ -904,7 +905,7 @@ export default function ProjectEdit() {
                                     return (s.decision || "pending") === submissionFilter;
                                 }).length === 0 && (
                                     <div
-                                        className="p-8 text-center text-white/30 text-sm"
+                                        className="p-8 text-center text-black/35 text-sm"
                                         data-testid="filter-empty-state"
                                     >
                                         No submissions match this filter.
@@ -978,12 +979,12 @@ export default function ProjectEdit() {
 function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     const s = submission;
     const meta = {
-        pending: { icon: Clock, label: "Pending", color: "text-white/60" },
-        approved: { icon: Check, label: "Approved", color: "text-[#34C759]" },
+        pending: { icon: Clock, label: "Pending", color: "text-black/60" },
+        approved: { icon: Check, label: "Approved", color: "text-green-600" },
         rejected: {
             icon: XCircle,
             label: "Rejected",
-            color: "text-[#FF3B30]",
+            color: "text-red-600",
         },
         hold: { icon: PauseCircle, label: "Hold", color: "text-[#c9a961]" },
     }[s.decision || "pending"];
@@ -1004,12 +1005,12 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     };
     return (
         <div
-            className="px-6 py-4 flex items-center justify-between gap-4 flex-wrap"
+            className="px-6 py-4 flex items-center justify-between gap-4 flex-wrap hover:bg-black/[0.015] transition-colors"
             data-testid={`submission-row-${s.id}`}
         >
             <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-display text-lg">
+                    <span className="font-display text-lg text-black/90">
                         {s.talent_name}
                     </span>
                     <span
@@ -1019,7 +1020,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     </span>
                     {isUpdated && (
                         <span
-                            className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-amber-300/80 border border-amber-300/30 px-1.5 py-0.5 rounded-sm"
+                            className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-sm"
                             data-testid={`updated-badge-${s.id}`}
                             title="Talent updated this submission after the previous decision"
                         >
@@ -1027,16 +1028,16 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                         </span>
                     )}
                     {s.status === "draft" && (
-                        <span className="text-[10px] tracking-widest uppercase text-white/30">
+                        <span className="text-[10px] tracking-widest uppercase text-black/35">
                             · Draft
                         </span>
                     )}
                 </div>
-                <div className="text-xs text-white/40 tg-mono mt-1 truncate">
+                <div className="text-xs text-black/45 tg-mono mt-1 truncate">
                     {s.talent_email}
                     {s.talent_phone ? ` · ${s.talent_phone}` : ""}
                 </div>
-                <div className="text-[11px] text-white/40 mt-2">
+                <div className="text-[11px] text-black/45 mt-2">
                     {mediaCounts.intro ? "1 intro video · " : "no intro · "}
                     {mediaCounts.takes} takes · {mediaCounts.images} images
                 </div>
@@ -1044,14 +1045,14 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
             <div className="flex gap-1 flex-wrap">
                 <button
                     onClick={onOpen}
-                    className="text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black"
                     data-testid={`review-submission-${s.id}`}
                 >
                     Review
                 </button>
                 <button
                     onClick={() => onDecision("approved")}
-                    className="text-xs px-3 py-2 border border-white/15 hover:border-[#34C759] hover:text-[#34C759] rounded-sm"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70"
                     data-testid={`approve-${s.id}`}
                     title="Approve"
                 >
@@ -1059,7 +1060,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 </button>
                 <button
                     onClick={() => onDecision("hold")}
-                    className="text-xs px-3 py-2 border border-white/15 hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm text-black/70"
                     data-testid={`hold-${s.id}`}
                     title="Hold"
                 >
@@ -1067,7 +1068,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 </button>
                 <button
                     onClick={() => onDecision("rejected")}
-                    className="text-xs px-3 py-2 border border-white/15 hover:border-[#FF3B30] hover:text-[#FF3B30] rounded-sm"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70"
                     data-testid={`reject-${s.id}`}
                     title="Reject"
                 >
@@ -1076,7 +1077,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 {onDelete && (
                     <button
                         onClick={onDelete}
-                        className="text-xs px-3 py-2 border border-white/15 hover:border-white/40 text-white/50 rounded-sm"
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/40 text-black/50 rounded-sm"
                         title="Delete"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1150,21 +1151,21 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
     return (
         <div
-            className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xl overflow-y-auto"
+            className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm overflow-y-auto"
             data-testid="submission-review-modal"
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-border hover:border-foreground rounded-sm flex items-center justify-center bg-background/80 text-foreground"
+                className="fixed top-5 right-5 z-10 w-10 h-10 border border-black/[0.08] hover:border-black/[0.20] rounded-sm flex items-center justify-center bg-white/80 text-black/70 hover:text-black"
             >
                 <X className="w-4 h-4" />
             </button>
-            <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14 text-foreground">
+            <div className="max-w-6xl mx-auto px-5 md:px-12 py-10 md:py-14 text-black/85">
                 <p className="eyebrow mb-3">Submission</p>
-                <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2">
+                <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2 text-black/90">
                     {submission.talent_name}
                 </h2>
-                <p className="text-sm text-muted-foreground tg-mono mb-6">
+                <p className="text-sm text-black/45 tg-mono mb-6">
                     {submission.talent_email}
                     {submission.talent_phone
                         ? ` · ${submission.talent_phone}`
@@ -1176,7 +1177,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         type="button"
                         onClick={openInDrive}
                         data-testid="open-in-drive-btn"
-                        className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-border hover:border-foreground/60 rounded-sm"
+                        className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm text-black/70 hover:text-black"
                         title="Opens the Google Drive backup folder for this submission"
                     >
                         <Cloud className="w-3.5 h-3.5" />
@@ -1186,12 +1187,12 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                 {/* Editable form data with per-field visibility toggles */}
                 <section
-                    className="mb-10 border border-border p-5 md:p-6"
+                    className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6"
                     data-testid="review-form-data-section"
                 >
                     <div className="flex items-center justify-between mb-5">
                         <p className="eyebrow">Talent Details</p>
-                        <span className="text-[10px] tg-mono text-muted-foreground">
+                        <span className="text-[10px] tg-mono text-black/45">
                             Toggle per-field to control client visibility
                         </span>
                     </div>
@@ -1202,7 +1203,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                 className="flex items-start gap-3"
                             >
                                 <div className="flex-1 min-w-0">
-                                    <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
+                                    <label className="text-[11px] text-black/45 tracking-widest uppercase">
                                         {f.label}
                                     </label>
                                     <input
@@ -1215,7 +1216,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             })
                                         }
                                         data-testid={`review-field-${f.key}`}
-                                        className="mt-1 w-full bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
+                                        className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
                                     />
                                 </div>
                                 <button
@@ -1232,19 +1233,19 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Visible to client"
                                             : "Hidden from client"
                                     }
-                                    className={`mt-5 w-10 h-5 rounded-full relative transition-all shrink-0 ${fv[f.key] ? "bg-foreground" : "bg-muted"}`}
+                                    className={`mt-5 w-10 h-5 rounded-full relative transition-all shrink-0 ${fv[f.key] ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv[f.key] ? "translate-x-5 bg-background" : "bg-foreground"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv[f.key] ? "translate-x-5 bg-white" : "bg-black"}`}
                                     />
                                 </button>
                             </div>
                         ))}
 
                         {/* Availability (structured) */}
-                        <div className="md:col-span-2 border-t border-border pt-4">
+                        <div className="md:col-span-2 border-t border-black/[0.08] pt-4">
                             <div className="flex items-center justify-between">
-                                <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
+                                <label className="text-[11px] text-black/45 tracking-widest uppercase">
                                     Availability
                                 </label>
                                 <button
@@ -1261,10 +1262,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Hidden from client"
                                             : "Visible to client"
                                     }
-                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.availability !== false ? "bg-foreground" : "bg-muted"}`}
+                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.availability !== false ? "translate-x-5 bg-background" : "bg-foreground"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.availability !== false ? "translate-x-5 bg-white" : "bg-black"}`}
                                     />
                                 </button>
                             </div>
@@ -1281,16 +1282,16 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                         })
                                     }
                                     data-testid="review-avail-status"
-                                    className="bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
+                                    className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
                                 >
-                                    <option value="" className="bg-background text-foreground">
+                                    <option value="" className="bg-white text-black/85">
                                         —
                                     </option>
                                     {AVAILABILITY_OPTIONS.map((opt) => (
                                         <option
                                             key={opt.key}
                                             value={opt.key}
-                                            className="bg-background text-foreground"
+                                            className="bg-white text-black/85"
                                         >
                                             {opt.label}
                                         </option>
@@ -1310,7 +1311,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     }
                                     placeholder="Note / reason"
                                     data-testid="review-avail-note"
-                                    className="flex-1 bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
+                                    className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
                                 />
                             </div>
                         </div>
@@ -1318,7 +1319,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         {/* Budget (structured) */}
                         <div className="md:col-span-2">
                             <div className="flex items-center justify-between">
-                                <label className="text-[11px] text-muted-foreground tracking-widest uppercase">
+                                <label className="text-[11px] text-black/45 tracking-widest uppercase">
                                     Budget
                                 </label>
                                 <button
@@ -1335,10 +1336,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Visible to client"
                                             : "Hidden from client"
                                     }
-                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.budget ? "bg-foreground" : "bg-muted"}`}
+                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.budget ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.budget ? "translate-x-5 bg-background" : "bg-foreground"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.budget ? "translate-x-5 bg-white" : "bg-black"}`}
                                     />
                                 </button>
                             </div>
@@ -1355,16 +1356,16 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                         })
                                     }
                                     data-testid="review-budget-status"
-                                    className="bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
+                                    className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
                                 >
-                                    <option value="" className="bg-background text-foreground">
+                                    <option value="" className="bg-white text-black/85">
                                         —
                                     </option>
                                     {BUDGET_OPTIONS.map((opt) => (
                                         <option
                                             key={opt.key}
                                             value={opt.key}
-                                            className="bg-background text-foreground"
+                                            className="bg-white text-black/85"
                                         >
                                             {opt.label}
                                         </option>
@@ -1384,7 +1385,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     }
                                     placeholder="Expected budget (if not accepting)"
                                     data-testid="review-budget-value"
-                                    className="flex-1 bg-transparent border-b border-border focus:border-foreground outline-none py-2 text-sm"
+                                    className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
                                 />
                             </div>
                         </div>
@@ -1392,7 +1393,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {Array.isArray(submission.project_custom_questions) &&
                         submission.project_custom_questions.length > 0 && (
-                            <div className="border-t border-border pt-5">
+                            <div className="border-t border-black/[0.08] pt-5">
                                 <p className="eyebrow mb-3">
                                     Custom Answers
                                 </p>
@@ -1402,10 +1403,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             key={q.id}
                                             className="mb-3 text-sm"
                                         >
-                                            <div className="text-muted-foreground text-xs mb-1">
+                                            <div className="text-black/45 text-xs mb-1">
                                                 {q.question}
                                             </div>
-                                            <div className="text-foreground">
+                                            <div className="text-black/85">
                                                 {(form.custom_answers || {})[
                                                     q.id
                                                 ] || "—"}
@@ -1420,7 +1421,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         onClick={save}
                         disabled={saving}
                         data-testid="review-save-btn"
-                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-foreground text-background rounded-sm text-xs font-medium hover:opacity-90"
+                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-black text-white rounded-sm text-xs font-medium hover:bg-black/90"
                     >
                         {saving && (
                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -1435,14 +1436,14 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         <video
                             src={intro.url}
                             controls
-                            className="w-full max-w-3xl border border-border bg-muted rounded-lg"
+                            className="w-full max-w-3xl border border-black/[0.08] bg-[#fafaf8] rounded-lg"
                             data-testid="review-intro-video"
                         />
                     </section>
                 ) : (
                     <section className="mb-10">
                         <p className="eyebrow mb-3">Introduction Video</p>
-                        <div className="max-w-3xl border border-dashed border-border bg-muted/40 aspect-video flex items-center justify-center text-muted-foreground text-xs tg-mono rounded-lg">
+                        <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                             Not submitted
                         </div>
                     </section>
@@ -1467,7 +1468,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             });
                         if (takes.length === 0) {
                             return (
-                                <div className="max-w-3xl border border-dashed border-border bg-muted/40 aspect-video flex items-center justify-center text-muted-foreground text-xs tg-mono rounded-lg">
+                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     Not submitted
                                 </div>
                             );
@@ -1479,14 +1480,14 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                         key={t.id}
                                         data-testid={`review-take-${i}`}
                                     >
-                                        <p className="text-xs text-muted-foreground mb-2 tg-mono truncate">
+                                        <p className="text-xs text-black/45 mb-2 tg-mono truncate">
                                             {t.label || `Take ${i + 1}`}
                                         </p>
                                         <video
                                             src={t.url}
                                             controls
                                             preload="metadata"
-                                            className="w-full border border-border bg-muted rounded-lg"
+                                            className="w-full border border-black/[0.08] bg-[#fafaf8] rounded-lg"
                                         />
                                     </div>
                                 ))}
@@ -1509,7 +1510,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="aspect-square bg-muted overflow-hidden border border-border"
+                                    className="aspect-square bg-[#fafaf8] overflow-hidden border border-black/[0.08]"
                                 >
                                     <img
                                         src={m.url}
@@ -1534,7 +1535,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="aspect-square bg-muted overflow-hidden border border-border"
+                                    className="aspect-square bg-[#fafaf8] overflow-hidden border border-black/[0.08]"
                                 >
                                     <img
                                         src={m.url}
@@ -1559,7 +1560,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     href={m.url}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="aspect-square bg-muted overflow-hidden border border-border"
+                                    className="aspect-square bg-[#fafaf8] overflow-hidden border border-black/[0.08]"
                                 >
                                     <img
                                         src={m.url}
@@ -1573,14 +1574,14 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                     </section>
                 )}
 
-                <div className="sticky bottom-4 flex gap-2 justify-end flex-wrap">
+                <div className="sticky bottom-4 flex gap-2 justify-end flex-wrap bg-white/90 backdrop-blur-sm border border-black/[0.08] rounded-xl px-4 py-3 shadow-sm">
                     <button
                         onClick={() => {
                             onDecision("approved");
                             onClose();
                         }}
                         data-testid="review-approve-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#34C759] text-black rounded-sm text-xs font-medium"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-sm text-xs font-medium hover:bg-green-700"
                     >
                         <Check className="w-3.5 h-3.5" /> Approve — Forward
                     </button>
@@ -1600,7 +1601,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             onClose();
                         }}
                         data-testid="review-reject-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#FF3B30]/60 text-[#FF3B30] hover:bg-[#FF3B30]/10 rounded-sm text-xs"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-sm text-xs"
                     >
                         <XCircle className="w-3.5 h-3.5" /> Reject
                     </button>
@@ -1626,18 +1627,18 @@ function UploadTile({
             onClick={() => inputRef.current?.click()}
             data-testid={`${testid}-btn`}
             disabled={uploading}
-            className="border border-dashed border-white/15 hover:border-white/40 p-5 text-left transition-all"
+            className="border border-dashed border-black/[0.08] hover:border-black/[0.18] p-5 text-left transition-all bg-white rounded-xl"
         >
             <div className="flex items-center justify-between mb-3">
-                <Icon className="w-4 h-4 text-white/60" strokeWidth={1.5} />
+                <Icon className="w-4 h-4 text-black/50" strokeWidth={1.5} />
                 {uploading ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-black/50" />
                 ) : (
-                    <Upload className="w-3.5 h-3.5 text-white/40" />
+                    <Upload className="w-3.5 h-3.5 text-black/40" />
                 )}
             </div>
-            <div className="text-sm font-display">{title}</div>
-            <div className="text-[10px] tg-mono text-white/40 mt-1">
+            <div className="text-sm font-display text-black/85">{title}</div>
+            <div className="text-[10px] tg-mono text-black/45 mt-1">
                 {hint || (multiple ? "Multiple allowed" : "Single file")}
             </div>
             <input

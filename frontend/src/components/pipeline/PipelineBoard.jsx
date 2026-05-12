@@ -204,84 +204,86 @@ function PipelineBoard({ projectId, projectName }) {
 
     return (
         <div 
-            className="min-h-screen bg-[#f5f5f3] px-6 py-6 pb-24"
+            className="min-h-screen bg-[#f5f5f3] px-5 py-5 pb-24"
             data-testid="project-pipeline"
         >
             <div className="max-w-[1680px] mx-auto">
-                {/* Operational Header Hierarchy */}
-                <div className="mb-6">
+                {/* Operational Header Hierarchy - refined typography */}
+                <div className="mb-5">
                     <div className="flex items-baseline justify-between flex-wrap gap-3">
                         <div>
-                            <h1 className="text-[26px] font-semibold text-black/85 tracking-[-0.02em]">Casting Pipeline</h1>
-                            <div className="text-sm text-black/40 mt-0.5">Project · {displayProjectName}</div>
+                            <h1 className="text-[22px] font-semibold text-black/85 tracking-[-0.01em]">Casting Pipeline</h1>
+                            <div className="text-xs text-black/40 mt-0.5">Project · {displayProjectName}</div>
                         </div>
-                        {/* Muted operational summary indicators */}
-                        <div className="flex gap-5 text-sm">
+                        {/* Restrained operational summary indicators - monochrome */}
+                        <div className="flex gap-5 text-xs">
                             <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-700/60"></span>
+                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
                                 <span className="text-black/50">Active</span>
-                                <span className="font-mono text-black/70 font-medium ml-1">{activeCount}</span>
+                                <span className="font-medium text-black/70 ml-1">{activeCount}</span>
                             </div>
                             <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-700/60"></span>
+                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
                                 <span className="text-black/50">Shortlisted</span>
-                                <span className="font-mono text-black/70 font-medium ml-1">{shortlistedCount}</span>
+                                <span className="font-medium text-black/70 ml-1">{shortlistedCount}</span>
                             </div>
                             <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-slate-700/60"></span>
+                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
                                 <span className="text-black/50">Approved</span>
-                                <span className="font-mono text-black/70 font-medium ml-1">{approvedCount}</span>
+                                <span className="font-medium text-black/70 ml-1">{approvedCount}</span>
                             </div>
                             <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-zinc-500/60"></span>
+                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
                                 <span className="text-black/50">Pending Tests</span>
-                                <span className="font-mono text-black/70 font-medium ml-1">{pendingTestsCount}</span>
+                                <span className="font-medium text-black/70 ml-1">{pendingTestsCount}</span>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                {/* Unified Control Deck with denser padding */}
-                <div className="bg-white border border-black/[0.06] rounded-2xl shadow-sm mb-6 sticky top-0 z-40">
-                    <div className="px-4 py-3">
-                        <PipelineToolbar
-                            projectId={projectId}
-                            bulkMode={bulkMode}
-                            onToggleBulkMode={handleToggleBulkMode}
-                            onOpenBulkAdd={() => setShowBulkAdd(true)}
-                        />
-                    </div>
-                    <div className="border-t border-black/[0.04] px-4 py-3">
-                        <QuickAddTalents
-                            searchQuery={searchQuery}
-                            onSearchQueryChange={setSearchQuery}
-                            searchLoading={searchLoading}
-                            searchResults={searchResults}
-                            selectedTalents={selectedTalents}
-                            onToggleTalent={toggleTalentSelect}
-                            onAddSelected={addSelectedToPipeline}
-                        />
-                    </div>
-                    <div className="border-t border-black/[0.04] px-4 py-3">
-                        <PipelineFilters
-                            search={search}
-                            onSearch={setSearch}
-                            statusFocus={statusFocus}
-                            onStatusFocus={setStatusFocus}
-                            hasSubmission={hasSubmission}
-                            onHasSubmission={setHasSubmission}
-                            hasIg={hasIg}
-                            onHasIg={setHasIg}
-                            filtersActive={filtersActive}
-                            onClearAll={clearAllFilters}
-                            totalCount={data.length}
-                            filteredCount={filteredData.length}
-                        />
+                {/* Unified Control Deck with operational styling - sticky with backdrop */}
+                <div className="sticky top-0 z-40 bg-[#f5f5f3]/90 backdrop-blur-sm -mx-5 px-5 pt-2 pb-2">
+                    <div className="bg-white border border-black/[0.06] rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                        <div className="px-4 py-3">
+                            <PipelineToolbar
+                                projectId={projectId}
+                                bulkMode={bulkMode}
+                                onToggleBulkMode={handleToggleBulkMode}
+                                onOpenBulkAdd={() => setShowBulkAdd(true)}
+                            />
+                        </div>
+                        <div className="border-t border-black/[0.04] px-4 py-3">
+                            <QuickAddTalents
+                                searchQuery={searchQuery}
+                                onSearchQueryChange={setSearchQuery}
+                                searchLoading={searchLoading}
+                                searchResults={searchResults}
+                                selectedTalents={selectedTalents}
+                                onToggleTalent={toggleTalentSelect}
+                                onAddSelected={addSelectedToPipeline}
+                            />
+                        </div>
+                        <div className="border-t border-black/[0.04] px-4 py-3">
+                            <PipelineFilters
+                                search={search}
+                                onSearch={setSearch}
+                                statusFocus={statusFocus}
+                                onStatusFocus={setStatusFocus}
+                                hasSubmission={hasSubmission}
+                                onHasSubmission={setHasSubmission}
+                                hasIg={hasIg}
+                                onHasIg={setHasIg}
+                                filtersActive={filtersActive}
+                                onClearAll={clearAllFilters}
+                                totalCount={data.length}
+                                filteredCount={filteredData.length}
+                            />
+                        </div>
                     </div>
                 </div>
 
-                {/* Workflow Content with denser operational rhythm */}
-                <div className="space-y-5">
+                {/* Workflow Content with operational rhythm */}
+                <div className="space-y-4 mt-6">
                     {hasZeroAfterFilter && (
                         <div className="mt-8">
                             <FilterEmptyState onReset={clearAllFilters} />
@@ -306,9 +308,9 @@ function PipelineBoard({ projectId, projectName }) {
                         </BoardSection>
                     )}
 
-                    {/* Supportive Follow-up Lane - static opacity, no hover theatrics */}
+                    {/* Supportive Follow-up Lane - clean, no opacity hacks */}
                     {!hasZeroAfterFilter && (
-                        <div className="mt-2 opacity-95">
+                        <div className="mt-2">
                             <FollowUpLane
                                 items={filteredData.filter((i) => i.is_follow_up === true)}
                                 refresh={fetchPipeline}

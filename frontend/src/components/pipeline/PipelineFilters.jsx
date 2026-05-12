@@ -12,6 +12,7 @@ import { DEFAULT_FILTERS, normaliseStage } from "@/components/pipeline/constants
  *   • Follow-up only view toggle
  *   • Hidden stages based on statusFocus
  *   • Tristate filters (yes/no/any) for submission and IG
+ *   • Safe handling of undefined/null data
  */
 export function usePipelineFilters(data) {
     // Search with debounce
@@ -54,6 +55,7 @@ export function usePipelineFilters(data) {
 
     // Filter the data based on all criteria
     const filteredData = useMemo(() => {
+        // SAFETY FIX: Handle undefined or null data gracefully
         if (!data || data.length === 0) return [];
         
         // First, filter by statusFocus (stage filtering)
@@ -123,10 +125,12 @@ export function usePipelineFilters(data) {
                hasIg !== "any";
     }, [searchInput, statusFocus, hasSubmission, hasIg]);
 
-    // Check if filtered results are zero but data exists
+    // SAFETY FIX: Check if filtered results are zero but data exists
+    // Prevents crash when data is undefined/null
     const hasZeroAfterFilter = useMemo(() => {
-        return data.length > 0 && filteredData.length === 0;
-    }, [data.length, filteredData.length]);
+        const dataLength = data?.length || 0;
+        return dataLength > 0 && filteredData.length === 0;
+    }, [data, filteredData.length]);
 
     // Clear all filters
     const clearAllFilters = useCallback(() => {
@@ -163,6 +167,26 @@ export function usePipelineFilters(data) {
         return count;
     }, [searchInput, statusFocus, hasSubmission, hasIg]);
 
+    // Helper: Get current filter summary for display/debugging
+    const filterSummary = useMemo(() => {
+        const active = [];
+        if (searchInput) active.push(`search: "${searchInput}"`);
+        if (statusFocus !== "all") active.push(`status: ${statusFocus}`);
+        if (hasSubmission !== "any") active.push(`submission: ${hasSubmission}`);
+        if (hasIg !== "any") active.push(`ig: ${hasIg}`);
+        return active;
+    }, [searchInput, statusFocus, hasSubmission, hasIg]);
+
+    // Helper: Get total unfiltered count safely
+    const totalCount = useMemo(() => {
+        return data?.length || 0;
+    }, [data]);
+
+    // Helper: Get filtered count
+    const filteredCount = useMemo(() => {
+        return filteredData.length;
+    }, [filteredData]);
+
     return {
         // Search
         search: searchInput,
@@ -187,11 +211,18 @@ export function usePipelineFilters(data) {
         hasZeroAfterFilter,
         activeFilterCount,
         
+        // Count helpers
+        totalCount,
+        filteredCount,
+        
+        // Filter metadata
+        filterSummary,
+        
         // Helpers
         clearAllFilters,
         isFilterActive,
         
-        // Original data reference
-        originalData: data,
+        // Original data reference (safe copy)
+        originalData: data || [],
     };
 }

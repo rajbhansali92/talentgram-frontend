@@ -1,198 +1,206 @@
-frontend/src/components/pipeline/PipelineFilters.jsx 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { DEFAULT_FILTERS, normaliseStage } from "@/components/pipeline/constants";
+import React, { memo } from "react";
+import { STATUS_FOCUS_OPTIONS, TRISTATE_OPTIONS } from "./constants";
 
 /**
- * usePipelineFilters — filter state + debounced search for pipeline board.
- *
- * ISSUE 5 FIX: Added proper debouncing (180ms) for search input
- * Prevents excessive re-renders while typing
+ * PipelineFilters — visual filter toolbar component.
+ * 
+ * This is the UI component only. All filtering logic lives in:
+ * frontend/src/hooks/usePipelineFilters.js
+ * 
  * Features:
- *   • 180ms debounce for smooth typing experience
- *   • Memoised filtered results for performance
- *   • Follow-up only view toggle
- *   • Hidden stages based on statusFocus
- *   • Tristate filters (yes/no/any) for submission and IG
+ *   • Sticky search input with clear button
+ *   • Status focus segmented control
+ *   • Tristate filters for Portfolio and Instagram
+ *   • Filter count display
+ *   • Reset button for clearing all filters
  */
-export function usePipelineFilters(data) {
-    // Search with debounce
-    const [searchInput, setSearchInput] = useState(DEFAULT_FILTERS.search);
-    const [debouncedSearch, setDebouncedSearch] = useState(DEFAULT_FILTERS.search);
-    
-    // Other filters
-    const [statusFocus, setStatusFocus] = useState(DEFAULT_FILTERS.statusFocus);
-    const [hasSubmission, setHasSubmission] = useState(DEFAULT_FILTERS.hasSubmission);
-    const [hasIg, setHasIg] = useState(DEFAULT_FILTERS.hasIg);
 
-    // ISSUE 5: Debounce search input (180ms)
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setDebouncedSearch(searchInput);
-        }, 180);
+const PipelineFilters = memo(function PipelineFilters({
+    search,
+    onSearch,
+    statusFocus,
+    onStatusFocus,
+    hasSubmission,
+    onHasSubmission,
+    hasIg,
+    onHasIg,
+    filtersActive,
+    onClearAll,
+    totalCount,
+    filteredCount,
+}) {
+    const showingCount = filteredCount !== totalCount;
 
-        return () => clearTimeout(timer);
-    }, [searchInput]);
+    return (
+        <div
+            data-testid="pipeline-control-bar"
+            className="
+                sticky top-0 z-30 mb-5
+                rounded-lg
+                bg-[#111]
+                border border-white/[0.06]
+            "
+        >
+            <div className="flex flex-col lg:flex-row lg:items-center gap-2 px-3 py-2">
+                {/* Search input */}
+                <div className="relative flex-1 min-w-0">
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => onSearch(e.target.value)}
+                        placeholder="Search by name, email, phone, or ID..."
+                        data-testid="pipeline-filter-search"
+                        className="
+                            w-full
+                            bg-black/50 border border-white/[0.08]
+                            rounded-md
+                            pl-8 pr-8 py-1.5
+                            text-[12px] text-white/80 placeholder-white/20
+                            focus:outline-none focus:border-white/15 focus:ring-1 focus:ring-white/5
+                            transition-all duration-200
+                        "
+                    />
+                    <svg
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-white/25 pointer-events-none"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                    >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    
+                    {/* Clear button */}
+                    {search && (
+                        <button
+                            type="button"
+                            onClick={() => onSearch("")}
+                            aria-label="Clear search"
+                            className="
+                                absolute right-2 top-1/2 -translate-y-1/2
+                                w-4 h-4 rounded-full
+                                flex items-center justify-center
+                                text-white/30 hover:text-white/60
+                                bg-white/[0.03] hover:bg-white/[0.06]
+                                transition-colors text-xs
+                            "
+                        >
+                            ×
+                        </button>
+                    )}
+                </div>
 
-    // Determine which stages are hidden based on statusFocus
-    const hiddenStages = useMemo(() => {
-        if (statusFocus === "all") return new Set();
-        
-        // Show only specific stage
-        if (statusFocus === "follow_up") {
-            return new Set(["all"]); // Special handling - show follow-up only separately
-        }
-        
-        // Hide all stages except the focused one
-        const allStages = [
-            "ask_to_test", "approved", "hold", "shortlisted", 
-            "already_tested", "locked", "rejected", 
-            "not_available", "not_interested", "pitch"
-        ];
-        const hidden = new Set(allStages);
-        hidden.delete(statusFocus);
-        return hidden;
-    }, [statusFocus]);
+                {/* Filter pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto lg:overflow-visible -mx-1 px-1">
+                    <FilterSegmented
+                        label="Status"
+                        value={statusFocus}
+                        onChange={onStatusFocus}
+                        options={STATUS_FOCUS_OPTIONS}
+                        testid="pipeline-filter-focus"
+                    />
+                    <FilterSegmented
+                        label="Portfolio"
+                        value={hasSubmission}
+                        onChange={onHasSubmission}
+                        options={TRISTATE_OPTIONS}
+                        testid="pipeline-filter-submitted"
+                        compact
+                    />
+                    <FilterSegmented
+                        label="IG"
+                        value={hasIg}
+                        onChange={onHasIg}
+                        options={TRISTATE_OPTIONS}
+                        testid="pipeline-filter-ig"
+                        compact
+                    />
+                </div>
 
-    // Filter the data based on all criteria
-    const filteredData = useMemo(() => {
-        if (!data || data.length === 0) return [];
-        
-        // First, filter by statusFocus (stage filtering)
-        let filtered = data;
-        
-        if (statusFocus !== "all" && statusFocus !== "follow_up") {
-            filtered = filtered.filter(item => {
-                const stage = normaliseStage(item.stage);
-                return stage === statusFocus;
-            });
-        }
-        
-        // Apply follow-up filter
-        if (statusFocus === "follow_up") {
-            filtered = filtered.filter(item => item.is_follow_up === true);
-        }
-        
-        // Apply debounced search filter
-        if (debouncedSearch && debouncedSearch.trim()) {
-            const searchLower = debouncedSearch.trim().toLowerCase();
-            filtered = filtered.filter(item => {
-                const name = (item.talent_name || "").toLowerCase();
-                const email = (item.talent_email || item.email || "").toLowerCase();
-                const phone = (item.talent_phone || "").toLowerCase();
-                const ig = (item.instagram_handle || "").toLowerCase();
-                const id = (item.talent_id || "").toLowerCase();
-                
-                return name.includes(searchLower) ||
-                       email.includes(searchLower) ||
-                       phone.includes(searchLower) ||
-                       ig.includes(searchLower) ||
-                       id.includes(searchLower);
-            });
-        }
-        
-        // Apply hasSubmission filter (tristate)
-        if (hasSubmission !== "any") {
-            const hasValue = hasSubmission === "yes";
-            filtered = filtered.filter(item => {
-                const hasSubmissionValue = Boolean(item.has_submission || item.portfolio_url);
-                return hasSubmissionValue === hasValue;
-            });
-        }
-        
-        // Apply hasIg filter (tristate)
-        if (hasIg !== "any") {
-            const hasValue = hasIg === "yes";
-            filtered = filtered.filter(item => {
-                const hasIgValue = Boolean(item.instagram_handle);
-                return hasIgValue === hasValue;
-            });
-        }
-        
-        return filtered;
-    }, [data, statusFocus, debouncedSearch, hasSubmission, hasIg]);
+                {/* Count + clear */}
+                <div className="flex items-center gap-2 shrink-0">
+                    <span
+                        className={`text-[9px] font-mono ${
+                            showingCount ? "text-white/50" : "text-white/20"
+                        }`}
+                        data-testid="pipeline-filter-count"
+                    >
+                        {showingCount
+                            ? `${filteredCount}/${totalCount}`
+                            : `${totalCount} total`}
+                    </span>
+                    {filtersActive && (
+                        <button
+                            type="button"
+                            onClick={onClearAll}
+                            data-testid="pipeline-filter-clear"
+                            className="
+                                px-2 py-0.5 rounded
+                                text-[9px] tracking-wide uppercase
+                                text-white/35 hover:text-rose-300/50
+                                hover:bg-rose-500/5
+                                transition-all duration-200
+                            "
+                            title="Clear all filters"
+                        >
+                            Reset
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+});
 
-    // Check if we should show only follow-up view
-    const showOnlyFollowUp = useMemo(() => {
-        return statusFocus === "follow_up";
-    }, [statusFocus]);
-
-    // Check if any filters are active
-    const filtersActive = useMemo(() => {
-        return searchInput !== "" ||
-               statusFocus !== "all" ||
-               hasSubmission !== "any" ||
-               hasIg !== "any";
-    }, [searchInput, statusFocus, hasSubmission, hasIg]);
-
-    // Check if filtered results are zero but data exists
-    const hasZeroAfterFilter = useMemo(() => {
-        return data.length > 0 && filteredData.length === 0;
-    }, [data.length, filteredData.length]);
-
-    // Clear all filters
-    const clearAllFilters = useCallback(() => {
-        setSearchInput(DEFAULT_FILTERS.search);
-        setDebouncedSearch(DEFAULT_FILTERS.search);
-        setStatusFocus(DEFAULT_FILTERS.statusFocus);
-        setHasSubmission(DEFAULT_FILTERS.hasSubmission);
-        setHasIg(DEFAULT_FILTERS.hasIg);
-    }, []);
-
-    // Helper: Check if a specific filter is active
-    const isFilterActive = useCallback((filterName) => {
-        switch(filterName) {
-            case "search":
-                return searchInput !== "";
-            case "status":
-                return statusFocus !== "all";
-            case "submission":
-                return hasSubmission !== "any";
-            case "ig":
-                return hasIg !== "any";
-            default:
-                return false;
-        }
-    }, [searchInput, statusFocus, hasSubmission, hasIg]);
-
-    // Helper: Get count of active filters
-    const activeFilterCount = useMemo(() => {
-        let count = 0;
-        if (searchInput) count++;
-        if (statusFocus !== "all") count++;
-        if (hasSubmission !== "any") count++;
-        if (hasIg !== "any") count++;
-        return count;
-    }, [searchInput, statusFocus, hasSubmission, hasIg]);
-
-    return {
-        // Search
-        search: searchInput,
-        setSearch: setSearchInput,
-        debouncedSearch,
-        
-        // Status focus
-        statusFocus,
-        setStatusFocus,
-        
-        // Tristate filters
-        hasSubmission,
-        setHasSubmission,
-        hasIg,
-        setHasIg,
-        
-        // Derived state
-        hiddenStages,
-        filteredData,
-        showOnlyFollowUp,
-        filtersActive,
-        hasZeroAfterFilter,
-        activeFilterCount,
-        
-        // Helpers
-        clearAllFilters,
-        isFilterActive,
-        
-        // Original data reference
-        originalData: data,
-    };
+/**
+ * FilterSegmented — reusable segmented control component
+ */
+function FilterSegmented({ label, value, onChange, options, testid, compact = false }) {
+    return (
+        <div
+            data-testid={testid}
+            className="
+                shrink-0 flex items-center gap-1.5
+                bg-white/[0.02] border border-white/[0.05]
+                rounded-md pl-2 pr-0.5 py-0.5
+            "
+        >
+            <span
+                className={`text-[8px] tracking-wide uppercase text-white/25 shrink-0 ${
+                    compact ? "hidden xl:inline" : ""
+                }`}
+            >
+                {label}
+            </span>
+            <div className="flex items-center gap-0.5">
+                {options.map((opt) => {
+                    const active = value === opt.value;
+                    return (
+                        <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() => onChange(opt.value)}
+                            data-testid={`${testid}-${opt.value}`}
+                            aria-pressed={active}
+                            className={`
+                                shrink-0
+                                px-2 py-0.5 rounded
+                                text-[8px] tracking-wide uppercase
+                                transition-all duration-150
+                                ${
+                                    active
+                                        ? "bg-white/80 text-black font-medium"
+                                        : "text-white/45 hover:text-white/70 hover:bg-white/[0.03]"
+                                }
+                            `}
+                        >
+                            {opt.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
 }
+
+export default PipelineFilters;

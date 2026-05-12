@@ -1,22 +1,6 @@
 import React, { memo } from "react";
 import { STATUS_FOCUS_OPTIONS, TRISTATE_OPTIONS } from "./constants";
 
-/**
- * PipelineFilters (PATCH 4E)
- *
- * Sticky cinematic search + filter surface. Sits directly under the
- * page header and stays put while the board scrolls beneath it.
- * Glassmorphism + compact pills — same visual system as the rest of
- * the kanban.
- *
- * Layout (desktop):
- *   [search input — flex-grow] [status focus segmented] [submission?] [ig?] [clear]
- * Layout (mobile):
- *   [search input — full row]
- *   [horizontal scrolling filter pills]
- *
- * Memoised so search keystrokes don't re-render the entire board context.
- */
 const PipelineFilters = memo(function PipelineFilters({
     search,
     onSearch,
@@ -37,41 +21,39 @@ const PipelineFilters = memo(function PipelineFilters({
         <div
             data-testid="pipeline-control-bar"
             className="
-                sticky top-2 z-30
-                mt-3 mb-4
-                rounded-2xl
-                bg-gradient-to-b from-[#171717]/95 to-[#111111]/92
-                backdrop-blur-md
+                sticky top-0 z-30 mb-5
+                rounded-lg
+                bg-[#111]
                 border border-white/[0.06]
-                shadow-[0_4px_16px_-8px_rgba(0,0,0,0.5),inset_0_1px_0_0_rgba(255,255,255,0.03)]
             "
         >
-            <div className="flex flex-col lg:flex-row lg:items-center gap-2 lg:gap-3 px-3 py-2 lg:px-4 lg:py-2">
-                {/* Search input — anchors the bar on desktop, full-width on mobile */}
+            <div className="flex flex-col lg:flex-row lg:items-center gap-2 px-3 py-2">
+                {/* Search input */}
                 <div className="relative flex-1 min-w-0">
                     <input
                         type="text"
                         value={search}
                         onChange={(e) => onSearch(e.target.value)}
-                        placeholder="Search talents — name, email, phone, instagram…"
+                        placeholder="Search by name, email, or phone..."
                         data-testid="pipeline-filter-search"
                         className="
                             w-full
-                            bg-black/30 border border-white/[0.06]
-                            rounded-[999px]
-                            pl-9 pr-3 py-1.25
-                            text-[12.5px] text-white/90 placeholder-white/25
-                            tg-mono
-                            focus:outline-none focus:border-white/25 focus:bg-black/40
+                            bg-black/50 border border-white/[0.08]
+                            rounded-md
+                            pl-8 pr-3 py-1.5
+                            text-[12px] text-white/80 placeholder-white/20
+                            focus:outline-none focus:border-white/15
                             transition-colors duration-200
                         "
                     />
-                    <span
-                        aria-hidden
-                        className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-[11px] tg-mono pointer-events-none"
+                    <svg
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-white/25"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
                     >
-                        ⌕
-                    </span>
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
                     {search && (
                         <button
                             type="button"
@@ -79,11 +61,11 @@ const PipelineFilters = memo(function PipelineFilters({
                             aria-label="Clear search"
                             className="
                                 absolute right-1.5 top-1/2 -translate-y-1/2
-                                w-6 h-6 rounded-full
+                                w-4 h-4 rounded-full
                                 flex items-center justify-center
-                                text-white/40 hover:text-white/80
-                                bg-white/[0.04] hover:bg-white/[0.08]
-                                transition-colors
+                                text-white/30 hover:text-white/60
+                                bg-white/[0.03] hover:bg-white/[0.06]
+                                transition-colors text-xs
                             "
                         >
                             ×
@@ -91,17 +73,17 @@ const PipelineFilters = memo(function PipelineFilters({
                     )}
                 </div>
 
-                {/* Filter pills — horizontally scrollable on small viewports */}
-                <div className="flex items-center gap-2 overflow-x-auto tg-pipeline-scroll lg:overflow-visible -mx-1 px-1">
+                {/* Filter pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto lg:overflow-visible -mx-1 px-1">
                     <FilterSegmented
-                        label="Focus"
+                        label="Status"
                         value={statusFocus}
                         onChange={onStatusFocus}
                         options={STATUS_FOCUS_OPTIONS}
                         testid="pipeline-filter-focus"
                     />
                     <FilterSegmented
-                        label="Submitted"
+                        label="Portfolio"
                         value={hasSubmission}
                         onChange={onHasSubmission}
                         options={TRISTATE_OPTIONS}
@@ -109,7 +91,7 @@ const PipelineFilters = memo(function PipelineFilters({
                         compact
                     />
                     <FilterSegmented
-                        label="Has IG"
+                        label="IG"
                         value={hasIg}
                         onChange={onHasIg}
                         options={TRISTATE_OPTIONS}
@@ -121,8 +103,8 @@ const PipelineFilters = memo(function PipelineFilters({
                 {/* Count + clear */}
                 <div className="flex items-center gap-2 shrink-0">
                     <span
-                        className={`text-[10px] tg-mono ${
-                            showingCount ? "text-white/70" : "text-white/35"
+                        className={`text-[9px] font-mono ${
+                            showingCount ? "text-white/50" : "text-white/20"
                         }`}
                         data-testid="pipeline-filter-count"
                     >
@@ -136,16 +118,15 @@ const PipelineFilters = memo(function PipelineFilters({
                             onClick={onClearAll}
                             data-testid="pipeline-filter-clear"
                             className="
-                                px-2.5 py-1 rounded-full
-                                text-[10px] tracking-[0.18em] uppercase
-                                text-white/55 hover:text-rose-200
-                                bg-white/[0.02] hover:bg-rose-300/8
-                                border border-white/[0.06] hover:border-rose-300/15
+                                px-2 py-0.5 rounded
+                                text-[9px] tracking-wide uppercase
+                                text-white/35 hover:text-rose-300/50
+                                hover:bg-rose-500/5
                                 transition-all duration-200
                             "
                             title="Clear all filters"
                         >
-                            Clear
+                            Reset
                         </button>
                     )}
                 </div>
@@ -154,10 +135,6 @@ const PipelineFilters = memo(function PipelineFilters({
     );
 });
 
-/**
- * FilterSegmented — small segmented control. Compact mode shrinks the
- * label and hides it on narrow viewports. Pure presentational.
- */
 function FilterSegmented({ label, value, onChange, options, testid, compact = false }) {
     return (
         <div
@@ -165,11 +142,11 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
             className="
                 shrink-0 flex items-center gap-1.5
                 bg-white/[0.02] border border-white/[0.05]
-                rounded-full pl-2.5 pr-1 py-1
+                rounded-md pl-2 pr-0.5 py-0.5
             "
         >
             <span
-                className={`text-[9px] tracking-[0.18em] uppercase text-white/35 shrink-0 ${
+                className={`text-[8px] tracking-wide uppercase text-white/25 shrink-0 ${
                     compact ? "hidden xl:inline" : ""
                 }`}
             >
@@ -186,13 +163,13 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
                             data-testid={`${testid}-${opt.value}`}
                             className={`
                                 shrink-0
-                                px-2 py-[3px] rounded-full
-                                text-[10px] tracking-[0.1em] uppercase
-                                transition-all duration-200
+                                px-2 py-0.5 rounded
+                                text-[8px] tracking-wide uppercase
+                                transition-all duration-150
                                 ${
                                     active
-                                        ? "bg-white/90 text-black font-medium"
-                                        : "text-white/55 hover:text-white/90 hover:bg-white/[0.04]"
+                                        ? "bg-white/80 text-black font-medium"
+                                        : "text-white/45 hover:text-white/70 hover:bg-white/[0.03]"
                                 }
                             `}
                         >

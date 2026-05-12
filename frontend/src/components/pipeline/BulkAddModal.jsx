@@ -8,27 +8,22 @@ function BulkAddModal({
     onSubmit,
 }) {
     return (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="
                 relative
-                bg-gradient-to-b from-[#171717] to-[#101010]
-                backdrop-blur-xl
-                border border-white/[0.06]
-                rounded-2xl
+                bg-white
+                border border-black/[0.08]
+                rounded-xl
                 p-6
                 w-full max-w-lg
-                shadow-[0_20px_60px_-24px_rgba(0,0,0,0.75)]
-                shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]
+                shadow-[0_24px_60px_-32px_rgba(0,0,0,0.18)]
             ">
-                {/* Atmospheric top glow */}
-                <div className="absolute top-0 left-0 right-0 h-16 pointer-events-none bg-gradient-to-b from-white/[0.02] to-transparent rounded-2xl" />
-                
                 <div className="relative space-y-4">
                     <div>
-                        <h3 className="text-[13px] tracking-[0.08em] uppercase font-medium text-white">
+                        <h3 className="text-[13px] tracking-[0.12em] uppercase font-medium text-black/85">
                             Bulk Import Talents
                         </h3>
-                        <p className="text-white/40 text-[10px] tracking-wide leading-relaxed mt-1">
+                        <p className="text-black/45 text-[10px] tracking-wide leading-relaxed mt-1">
                             Enter talent IDs (one per line or comma-separated)
                         </p>
                     </div>
@@ -40,23 +35,24 @@ function BulkAddModal({
                         data-testid="pipeline-bulk-input"
                         className="
                             w-full h-32 
-                            bg-black/35
-                            border border-white/[0.06]
-                            rounded-xl
+                            bg-[#f5f5f5]
+                            border border-black/[0.08]
+                            rounded-lg
                             p-3
-                            text-white text-[12px] leading-relaxed
-                            placeholder:text-white/18
+                            text-black/85 text-[12px] leading-relaxed
+                            placeholder:text-black/30
                             font-mono
                             focus:outline-none
-                            focus:border-white/[0.14]
-                            focus:bg-black/45
+                            focus:border-black/[0.14]
+                            focus:bg-white
+                            focus:ring-1 focus:ring-black/[0.06]
                             transition-all duration-150
                             resize-none
                         "
                         disabled={busy}
                     />
 
-                    <div className="text-white/30 text-[10px] tracking-wide">
+                    <div className="text-black/40 text-[10px] tracking-wide">
                         Supports UUIDs, custom IDs, or numeric IDs
                     </div>
 
@@ -65,11 +61,10 @@ function BulkAddModal({
                             onClick={onCancel}
                             disabled={busy}
                             className="
-                                px-4 py-2
-                                bg-white/[0.04] hover:bg-white/[0.07]
-                                text-white/60 hover:text-white/80
-                                rounded-full
-                                text-[10px] tracking-[0.16em] uppercase
+                                px-4 py-2 rounded-full
+                                bg-black/[0.04] hover:bg-black/[0.07]
+                                text-black/60 hover:text-black/85
+                                text-[10px] tracking-[0.12em] uppercase
                                 transition-all duration-150
                                 disabled:opacity-40 disabled:cursor-not-allowed
                             "
@@ -81,11 +76,10 @@ function BulkAddModal({
                             disabled={busy}
                             data-testid="pipeline-bulk-add-submit"
                             className="
-                                px-4 py-2
-                                bg-white/[0.12] hover:bg-white/[0.16]
-                                text-white/90 hover:text-white
-                                rounded-full
-                                text-[10px] tracking-[0.16em] uppercase font-medium
+                                px-4 py-2 rounded-full
+                                bg-black text-white
+                                hover:bg-black/90
+                                text-[10px] tracking-[0.12em] uppercase font-medium
                                 transition-all duration-150
                                 disabled:opacity-40 disabled:cursor-not-allowed
                             "

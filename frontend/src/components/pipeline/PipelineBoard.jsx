@@ -26,7 +26,7 @@ import {
     normaliseStage,
 } from "./constants";
 
-function PipelineBoard({ projectId }) {
+function PipelineBoard({ projectId, projectName }) {
     const { data, setData, loading, error, fetchPipeline } = usePipelineData(projectId);
     const {
         searchQuery,
@@ -158,9 +158,9 @@ function PipelineBoard({ projectId }) {
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-[#0b0b0b] flex items-center justify-center" data-testid="pipeline-loading">
-                <div className="text-white/20 text-sm animate-pulse tracking-wide">
-                    Preparing casting board
+            <div className="min-h-screen bg-[#f5f5f3] flex items-center justify-center" data-testid="pipeline-loading">
+                <div className="text-black/45 text-sm tracking-wide">
+                    Loading casting pipeline…
                 </div>
             </div>
         );
@@ -168,9 +168,10 @@ function PipelineBoard({ projectId }) {
 
     if (error) {
         return (
-            <div className="min-h-screen bg-[#0b0b0b] flex items-center justify-center" data-testid="pipeline-error">
-                <div className="text-white/35 text-sm tracking-wide">
-                    Unable to load casting workflow
+            <div className="min-h-screen bg-[#f5f5f3] flex items-center justify-center" data-testid="pipeline-error">
+                <div className="text-black/45 text-sm tracking-wide text-center">
+                    <div>Failed to load casting pipeline</div>
+                    <div className="text-xs mt-2 text-black/30">Please refresh or try again.</div>
                 </div>
             </div>
         );
@@ -192,58 +193,97 @@ function PipelineBoard({ projectId }) {
     const itemsForStage = (stage) =>
         filteredData.filter((i) => normaliseStage(i.stage) === stage);
 
+    // Operational summary derived from data
+    const activeCount = data.filter(i => !OUTCOME_STAGES.includes(normaliseStage(i.stage)) && normaliseStage(i.stage) !== 'archived').length;
+    const shortlistedCount = data.filter(i => normaliseStage(i.stage) === 'shortlist').length;
+    const approvedCount = data.filter(i => normaliseStage(i.stage) === 'approved').length;
+    const pendingTestsCount = data.filter(i => normaliseStage(i.stage) === 'test_sent').length;
+
+    // Display project name if provided, otherwise fallback to a cleaner placeholder
+    const displayProjectName = projectName || (projectId && projectId.length > 8 ? `${projectId.slice(0, 8)}...` : projectId) || 'Active campaign';
+
     return (
         <div 
-            className="min-h-screen bg-[#0b0b0b] px-4 md:px-6 py-5 md:py-6 pb-24 relative"
+            className="min-h-screen bg-[#f5f5f3] px-6 py-6 pb-24"
             data-testid="project-pipeline"
-            style={{
-                backgroundImage: 'radial-gradient(circle at top, rgba(255,255,255,0.03), transparent 45%)'
-            }}
         >
-            {/* Atmospheric top fade */}
-            <div className="absolute top-0 left-0 right-0 h-24 pointer-events-none bg-gradient-to-b from-white/[0.015] to-transparent" />
-            
-            {/* Premium max-width container */}
-            <div className="max-w-[1900px] mx-auto relative">
-                {/* Orchestration spacing - top controls */}
-                <div className="space-y-5">
-                    <PipelineToolbar
-                        projectId={projectId}
-                        bulkMode={bulkMode}
-                        onToggleBulkMode={handleToggleBulkMode}
-                        onOpenBulkAdd={() => setShowBulkAdd(true)}
-                    />
-
-                    <QuickAddTalents
-                        searchQuery={searchQuery}
-                        onSearchQueryChange={setSearchQuery}
-                        searchLoading={searchLoading}
-                        searchResults={searchResults}
-                        selectedTalents={selectedTalents}
-                        onToggleTalent={toggleTalentSelect}
-                        onAddSelected={addSelectedToPipeline}
-                    />
-
-                    <PipelineFilters
-                        search={search}
-                        onSearch={setSearch}
-                        statusFocus={statusFocus}
-                        onStatusFocus={setStatusFocus}
-                        hasSubmission={hasSubmission}
-                        onHasSubmission={setHasSubmission}
-                        hasIg={hasIg}
-                        onHasIg={setHasIg}
-                        filtersActive={filtersActive}
-                        onClearAll={clearAllFilters}
-                        totalCount={data.length}
-                        filteredCount={filteredData.length}
-                    />
+            <div className="max-w-[1680px] mx-auto">
+                {/* Operational Header Hierarchy */}
+                <div className="mb-6">
+                    <div className="flex items-baseline justify-between flex-wrap gap-3">
+                        <div>
+                            <h1 className="text-[26px] font-semibold text-black/85 tracking-[-0.02em]">Casting Pipeline</h1>
+                            <div className="text-sm text-black/40 mt-0.5">Project · {displayProjectName}</div>
+                        </div>
+                        {/* Muted operational summary indicators */}
+                        <div className="flex gap-5 text-sm">
+                            <div className="flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-700/60"></span>
+                                <span className="text-black/50">Active</span>
+                                <span className="font-mono text-black/70 font-medium ml-1">{activeCount}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-700/60"></span>
+                                <span className="text-black/50">Shortlisted</span>
+                                <span className="font-mono text-black/70 font-medium ml-1">{shortlistedCount}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-700/60"></span>
+                                <span className="text-black/50">Approved</span>
+                                <span className="font-mono text-black/70 font-medium ml-1">{approvedCount}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-zinc-500/60"></span>
+                                <span className="text-black/50">Pending Tests</span>
+                                <span className="font-mono text-black/70 font-medium ml-1">{pendingTestsCount}</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
-                {/* Workflow content with orchestrated spacing */}
-                <div className="space-y-8 mt-6">
+                {/* Unified Control Deck with denser padding */}
+                <div className="bg-white border border-black/[0.06] rounded-2xl shadow-sm mb-6 sticky top-0 z-40">
+                    <div className="px-4 py-3">
+                        <PipelineToolbar
+                            projectId={projectId}
+                            bulkMode={bulkMode}
+                            onToggleBulkMode={handleToggleBulkMode}
+                            onOpenBulkAdd={() => setShowBulkAdd(true)}
+                        />
+                    </div>
+                    <div className="border-t border-black/[0.04] px-4 py-3">
+                        <QuickAddTalents
+                            searchQuery={searchQuery}
+                            onSearchQueryChange={setSearchQuery}
+                            searchLoading={searchLoading}
+                            searchResults={searchResults}
+                            selectedTalents={selectedTalents}
+                            onToggleTalent={toggleTalentSelect}
+                            onAddSelected={addSelectedToPipeline}
+                        />
+                    </div>
+                    <div className="border-t border-black/[0.04] px-4 py-3">
+                        <PipelineFilters
+                            search={search}
+                            onSearch={setSearch}
+                            statusFocus={statusFocus}
+                            onStatusFocus={setStatusFocus}
+                            hasSubmission={hasSubmission}
+                            onHasSubmission={setHasSubmission}
+                            hasIg={hasIg}
+                            onHasIg={setHasIg}
+                            filtersActive={filtersActive}
+                            onClearAll={clearAllFilters}
+                            totalCount={data.length}
+                            filteredCount={filteredData.length}
+                        />
+                    </div>
+                </div>
+
+                {/* Workflow Content with denser operational rhythm */}
+                <div className="space-y-5">
                     {hasZeroAfterFilter && (
-                        <div className="mt-16">
+                        <div className="mt-8">
                             <FilterEmptyState onReset={clearAllFilters} />
                         </div>
                     )}
@@ -266,8 +306,9 @@ function PipelineBoard({ projectId }) {
                         </BoardSection>
                     )}
 
+                    {/* Supportive Follow-up Lane - static opacity, no hover theatrics */}
                     {!hasZeroAfterFilter && (
-                        <div className="mt-2">
+                        <div className="mt-2 opacity-95">
                             <FollowUpLane
                                 items={filteredData.filter((i) => i.is_follow_up === true)}
                                 refresh={fetchPipeline}

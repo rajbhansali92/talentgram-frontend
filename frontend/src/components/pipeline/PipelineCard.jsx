@@ -3,6 +3,7 @@ import React, {
     useState,
     useEffect,
     useRef,
+    useCallback,
 } from "react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
@@ -34,8 +35,10 @@ const PipelineCard = memo(function PipelineCard({
     const overflowRef = useRef(null);
     const moreButtonRef = useRef(null);
 
-    // ISSUE 1 & 9: Click outside + ESC key to close overflow menu
+    // PERFORMANCE FIX: Only attach global listeners when menu is open
     useEffect(() => {
+        if (!showMoreActions) return;
+
         function handleClickOutside(e) {
             if (
                 overflowRef.current &&
@@ -48,21 +51,24 @@ const PipelineCard = memo(function PipelineCard({
         }
 
         function handleEsc(e) {
-            if (e.key === "Escape" && showMoreActions) {
+            if (e.key === "Escape") {
                 setShowMoreActions(false);
             }
         }
 
+        // Add listeners only when menu is open
         document.addEventListener("mousedown", handleClickOutside);
         document.addEventListener("keydown", handleEsc);
 
         return () => {
+            // Clean up listeners when menu closes
             document.removeEventListener("mousedown", handleClickOutside);
             document.removeEventListener("keydown", handleEsc);
         };
-    }, [showMoreActions]);
+    }, [showMoreActions]); // Re-run when menu open state changes
 
-    const move = async (stage) => {
+    // Memoized move function to prevent unnecessary re-renders
+    const move = useCallback(async (stage) => {
         setMoving(true);
         try {
             await adminApi.patch("/pipeline/move", {
@@ -70,15 +76,24 @@ const PipelineCard = memo(function PipelineCard({
                 stage,
             });
             await refresh();
-            // Close overflow menu after successful move
-            setShowMoreActions(false);
+            // Close overflow menu after successful move (menu is already handled)
         } catch (e) {
             console.error("Move failed:", e);
             toast.error(e?.response?.data?.detail || "Move failed");
         } finally {
             setMoving(false);
         }
-    };
+    }, [item.id, refresh]);
+
+    // Memoized close menu function
+    const closeMoreMenu = useCallback(() => {
+        setShowMoreActions(false);
+    }, []);
+
+    // Memoized toggle menu function
+    const toggleMoreMenu = useCallback(() => {
+        setShowMoreActions(prev => !prev);
+    }, []);
 
     const canonicalStage = normaliseStage(item.stage);
     const nextStages = NEXT_STAGE_FLOW[canonicalStage] || [];
@@ -95,25 +110,32 @@ const PipelineCard = memo(function PipelineCard({
 
     const draggable = dragSupported && !readOnly && !bulkMode;
 
-    const handleDragStart = (e) => {
+    const handleDragStart = useCallback((e) => {
         if (!draggable) return;
         e.dataTransfer.setData("text/plain", item.id);
         e.dataTransfer.effectAllowed = "move";
         setTimeout(() => onDragStart && onDragStart(item.id), 0);
-    };
+    }, [draggable, item.id, onDragStart]);
 
-    const handleDragEnd = () => {
+    const handleDragEnd = useCallback(() => {
         if (!draggable) return;
         if (onDragEnd) onDragEnd();
-    };
+    }, [draggable, onDragEnd]);
 
-    const handleKeyDown = (e) => {
+    const handleKeyDown = useCallback((e) => {
         // Accessibility: Enter or Space triggers selection in bulk mode
         if (bulkMode && (e.key === "Enter" || e.key === " ")) {
             e.preventDefault();
             onToggleSelect(item.id);
         }
-    };
+    }, [bulkMode, item.id, onToggleSelect]);
+
+    // Handle overflow action click - closes menu AFTER move completes
+    const handleOverflowAction = useCallback(async (stage) => {
+        // Close menu immediately for better UX
+        setShowMoreActions(false);
+        await move(stage);
+    }, [move]);
 
     const shellClass = [
         "group relative rounded-md overflow-hidden",
@@ -286,7 +308,7 @@ const PipelineCard = memo(function PipelineCard({
                                 <button
                                     ref={moreButtonRef}
                                     type="button"
-                                    onClick={() => setShowMoreActions(!showMoreActions)}
+                                    onClick={toggleMoreMenu}
                                     aria-label="More actions"
                                     aria-expanded={showMoreActions}
                                     aria-haspopup="true"
@@ -310,10 +332,7 @@ const PipelineCard = memo(function PipelineCard({
                                             <button
                                                 key={stage}
                                                 type="button"
-                                                onClick={() => {
-                                                    move(stage);
-                                                    setShowMoreActions(false);
-                                                }}
+                                                onClick={() => handleOverflowAction(stage)}
                                                 className="
                                                     w-full text-left px-2 py-1
                                                     text-[8px] tracking-wide uppercase

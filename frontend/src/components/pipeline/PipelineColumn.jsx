@@ -1,4 +1,4 @@
-import React, { memo, useState } from "react";
+import React, { memo, useState, useCallback } from "react";
 import PipelineCard from "./PipelineCard";
 import { EmptyLane } from "./PipelineEmptyState";
 import {
@@ -37,31 +37,34 @@ const PipelineColumn = memo(function PipelineColumn({
 
     const [isDragOver, setIsDragOver] = useState(false);
 
-    const handleDragOver = (e) => {
+    const handleDragOver = useCallback((e) => {
         if (!isDroppable) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-    };
+    }, [isDroppable]);
 
-    const handleDragEnter = (e) => {
+    const handleDragEnter = useCallback((e) => {
         if (!isDroppable) return;
         e.preventDefault();
         setIsDragOver(true);
-    };
+    }, [isDroppable]);
 
-    const handleDragLeave = (e) => {
+    const handleDragLeave = useCallback((e) => {
         if (!isDroppable) return;
         if (e.currentTarget.contains(e.relatedTarget)) return;
         setIsDragOver(false);
-    };
+    }, [isDroppable]);
 
-    const handleDrop = (e) => {
+    const handleDrop = useCallback((e) => {
         if (!isDroppable) return;
         e.preventDefault();
         setIsDragOver(false);
         const droppedId = e.dataTransfer.getData("text/plain");
         if (droppedId) onCardDrop(stage, droppedId);
-    };
+    }, [isDroppable, stage, onCardDrop]);
+
+    // Accessibility: Announce column count to screen readers
+    const columnLabel = `${getStageLabel(stage)} column with ${items.length} items`;
 
     return (
         <div
@@ -70,6 +73,8 @@ const PipelineColumn = memo(function PipelineColumn({
             onDragEnter={handleDragEnter}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
+            role="region"
+            aria-label={columnLabel}
             className={`
                 relative shrink-0 w-[268px] min-w-[268px] max-w-[268px]
                 rounded-lg overflow-hidden
@@ -77,7 +82,11 @@ const PipelineColumn = memo(function PipelineColumn({
                 border transition-all duration-200
                 ${
                     isDragOver
-                        ? "border-white/20"
+                        ? `
+                            border-white/20
+                            bg-white/[0.02]
+                            ring-1 ring-white/10
+                          `
                         : "border-white/[0.06]"
                 }
             `}
@@ -85,13 +94,13 @@ const PipelineColumn = memo(function PipelineColumn({
             {/* Stage accent line — very subtle */}
             <div
                 className={`absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r ${accent} pointer-events-none`}
-                aria-hidden
+                aria-hidden="true"
             />
 
-            {/* Sticky header */}
+            {/* Sticky header - offset below filter bar */}
             <div
                 className="
-                    sticky top-0 z-10
+                    sticky top-[44px] z-10
                     px-3 py-2
                     bg-[#141414]
                     border-b border-white/[0.04]
@@ -103,7 +112,10 @@ const PipelineColumn = memo(function PipelineColumn({
                         {getStageLabel(stage)}
                     </span>
                     {readOnly && (
-                        <span className="text-[7px] tracking-wide uppercase text-amber-400/30">
+                        <span 
+                            className="text-[7px] tracking-wide uppercase text-amber-400/30"
+                            aria-label="Read only column"
+                        >
                             ro
                         </span>
                     )}
@@ -116,6 +128,7 @@ const PipelineColumn = memo(function PipelineColumn({
                         shrink-0
                     "
                     data-testid={`pipeline-column-count-${stage}`}
+                    aria-label={`${items.length} items`}
                 >
                     {items.length}
                 </span>
@@ -128,11 +141,13 @@ const PipelineColumn = memo(function PipelineColumn({
                         type="button"
                         onClick={() => onSelectAll(items)}
                         data-testid={`pipeline-select-all-${stage}`}
+                        aria-label={allInColumnSelected ? "Deselect all items in column" : "Select all items in column"}
                         className="
                             w-full text-left flex items-center justify-between gap-2
                             text-[8px] tracking-wide uppercase
                             text-white/35 hover:text-white/60
                             transition-colors duration-200
+                            focus:outline-none focus:ring-1 focus:ring-white/20 rounded
                         "
                     >
                         <span>
@@ -140,14 +155,14 @@ const PipelineColumn = memo(function PipelineColumn({
                                 ? "Deselect all"
                                 : "Select all"}
                         </span>
-                        <span className="font-mono text-white/15">
+                        <span className="font-mono text-white/15" aria-hidden="true">
                             {items.length}
                         </span>
                     </button>
                 </div>
             )}
 
-            {/* Card stream */}
+            {/* Card stream - dynamic height */}
             <div
                 className={`
                     px-2 py-2 space-y-2
@@ -155,9 +170,11 @@ const PipelineColumn = memo(function PipelineColumn({
                     ${
                         compact
                             ? "min-h-[180px] max-h-[260px]"
-                            : "min-h-[260px] max-h-[52vh]"
+                            : "min-h-[260px] max-h-[calc(100vh-240px)]"
                     }
                 `}
+                role="list"
+                aria-label={`Cards in ${getStageLabel(stage)} stage`}
             >
                 {items.length === 0 ? (
                     <EmptyLane label={emptyCopy} />
@@ -180,6 +197,14 @@ const PipelineColumn = memo(function PipelineColumn({
                     ))
                 )}
             </div>
+
+            {/* Drop overlay indicator for better visual feedback */}
+            {isDragOver && (
+                <div 
+                    className="absolute inset-0 pointer-events-none bg-white/[0.01] border-2 border-dashed border-white/15 rounded-lg"
+                    aria-hidden="true"
+                />
+            )}
         </div>
     );
 });

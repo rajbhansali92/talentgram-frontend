@@ -1,4 +1,9 @@
-import React, { memo, useState } from "react";
+import React, {
+    memo,
+    useState,
+    useEffect,
+    useRef,
+} from "react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 import TalentAvatar from "./TalentAvatar";
@@ -26,6 +31,36 @@ const PipelineCard = memo(function PipelineCard({
 }) {
     const [moving, setMoving] = useState(false);
     const [showMoreActions, setShowMoreActions] = useState(false);
+    const overflowRef = useRef(null);
+    const moreButtonRef = useRef(null);
+
+    // ISSUE 1 & 9: Click outside + ESC key to close overflow menu
+    useEffect(() => {
+        function handleClickOutside(e) {
+            if (
+                overflowRef.current &&
+                !overflowRef.current.contains(e.target) &&
+                moreButtonRef.current &&
+                !moreButtonRef.current.contains(e.target)
+            ) {
+                setShowMoreActions(false);
+            }
+        }
+
+        function handleEsc(e) {
+            if (e.key === "Escape" && showMoreActions) {
+                setShowMoreActions(false);
+            }
+        }
+
+        document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener("keydown", handleEsc);
+
+        return () => {
+            document.removeEventListener("mousedown", handleClickOutside);
+            document.removeEventListener("keydown", handleEsc);
+        };
+    }, [showMoreActions]);
 
     const move = async (stage) => {
         setMoving(true);
@@ -35,6 +70,8 @@ const PipelineCard = memo(function PipelineCard({
                 stage,
             });
             await refresh();
+            // Close overflow menu after successful move
+            setShowMoreActions(false);
         } catch (e) {
             console.error("Move failed:", e);
             toast.error(e?.response?.data?.detail || "Move failed");
@@ -70,6 +107,14 @@ const PipelineCard = memo(function PipelineCard({
         if (onDragEnd) onDragEnd();
     };
 
+    const handleKeyDown = (e) => {
+        // Accessibility: Enter or Space triggers selection in bulk mode
+        if (bulkMode && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            onToggleSelect(item.id);
+        }
+    };
+
     const shellClass = [
         "group relative rounded-md overflow-hidden",
         "transition-all duration-200",
@@ -94,10 +139,14 @@ const PipelineCard = memo(function PipelineCard({
             <div
                 data-testid={`pipeline-card-${item.id}`}
                 onClick={() => onToggleSelect(item.id)}
+                onKeyDown={handleKeyDown}
                 draggable={draggable}
                 onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
                 className={`${shellClass} px-2 py-2 cursor-pointer`}
+                role="checkbox"
+                aria-checked={isSelected}
+                tabIndex={0}
             >
                 <div className="flex items-center gap-2">
                     <input
@@ -106,6 +155,7 @@ const PipelineCard = memo(function PipelineCard({
                         onChange={() => onToggleSelect(item.id)}
                         onClick={(e) => e.stopPropagation()}
                         className="w-3.5 h-3.5 rounded border-white/20 bg-transparent"
+                        aria-label={`Select ${displayName}`}
                     />
                     <TalentAvatar
                         src={item.image_url}
@@ -134,6 +184,7 @@ const PipelineCard = memo(function PipelineCard({
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
             className={shellClass}
+            aria-label={`Talent: ${displayName}`}
         >
             <div className="p-2.5 space-y-2">
                 {/* Identity row */}
@@ -167,9 +218,12 @@ const PipelineCard = memo(function PipelineCard({
                         <span
                             className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border ${statusTone.chip}`}
                             title={statusTone.label}
+                            role="status"
+                            aria-label={`Status: ${statusTone.label}`}
                         >
                             <span
                                 className={`w-1 h-1 rounded-full ${statusTone.dot}`}
+                                aria-hidden="true"
                             />
                             <span
                                 className={`text-[7px] tracking-wide uppercase ${statusTone.text}`}
@@ -182,14 +236,14 @@ const PipelineCard = memo(function PipelineCard({
 
                 {/* Metadata - compact */}
                 {(displayEmail || displayPhone) && (
-                    <div className="space-y-0.5">
+                    <div className="space-y-0.5" aria-label="Contact information">
                         {displayEmail && (
-                            <p className="text-[9px] text-white/55 truncate font-mono">
+                            <p className="text-[9px] text-white/55 truncate font-mono" title={displayEmail}>
                                 {displayEmail}
                             </p>
                         )}
                         {displayPhone && (
-                            <p className="text-[9px] text-white/55 truncate font-mono">
+                            <p className="text-[9px] text-white/55 truncate font-mono" title={displayPhone}>
                                 {displayPhone}
                             </p>
                         )}
@@ -198,7 +252,11 @@ const PipelineCard = memo(function PipelineCard({
 
                 {/* Action pills - max 2 visible */}
                 {!readOnly && visibleActions.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-white/[0.03]">
+                    <div 
+                        className="flex flex-wrap items-center gap-1 pt-1 border-t border-white/[0.03]"
+                        role="group"
+                        aria-label="Stage actions"
+                    >
                         {visibleActions.map((stage) => (
                             <button
                                 key={stage}
@@ -206,6 +264,7 @@ const PipelineCard = memo(function PipelineCard({
                                 onClick={() => move(stage)}
                                 disabled={moving}
                                 data-testid={`pipeline-card-move-${item.id}-${stage}`}
+                                aria-label={`Move to ${getStageLabel(stage)}`}
                                 className="
                                     px-2 py-0.5 rounded-sm
                                     text-[8px] tracking-wide uppercase
@@ -220,10 +279,17 @@ const PipelineCard = memo(function PipelineCard({
                             </button>
                         ))}
                         {overflowActions.length > 0 && (
-                            <div className="relative">
+                            <div
+                                className="relative"
+                                ref={overflowRef}
+                            >
                                 <button
+                                    ref={moreButtonRef}
                                     type="button"
                                     onClick={() => setShowMoreActions(!showMoreActions)}
+                                    aria-label="More actions"
+                                    aria-expanded={showMoreActions}
+                                    aria-haspopup="true"
                                     className="
                                         px-1.5 py-0.5 rounded-sm
                                         text-[8px] tracking-wide
@@ -235,7 +301,11 @@ const PipelineCard = memo(function PipelineCard({
                                     ⋯
                                 </button>
                                 {showMoreActions && (
-                                    <div className="absolute bottom-full left-0 mb-1 z-20 bg-[#1a1a1a] border border-white/10 rounded-md shadow-lg py-1 min-w-[80px]">
+                                    <div 
+                                        className="absolute bottom-full right-0 mb-1 z-20 bg-[#1a1a1a] border border-white/10 rounded-md shadow-lg py-1 min-w-[80px]"
+                                        role="menu"
+                                        aria-label="More stage actions"
+                                    >
                                         {overflowActions.map((stage) => (
                                             <button
                                                 key={stage}
@@ -249,6 +319,8 @@ const PipelineCard = memo(function PipelineCard({
                                                     text-[8px] tracking-wide uppercase
                                                     text-white/60 hover:text-white/90 hover:bg-white/5
                                                 "
+                                                role="menuitem"
+                                                aria-label={`Move to ${getStageLabel(stage)}`}
                                             >
                                                 {STAGE_LABELS[stage] || getStageLabel(stage)}
                                             </button>

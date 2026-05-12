@@ -1,4 +1,4 @@
-import React, { memo } from "react";
+import React, { memo, useState, useCallback } from "react";
 
 /**
  * PipelineToolbar — Header section for the pipeline board.
@@ -10,6 +10,7 @@ import React, { memo } from "react";
  *   • Accessible tooltip with full ID
  *   • Responsive layout for mobile
  *   • Clear visual hierarchy
+ *   • No runtime style injection (styles must be in global CSS)
  */
 
 const PipelineToolbar = memo(function PipelineToolbar({
@@ -19,19 +20,38 @@ const PipelineToolbar = memo(function PipelineToolbar({
     onToggleBulkMode,
     onOpenBulkAdd,
 }) {
-    const [copyFeedback, setCopyFeedback] = React.useState(false);
+    const [copyFeedback, setCopyFeedback] = useState(false);
+    const [copyError, setCopyError] = useState(false);
 
-    // Handle copy to clipboard
-    const handleCopyId = async () => {
+    // Handle copy to clipboard with error handling
+    const handleCopyId = useCallback(async () => {
         if (!projectId) return;
+        
         try {
             await navigator.clipboard.writeText(projectId);
             setCopyFeedback(true);
+            setCopyError(false);
             setTimeout(() => setCopyFeedback(false), 2000);
         } catch (err) {
             console.error("Failed to copy:", err);
+            setCopyError(true);
+            setTimeout(() => setCopyError(false), 2000);
+            
+            // Fallback for older browsers
+            try {
+                const textArea = document.createElement("textarea");
+                textArea.value = projectId;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textArea);
+                setCopyFeedback(true);
+                setCopyError(false);
+            } catch (fallbackErr) {
+                console.error("Fallback copy failed:", fallbackErr);
+            }
         }
-    };
+    }, [projectId]);
 
     // Format display ID: use projectName if available, else truncate UUID
     const displayProjectName = projectName || null;
@@ -60,7 +80,7 @@ const PipelineToolbar = memo(function PipelineToolbar({
                             <button
                                 type="button"
                                 onClick={handleCopyId}
-                                className="group flex items-center gap-1 text-white/25 hover:text-white/50 transition-colors duration-200"
+                                className="group flex items-center gap-1 text-white/25 hover:text-white/50 transition-colors duration-200 focus:outline-none focus:ring-1 focus:ring-white/20 rounded"
                                 title={`Copy full ID: ${fullId}`}
                                 aria-label="Copy project ID to clipboard"
                             >
@@ -72,13 +92,19 @@ const PipelineToolbar = memo(function PipelineToolbar({
                                     fill="none"
                                     stroke="currentColor"
                                     viewBox="0 0 24 24"
+                                    aria-hidden="true"
                                 >
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                                 </svg>
                             </button>
                             {copyFeedback && (
-                                <span className="text-[8px] text-emerald-400/60 animate-fade-in">
+                                <span className="text-[8px] text-emerald-400/60 animate-fade-in" role="status">
                                     Copied!
+                                </span>
+                            )}
+                            {copyError && (
+                                <span className="text-[8px] text-rose-400/60 animate-fade-in" role="alert">
+                                    Copy failed
                                 </span>
                             )}
                         </>
@@ -87,7 +113,7 @@ const PipelineToolbar = memo(function PipelineToolbar({
                         <button
                             type="button"
                             onClick={handleCopyId}
-                            className="group flex items-center gap-1 text-white/25 hover:text-white/50 transition-colors duration-200"
+                            className="group flex items-center gap-1 text-white/25 hover:text-white/50 transition-colors duration-200 focus:outline-none focus:ring-1 focus:ring-white/20 rounded"
                             title={`Copy full ID: ${fullId}`}
                             aria-label="Copy project ID to clipboard"
                         >
@@ -99,12 +125,18 @@ const PipelineToolbar = memo(function PipelineToolbar({
                                 fill="none"
                                 stroke="currentColor"
                                 viewBox="0 0 24 24"
+                                aria-hidden="true"
                             >
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                             </svg>
                             {copyFeedback && (
-                                <span className="text-[8px] text-emerald-400/60 ml-1">
+                                <span className="text-[8px] text-emerald-400/60 ml-1 animate-fade-in" role="status">
                                     Copied!
+                                </span>
+                            )}
+                            {copyError && (
+                                <span className="text-[8px] text-rose-400/60 ml-1 animate-fade-in" role="alert">
+                                    Failed
                                 </span>
                             )}
                         </button>
@@ -153,28 +185,5 @@ const PipelineToolbar = memo(function PipelineToolbar({
         </div>
     );
 });
-
-// Add animation CSS if not already present (optional)
-// This can be added to your global CSS file
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes fade-in {
-        from {
-            opacity: 0;
-            transform: translateY(-2px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-    .animate-fade-in {
-        animation: fade-in 0.2s ease-out forwards;
-    }
-`;
-if (!document.querySelector('#pipeline-toolbar-styles')) {
-    style.id = 'pipeline-toolbar-styles';
-    document.head.appendChild(style);
-}
 
 export default PipelineToolbar;

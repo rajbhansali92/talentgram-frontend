@@ -74,18 +74,28 @@ export const STAGE_ACCENTS = {
 };
 export const DEFAULT_ACCENT = "from-white/5 to-transparent";
 
-// Minimal empty-state copy
+/* ---------------------------------------------------------------------
+ * ISSUE 7 FIX: Clearer empty state copy
+ * Replaced abstract text with more descriptive, actionable copy
+ * ------------------------------------------------------------------- */
 export const EMPTY_STATE_COPY = {
-    ask_to_test: "No pending",
-    approved: "Awaiting approval",
-    hold: "Paused",
-    shortlisted: "Curated",
-    already_tested: "Completed",
-    locked: "Finalised",
-    rejected: "Archived",
-    not_available: "Available",
-    not_interested: "Open",
-    pitch: "No active",
+    // Main flow stages — clear action-oriented copy
+    ask_to_test: "No pending invitations",
+    approved: "Awaiting approvals",
+    hold: "On hold",  // Fixed: was "Paused" - clearer
+    shortlisted: "No shortlisted talents",
+    already_tested: "No completed tests",
+    locked: "No finalised placements",
+    
+    // Outcome stages — clear terminal states
+    rejected: "No rejected talents",
+    not_available: "All talents available",
+    not_interested: "Open to opportunities",  // Fixed: was "Open" - clearer
+    
+    // Independent stages
+    pitch: "No active pitches",  // Fixed: was "No active" - more descriptive
+    
+    // Follow-up
     follow_up: "All caught up",
 };
 
@@ -160,9 +170,13 @@ export const STATUS_TONES = {
     },
 };
 
-// Only show 2 primary actions per card — others require click
+// Only show 2 primary actions per card — others in overflow menu
 export const VISIBLE_ACTIONS_PER_CARD = 2;
 
+/* ---------------------------------------------------------------------
+ * Next stage flow definitions
+ * Controls which transition buttons appear on each card
+ * ------------------------------------------------------------------- */
 export const NEXT_STAGE_FLOW = {
     ask_to_test: ["approved", "not_interested", "not_available"],
     approved: ["shortlisted", "hold", "rejected"],
@@ -176,5 +190,75 @@ export const NEXT_STAGE_FLOW = {
     pitch: ["ask_to_test", "rejected"],
 };
 
+/* ---------------------------------------------------------------------
+ * Helper: Get human-readable stage label
+ * ------------------------------------------------------------------- */
 export const getStageLabel = (stage) =>
     STAGE_LABELS[stage] || stage.replaceAll("_", " ").toUpperCase();
+
+/* ---------------------------------------------------------------------
+ * Additional helpers for better type safety and DX
+ * ------------------------------------------------------------------- */
+
+/**
+ * Check if a stage is a terminal state (outcome)
+ */
+export const isTerminalStage = (stage) => {
+    const normalised = normaliseStage(stage);
+    return OUTCOME_STAGES.includes(normalised);
+};
+
+/**
+ * Check if a stage is in the main flow
+ */
+export const isMainFlowStage = (stage) => {
+    const normalised = normaliseStage(stage);
+    return MAIN_FLOW_STAGES.includes(normalised);
+};
+
+/**
+ * Get all available stages for a given current stage
+ */
+export const getAvailableTransitions = (currentStage) => {
+    const normalised = normaliseStage(currentStage);
+    return NEXT_STAGE_FLOW[normalised] || [];
+};
+
+/**
+ * Get stage color for UI indicators (simplified mapping)
+ */
+export const getStageColor = (stage) => {
+    const normalised = normaliseStage(stage);
+    const colorMap = {
+        ask_to_test: "slate",
+        approved: "emerald",
+        hold: "amber",
+        shortlisted: "violet",
+        already_tested: "fuchsia",
+        locked: "amber",
+        rejected: "rose",
+        not_available: "zinc",
+        not_interested: "zinc",
+        pitch: "teal",
+        follow_up: "amber",
+    };
+    return colorMap[normalised] || "white";
+};
+
+/**
+ * Check if a stage can accept drag-drop operations
+ */
+export const isDroppableStage = (stage) => {
+    const nonDroppable = [...OUTCOME_STAGES, "locked", "pitch"];
+    return !nonDroppable.includes(normaliseStage(stage));
+};
+
+/**
+ * Get placeholder text for empty state based on context
+ */
+export const getEmptyStateMessage = (stage, hasFilters = false) => {
+    if (hasFilters) {
+        return "No matching talents";
+    }
+    return EMPTY_STATE_COPY[stage] || "Empty";
+};

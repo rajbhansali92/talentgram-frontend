@@ -9,9 +9,9 @@ import TalentAvatar from "./TalentAvatar";
  *   • Proper z-index stacking (dropdown above sticky elements)
  *   • Increased dropdown offset for better visual separation
  *   • Keyboard navigation support (Enter, Escape, Arrow keys)
- *   • Prevents parent scroll containers from clipping dropdown
  *   • Focus management and accessibility
  *   • Loading states with skeleton option
+ *   • No DOM mutation — uses proper CSS containment
  */
 
 const QuickAddTalents = memo(function QuickAddTalents({
@@ -30,7 +30,7 @@ const QuickAddTalents = memo(function QuickAddTalents({
     const inputRef = useRef(null);
     const dropdownRef = useRef(null);
 
-    // ISSUE 8 FIX: Handle click outside with proper refs
+    // Handle click outside with proper refs
     useEffect(() => {
         function handleClickOutside(event) {
             if (
@@ -48,46 +48,7 @@ const QuickAddTalents = memo(function QuickAddTalents({
         return () => document.removeEventListener("mousedown", handleClickOutside);
     }, []);
 
-    // ISSUE 8 FIX: Prevent body scroll when dropdown is open
-    useEffect(() => {
-        if (isOpen && searchResults.length > 0) {
-            // Find and temporarily disable any parent overflow:hidden
-            const findScrollParents = (element) => {
-                const parents = [];
-                let current = element.parentElement;
-                while (current && current !== document.body) {
-                    const overflow = window.getComputedStyle(current).overflow;
-                    const overflowY = window.getComputedStyle(current).overflowY;
-                    if (overflow === 'hidden' || overflowY === 'hidden') {
-                        parents.push(current);
-                    }
-                    current = current.parentElement;
-                }
-                return parents;
-            };
-            
-            const scrollParents = findScrollParents(wrapperRef.current);
-            const originalOverflows = scrollParents.map(p => ({
-                element: p,
-                overflow: p.style.overflow,
-                overflowY: p.style.overflowY
-            }));
-            
-            scrollParents.forEach(p => {
-                p.style.overflow = 'visible';
-                p.style.overflowY = 'visible';
-            });
-            
-            return () => {
-                originalOverflows.forEach(({ element, overflow, overflowY }) => {
-                    element.style.overflow = overflow;
-                    element.style.overflowY = overflowY;
-                });
-            };
-        }
-    }, [isOpen, searchResults.length]);
-
-    // ISSUE 8 FIX: Keyboard navigation
+    // Keyboard navigation
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (!isOpen) return;
@@ -184,6 +145,7 @@ const QuickAddTalents = memo(function QuickAddTalents({
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
+                        aria-hidden="true"
                     >
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
@@ -233,7 +195,7 @@ const QuickAddTalents = memo(function QuickAddTalents({
                 </button>
             </div>
 
-            {/* ISSUE 8 FIX: Enhanced dropdown with proper stacking and spacing */}
+            {/* Enhanced dropdown with proper stacking and spacing */}
             {isOpen && searchQuery && (
                 <div 
                     id="quick-add-dropdown"
@@ -302,6 +264,7 @@ const QuickAddTalents = memo(function QuickAddTalents({
                                         readOnly
                                         className="w-3.5 h-3.5 rounded border-white/20 bg-transparent pointer-events-none"
                                         tabIndex={-1}
+                                        aria-hidden="true"
                                     />
                                     <TalentAvatar
                                         src={talent.image_url}
@@ -343,27 +306,5 @@ const QuickAddTalents = memo(function QuickAddTalents({
         </div>
     );
 });
-
-// Add dropdown animation to global styles if not present
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes dropdown-in {
-        from {
-            opacity: 0;
-            transform: translateY(-4px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-    .animate-dropdown-in {
-        animation: dropdown-in 0.15s ease-out forwards;
-    }
-`;
-if (!document.querySelector('#quick-add-styles')) {
-    style.id = 'quick-add-styles';
-    document.head.appendChild(style);
-}
 
 export default QuickAddTalents;

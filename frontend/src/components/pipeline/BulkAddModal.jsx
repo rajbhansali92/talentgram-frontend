@@ -1,9 +1,5 @@
 import React from "react";
 
-/**
- * BulkAddModal — paste-IDs modal for bulk-adding talents to the pipeline.
- * Stateless; the parent owns the textarea value and the busy flag.
- */
 function BulkAddModal({
     value,
     onChange,
@@ -13,27 +9,42 @@ function BulkAddModal({
 }) {
     return (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-            <div className="bg-gray-900 border border-white/20 rounded-lg p-6 w-full max-w-lg">
-                <h3 className="text-white text-lg mb-4">Bulk Add Talents</h3>
-                <p className="text-white/40 text-sm mb-3">
+            <div className="bg-[#151515] border border-white/10 rounded-lg p-5 w-full max-w-md shadow-xl">
+                <h3 className="text-white text-sm font-medium mb-1">
+                    Bulk Import Talents
+                </h3>
+                <p className="text-white/30 text-[10px] mb-3">
                     Enter talent IDs (one per line or comma-separated)
                 </p>
                 <textarea
                     value={value}
                     onChange={(e) => onChange(e.target.value)}
-                    placeholder={"tal_12345\ntal_67890\ntal_11111"}
+                    placeholder="tal_12345&#10;tal_67890&#10;tal_11111"
                     data-testid="pipeline-bulk-input"
-                    className="w-full h-40 bg-black/50 border border-white/20 rounded p-2 text-white mb-4 font-mono text-sm"
+                    className="
+                        w-full h-32 
+                        bg-black/50 border border-white/10 rounded-md 
+                        p-2 text-white mb-3 font-mono text-xs
+                        focus:outline-none focus:border-white/20
+                        transition-colors duration-150
+                        resize-none
+                    "
                     disabled={busy}
                 />
-                <div className="text-white/40 text-xs mb-4">
+                <div className="text-white/20 text-[9px] mb-3">
                     Supports UUIDs, custom IDs, or numeric IDs
                 </div>
                 <div className="flex gap-2 justify-end">
                     <button
                         onClick={onCancel}
                         disabled={busy}
-                        className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded transition-colors"
+                        className="
+                            px-3 py-1.5 
+                            bg-white/5 hover:bg-white/10 
+                            text-white/60 hover:text-white/80 
+                            rounded text-xs
+                            transition-colors duration-150
+                        "
                     >
                         Cancel
                     </button>
@@ -41,9 +52,15 @@ function BulkAddModal({
                         onClick={onSubmit}
                         disabled={busy}
                         data-testid="pipeline-bulk-add-submit"
-                        className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded transition-colors"
+                        className="
+                            px-3 py-1.5 
+                            bg-white/10 hover:bg-white/15 
+                            text-white/80 hover:text-white 
+                            rounded text-xs font-medium
+                            transition-colors duration-150
+                        "
                     >
-                        {busy ? "Adding…" : "Add Talents"}
+                        {busy ? "Adding..." : "Import"}
                     </button>
                 </div>
             </div>

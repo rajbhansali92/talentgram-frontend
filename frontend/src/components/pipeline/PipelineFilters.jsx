@@ -41,11 +41,11 @@ const PipelineFilters = memo(function PipelineFilters({
         <div
             data-testid="pipeline-control-bar"
             className="
-                sticky top-2 z-30 mb-6
-                rounded-xl
-                bg-gradient-to-br from-[#141415] via-[#111112] to-[#0a0a0b]
-                border border-white/[0.04]
-                backdrop-blur-md
+                sticky top-3 z-30 mb-6
+                rounded-lg
+                bg-white
+                border border-black/[0.08]
+                shadow-[0_4px_18px_-14px_rgba(0,0,0,0.08)]
                 overflow-visible
             "
         >
@@ -61,17 +61,17 @@ const PipelineFilters = memo(function PipelineFilters({
                         data-testid="pipeline-filter-search"
                         className="
                             w-full
-                            bg-black/40 border border-white/[0.06]
+                            bg-[#f5f5f5] border border-black/[0.08]
                             rounded-lg
                             pl-9 pr-9 py-1.5
-                            text-[13px] text-white/85 placeholder-white/25
-                            focus-visible:outline-none focus-visible:border-white/15 focus-visible:ring-1 focus-visible:ring-white/8
+                            text-[13px] text-black/85 placeholder:text-black/35
+                            focus-visible:outline-none focus-visible:border-black/[0.15] focus-visible:ring-1 focus-visible:ring-black/8
                             transition-all duration-200
-                            hover:border-white/10
+                            hover:border-black/[0.12]
                         "
                     />
                     <svg
-                        className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30 pointer-events-none transition-colors duration-200"
+                        className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-black/30 pointer-events-none transition-colors duration-200"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -90,11 +90,11 @@ const PipelineFilters = memo(function PipelineFilters({
                                 absolute right-2 top-1/2 -translate-y-1/2
                                 min-w-[22px] min-h-[22px] w-[22px] h-[22px] rounded
                                 flex items-center justify-center
-                                text-white/40 hover:text-white/70
-                                bg-white/[0.02] hover:bg-white/[0.06]
+                                text-black/45 hover:text-black/75
+                                bg-black/[0.03] hover:bg-black/[0.06]
                                 transition-all duration-200
                                 text-base font-medium
-                                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/15
+                                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black/15
                             "
                         >
                             ×
@@ -133,7 +133,7 @@ const PipelineFilters = memo(function PipelineFilters({
                 <div className="flex items-center gap-3 shrink-0">
                     <span
                         className={`text-[10px] font-mono tracking-wide ${
-                            showingCount ? "text-white/55" : "text-white/25"
+                            showingCount ? "text-black/55" : "text-black/35"
                         }`}
                         data-testid="pipeline-filter-count"
                     >
@@ -148,11 +148,11 @@ const PipelineFilters = memo(function PipelineFilters({
                             data-testid="pipeline-filter-clear"
                             className="
                                 px-2.5 py-0.5 rounded
-                                text-[9px] tracking-wide uppercase font-medium
-                                text-white/40 hover:text-rose-300/60
-                                hover:bg-rose-500/8
+                                text-[10px] tracking-wide uppercase font-medium
+                                text-black/45 hover:text-black/75
+                                hover:bg-black/[0.04]
                                 transition-all duration-200
-                                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500/25
+                                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black/15
                             "
                             title="Clear all filters"
                         >
@@ -174,13 +174,13 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
             data-testid={testid}
             className="
                 shrink-0 flex items-center gap-2
-                bg-white/[0.015] border border-white/[0.04]
+                bg-[#fafafa] border border-black/[0.06]
                 rounded-md pl-2.5 pr-1 py-0.5
-                hover:border-white/[0.07] transition-colors duration-200
+                hover:border-black/[0.10] transition-colors duration-200
             "
         >
             <span
-                className={`text-[9px] font-medium tracking-wide uppercase text-white/25 shrink-0 ${
+                className={`text-[10px] font-medium tracking-wide uppercase text-black/40 shrink-0 ${
                     compact ? "hidden xl:inline" : ""
                 }`}
             >
@@ -199,13 +199,13 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
                             className={`
                                 shrink-0
                                 px-2.5 py-0.5 rounded-[5px]
-                                text-[9px] font-medium tracking-wide uppercase
+                                text-[10px] font-medium tracking-wide uppercase
                                 transition-all duration-150
-                                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/15
+                                focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black/15
                                 ${
                                     active
-                                        ? "bg-white text-black shadow-[0_1px_2px_rgba(0,0,0,0.1)] ring-1 ring-white/15"
-                                        : "text-white/45 hover:text-white/75 hover:bg-white/[0.03]"
+                                        ? "bg-black text-white shadow-[0_1px_2px_rgba(0,0,0,0.05)]"
+                                        : "text-black/55 hover:text-black/85 hover:bg-black/[0.03]"
                                 }
                             `}
                         >

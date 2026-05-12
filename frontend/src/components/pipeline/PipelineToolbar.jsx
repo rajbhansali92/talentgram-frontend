@@ -1,13 +1,5 @@
 import React, { memo } from "react";
 
-/**
- * PipelineToolbar — slim header row with the two persistent entry points
- * for bulk workflows. Renders the page title + project ID on the left
- * and the "Bulk Select" toggle + "+ Bulk Add" CTA on the right.
- *
- * The heavy bulk-action surface lives in the floating BulkActionBar
- * (PATCH 4C) — this toolbar only carries persistent entry points.
- */
 const PipelineToolbar = memo(function PipelineToolbar({
     projectId,
     bulkMode,
@@ -15,45 +7,45 @@ const PipelineToolbar = memo(function PipelineToolbar({
     onOpenBulkAdd,
 }) {
     return (
-        <div className="mb-4 flex justify-between items-start flex-wrap gap-3">
+        <div className="mb-5 flex justify-between items-end flex-wrap gap-3">
             <div>
-                <h2 className="text-white font-semibold tracking-tight">
+                <h1 className="text-xl font-medium tracking-tight text-white/90">
                     Casting Pipeline
-                </h2>
-                <p className="text-white/40 text-[11px] mt-1 tg-mono">
-                    Project ID: {projectId}
+                </h1>
+                <p className="text-white/25 text-[10px] mt-1 font-mono">
+                    {projectId}
                 </p>
             </div>
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex gap-2">
                 <button
                     type="button"
                     onClick={onToggleBulkMode}
                     data-testid="pipeline-bulk-mode"
                     aria-pressed={bulkMode}
                     className={`
-                        px-3 py-1.5 text-[11px] tracking-[0.16em] uppercase
-                        rounded-full border transition-all duration-200
+                        px-3 py-1.5 text-[10px] tracking-wide uppercase
+                        rounded-md transition-all duration-200
                         ${
                             bulkMode
-                                ? "border-white/30 bg-white/[0.08] text-white/90"
-                                : "border-white/10 bg-white/[0.03] text-white/65 hover:text-white hover:border-white/20"
+                                ? "bg-white/10 text-white border border-white/15"
+                                : "bg-transparent text-white/50 border border-white/10 hover:bg-white/5 hover:text-white/70"
                         }
                     `}
                 >
-                    {bulkMode ? "Exit Select" : "Bulk Select"}
+                    {bulkMode ? "Exit Select" : "Select Mode"}
                 </button>
                 <button
                     type="button"
                     onClick={onOpenBulkAdd}
                     data-testid="pipeline-bulk-add-open"
                     className="
-                        px-3 py-1.5 text-[11px] tracking-[0.16em] uppercase
-                        rounded-full border border-white/10 bg-white/[0.03]
-                        text-white/65 hover:text-white hover:border-white/20
-                        transition-all duration-200
+                        px-3 py-1.5 text-[10px] tracking-wide uppercase
+                        border border-white/10 bg-white/5
+                        text-white/50 hover:text-white/80 hover:bg-white/8
+                        rounded-md transition-all duration-200
                     "
                 >
-                    + Bulk Add
+                    + Bulk Import
                 </button>
             </div>
         </div>

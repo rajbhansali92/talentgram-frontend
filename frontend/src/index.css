@@ -470,3 +470,36 @@ html.light .tg-pipeline-scroll:hover::-webkit-scrollbar-thumb {
     background: rgba(0, 0, 0, 0.16);
 }
 
+/* -------------------------------------------------------------------------
+ * Pipeline animations
+ * ----------------------------------------------------------------------- */
+
+@keyframes fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(-2px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-fade-in {
+    animation: fade-in 0.2s ease-out forwards;
+}
+
+@keyframes dropdown-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-dropdown-in {
+    animation: dropdown-in 0.15s ease-out forwards;
+}

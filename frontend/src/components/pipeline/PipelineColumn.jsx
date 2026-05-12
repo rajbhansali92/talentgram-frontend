@@ -76,54 +76,47 @@ const PipelineColumn = memo(function PipelineColumn({
             role="region"
             aria-label={columnLabel}
             className={`
-                relative shrink-0 w-[340px] min-w-[340px] max-w-[340px]
-                rounded-xl overflow-visible
-                bg-gradient-to-b from-[#151515] to-[#101010]
-                shadow-[0_12px_32px_-18px_rgba(0,0,0,0.65)]
+                relative shrink-0 w-[320px] min-w-[320px] max-w-[320px]
+                rounded-lg overflow-visible
+                bg-white
+                shadow-[0_4px_14px_-10px_rgba(0,0,0,0.08)]
                 border transition-all duration-200
-                hover:border-white/[0.07]
-                before:absolute before:inset-0
-                before:bg-gradient-to-b
-                before:from-white/[0.015]
-                before:to-transparent
-                before:pointer-events-none
-                before:rounded-xl
+                hover:border-black/[0.12]
                 ${
                     isDragOver
                         ? `
-                            border-white/25
-                            bg-white/[0.03]
-                            ring-1 ring-white/15
-                            shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06), inset_0_0_24px_rgba(255,255,255,0.03)]
+                            bg-black/[0.02]
+                            ring-1 ring-black/[0.08]
+                            border-black/[0.12]
                           `
-                        : "border-white/[0.07]"
+                        : "border-black/[0.08]"
                 }
             `}
         >
-            {/* Stage accent line — very subtle */}
+            {/* Stage accent line — simple solid muted operational indicator */}
             <div
-                className={`absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r ${accent} pointer-events-none rounded-t-xl`}
+                className={`absolute inset-x-0 top-0 h-[2px] ${accent} pointer-events-none rounded-t-lg`}
                 aria-hidden="true"
             />
 
-            {/* Sticky header - offset below filter bar */}
+            {/* Sticky header — operational clarity */}
             <div
                 className="
                     sticky top-[52px] z-10
                     px-4 py-3
-                    bg-[#111111]/92 backdrop-blur-md
-                    border-b border-white/[0.08]
-                    rounded-t-xl
+                    bg-white/96 backdrop-blur-sm
+                    border-b border-black/[0.06]
+                    rounded-t-lg
                     flex items-center justify-between gap-3
                 "
             >
                 <div className="min-w-0 flex items-center gap-2">
-                    <span className="text-[10px] tracking-[0.2em] uppercase text-white/70 font-medium truncate">
+                    <span className="text-[11px] tracking-[0.15em] uppercase text-black/70 font-medium truncate">
                         {getStageLabel(stage)}
                     </span>
                     {readOnly && (
                         <span 
-                            className="text-[7px] tracking-wide uppercase text-white/35 font-mono"
+                            className="text-[8px] tracking-wide uppercase text-black/35 font-mono"
                             aria-label="Read only column"
                         >
                             view
@@ -132,9 +125,9 @@ const PipelineColumn = memo(function PipelineColumn({
                 </div>
                 <span
                     className="
-                        text-[10px] font-mono text-white/45
-                        px-1.5 py-0.5 rounded-[4px]
-                        bg-white/[0.05] border border-white/[0.05]
+                        text-[11px] font-mono text-black/55
+                        px-2 py-0.5 rounded-[4px]
+                        bg-black/[0.04] border border-black/[0.06]
                         shrink-0
                     "
                     data-testid={`pipeline-column-count-${stage}`}
@@ -144,9 +137,9 @@ const PipelineColumn = memo(function PipelineColumn({
                 </span>
             </div>
 
-            {/* Select all */}
+            {/* Select all — subtle operational area */}
             {canSelectAll && (
-                <div className="px-4 py-2 border-b border-white/[0.03] bg-white/[0.015]">
+                <div className="px-4 py-2 border-b border-black/[0.04] bg-black/[0.015]">
                     <button
                         type="button"
                         onClick={() => onSelectAll(items)}
@@ -154,10 +147,10 @@ const PipelineColumn = memo(function PipelineColumn({
                         aria-label={allInColumnSelected ? "Deselect all items in column" : "Select all items in column"}
                         className="
                             w-full text-left flex items-center justify-between gap-2
-                            text-[9px] tracking-wide uppercase
-                            text-white/40 hover:text-white/65
+                            text-[10px] tracking-wide uppercase
+                            text-black/45 hover:text-black/70
                             transition-colors duration-200
-                            focus:outline-none focus:ring-1 focus:ring-white/20 rounded
+                            focus:outline-none focus:ring-1 focus:ring-black/20 rounded
                         "
                     >
                         <span>
@@ -165,23 +158,24 @@ const PipelineColumn = memo(function PipelineColumn({
                                 ? "Deselect all"
                                 : "Select all"}
                         </span>
-                        <span className="font-mono text-white/20" aria-hidden="true">
+                        <span className="font-mono text-black/25" aria-hidden="true">
                             {items.length}
                         </span>
                     </button>
                 </div>
             )}
 
-            {/* Card stream - dynamic height with overflow hidden ONLY here */}
+            {/* Card stream - subtle operational lane background */}
             <div
                 className={`
                     px-3 py-3 space-y-3
                     overflow-y-auto overflow-x-visible
+                    bg-[#fafafa]
                     tg-pipeline-scroll
                     ${
                         compact
                             ? "min-h-[180px] max-h-[240px]"
-                            : "min-h-[180px] max-h-[58vh]"
+                            : "min-h-[180px] max-h-[64vh]"
                     }
                 `}
                 role="list"
@@ -209,10 +203,10 @@ const PipelineColumn = memo(function PipelineColumn({
                 )}
             </div>
 
-            {/* Drop overlay indicator for better visual feedback */}
+            {/* Drop overlay — minimal operational feedback */}
             {isDragOver && (
                 <div 
-                    className="absolute inset-0 pointer-events-none bg-white/[0.025] backdrop-blur-[1px] border border-white/[0.10] rounded-xl transition-opacity duration-150"
+                    className="absolute inset-0 pointer-events-none bg-black/[0.01] rounded-lg transition-opacity duration-150"
                     aria-hidden="true"
                 />
             )}

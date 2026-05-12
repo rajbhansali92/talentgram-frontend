@@ -26,19 +26,8 @@ import {
     normaliseStage,
 } from "./constants";
 
-/**
- * PipelineBoard — orchestration root.
- *
- * Composes the data hook, filter hook, bulk-selection hook, DnD hook,
- * and talent-search hook, then wires them into the cinematic board
- * layout. The component itself is intentionally thin — every visual
- * concern lives in a dedicated component under /components/pipeline/.
- */
 function PipelineBoard({ projectId }) {
-    // ---- data ---------------------------------------------------------
     const { data, setData, loading, error, fetchPipeline } = usePipelineData(projectId);
-
-    // ---- talent search (Quick Add) ------------------------------------
     const {
         searchQuery,
         setSearchQuery,
@@ -49,7 +38,6 @@ function PipelineBoard({ projectId }) {
         resetSearch,
     } = useTalentSearch();
 
-    // ---- filters ------------------------------------------------------
     const {
         search,
         setSearch,
@@ -67,7 +55,6 @@ function PipelineBoard({ projectId }) {
         hasZeroAfterFilter,
     } = usePipelineFilters(data);
 
-    // ---- bulk selection ----------------------------------------------
     const {
         bulkIds,
         setBulkIds,
@@ -77,7 +64,6 @@ function PipelineBoard({ projectId }) {
         selectAllInColumn,
     } = useBulkSelection();
 
-    // ---- drag & drop -------------------------------------------------
     const {
         dragSupported,
         dragId,
@@ -86,15 +72,11 @@ function PipelineBoard({ projectId }) {
         handleCardDrop,
     } = usePipelineDnD({ setData, refresh: fetchPipeline });
 
-    // ---- bulk-add modal ----------------------------------------------
     const [showBulkAdd, setShowBulkAdd] = useState(false);
     const [bulkTalentsInput, setBulkTalentsInput] = useState("");
     const [bulkAdding, setBulkAdding] = useState(false);
 
-    // ---- handlers ----------------------------------------------------
     const handleToggleBulkMode = useCallback(() => {
-        // Leaving bulk mode also clears the selection so it's a single
-        // mental action.
         if (bulkMode) {
             setBulkMode(false);
             setBulkIds(new Set());
@@ -118,10 +100,10 @@ function PipelineBoard({ projectId }) {
             const count = selectedTalents.size;
             resetSearch();
             await fetchPipeline();
-            toast.success(`Added ${count} talent(s) to pipeline`);
+            toast.success(`Added ${count} talent(s)`);
         } catch (e) {
             console.error("Failed to add talents:", e);
-            toast.error(e?.response?.data?.detail || "Failed to add talents to pipeline");
+            toast.error(e?.response?.data?.detail || "Failed to add talents");
         }
     };
 
@@ -132,7 +114,7 @@ function PipelineBoard({ projectId }) {
             .filter((id) => id.length > 0 && id !== ",");
 
         if (talentIds.length === 0) {
-            toast.error("Please enter at least one talent ID");
+            toast.error("Enter at least one talent ID");
             return;
         }
 
@@ -145,7 +127,7 @@ function PipelineBoard({ projectId }) {
             setBulkTalentsInput("");
             setShowBulkAdd(false);
             await fetchPipeline();
-            toast.success(`Successfully added ${talentIds.length} talent(s)`);
+            toast.success(`Added ${talentIds.length} talent(s)`);
         } catch (e) {
             console.error("Bulk add failed:", e);
             toast.error(e?.response?.data?.detail || "Failed to add talents");
@@ -156,10 +138,6 @@ function PipelineBoard({ projectId }) {
 
     const handleBulkMove = async (targetStage) => {
         if (bulkIds.size === 0) return;
-        // The deliberate click on a floating pill is itself the confirm —
-        // no `window.confirm` (it blocked the main thread and felt jarring).
-        // Errors are toasted; failed moves keep the selection intact so the
-        // user can retry or cancel cleanly.
         const count = bulkIds.size;
         try {
             await adminApi.patch("/pipeline/move", {
@@ -170,7 +148,7 @@ function PipelineBoard({ projectId }) {
             setBulkMode(false);
             await fetchPipeline();
             toast.success(
-                `Moved ${count} ${count === 1 ? "talent" : "talents"} to ${getStageLabel(targetStage)}`,
+                `Moved ${count} to ${getStageLabel(targetStage)}`,
             );
         } catch (e) {
             console.error("Bulk move failed:", e);
@@ -178,31 +156,24 @@ function PipelineBoard({ projectId }) {
         }
     };
 
-    // ---- early returns ------------------------------------------------
     if (loading) {
         return (
-            <div
-                className="flex items-center justify-center h-64"
-                data-testid="pipeline-loading"
-            >
-                <div className="text-white/60">Loading pipeline…</div>
+            <div className="flex items-center justify-center h-64" data-testid="pipeline-loading">
+                <div className="text-white/30 text-xs animate-pulse">
+                    Loading pipeline...
+                </div>
             </div>
         );
     }
 
     if (error) {
         return (
-            <div
-                className="flex items-center justify-center h-64"
-                data-testid="pipeline-error"
-            >
-                <div className="text-red-400">{error}</div>
+            <div className="flex items-center justify-center h-64" data-testid="pipeline-error">
+                <div className="text-rose-400/50 text-xs">{error}</div>
             </div>
         );
     }
 
-    // Shared column props — cuts the prop-drilling repetition across the
-    // three rendered sections.
     const columnCommons = {
         refresh: fetchPipeline,
         bulkMode,
@@ -248,7 +219,6 @@ function PipelineBoard({ projectId }) {
                 />
             )}
 
-            {/* Sticky cinematic control bar (PATCH 4E) */}
             <PipelineFilters
                 search={search}
                 onSearch={setSearch}
@@ -264,17 +234,14 @@ function PipelineBoard({ projectId }) {
                 filteredCount={filteredData.length}
             />
 
-            {/* Empty filter state — replaces board sections when active
-                filters resolve to zero matches. */}
             {hasZeroAfterFilter && (
                 <FilterEmptyState onReset={clearAllFilters} />
             )}
 
-            {/* Main flow — hidden when showOnlyFollowUp or empty. */}
             {!hasZeroAfterFilter && !showOnlyFollowUp && (
                 <BoardSection
-                    eyebrow="Main flow"
-                    helper={`${MAIN_FLOW_STAGES.length} stages · progression funnel`}
+                    eyebrow="Pipeline"
+                    helper={`${MAIN_FLOW_STAGES.length} stages`}
                 >
                     <BoardRow testid="pipeline-main-flow">
                         {MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
@@ -289,8 +256,6 @@ function PipelineBoard({ projectId }) {
                 </BoardSection>
             )}
 
-            {/* Follow-up — virtual read-only lane. Always shown unless the
-                board was filtered to zero results. */}
             {!hasZeroAfterFilter && (
                 <FollowUpLane
                     items={filteredData.filter((i) => i.is_follow_up === true)}
@@ -298,9 +263,8 @@ function PipelineBoard({ projectId }) {
                 />
             )}
 
-            {/* Outcomes — terminal states. Visually de-emphasised. */}
             {!hasZeroAfterFilter && !showOnlyFollowUp && (
-                <BoardSection eyebrow="Outcomes" helper="Terminal states" muted>
+                <BoardSection eyebrow="Archived" muted>
                     <BoardRow testid="pipeline-outcomes">
                         {OUTCOME_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
                             <PipelineColumn
@@ -314,13 +278,8 @@ function PipelineBoard({ projectId }) {
                 </BoardSection>
             )}
 
-            {/* Pitch — independent sourcing lane. */}
             {!hasZeroAfterFilter && !showOnlyFollowUp && (
-                <BoardSection
-                    eyebrow="Pitch"
-                    helper="Sourcing · independent of funnel"
-                    divider
-                >
+                <BoardSection eyebrow="Sourcing" divider>
                     <BoardRow testid="pipeline-pitch">
                         {INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
                             <PipelineColumn
@@ -334,8 +293,6 @@ function PipelineBoard({ projectId }) {
                 </BoardSection>
             )}
 
-            {/* Floating cinematic bulk action bar (PATCH 4C). Mounted last
-                so it sits on top of everything via z-index. */}
             <BulkActionBar
                 count={bulkIds.size}
                 onClear={handleClearBulk}
@@ -345,7 +302,4 @@ function PipelineBoard({ projectId }) {
     );
 }
 
-// Memoise. Parent (ProjectEdit) re-renders on every keystroke into its
-// form fields; with primitive `projectId`, this subtree skips
-// reconciliation until you navigate to a different project.
 export default memo(PipelineBoard);

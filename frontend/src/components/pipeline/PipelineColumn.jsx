@@ -77,7 +77,7 @@ const PipelineColumn = memo(function PipelineColumn({
             aria-label={columnLabel}
             className={`
                 relative shrink-0 w-[268px] min-w-[268px] max-w-[268px]
-                rounded-lg overflow-hidden
+                rounded-lg overflow-visible
                 bg-[#111]
                 border transition-all duration-200
                 ${
@@ -162,11 +162,12 @@ const PipelineColumn = memo(function PipelineColumn({
                 </div>
             )}
 
-            {/* Card stream - dynamic height */}
+            {/* Card stream - dynamic height with overflow hidden ONLY here */}
             <div
                 className={`
                     px-2 py-2 space-y-2
-                    overflow-y-auto tg-pipeline-scroll
+                    overflow-y-auto overflow-x-visible
+                    tg-pipeline-scroll
                     ${
                         compact
                             ? "min-h-[180px] max-h-[260px]"

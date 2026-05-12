@@ -1,4 +1,4 @@
-import React, { memo } from "react";
+import React, { memo, useState } from "react";
 
 /**
  * TalentAvatar — premium cinematic avatar with initial-letter fallback.
@@ -12,31 +12,34 @@ import React, { memo } from "react";
  * so the empty state still reads "premium", not "broken image".
  */
 const TalentAvatar = memo(function TalentAvatar({ src, name, size = "md" }) {
+    const [errored, setErrored] = useState(false);
     const initial = (name || "?").trim().charAt(0).toUpperCase() || "?";
     const dims =
         size === "sm"
-            ? "w-6 h-6 text-[10px] rounded"
+            ? "w-6 h-6 text-[10px] rounded-md"
             : size === "lg"
               ? "w-14 h-14 text-base rounded-xl"
               : "w-11 h-11 text-sm rounded-lg";
 
-    if (src) {
+    if (src && !errored) {
         return (
             <img
                 src={src}
-                alt=""
+                alt={name || "Talent avatar"}
                 loading="lazy"
-                className={`${dims} object-cover shrink-0 bg-white/5 ring-1 ring-white/10 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)]`}
+                onError={() => setErrored(true)}
+                className={`${dims} object-cover object-center shrink-0 bg-white/5 ring-1 ring-white/10 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] transition-opacity duration-300`}
             />
         );
     }
     return (
         <div
             aria-hidden
-            className={`${dims} shrink-0 flex items-center justify-center font-medium text-white/75
+            className={`${dims} shrink-0 flex items-center justify-center font-semibold tracking-[0.02em] text-white/75
                 bg-gradient-to-br from-white/[0.08] to-white/[0.02]
-                ring-1 ring-white/10
-                shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.05)]`}
+                ring-1 ring-white/[0.08]
+                shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.05)]
+                backdrop-blur-[1px]`}
         >
             {initial}
         </div>

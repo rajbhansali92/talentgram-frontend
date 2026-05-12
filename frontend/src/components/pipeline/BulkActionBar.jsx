@@ -26,32 +26,29 @@ const BulkActionBar = memo(function BulkActionBar({ count, onClear, onMove }) {
                 className="
                     flex items-center gap-2
                     px-3 py-2
-                    rounded-full
-                    bg-gradient-to-b from-[#171717]/95 to-[#101010]/92
-                    backdrop-blur-xl
-                    border border-white/[0.06]
-                    shadow-[0_10px_35px_-18px_rgba(0,0,0,0.7)]
-                    shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]
-                    ring-1 ring-white/[0.03]
+                    rounded-lg
+                    bg-white
+                    border border-black/[0.08]
+                    shadow-[0_8px_24px_-18px_rgba(0,0,0,0.10)]
                 "
             >
                 <div
                     className="
                         shrink-0 flex items-center gap-1
                         px-2 py-0.5 rounded-full
-                        bg-white/[0.12]
-                        border border-white/[0.08]
-                        text-white/90
-                        text-[10px] tracking-[0.18em] uppercase font-medium
+                        bg-black/[0.05]
+                        border border-black/[0.08]
+                        text-black/75
+                        text-[10px] tracking-[0.14em] uppercase font-medium
                     "
                     data-testid="pipeline-bulk-bar-count"
                 >
                     {count}
                 </div>
 
-                <div className="w-px h-4 bg-white/[0.05]" />
+                <div className="w-px h-4 bg-black/[0.08]" />
 
-                <span className="text-[9px] tracking-[0.18em] uppercase text-white/30 shrink-0">
+                <span className="text-[10px] tracking-[0.14em] uppercase text-black/40 shrink-0">
                     Move
                 </span>
 
@@ -66,10 +63,10 @@ const BulkActionBar = memo(function BulkActionBar({ count, onClear, onMove }) {
                             className="
                                 shrink-0
                                 px-2.5 py-1 rounded-full
-                                text-[9px] tracking-[0.12em] uppercase
-                                text-white/60 hover:text-white/80
-                                bg-white/[0.05] hover:bg-white/[0.08]
-                                border border-white/[0.05] hover:border-white/[0.1]
+                                text-[10px] tracking-[0.1em] uppercase
+                                text-black/60 hover:text-black/85
+                                bg-black/[0.03] hover:bg-black/[0.06]
+                                border border-black/[0.06] hover:border-black/[0.10]
                                 transition-all duration-150
                                 disabled:opacity-40 disabled:cursor-not-allowed
                             "
@@ -85,11 +82,11 @@ const BulkActionBar = memo(function BulkActionBar({ count, onClear, onMove }) {
                     data-testid="pipeline-bulk-bar-clear"
                     className="
                         shrink-0
-                        w-6 h-6 rounded-full
+                        w-6 h-6 rounded-lg
                         flex items-center justify-center
-                        text-white/35 hover:text-white/70
-                        hover:bg-white/[0.05]
-                        transition-all duration-200
+                        text-black/40 hover:text-black/70
+                        hover:bg-black/[0.05]
+                        transition-all duration-150
                         text-base leading-none
                     "
                 >

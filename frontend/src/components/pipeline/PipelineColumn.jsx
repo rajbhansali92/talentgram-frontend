@@ -76,20 +76,19 @@ const PipelineColumn = memo(function PipelineColumn({
             role="region"
             aria-label={columnLabel}
             className={`
-                relative shrink-0 w-[320px] min-w-[320px] max-w-[320px]
+                relative shrink-0 w-[300px] min-w-[300px] max-w-[300px]
                 rounded-lg overflow-visible
                 bg-white
-                shadow-[0_4px_14px_-10px_rgba(0,0,0,0.08)]
-                border transition-all duration-200
-                hover:border-black/[0.12]
+                shadow-[0_1px_2px_rgba(0,0,0,0.04)]
+                border border-black/[0.08] transition-all duration-150
                 ${
                     isDragOver
                         ? `
-                            bg-black/[0.02]
-                            ring-1 ring-black/[0.08]
-                            border-black/[0.12]
+                            bg-black/[0.01]
+                            ring-1 ring-black/[0.06]
+                            border-black/[0.10]
                           `
-                        : "border-black/[0.08]"
+                        : ""
                 }
             `}
         >
@@ -111,7 +110,7 @@ const PipelineColumn = memo(function PipelineColumn({
                 "
             >
                 <div className="min-w-0 flex items-center gap-2">
-                    <span className="text-[11px] tracking-[0.15em] uppercase text-black/70 font-medium truncate">
+                    <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-medium truncate">
                         {getStageLabel(stage)}
                     </span>
                     {readOnly && (
@@ -126,7 +125,7 @@ const PipelineColumn = memo(function PipelineColumn({
                 <span
                     className="
                         text-[11px] font-mono text-black/55
-                        px-2 py-0.5 rounded-[4px]
+                        px-2 py-0.5 rounded
                         bg-black/[0.04] border border-black/[0.06]
                         shrink-0
                     "
@@ -149,7 +148,7 @@ const PipelineColumn = memo(function PipelineColumn({
                             w-full text-left flex items-center justify-between gap-2
                             text-[10px] tracking-wide uppercase
                             text-black/45 hover:text-black/70
-                            transition-colors duration-200
+                            transition-colors duration-100
                             focus:outline-none focus:ring-1 focus:ring-black/20 rounded
                         "
                     >
@@ -165,10 +164,10 @@ const PipelineColumn = memo(function PipelineColumn({
                 </div>
             )}
 
-            {/* Card stream - subtle operational lane background */}
+            {/* Card stream - dense operational lane background */}
             <div
                 className={`
-                    px-3 py-3 space-y-3
+                    px-2.5 py-2.5 space-y-2.5
                     overflow-y-auto overflow-x-visible
                     bg-[#fafafa]
                     tg-pipeline-scroll
@@ -206,7 +205,7 @@ const PipelineColumn = memo(function PipelineColumn({
             {/* Drop overlay — minimal operational feedback */}
             {isDragOver && (
                 <div 
-                    className="absolute inset-0 pointer-events-none bg-black/[0.01] rounded-lg transition-opacity duration-150"
+                    className="absolute inset-0 pointer-events-none bg-black/[0.005] rounded-lg transition-opacity duration-100"
                     aria-hidden="true"
                 />
             )}

@@ -31,9 +31,7 @@ export const PIPELINE_STAGE_ORDER = [
     ...INDEPENDENT_STAGES,
 ];
 
-// Bulk-action toolbar exposes only the funnel destinations (no
-// terminal/independent stages — those are still reachable via per-card
-// buttons but rarely needed in bulk).
+// Bulk-action toolbar exposes only the funnel destinations
 export const BULK_MOVE_TARGETS = ["ask_to_test", "approved", "shortlisted", "locked"];
 
 export const LEGACY_STAGE_ALIASES = {
@@ -57,48 +55,45 @@ export const STAGE_LABELS = {
     not_available: "NOT AVAILABLE",
     not_interested: "NOT INTERESTED",
     pitch: "PITCH",
-    // Virtual read-only lane (PATCH 3C). Never stored in DB.
     follow_up: "FOLLOW-UP",
 };
 
-// Per-stage accent colours. Used as a thin top bar on the column header.
-// Enhanced: Opacity tuned down for a more luxury, cinematic indicator.
+// Refined stage accents — very subtle, almost invisible
 export const STAGE_ACCENTS = {
-    ask_to_test: "from-sky-400/40 to-sky-500/0",
-    approved: "from-emerald-400/40 to-emerald-500/0",
-    hold: "from-amber-400/40 to-amber-500/0",
-    shortlisted: "from-violet-400/40 to-violet-500/0",
-    already_tested: "from-fuchsia-400/40 to-fuchsia-500/0",
-    locked: "from-yellow-300/40 to-yellow-500/0",
-    rejected: "from-rose-400/25 to-rose-500/0",
-    not_available: "from-zinc-400/20 to-zinc-500/0",
-    not_interested: "from-zinc-400/20 to-zinc-500/0",
-    pitch: "from-teal-400/40 to-teal-500/0",
-    follow_up: "from-amber-400/50 to-amber-500/0",
+    ask_to_test: "from-slate-400/20 to-transparent",
+    approved: "from-emerald-400/20 to-transparent",
+    hold: "from-amber-400/20 to-transparent",
+    shortlisted: "from-violet-400/20 to-transparent",
+    already_tested: "from-fuchsia-400/15 to-transparent",
+    locked: "from-amber-300/15 to-transparent",
+    rejected: "from-rose-400/12 to-transparent",
+    not_available: "from-zinc-500/10 to-transparent",
+    not_interested: "from-zinc-500/10 to-transparent",
+    pitch: "from-teal-400/20 to-transparent",
+    follow_up: "from-amber-400/15 to-transparent",
 };
-export const DEFAULT_ACCENT = "from-white/10 to-white/0";
+export const DEFAULT_ACCENT = "from-white/5 to-transparent";
 
-// Cinematic empty-state copy keyed by stage. Falls back to a generic line.
+// Minimal empty-state copy
 export const EMPTY_STATE_COPY = {
-    ask_to_test: "Awaiting first invitations",
-    approved: "No approvals yet",
-    hold: "Nothing on hold",
-    shortlisted: "Empty shortlist",
-    already_tested: "No prior tests",
-    locked: "Not finalised yet",
-    rejected: "Cleanly clear",
-    not_available: "Everyone's available",
-    not_interested: "All in",
-    pitch: "No pitches in flight",
+    ask_to_test: "No pending",
+    approved: "Awaiting approval",
+    hold: "Paused",
+    shortlisted: "Curated",
+    already_tested: "Completed",
+    locked: "Finalised",
+    rejected: "Archived",
+    not_available: "Available",
+    not_interested: "Open",
+    pitch: "No active",
     follow_up: "All caught up",
 };
 
-// Stable references used by the read-only follow-up lane.
 export const EMPTY_BULK_SET = new Set();
 export const NOOP = () => {};
 
 /* ---------------------------------------------------------------------
- * Filter primitives (PATCH 4E)
+ * Filter primitives
  * ------------------------------------------------------------------- */
 export const STATUS_FOCUS_OPTIONS = [
     { value: "all", label: "All" },
@@ -124,50 +119,50 @@ export const DEFAULT_FILTERS = {
 };
 
 /* ---------------------------------------------------------------------
- * Status tones (PATCH 4B)
- * Used by the Card footer for terminal/locked states. All tones stay
- * muted on purpose — luxury, not dashboard. 
+ * Status tones — refined, minimal
  * ------------------------------------------------------------------- */
 export const STATUS_TONES = {
     locked: {
-        label: "Finalised",
-        dot: "bg-yellow-200/60",
-        text: "text-yellow-200/70",
-        chip: "border-yellow-200/12 bg-yellow-200/[0.03]",
+        label: "Final",
+        dot: "bg-amber-300/40",
+        text: "text-amber-300/50",
+        chip: "border-amber-400/8 bg-amber-400/[0.01]",
     },
     approved: {
         label: "Approved",
-        dot: "bg-emerald-300/60",
-        text: "text-emerald-300/70",
-        chip: "border-emerald-300/12 bg-emerald-300/[0.03]",
+        dot: "bg-emerald-400/40",
+        text: "text-emerald-400/50",
+        chip: "border-emerald-400/8 bg-emerald-400/[0.01]",
     },
     hold: {
-        label: "On hold",
-        dot: "bg-amber-300/60",
-        text: "text-amber-200/70",
-        chip: "border-amber-300/12 bg-amber-300/[0.03]",
+        label: "Hold",
+        dot: "bg-amber-400/35",
+        text: "text-amber-300/45",
+        chip: "border-amber-400/8 bg-amber-400/[0.01]",
     },
     rejected: {
         label: "Rejected",
-        dot: "bg-rose-300/50",
-        text: "text-rose-300/60",
-        chip: "border-rose-300/12 bg-rose-300/[0.03]",
+        dot: "bg-rose-400/30",
+        text: "text-rose-400/40",
+        chip: "border-rose-400/6 bg-rose-400/[0.005]",
     },
     not_available: {
-        label: "Not available",
-        dot: "bg-zinc-300/40",
-        text: "text-zinc-300/55",
-        chip: "border-zinc-300/12 bg-zinc-300/[0.03]",
+        label: "Unavailable",
+        dot: "bg-zinc-500/30",
+        text: "text-zinc-400/40",
+        chip: "border-zinc-500/6 bg-zinc-500/[0.005]",
     },
     not_interested: {
-        label: "Not interested",
-        dot: "bg-zinc-300/40",
-        text: "text-zinc-300/55",
-        chip: "border-zinc-300/12 bg-zinc-300/[0.03]",
+        label: "Declined",
+        dot: "bg-zinc-500/30",
+        text: "text-zinc-400/40",
+        chip: "border-zinc-500/6 bg-zinc-500/[0.005]",
     },
 };
 
-// Sugessted next-steps for card action buttons.
+// Only show 2 primary actions per card — others require click
+export const VISIBLE_ACTIONS_PER_CARD = 2;
+
 export const NEXT_STAGE_FLOW = {
     ask_to_test: ["approved", "not_interested", "not_available"],
     approved: ["shortlisted", "hold", "rejected"],

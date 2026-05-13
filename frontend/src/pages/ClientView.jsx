@@ -148,8 +148,8 @@ export default function ClientView() {
             const response = await axios.post(
                 `${API}/public/links/${slug}/identify`,
                 {
-                    viewer_name: name,
-                    viewer_email: email,
+                    name: name,
+                    email: email,
                 },
             );
             if (response.data.token) {

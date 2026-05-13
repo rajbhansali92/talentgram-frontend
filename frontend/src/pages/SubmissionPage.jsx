@@ -754,14 +754,14 @@ export default function SubmissionPage() {
     // ---------------------------------------------------------------
     if (loading) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#050505]">
-                <Loader2 className="w-6 h-6 animate-spin text-white/40" />
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-50 to-white">
+                <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
             </div>
         );
     }
     if (!project) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#050505] text-white/60 p-6 text-center">
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-slate-500 p-6 text-center">
                 <p>Project not found.</p>
             </div>
         );
@@ -825,23 +825,27 @@ export default function SubmissionPage() {
             submission?.status === "updated" ? "Resubmitted" : "Submitted";
         const feedback = submission?.client_feedback || [];
         return (
-            <div className="min-h-screen bg-[#050505] text-white relative">
-                <div className="absolute top-5 right-5">
+            <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden">
+                <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-amber-200/20" />
+                <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
                 </div>
-                <div className="max-w-2xl w-full mx-auto px-6 py-12 md:py-20 tg-fade-up">
-                    <div className="text-center">
-                        <div className="w-14 h-14 mx-auto mb-6 rounded-full border border-white/20 flex items-center justify-center">
-                            <Check className="w-6 h-6" />
+                <div className="max-w-xl mx-auto px-6 py-16 md:py-24 tg-fade-up">
+                    <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-10 border border-slate-200/60 shadow-[0_20px_40px_-12px_rgba(0,0,0,0.05)] text-center">
+                        <div className="relative w-20 h-20 mx-auto mb-8">
+                            <div className="absolute inset-0 rounded-full bg-emerald-100/60 blur-xl animate-pulse" />
+                            <div className="relative w-full h-full rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center shadow-sm">
+                                <Check className="w-8 h-8 text-emerald-600" />
+                            </div>
                         </div>
-                        <p className="eyebrow mb-3">{statusLabel}</p>
-                        <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-5">
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-4">{statusLabel}</p>
+                        <h1 className="font-display text-4xl md:text-5xl tracking-tight text-slate-900 mb-6 leading-[1.05]">
                             Thank you,{" "}
-                            {form.first_name || submission.talent_name?.split(" ")[0]}.
+                            <span className="text-slate-700">{form.first_name || submission.talent_name?.split(" ")[0]}</span>.
                         </h1>
-                        <p className="text-white/60 text-sm md:text-base leading-relaxed mb-8">
+                        <p className="text-[13px] leading-relaxed text-slate-500 mb-10 max-w-md mx-auto">
                             Your audition for{" "}
-                            <span className="text-white">
+                            <span className="font-medium text-slate-800">
                                 {project.brand_name}
                             </span>{" "}
                             has been received. The Talentgram team will review and
@@ -851,7 +855,7 @@ export default function SubmissionPage() {
                             type="button"
                             onClick={() => setEditMode(true)}
                             data-testid="refine-submission-btn"
-                            className="text-xs tg-mono text-white/60 hover:text-white underline underline-offset-4"
+                            className="text-[11px] font-mono text-slate-400 hover:text-slate-600 underline underline-offset-4 transition-colors"
                         >
                             Want to refine or replace a take? Update your submission →
                         </button>
@@ -861,20 +865,20 @@ export default function SubmissionPage() {
                         here. The relay is mediated by the team, so notes the talent
                         sees have been reviewed. Order is approval-time ascending. */}
                     <section
-                        className="mt-14"
+                        className="mt-16"
                         data-testid="talent-feedback-section"
                     >
-                        <p className="eyebrow mb-3">Client Feedback</p>
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-4">Client Feedback</p>
                         {feedback.length === 0 ? (
                             <div
-                                className="border border-white/10 rounded-sm p-5 text-sm text-white/50"
+                                className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-slate-400 border border-slate-200/60"
                                 data-testid="talent-feedback-empty"
                             >
                                 No feedback yet — the team will share notes here
                                 once a client responds.
                             </div>
                         ) : (
-                            <div className="space-y-3">
+                            <div className="space-y-4">
                                 {feedback.map((f) => (
                                     <FeedbackRow key={f.id} fb={f} />
                                 ))}
@@ -887,9 +891,15 @@ export default function SubmissionPage() {
     }
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white" data-testid="submission-page" data-mobile-step={mobileStep}>
-            <header className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-white/10">
-                <div className="max-w-3xl mx-auto px-5 py-4 flex items-center justify-between">
+        <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden" data-testid="submission-page" data-mobile-step={mobileStep}>
+            {/* Ambient luxury background blobs */}
+            <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
+                <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-amber-200/40 mix-blend-multiply animate-blob" />
+                <div className="absolute bottom-0 -right-40 w-80 h-80 rounded-full bg-slate-200/40 mix-blend-multiply animate-blob animation-delay-2000" />
+            </div>
+
+            <header className="sticky top-0 z-30 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                <div className="max-w-3xl mx-auto px-5 py-5 flex items-center justify-between">
                     <Logo size="sm" />
                     <ThemeToggle size="sm" />
                 </div>
@@ -899,10 +909,10 @@ export default function SubmissionPage() {
                     out of the email field and chosen Use/Edit (or no match). */}
                 {emailGateUnlocked && (
                 <div
-                    className="md:hidden border-t border-white/10 bg-black/70"
+                    className="md:hidden bg-white/60 backdrop-blur-sm border-t border-slate-200/40"
                     data-testid="wizard-stepbar"
                 >
-                    <div className="max-w-3xl mx-auto px-5 py-3 flex items-center gap-3">
+                    <div className="max-w-3xl mx-auto px-5 py-4 flex items-center gap-3">
                         {[1, 2, 3].map((n, i) => {
                             const labels = ["Profile", "Brief", "Uploads"];
                             const reached = mobileStep >= n;
@@ -913,23 +923,23 @@ export default function SubmissionPage() {
                                     type="button"
                                     onClick={() => goToStep(n)}
                                     data-testid={`wizard-step-${n}`}
-                                    className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-90" : "opacity-40"}`}
+                                    className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-80" : "opacity-50"}`}
                                 >
                                     <span
-                                        className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] tg-mono shrink-0 ${active ? "bg-white text-black" : reached ? "bg-white/20 text-white border border-white/40" : "border border-white/20 text-white/50"}`}
+                                        className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-slate-700 border border-slate-300" : "border border-slate-300 text-slate-500"}`}
                                     >
                                         {reached && !active ? <Check className="w-3 h-3" /> : n}
                                     </span>
-                                    <span className={`text-[11px] tracking-widest uppercase ${active ? "text-white" : "text-white/60"}`}>
+                                    <span className={`text-[11px] tracking-wider uppercase font-medium ${active ? "text-slate-900" : "text-slate-500"}`}>
                                         {labels[i]}
                                     </span>
                                 </button>
                             );
                         })}
                     </div>
-                    <div className="h-0.5 bg-white/5">
+                    <div className="h-0.5 bg-slate-200/60">
                         <div
-                            className="h-full bg-white transition-all duration-300"
+                            className="h-full bg-slate-800 transition-all duration-300"
                             style={{ width: `${(mobileStep - 1) * 50}%` }}
                             data-testid="wizard-progress-bar"
                         />
@@ -938,14 +948,14 @@ export default function SubmissionPage() {
                 )}
             </header>
 
-            <div className="max-w-3xl mx-auto px-5 py-8 md:py-14">
+            <div className="max-w-3xl mx-auto px-5 py-10 md:py-16">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-10" data-testid="project-info-section" data-step="1">
-                    <p className="eyebrow mb-3">Audition Brief</p>
-                    <h1 className="font-display text-3xl md:text-5xl tracking-tight mb-6">
+                <section className="mb-16 bg-white/60 rounded-3xl p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
+                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
+                    <h1 className="font-display text-3xl md:text-5xl tracking-tight text-slate-900 mb-8 leading-[1.05]">
                         Talentgram × {project.brand_name}
                     </h1>
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-5 mb-6 border-t border-white/10 pt-6">
+                    <div className="grid grid-cols-2 gap-x-6 gap-y-5 border-t border-slate-200/50 pt-6">
                         <Info label="Character" value={project.character} />
                         <Info label="Shoot Dates" value={project.shoot_dates} />
                         {/* Phase 1 (v37): expose Director + Production House so
@@ -960,11 +970,11 @@ export default function SubmissionPage() {
                         <Info label="Medium / Usage" value={project.medium_usage} wide />
                     </div>
                     {project.additional_details && (
-                        <div className="mb-6">
-                            <p className="text-[11px] text-white/50 tracking-widest uppercase mb-2">
+                        <div className="mt-6 pt-4 border-t border-slate-100">
+                            <p className="text-[11px] text-slate-400 tracking-[0.2em] uppercase font-mono mb-2">
                                 Additional Details
                             </p>
-                            <p className="text-sm text-white/80 whitespace-pre-line">
+                            <p className="text-[13px] leading-relaxed text-slate-600 whitespace-pre-line">
                                 {project.additional_details}
                             </p>
                         </div>
@@ -974,7 +984,7 @@ export default function SubmissionPage() {
                         <button
                             onClick={() => setShowMaterial(true)}
                             data-testid="view-audition-material-btn"
-                            className="inline-flex items-center gap-2 px-4 py-3 border border-white/15 hover:border-white rounded-sm text-sm transition-all"
+                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-slate-200 hover:border-slate-300 rounded-full text-[13px] text-slate-700 transition-all hover:shadow-sm hover:-translate-y-[1px] bg-white/40"
                         >
                             <FolderOpen className="w-4 h-4" /> View Audition Material
                         </button>
@@ -983,24 +993,25 @@ export default function SubmissionPage() {
 
                 {/* SECTION 2 — TALENT DETAILS FORM */}
                 <section
-                    className="border-t border-white/10 pt-10 mb-10"
+                    className="pt-4 mb-16"
                     data-testid="talent-details-section"
                     data-step="1-2"
                 >
-                    <p className="eyebrow mb-3" data-step="1">Talent Details</p>
-                    <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-2" data-step="1">
+                    <div className="bg-white rounded-3xl p-7 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
+                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4" data-step="1">Talent Details</p>
+                    <h2 className="font-display text-2xl md:text-3xl tracking-tight text-slate-900 mb-3 leading-[1.05]" data-step="1">
                         Your profile.
                     </h2>
-                    <p className="text-sm text-white/50 mb-8" data-step="1">
+                    <p className="text-[13px] leading-relaxed text-slate-500 mb-10" data-step="1">
                         All fields are required unless marked optional.
                     </p>
 
-                    <form onSubmit={startSubmission} className="space-y-6">
+                    <form onSubmit={startSubmission} className="space-y-8">
                         {/* Phase 1 — email-first identity. The email field
                             anchors the form so we can prefill known talents
                             BEFORE they retype everything. */}
                         <div data-step="1">
-                            <FormField
+                            <PremiumFormField
                                 label="Email *"
                                 type="email"
                                 value={form.email}
@@ -1028,7 +1039,7 @@ export default function SubmissionPage() {
                                 disabled={!!saved}
                                 wide
                             />
-                            <p className="text-[11px] text-white/40 mt-2 tg-mono">
+                            <p className="text-[11px] text-slate-400 mt-3 font-mono">
                                 We use email to recognise you.{" "}
                                 {emailGateUnlocked
                                     ? "Returning talents see saved details below."
@@ -1041,18 +1052,18 @@ export default function SubmissionPage() {
                             user is in control: Use this OR Edit manually. */}
                         {prefillSuggestion && !saved && (
                             <div
-                                className="border border-[#c9a961]/40 bg-[#c9a961]/[0.06] p-4 rounded-sm flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
+                                className="bg-amber-50/40 border border-amber-200/60 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
                                 data-testid="prefill-suggestion-card"
                                 data-step="1"
                             >
                                 <div className="min-w-0 flex-1">
-                                    <p className="text-sm text-white">
+                                    <p className="text-[13px] text-slate-800">
                                         We found your profile.{" "}
-                                        <span className="text-white/60">
+                                        <span className="text-slate-500">
                                             Use saved details?
                                         </span>
                                     </p>
-                                    <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
+                                    <p className="text-[11px] text-slate-400 font-mono mt-1 truncate">
                                         {prefillSuggestion.data.first_name}{" "}
                                         {prefillSuggestion.data.last_name || ""}
                                         {prefillSuggestion.data.location ? ` · ${prefillSuggestion.data.location}` : ""}
@@ -1064,7 +1075,7 @@ export default function SubmissionPage() {
                                         type="button"
                                         onClick={applyPrefill}
                                         data-testid="prefill-use-btn"
-                                        className="bg-white text-black px-4 py-2.5 text-xs rounded-sm hover:opacity-90 inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-transform"
+                                        className="bg-slate-900 text-white px-5 py-2.5 text-[11px] rounded-full hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200"
                                     >
                                         <Check className="w-3.5 h-3.5" />
                                         Use this
@@ -1073,7 +1084,7 @@ export default function SubmissionPage() {
                                         type="button"
                                         onClick={dismissPrefill}
                                         data-testid="prefill-dismiss-btn"
-                                        className="border border-white/20 text-white/70 hover:border-white px-4 py-2.5 text-xs rounded-sm inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-transform"
+                                        className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[11px] rounded-full inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50"
                                     >
                                         Edit manually
                                     </button>
@@ -1083,8 +1094,8 @@ export default function SubmissionPage() {
 
                         {emailGateUnlocked && (
                         <>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6" data-step="1">
-                            <FormField
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8" data-step="1">
+                            <PremiumFormField
                                 label="First Name *"
                                 value={form.first_name}
                                 onChange={(v) =>
@@ -1094,7 +1105,7 @@ export default function SubmissionPage() {
                                 testid="form-first-name"
                                 required
                             />
-                            <FormField
+                            <PremiumFormField
                                 label="Last Name *"
                                 value={form.last_name}
                                 onChange={(v) =>
@@ -1104,7 +1115,7 @@ export default function SubmissionPage() {
                                 testid="form-last-name"
                                 required
                             />
-                            <FormField
+                            <PremiumFormField
                                 label="Phone (optional)"
                                 type="tel"
                                 value={form.phone}
@@ -1114,7 +1125,7 @@ export default function SubmissionPage() {
                                 onBlur={saveForm}
                                 testid="form-phone"
                             />
-                            <FormField
+                            <PremiumFormField
                                 label="Date of Birth (optional)"
                                 type="date"
                                 value={form.dob}
@@ -1124,10 +1135,10 @@ export default function SubmissionPage() {
                                 }
                                 onBlur={saveForm}
                                 testid="form-dob"
-                                className="[color-scheme:dark]"
+                                className="[color-scheme:light]"
                             />
                             <div data-testid="form-age-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Age {form.dob ? "(auto)" : "*"}
                                 </span>
                                 <input
@@ -1148,11 +1159,11 @@ export default function SubmissionPage() {
                                     min={10}
                                     max={80}
                                     data-testid="form-age-input"
-                                    className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base disabled:text-white/50"
+                                    className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 disabled:text-slate-400 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                 />
                             </div>
                             <div data-testid="form-height-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Height *
                                 </span>
                                 <div className="mt-2">
@@ -1165,11 +1176,11 @@ export default function SubmissionPage() {
                                     >
                                         <SelectTrigger
                                             data-testid="form-height-trigger"
-                                            className="bg-transparent border-0 border-b border-white/20 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-3"
+                                            className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                         >
                                             <SelectValue placeholder="Select height" />
                                         </SelectTrigger>
-                                        <SelectContent className="max-h-72">
+                                        <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
                                             {HEIGHT_OPTIONS.map((h) => (
                                                 <SelectItem
                                                     key={h}
@@ -1182,7 +1193,7 @@ export default function SubmissionPage() {
                                     </Select>
                                 </div>
                             </div>
-                            <FormField
+                            <PremiumFormField
                                 label="Current Location *"
                                 value={form.location}
                                 onChange={(v) =>
@@ -1193,7 +1204,7 @@ export default function SubmissionPage() {
                                 required
                             />
                             {project.competitive_brand_enabled && (
-                                <FormField
+                                <PremiumFormField
                                     label="Competitive Brand (declare conflicts)"
                                     value={form.competitive_brand}
                                     onChange={(v) =>
@@ -1215,12 +1226,12 @@ export default function SubmissionPage() {
                             work_links) so the same shape lands in the master
                             talent record on finalize. */}
                         <div
-                            className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6"
+                            className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8"
                             data-step="1"
                             data-testid="unified-identity-block"
                         >
                             <div data-testid="form-gender-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Gender
                                 </span>
                                 <div className="mt-2 grid grid-cols-2 gap-2">
@@ -1240,10 +1251,10 @@ export default function SubmissionPage() {
                                                     setTimeout(saveForm, 0);
                                                 }}
                                                 data-testid={`form-gender-${g.key}`}
-                                                className={`px-3 py-2.5 text-xs rounded-sm border transition-all min-h-[44px] active:scale-[0.97] ${
+                                                className={`px-3 py-2.5 text-[12px] rounded-full border transition-all duration-200 min-h-[44px] active:scale-[0.97] ${
                                                     active
-                                                        ? "bg-white text-black border-white"
-                                                        : "border-white/20 hover:border-white text-white/80"
+                                                        ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                                        : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
                                                 }`}
                                             >
                                                 {g.label}
@@ -1253,7 +1264,7 @@ export default function SubmissionPage() {
                                 </div>
                             </div>
                             <div data-testid="form-ethnicity-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Ethnicity
                                 </span>
                                 <div className="mt-2">
@@ -1266,11 +1277,11 @@ export default function SubmissionPage() {
                                     >
                                         <SelectTrigger
                                             data-testid="form-ethnicity-trigger"
-                                            className="bg-transparent border-0 border-b border-white/20 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-3"
+                                            className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                         >
                                             <SelectValue placeholder="Select ethnicity" />
                                         </SelectTrigger>
-                                        <SelectContent className="max-h-72">
+                                        <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
                                             {ETHNICITY_OPTIONS.map((e) => (
                                                 <SelectItem
                                                     key={e.key}
@@ -1284,7 +1295,7 @@ export default function SubmissionPage() {
                                     </Select>
                                 </div>
                             </div>
-                            <FormField
+                            <PremiumFormField
                                 label="Instagram Handle"
                                 value={form.instagram_handle}
                                 onChange={(v) =>
@@ -1295,7 +1306,7 @@ export default function SubmissionPage() {
                                 placeholder="@yourhandle"
                             />
                             <div data-testid="form-instagram-followers-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Instagram Followers
                                 </span>
                                 <div className="mt-2">
@@ -1311,14 +1322,14 @@ export default function SubmissionPage() {
                                     >
                                         <SelectTrigger
                                             data-testid="form-instagram-followers-trigger"
-                                            className="bg-transparent border-0 border-b border-white/20 rounded-none px-0 focus:border-white focus:ring-0 shadow-none h-auto py-3"
+                                            className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                         >
                                             <SelectValue placeholder="Select range" />
                                         </SelectTrigger>
-                                        <SelectContent className="max-h-72">
+                                        <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
                                             {FOLLOWER_TIERS.map((tier) => (
                                                 <SelectGroup key={tier.label}>
-                                                    <SelectLabel className="text-[10px] tracking-wide uppercase text-white/40">
+                                                    <SelectLabel className="text-[10px] tracking-wide uppercase text-slate-400 font-mono">
                                                         {tier.label}
                                                     </SelectLabel>
                                                     {tier.items.map((it) => (
@@ -1337,7 +1348,7 @@ export default function SubmissionPage() {
                                 </div>
                             </div>
                             <label className="block md:col-span-2" data-testid="form-bio-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Bio (optional)
                                 </span>
                                 <textarea
@@ -1352,12 +1363,12 @@ export default function SubmissionPage() {
                                     rows={3}
                                     maxLength={600}
                                     data-testid="form-bio"
-                                    className="mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base resize-none"
+                                    className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                     placeholder="A short note about you (max 600 chars)"
                                 />
                             </label>
                             <div className="md:col-span-2" data-testid="form-work-links-field">
-                                <span className="text-[11px] text-white/60 tracking-widest uppercase">
+                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                                     Work Links (optional)
                                 </span>
                                 <WorkLinksEditor
@@ -1372,22 +1383,22 @@ export default function SubmissionPage() {
 
                         {/* AVAILABILITY — decision block */}
                         <div
-                            className="border-t border-white/10 pt-7"
+                            className="border-t border-slate-100 pt-8"
                             data-testid="availability-block"
                             data-step="2"
                         >
-                            <p className="eyebrow mb-2">
+                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-3">
                                 Availability{" "}
-                                <span className="text-[#FF3B30]">*</span>
+                                <span className="text-rose-500">*</span>
                             </p>
                             {project.shoot_dates && (
-                                <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                                <p className="text-[12px] text-slate-500 mb-5 leading-relaxed">
                                     {project.shoot_dates}
                                     {" — "}Costume trial and rehearsal dates
                                     (if any) will be informed.
                                 </p>
                             )}
-                            <div className="grid grid-cols-2 gap-2 mb-3">
+                            <div className="grid grid-cols-2 gap-2 mb-4">
                                 {AVAILABILITY_OPTIONS.map((opt) => {
                                     const active =
                                         form.availability.status === opt.key;
@@ -1406,7 +1417,11 @@ export default function SubmissionPage() {
                                                 setTimeout(saveForm, 0);
                                             }}
                                             data-testid={`avail-${opt.key}-btn`}
-                                            className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${active ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                            className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                active
+                                                    ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                                    : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                            }`}
                                         >
                                             {opt.label}
                                         </button>
@@ -1429,53 +1444,53 @@ export default function SubmissionPage() {
                                     rows={3}
                                     placeholder="Please specify reason / alternate availability"
                                     data-testid="availability-note-input"
-                                    className="w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
+                                    className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                 />
                             )}
                         </div>
 
                         {/* BUDGET — decision block */}
                         <div
-                            className="border-t border-white/10 pt-7"
+                            className="border-t border-slate-100 pt-8"
                             data-testid="budget-block"
                             data-step="2"
                         >
-                            <p className="eyebrow mb-4">
+                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-5">
                                 Budget{" "}
-                                <span className="text-[#FF3B30]">*</span>
+                                <span className="text-rose-500">*</span>
                             </p>
                             {project.commission_percent && (
                                 <div
-                                    className="flex items-center justify-between border border-white/25 bg-white/[0.04] px-4 py-3 mb-5"
+                                    className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                     data-testid="commission-card"
                                 >
-                                    <span className="text-[11px] tracking-widest uppercase text-white/70">
+                                    <span className="text-[11px] tracking-[0.2em] uppercase font-mono text-slate-500">
                                         Commission
                                     </span>
-                                    <span className="font-display text-2xl text-white">
+                                    <span className="font-display text-2xl text-slate-800">
                                         {project.commission_percent}
                                     </span>
                                 </div>
                             )}
                             {(project.talent_budget || []).length > 0 && (
                                 <div
-                                    className="border border-white/15 bg-white/[0.03] px-4 py-3 mb-5"
+                                    className="bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                     data-testid="talent-budget-hint"
                                 >
-                                    <div className="text-[10px] tracking-widest uppercase text-white/50 mb-2">
+                                    <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-3">
                                         Offered Budget
                                     </div>
-                                    <div className="space-y-1.5">
+                                    <div className="space-y-2">
                                         {project.talent_budget.map((row, i) => (
                                             <div
                                                 key={`${row.label || ""}-${i}`}
-                                                className="flex items-center justify-between gap-3 text-sm"
+                                                className="flex items-center justify-between gap-3 text-[13px]"
                                                 data-testid={`talent-budget-line-${i}`}
                                             >
-                                                <span className="text-white/70">
+                                                <span className="text-slate-500">
                                                     {row.label || "—"}
                                                 </span>
-                                                <span className="tg-mono text-white/90">
+                                                <span className="font-mono text-slate-700">
                                                     {row.value || "—"}
                                                 </span>
                                             </div>
@@ -1483,7 +1498,7 @@ export default function SubmissionPage() {
                                     </div>
                                 </div>
                             )}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -1497,11 +1512,15 @@ export default function SubmissionPage() {
                                         setTimeout(saveForm, 0);
                                     }}
                                     data-testid="budget-accept-btn"
-                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "accept" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                    className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                        form.budget.status === "accept"
+                                            ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                            : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                    }`}
                                 >
                                     Accept
                                     {project.budget_per_day && (
-                                        <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
+                                        <span className="block text-[11px] font-mono opacity-70 mt-1">
                                             {project.budget_per_day} / day
                                         </span>
                                     )}
@@ -1519,10 +1538,14 @@ export default function SubmissionPage() {
                                         setTimeout(saveForm, 0);
                                     }}
                                     data-testid="budget-custom-btn"
-                                    className={`px-4 py-3.5 rounded-sm text-sm border transition-all min-h-[52px] ${form.budget.status === "custom" ? "bg-white text-black border-white" : "border-white/20 hover:border-white/50 text-white/80"}`}
+                                    className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                        form.budget.status === "custom"
+                                            ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                            : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                    }`}
                                 >
                                     Not accepting
-                                    <span className="block text-[11px] tg-mono opacity-70 mt-0.5">
+                                    <span className="block text-[11px] font-mono opacity-70 mt-1">
                                         Propose your own
                                     </span>
                                 </button>
@@ -1543,25 +1566,25 @@ export default function SubmissionPage() {
                                     onBlur={saveForm}
                                     placeholder="Enter your expected budget per day"
                                     data-testid="budget-value-input"
-                                    className="w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base"
+                                    className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                 />
                             )}
                         </div>
 
                         {project.medium_usage && (
-                            <div className="border-t border-white/10 pt-7" data-step="2">
-                                <p className="eyebrow mb-3">Medium / Usage</p>
-                                <p className="text-sm text-white/80">
+                            <div className="border-t border-slate-100 pt-8" data-step="2">
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Medium / Usage</p>
+                                <p className="text-[13px] leading-relaxed text-slate-600">
                                     {project.medium_usage}
                                 </p>
                             </div>
                         )}
 
                         {(project.custom_questions || []).length > 0 && (
-                            <div className="border-t border-white/10 pt-6 space-y-5" data-step="2">
-                                <p className="eyebrow">Additional Questions</p>
+                            <div className="border-t border-slate-100 pt-8 space-y-6" data-step="2">
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">Additional Questions</p>
                                 {project.custom_questions.map((q) => (
-                                    <FormField
+                                    <PremiumFormField
                                         key={q.id}
                                         label={q.question}
                                         value={
@@ -1591,7 +1614,7 @@ export default function SubmissionPage() {
                                 type="submit"
                                 disabled={starting}
                                 data-testid="start-submission-btn"
-                                className="hidden md:inline-flex w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 items-center justify-center gap-2 min-h-[52px]"
+                                className="hidden md:inline-flex w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-lg items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                             >
                                 {starting && (
                                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -1602,27 +1625,29 @@ export default function SubmissionPage() {
                         </>
                         )}
                     </form>
+                    </div>
                 </section>
 
                 {/* SECTION 3 — UPLOADS (gated on saved + email-first gate) */}
                 {emailGateUnlocked && saved && (
                     <section
-                        className="border-t border-white/10 pt-10"
+                        className="pt-4"
                         data-testid="uploads-section"
                         data-step="3"
                     >
-                        <p className="eyebrow mb-3">Uploads</p>
-                        <h2 className="font-display text-2xl md:text-3xl tracking-tight mb-2">
+                        <div className="bg-white rounded-3xl p-7 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Uploads</p>
+                        <h2 className="font-display text-2xl md:text-3xl tracking-tight text-slate-900 mb-3 leading-[1.05]">
                             Show us your work.
                         </h2>
                         <p
-                            className="text-xs text-white/50 mb-8 tg-mono"
+                            className="text-[12px] text-slate-500 mb-10 font-mono"
                             data-testid="uploads-optional-hint"
                         >
                             Optional — but recommended to increase your selection chances.
                         </p>
 
-                        <UploadSlot
+                        <PremiumUploadSlot
                             title="Introduction Video"
                             note="Optional (recommended). Your most recent professional introduction video (without contact info)."
                             icon={Video}
@@ -1639,22 +1664,22 @@ export default function SubmissionPage() {
                             onRetry={() => retryUpload("intro_video")}
                         />
 
-                        <div className="mb-8" data-testid="takes-section">
-                            <div className="flex items-center justify-between mb-3">
-                                <p className="eyebrow">
+                        <div className="mb-10" data-testid="takes-section">
+                            <div className="flex items-center justify-between mb-4">
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
                                     Audition Takes{" "}
-                                    <span className="text-white/40">
+                                    <span className="text-slate-400">
                                         (up to {MAX_TAKES})
                                     </span>
                                 </p>
                                 <span
-                                    className="text-xs tg-mono text-white/50"
+                                    className="text-[11px] font-mono text-slate-400"
                                     data-testid="takes-counter"
                                 >
                                     {takes.length}/{MAX_TAKES}
                                 </span>
                             </div>
-                            <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                            <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
                                 Optional (recommended). Upload each take as a
                                 separate video and label it (e.g., "Scene 1",
                                 "Closeup emotional"). Talents with takes have
@@ -1662,7 +1687,7 @@ export default function SubmissionPage() {
                             </p>
 
                             {takes.map((t, i) => (
-                                <TakeRow
+                                <PremiumTakeRow
                                     key={t.id}
                                     index={i + 1}
                                     media={t}
@@ -1675,7 +1700,7 @@ export default function SubmissionPage() {
                             ))}
 
                             {canAddTake && (
-                                <AddTakeSlot
+                                <PremiumAddTakeSlot
                                     number={takes.length + 1}
                                     uploading={uploading}
                                     uploadPct={uploadPct}
@@ -1687,22 +1712,22 @@ export default function SubmissionPage() {
                             )}
                         </div>
 
-                        <div className="mb-10" data-testid="images-upload-section">
-                            <div className="flex items-center justify-between mb-2">
-                                <p className="eyebrow">
+                        <div className="mb-8" data-testid="images-upload-section">
+                            <div className="flex items-center justify-between mb-3">
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
                                     Images{" "}
-                                    <span className="text-white/40">
+                                    <span className="text-slate-400">
                                         (optional)
                                     </span>
                                 </p>
                                 <span
                                     data-testid="image-counter"
-                                    className="text-xs tg-mono text-white/70"
+                                    className="text-[11px] font-mono text-slate-400"
                                 >
                                     {images.length}/{MAX_IMAGES_PER_CATEGORY}
                                 </span>
                             </div>
-                            <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                            <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
                                 Optional (recommended). High-resolution
                                 portfolio images aligned with the brand's
                                 aesthetic improve your selection odds. Up to{" "}
@@ -1711,7 +1736,7 @@ export default function SubmissionPage() {
                             </p>
 
                             {/* Phase 2 — optional Indian look images */}
-                            <PortfolioGroup
+                            <PremiumPortfolioGroup
                                 label="Indian Look (optional)"
                                 hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
                                 items={indianImages}
@@ -1727,7 +1752,7 @@ export default function SubmissionPage() {
                             />
 
                             {/* Phase 2 — optional Western look images */}
-                            <PortfolioGroup
+                            <PremiumPortfolioGroup
                                 label="Western Look (optional)"
                                 hint="Casual, formal or western-styled references."
                                 items={westernImages}
@@ -1742,26 +1767,26 @@ export default function SubmissionPage() {
                                 testidPrefix="western"
                             />
 
-                            <p className="eyebrow mt-2 mb-3" data-testid="generic-portfolio-label">
+                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mt-4 mb-4" data-testid="generic-portfolio-label">
                                 Portfolio (general)
                             </p>
 
-                            <div className="grid grid-cols-3 md:grid-cols-4 gap-2 mb-3">
+                            <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
                                 {images.map((m) => (
                                     <div
                                         key={m.id}
-                                        className="relative aspect-square bg-[#0a0a0a] border border-white/10 group"
+                                        className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
                                     >
                                         <img
                                             src={m.url}
                                             alt=""
-                                            className="w-full h-full object-cover"
+                                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                         />
                                         <button
                                             onClick={() => removeMedia(m.id)}
-                                            className="absolute top-1 right-1 p-1 bg-black/70 hover:bg-[#FF3B30] rounded-sm"
+                                            className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
                                         >
-                                            <X className="w-3 h-3" />
+                                            <X className="w-3 h-3 text-slate-700" />
                                         </button>
                                     </div>
                                 ))}
@@ -1772,26 +1797,26 @@ export default function SubmissionPage() {
                                         }
                                         disabled={uploading === "image"}
                                         data-testid="add-image-btn"
-                                        className="relative aspect-square border border-dashed border-white/20 hover:border-white/50 flex items-center justify-center text-white/50 hover:text-white transition-all overflow-hidden"
+                                        className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                                     >
                                         {uploading === "image" && uploadPct > 0 && (
                                             <span
                                                 aria-hidden
-                                                className="absolute inset-y-0 left-0 bg-white/10"
+                                                className="absolute inset-y-0 left-0 bg-amber-200/30"
                                                 style={{ width: `${uploadPct}%` }}
                                             />
                                         )}
                                         {uploading === "image" ? (
                                             <div className="relative flex flex-col items-center gap-1">
                                                 <Loader2 className="w-5 h-5 animate-spin" />
-                                                <span className="text-[10px] tg-mono">
+                                                <span className="text-[10px] font-mono">
                                                     {uploadPct ? `${uploadPct}%` : "…"}
                                                 </span>
                                             </div>
                                         ) : (
                                             <div className="relative flex flex-col items-center gap-1">
                                                 <Camera className="w-5 h-5" />
-                                                <span className="text-[10px] tg-mono">
+                                                <span className="text-[10px] font-mono">
                                                     Add
                                                 </span>
                                             </div>
@@ -1827,13 +1852,13 @@ export default function SubmissionPage() {
                                     e.target.value = "";
                                 }}
                             />
-                            <div className="md:hidden grid grid-cols-2 gap-2 mt-2">
+                            <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
                                 <button
                                     type="button"
                                     onClick={() => cameraImagesRef.current?.click()}
                                     disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
                                     data-testid="add-image-camera-btn"
-                                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
+                                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                 >
                                     <Camera className="w-3.5 h-3.5" /> Take photo
                                 </button>
@@ -1842,7 +1867,7 @@ export default function SubmissionPage() {
                                     onClick={() => imagesRef.current?.click()}
                                     disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
                                     data-testid="add-image-library-btn"
-                                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-40"
+                                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                 >
                                     <FolderOpen className="w-3.5 h-3.5" /> From library
                                 </button>
@@ -1854,7 +1879,7 @@ export default function SubmissionPage() {
                                 onClick={finalize}
                                 disabled={finalizing || !readyToSubmit}
                                 data-testid="finalize-submission-btn"
-                                className="w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2 min-h-[52px] shadow-[0_8px_40px_rgba(0,0,0,0.6)]"
+                                className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-lg disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                             >
                                 {finalizing ? (
                                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -1864,11 +1889,12 @@ export default function SubmissionPage() {
                                 Submit Audition
                             </button>
                             {!readyToSubmit && (
-                                <p className="text-[11px] text-white/40 text-center mt-3 tg-mono">
+                                <p className="text-[11px] text-slate-400 text-center mt-4 font-mono">
                                     Need: First+Last name · Height · Location ·
                                     Availability · Budget
                                 </p>
                             )}
+                        </div>
                         </div>
                     </section>
                 )}
@@ -1885,7 +1911,7 @@ export default function SubmissionPage() {
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
             {emailGateUnlocked && mobileStep < 3 && (
                 <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-black/90 backdrop-blur-xl border-t border-white/10 px-4 py-3"
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-slate-200/60 px-4 py-4 shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
                     data-testid="wizard-bottom-bar"
                 >
                     <div className="flex items-center gap-2 max-w-3xl mx-auto">
@@ -1894,7 +1920,7 @@ export default function SubmissionPage() {
                                 type="button"
                                 onClick={() => goToStep(mobileStep - 1)}
                                 data-testid="wizard-back-btn"
-                                className="px-4 py-3 border border-white/20 text-white/70 rounded-sm text-sm min-h-[48px] active:scale-[0.97] transition-transform"
+                                className="px-5 py-3 border border-slate-200 text-slate-600 rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
                                 Back
                             </button>
@@ -1904,7 +1930,7 @@ export default function SubmissionPage() {
                             onClick={() => goToStep(mobileStep + 1)}
                             disabled={starting}
                             data-testid="wizard-next-btn"
-                            className="flex-1 bg-white text-black py-3 rounded-sm text-sm font-medium hover:opacity-90 inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform disabled:opacity-50"
+                            className="flex-1 bg-slate-900 text-white py-3 rounded-full text-[13px] font-medium hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 disabled:opacity-50"
                         >
                             {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
                             {mobileStep === 1 ? "Continue to Brief" : "Continue to Uploads"}
@@ -1920,15 +1946,15 @@ function Info({ label, value, wide }) {
     if (!value) return null;
     return (
         <div className={wide ? "col-span-2" : ""}>
-            <div className="text-[10px] tracking-widest uppercase text-white/40 mb-1">
+            <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-1">
                 {label}
             </div>
-            <div className="text-sm font-medium">{value}</div>
+            <div className="text-[13px] font-medium text-slate-700">{value}</div>
         </div>
     );
 }
 
-function PortfolioGroup({
+function PremiumPortfolioGroup({
     label,
     hint,
     items,
@@ -1945,36 +1971,36 @@ function PortfolioGroup({
     const isUploading = uploading === category;
     const reachedCap = allImagesCount >= maxImages;
     return (
-        <div className="mb-5" data-testid={`portfolio-group-${testidPrefix}`}>
-            <div className="flex items-center justify-between mb-1">
-                <p className="eyebrow">{label}</p>
-                <span className="text-[10px] tg-mono text-white/50">
+        <div className="mb-8" data-testid={`portfolio-group-${testidPrefix}`}>
+            <div className="flex items-center justify-between mb-2">
+                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-500">{label}</p>
+                <span className="text-[10px] font-mono text-slate-400">
                     {items.length}
                 </span>
             </div>
             {hint && (
-                <p className="text-[11px] text-white/40 mb-3 tg-mono">
+                <p className="text-[11px] text-slate-400 mb-4 font-mono">
                     {hint}
                 </p>
             )}
-            <div className="grid grid-cols-3 md:grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
                 {items.map((m) => (
                     <div
                         key={m.id}
-                        className="relative aspect-square bg-[#0a0a0a] border border-white/10 group"
+                        className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
                         data-testid={`${testidPrefix}-image-${m.id}`}
                     >
                         <img
                             src={m.url}
                             alt=""
-                            className="w-full h-full object-cover"
+                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                         />
                         <button
                             onClick={() => removeMedia(m.id)}
                             data-testid={`${testidPrefix}-image-remove-${m.id}`}
-                            className="absolute top-1 right-1 p-1 bg-black/70 hover:bg-[#FF3B30] rounded-sm"
+                            className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
                         >
-                            <X className="w-3 h-3" />
+                            <X className="w-3 h-3 text-slate-700" />
                         </button>
                     </div>
                 ))}
@@ -1984,26 +2010,26 @@ function PortfolioGroup({
                         onClick={() => inputRef.current?.click()}
                         disabled={isUploading}
                         data-testid={`add-${testidPrefix}-image-btn`}
-                        className="relative aspect-square border border-dashed border-white/20 hover:border-white/50 flex items-center justify-center text-white/50 hover:text-white transition-all overflow-hidden disabled:opacity-50"
+                        className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden disabled:opacity-50 bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                     >
                         {isUploading && uploadPct > 0 && (
                             <span
                                 aria-hidden
-                                className="absolute inset-y-0 left-0 bg-white/10"
+                                className="absolute inset-y-0 left-0 bg-amber-200/30"
                                 style={{ width: `${uploadPct}%` }}
                             />
                         )}
                         {isUploading ? (
                             <div className="relative flex flex-col items-center gap-1">
                                 <Loader2 className="w-5 h-5 animate-spin" />
-                                <span className="text-[10px] tg-mono">
+                                <span className="text-[10px] font-mono">
                                     {uploadPct ? `${uploadPct}%` : "…"}
                                 </span>
                             </div>
                         ) : (
                             <div className="relative flex flex-col items-center gap-1">
                                 <Plus className="w-5 h-5" />
-                                <span className="text-[10px] tg-mono">Add</span>
+                                <span className="text-[10px] font-mono">Add</span>
                             </div>
                         )}
                     </button>
@@ -2036,19 +2062,19 @@ function WorkLinksEditor({ links, onChange }) {
     const remove = (i) =>
         onChange((links || []).filter((_, idx) => idx !== i));
     return (
-        <div className="mt-2 space-y-2" data-testid="work-links-editor">
+        <div className="mt-2 space-y-3" data-testid="work-links-editor">
             {(links || []).map((w, i) => (
                 <div
                     key={`${w}-${i}`}
-                    className="flex items-center justify-between gap-2 px-3 py-2 border border-white/10 rounded-sm text-xs tg-mono break-all"
+                    className="flex items-center justify-between gap-2 px-4 py-2 bg-white/60 rounded-2xl border border-slate-200 text-[11px] font-mono break-all shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
                     data-testid={`work-link-row-${i}`}
                 >
-                    <span className="truncate text-white/80">{w}</span>
+                    <span className="truncate text-slate-600">{w}</span>
                     <button
                         type="button"
                         onClick={() => remove(i)}
                         data-testid={`work-link-remove-${i}`}
-                        className="text-white/40 hover:text-white shrink-0"
+                        className="text-slate-400 hover:text-rose-500 shrink-0 transition-colors"
                     >
                         <X className="w-3.5 h-3.5" />
                     </button>
@@ -2067,13 +2093,13 @@ function WorkLinksEditor({ links, onChange }) {
                     inputMode="url"
                     placeholder="https://… (paste & press Enter)"
                     data-testid="work-link-input"
-                    className="flex-1 bg-transparent border-b border-white/20 focus:border-white outline-none py-2 text-sm"
+                    className="flex-1 bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                 />
                 <button
                     type="button"
                     onClick={add}
                     data-testid="work-link-add-btn"
-                    className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm min-h-[44px] active:scale-[0.97] transition-transform"
+                    className="text-[11px] px-4 py-2.5 border border-slate-200 hover:border-slate-300 rounded-full min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                 >
                     Add
                 </button>
@@ -2082,7 +2108,7 @@ function WorkLinksEditor({ links, onChange }) {
     );
 }
 
-function FormField({
+function PremiumFormField({
     label,
     value,
     onChange,
@@ -2099,7 +2125,7 @@ function FormField({
 }) {
     return (
         <label className={`block ${wide ? "md:col-span-2" : ""}`}>
-            <span className="text-[11px] text-white/60 tracking-widest uppercase">
+            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
                 {label}
             </span>
             <input
@@ -2129,10 +2155,10 @@ function FormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 text-base disabled:text-white/50 ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] text-slate-800 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-400 ${className}`}
             />
             {hint && (
-                <span className="block text-[10px] text-white/40 mt-1 tg-mono">
+                <span className="block text-[10px] text-slate-400 mt-1 font-mono">
                     {hint}
                 </span>
             )}
@@ -2140,7 +2166,7 @@ function FormField({
     );
 }
 
-function UploadSlot({
+function PremiumUploadSlot({
     title,
     required,
     note,
@@ -2162,50 +2188,50 @@ function UploadSlot({
     const cameraRef = useRef(null);
     const isVideo = (accept || "").includes("video");
     return (
-        <div className={compact ? "mb-3" : "mb-8"}>
+        <div className={compact ? "mb-4" : "mb-10"}>
             {!compact && (
-                <div className="flex items-center justify-between mb-2">
-                    <p className="eyebrow">
+                <div className="flex items-center justify-between mb-3">
+                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
                         {title}
                         {required && (
-                            <span className="text-[#FF3B30]"> *</span>
+                            <span className="text-rose-500"> *</span>
                         )}
                     </p>
                     {hasFile && (
-                        <span className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-[#34C759]">
+                        <span className="inline-flex items-center gap-1 text-[10px] tracking-[0.2em] uppercase font-mono text-emerald-600">
                             <Check className="w-3 h-3" /> Uploaded
                         </span>
                     )}
                 </div>
             )}
             {!compact && note && (
-                <p className="text-xs text-white/50 mb-4 leading-relaxed">
+                <p className="text-[12px] leading-relaxed text-slate-500 mb-5">
                     {note}
                 </p>
             )}
             {hasFile ? (
-                <div className="border border-white/10 p-3 flex items-center gap-3">
-                    <Icon className="w-4 h-4 text-white/60 shrink-0" />
+                <div className="bg-white/60 border border-slate-200 rounded-2xl p-3 flex items-center gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                    <Icon className="w-4 h-4 text-slate-500 shrink-0" />
                     <div className="min-w-0 flex-1">
-                        <div className="text-sm truncate">
+                        <div className="text-[13px] truncate">
                             {compact && (
-                                <span className="font-display mr-2">
+                                <span className="font-display mr-2 text-slate-700">
                                     {title}
                                     {required && (
-                                        <span className="text-[#FF3B30]">
+                                        <span className="text-rose-500">
                                             {" "}*
                                         </span>
                                     )}
                                 </span>
                             )}
-                            <span className="text-white/60 tg-mono text-xs">
+                            <span className="text-slate-500 font-mono text-[11px]">
                                 {media.original_filename || "file"}
                             </span>
                         </div>
                     </div>
                     <button
                         onClick={() => onRemove(media)}
-                        className="text-white/50 hover:text-[#FF3B30] p-1 min-w-[44px] min-h-[44px] flex items-center justify-center"
+                        className="text-slate-400 hover:text-rose-500 p-1 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors"
                     >
                         <Trash2 className="w-4 h-4" />
                     </button>
@@ -2217,13 +2243,13 @@ function UploadSlot({
                         which makes iOS/Android jump straight into the
                         recorder UI. */}
                     {cameraCapture && (
-                        <div className="md:hidden grid grid-cols-2 gap-2 mb-2">
+                        <div className="md:hidden grid grid-cols-2 gap-2 mb-3">
                             <button
                                 type="button"
                                 onClick={() => cameraRef.current?.click()}
                                 disabled={uploading}
                                 data-testid={`${testid}-camera-btn`}
-                                className="border border-white/20 hover:border-white p-3.5 text-sm rounded-sm flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-transform"
+                                className="border border-slate-200 hover:border-slate-300 p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
                                 <Camera className="w-4 h-4" />
                                 {isVideo ? "Record" : "Take photo"}
@@ -2233,7 +2259,7 @@ function UploadSlot({
                                 onClick={() => inputRef.current?.click()}
                                 disabled={uploading}
                                 data-testid={`${testid}-library-btn`}
-                                className="border border-white/20 hover:border-white p-3.5 text-sm rounded-sm flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-transform"
+                                className="border border-slate-200 hover:border-slate-300 p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
                                 <FolderOpen className="w-4 h-4" />
                                 From library
@@ -2244,34 +2270,34 @@ function UploadSlot({
                         onClick={() => inputRef.current?.click()}
                         disabled={uploading}
                         data-testid={`${testid}-btn`}
-                        className={`w-full border border-dashed border-white/20 hover:border-white/50 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all relative overflow-hidden ${cameraCapture ? "hidden md:flex" : ""}`}
+                        className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-slate-200 hover:border-amber-200 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
                     >
                         {uploading && typeof uploadPct === "number" && uploadPct > 0 && (
                             <span
                                 aria-hidden
-                                className="absolute inset-y-0 left-0 bg-white/10 transition-[width]"
+                                className="absolute inset-y-0 left-0 bg-amber-200/30 transition-[width] duration-300"
                                 style={{ width: `${uploadPct}%` }}
                             />
                         )}
                         {uploading ? (
-                            <Loader2 className="w-4 h-4 animate-spin relative" />
+                            <Loader2 className="w-4 h-4 animate-spin relative text-slate-600" />
                         ) : (
-                            <Upload className="w-4 h-4 text-white/60 relative" />
+                            <Upload className="w-4 h-4 text-slate-500 relative" />
                         )}
                         {compact ? (
-                            <span className="text-sm flex-1 relative">
+                            <span className="text-[13px] flex-1 relative text-slate-700">
                                 <span className="font-display mr-2">
                                     {title}
                                     {required && (
-                                        <span className="text-[#FF3B30]"> *</span>
+                                        <span className="text-rose-500"> *</span>
                                     )}
                                 </span>
-                                <span className="text-white/40 text-xs">
+                                <span className="text-slate-400 text-[11px]">
                                     {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
                                 </span>
                             </span>
                         ) : (
-                            <span className="text-sm text-white/70 relative">
+                            <span className="text-[13px] text-slate-600 relative">
                                 {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
                             </span>
                         )}
@@ -2281,7 +2307,7 @@ function UploadSlot({
                             type="button"
                             onClick={onRetry}
                             data-testid={`${testid}-retry-btn`}
-                            className="mt-2 w-full text-xs px-4 py-2.5 border border-[#FF3B30]/40 text-[#FF3B30] hover:bg-[#FF3B30]/10 rounded-sm inline-flex items-center justify-center gap-2 min-h-[44px]"
+                            className="mt-3 w-full text-[11px] px-4 py-2.5 border border-rose-200 text-rose-600 hover:bg-rose-50 rounded-full inline-flex items-center justify-center gap-2 min-h-[44px] transition-all duration-200"
                         >
                             <Loader2 className="w-3.5 h-3.5" />
                             Upload failed — Retry
@@ -2319,7 +2345,7 @@ function UploadSlot({
 // --------------------------------------------------------------------------
 // Renamable take row (existing take) — supports inline label edit + remove
 // --------------------------------------------------------------------------
-function TakeRow({ index, media, canRename, onRename, onRemove }) {
+function PremiumTakeRow({ index, media, canRename, onRename, onRemove }) {
     const [label, setLabel] = useState(media.label || `Take ${index}`);
     const [dirty, setDirty] = useState(false);
 
@@ -2337,10 +2363,10 @@ function TakeRow({ index, media, canRename, onRename, onRemove }) {
 
     return (
         <div
-            className="border border-white/10 p-3 flex items-center gap-3 mb-3"
+            className="bg-white/60 border border-slate-200 rounded-2xl p-3 flex items-center gap-3 mb-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.06)]"
             data-testid={`take-row-${index}`}
         >
-            <Video className="w-4 h-4 text-white/60 shrink-0" />
+            <Video className="w-4 h-4 text-slate-500 shrink-0" />
             <div className="flex-1 min-w-0">
                 {canRename ? (
                     <input
@@ -2357,25 +2383,25 @@ function TakeRow({ index, media, canRename, onRename, onRemove }) {
                             }
                         }}
                         placeholder={`Take ${index}`}
-                        className={`bg-transparent outline-none text-sm w-full py-1.5 border-b ${dirty ? "border-white/40" : "border-transparent"} focus:border-white/60`}
+                        className={`bg-transparent outline-none text-[13px] w-full py-1.5 px-2 rounded-xl border transition-all duration-200 ${dirty ? "border-amber-300 bg-amber-50/30" : "border-transparent"} focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 text-slate-700`}
                         data-testid={`take-label-${index}`}
                     />
                 ) : (
-                    <div className="text-sm text-white/80 py-1.5">
+                    <div className="text-[13px] text-slate-700 py-1.5">
                         {label}
-                        <span className="ml-2 text-[10px] text-white/30 tg-mono">
+                        <span className="ml-2 text-[10px] text-slate-400 font-mono">
                             (legacy)
                         </span>
                     </div>
                 )}
-                <div className="text-[10px] tg-mono text-white/40 truncate">
+                <div className="text-[10px] font-mono text-slate-400 truncate mt-1">
                     {media.original_filename || "file"}
                 </div>
             </div>
             <button
                 type="button"
                 onClick={onRemove}
-                className="text-xs text-white/40 hover:text-[#FF3B30]"
+                className="text-[11px] text-slate-400 hover:text-rose-500 transition-colors"
                 data-testid={`take-remove-${index}`}
             >
                 Remove
@@ -2388,7 +2414,7 @@ function TakeRow({ index, media, canRename, onRename, onRemove }) {
 // Add-a-new-take slot — user picks a file, we upload with the label they type
 // (falls back to "Take N" if empty).
 // --------------------------------------------------------------------------
-function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef }) {
+function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef }) {
     const [label, setLabel] = useState("");
     const cameraRef = useRef(null);
     const busy = uploading && uploading.startsWith("take");
@@ -2398,13 +2424,13 @@ function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef 
 
     return (
         <div
-            className="border border-dashed border-white/15 p-3 relative overflow-hidden"
+            className="bg-gradient-to-b from-white to-slate-50/70 border border-slate-200 hover:border-amber-200 rounded-2xl p-3 relative overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 hover:-translate-y-[1px]"
             data-testid={`add-take-${number}`}
         >
             {busy && typeof uploadPct === "number" && uploadPct > 0 && (
                 <span
                     aria-hidden
-                    className="absolute inset-y-0 left-0 bg-white/10"
+                    className="absolute inset-y-0 left-0 bg-amber-200/30 transition-all duration-300"
                     style={{ width: `${uploadPct}%` }}
                 />
             )}
@@ -2413,7 +2439,7 @@ function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef 
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                     placeholder={`${fallback} — add a label`}
-                    className="flex-1 bg-transparent outline-none text-sm py-1.5 border-b border-white/10 focus:border-white/40"
+                    className="flex-1 bg-transparent outline-none text-[13px] py-1.5 px-3 rounded-xl border border-slate-200 focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-slate-700"
                     enterKeyHint="done"
                     data-testid={`new-take-label-${number}`}
                 />
@@ -2421,21 +2447,21 @@ function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef 
                     type="button"
                     onClick={triggerLib}
                     disabled={busy}
-                    className="hidden md:inline-flex relative text-xs px-3 py-2 border border-white/15 hover:border-white/40 rounded-sm items-center gap-1 disabled:opacity-40 min-h-[44px]"
+                    className="hidden md:inline-flex relative text-[11px] px-4 py-2 border border-slate-200 hover:border-slate-300 rounded-full items-center gap-1 disabled:opacity-40 min-h-[44px] bg-white/60 text-slate-600 transition-all duration-200"
                     data-testid={`new-take-upload-${number}`}
                 >
                     {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
                     {busy && uploadPct ? `${uploadPct}%` : "Upload"}
-                    {required && <span className="text-[#FF3B30]">*</span>}
+                    {required && <span className="text-rose-500">*</span>}
                 </button>
             </div>
             {/* Mobile-only camera-first dual buttons */}
-            <div className="md:hidden grid grid-cols-2 gap-2 mt-2 relative">
+            <div className="md:hidden grid grid-cols-2 gap-2 mt-3 relative">
                 <button
                     type="button"
                     onClick={triggerCam}
                     disabled={busy}
-                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform"
+                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                     data-testid={`new-take-camera-${number}`}
                 >
                     <Camera className="w-3.5 h-3.5" /> Record
@@ -2444,11 +2470,11 @@ function AddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef 
                     type="button"
                     onClick={triggerLib}
                     disabled={busy}
-                    className="border border-white/20 hover:border-white p-3 text-xs rounded-sm inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-transform"
+                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                     data-testid={`new-take-library-${number}`}
                 >
                     <FolderOpen className="w-3.5 h-3.5" /> Library
-                    {required && <span className="text-[#FF3B30]">*</span>}
+                    {required && <span className="text-rose-500">*</span>}
                 </button>
             </div>
             <input
@@ -2484,11 +2510,11 @@ function FeedbackRow({ fb }) {
     const isVoice = fb.type === "voice";
     return (
         <div
-            className="border border-white/10 bg-white/[0.02] p-4 rounded-sm"
+            className="bg-white/60 border border-slate-200 rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.06)]"
             data-testid={`talent-feedback-${fb.id}`}
         >
-            <div className="flex items-center justify-between gap-3 mb-2">
-                <span className="inline-flex items-center gap-1.5 text-[10px] tracking-widest uppercase text-white/50">
+            <div className="flex items-center justify-between gap-3 mb-3">
+                <span className="inline-flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase font-mono text-slate-500">
                     {isVoice ? (
                         <Mic className="w-3 h-3" />
                     ) : (
@@ -2496,7 +2522,7 @@ function FeedbackRow({ fb }) {
                     )}
                     {isVoice ? "Voice" : "Text"}
                 </span>
-                <span className="text-[10px] tg-mono text-white/40">
+                <span className="text-[10px] font-mono text-slate-400">
                     Received {timeAgo(fb.approved_at || fb.created_at)}
                 </span>
             </div>
@@ -2509,7 +2535,7 @@ function FeedbackRow({ fb }) {
                 />
             ) : (
                 <p
-                    className="text-sm text-white/85 whitespace-pre-wrap"
+                    className="text-[13px] leading-relaxed text-slate-700 whitespace-pre-wrap"
                     data-testid={`talent-feedback-text-${fb.id}`}
                 >
                     {fb.text}
@@ -2529,5 +2555,3 @@ function timeAgo(iso) {
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
 }
-
-

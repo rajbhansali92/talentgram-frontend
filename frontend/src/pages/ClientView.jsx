@@ -24,7 +24,11 @@ import {
     Clock,
 } from "lucide-react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+// Safety fallback to prevent catastrophic failures when env var is missing
+const API =
+    process.env.REACT_APP_BACKEND_URL
+        ? `${process.env.REACT_APP_BACKEND_URL}/api`
+        : "http://localhost:8000/api";
 
 /**
  * Client-facing privacy helper — collapses the talent's full name to
@@ -118,15 +122,30 @@ export default function ClientView() {
         e.preventDefault();
         setLoading(true);
         try {
-            const { data } = await axios.post(
+            const response = await axios.post(
                 `${API}/public/links/${slug}/identify`,
-                { name, email },
+                {
+                    viewer_name: name,
+                    viewer_email: email,
+                },
             );
-            saveViewerToken(slug, data.token);
-            setIdentified(true);
-            toast.success(`Welcome, ${name.split(" ")[0]}`);
+            if (response.data.token) {
+                saveViewerToken(slug, response.data.token);
+                setIdentified(true);
+                // Safe greeting that handles empty name edge case
+                toast.success(
+                    `Welcome, ${(name || "Guest").split(" ")[0]}`
+                );
+            } else {
+                throw new Error("No token received");
+            }
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to continue");
+            console.error("IDENTIFY ERROR:", e?.response?.data || e);
+            toast.error(
+                e?.response?.data?.detail ||
+                e?.response?.data?.message ||
+                "Failed to continue. Please try again."
+            );
         } finally {
             setLoading(false);
         }
@@ -224,7 +243,7 @@ export default function ClientView() {
         return (
             <div className="min-h-screen bg-[#111110] relative">
                 <div
-                    className="absolute inset-0 opacity-20"
+                    className="absolute inset-0 opacity-15"
                     style={{
                         backgroundImage:
                             "url('https://images.pexels.com/photos/15128321/pexels-photo-15128321.jpeg')",
@@ -232,26 +251,26 @@ export default function ClientView() {
                         backgroundPosition: "center",
                     }}
                 />
-                <div className="absolute inset-0 bg-gradient-to-b from-[#111110]/40 via-[#111110]/80 to-[#111110]" />
+                <div className="absolute inset-0 bg-gradient-to-b from-[#111110]/60 via-[#111110]/85 to-[#111110]" />
                 <div className="relative z-10 min-h-screen flex items-center justify-center px-6">
                     <form
                         onSubmit={identify}
-                        className="w-full max-w-md bg-[#111110]/80 backdrop-blur-md border border-white/[0.08] p-8 md:p-10 rounded-xl"
+                        className="w-full max-w-md bg-[#111110]/85 backdrop-blur-md border border-white/[0.12] p-8 md:p-10 rounded-xl"
                         data-testid="identity-gate-form"
                     >
                         <div className="flex justify-center mb-8">
                             <Logo size="md" />
                         </div>
-                        <p className="eyebrow mb-3 tracking-[0.12em]">Curated Portfolio</p>
-                        <h1 className="font-display text-2xl tracking-wide mb-3">
+                        <p className="eyebrow mb-3 tracking-[0.12em] text-white/68">Curated Portfolio</p>
+                        <h1 className="font-display text-2xl tracking-wide mb-3 text-white/90">
                             A private review awaits you.
                         </h1>
-                        <p className="text-[#a1a1aa] text-sm mb-8">
+                        <p className="text-white/68 text-sm mb-8">
                             Please share your name and email to continue. This
                             helps us follow up on your selections.
                         </p>
                         <label className="block mb-4">
-                            <span className="text-[11px] text-[#7c7c84] tracking-[0.08em] uppercase">
+                            <span className="text-[11px] text-white/68 tracking-[0.08em] uppercase">
                                 Your Name
                             </span>
                             <input
@@ -259,11 +278,11 @@ export default function ClientView() {
                                 onChange={(e) => setName(e.target.value)}
                                 required
                                 data-testid="identity-name-input"
-                                className="mt-2 w-full bg-transparent border-b border-white/[0.08] focus:border-white/30 outline-none py-2.5 text-sm text-[#d6d3cf]"
+                                className="mt-2 w-full bg-transparent border-b border-white/[0.12] focus:border-white/50 outline-none py-2.5 text-sm text-white/90 placeholder:text-white/40"
                             />
                         </label>
                         <label className="block mb-8">
-                            <span className="text-[11px] text-[#7c7c84] tracking-[0.08em] uppercase">
+                            <span className="text-[11px] text-white/68 tracking-[0.08em] uppercase">
                                 Email
                             </span>
                             <input
@@ -272,14 +291,14 @@ export default function ClientView() {
                                 onChange={(e) => setEmail(e.target.value)}
                                 required
                                 data-testid="identity-email-input"
-                                className="mt-2 w-full bg-transparent border-b border-white/[0.08] focus:border-white/30 outline-none py-2.5 text-sm text-[#d6d3cf]"
+                                className="mt-2 w-full bg-transparent border-b border-white/[0.12] focus:border-white/50 outline-none py-2.5 text-sm text-white/90 placeholder:text-white/40"
                             />
                         </label>
                         <button
                             type="submit"
                             disabled={loading}
                             data-testid="identity-submit-btn"
-                            className="w-full bg-white text-black py-3.5 rounded-lg text-sm font-medium hover:opacity-90 inline-flex items-center justify-center gap-2 transition-colors duration-150"
+                            className="w-full bg-[#f5f1eb] text-black py-3.5 rounded-lg text-sm font-medium hover:bg-white transition-colors duration-150 inline-flex items-center justify-center gap-2"
                         >
                             {loading && (
                                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -294,7 +313,7 @@ export default function ClientView() {
 
     if (!data) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#111110] text-[#7c7c84]">
+            <div className="min-h-screen flex items-center justify-center bg-[#111110] text-white/68">
                 <Loader2 className="w-6 h-6 animate-spin" />
             </div>
         );
@@ -327,27 +346,27 @@ export default function ClientView() {
     const reviewedPct = totalCount === 0 ? 0 : Math.round((seenCount / totalCount) * 100);
 
     return (
-        <div className="min-h-screen bg-[#111110] text-[#d6d3cf]" data-testid="client-view-page">
-            <header className="sticky top-0 z-30 bg-[#111110]/90 backdrop-blur-md border-b border-white/[0.08]">
+        <div className="min-h-screen bg-[#111110] text-white/90" data-testid="client-view-page">
+            <header className="sticky top-0 z-30 bg-[#111110]/95 backdrop-blur-md border-b border-white/[0.12]">
                 <div className="max-w-[1600px] mx-auto px-4 md:px-12 py-3 md:py-5">
                     <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                            <p className="eyebrow hidden md:block tracking-[0.12em]">Curated Review</p>
-                            <h1 className="font-display text-base md:text-xl tracking-wide mt-0 md:mt-1 truncate">
+                            <p className="eyebrow hidden md:block tracking-[0.12em] text-white/68">Curated Review</p>
+                            <h1 className="font-display text-base md:text-xl tracking-wide mt-0 md:mt-1 truncate text-white/90">
                                 {link.title}
                             </h1>
-                            <p className="text-[10px] md:hidden text-[#7c7c84] font-mono tracking-[0.08em] mt-0.5 truncate">
+                            <p className="text-[10px] md:hidden text-white/68 font-mono tracking-[0.08em] mt-0.5 truncate">
                                 {viewer.name} · {seenCount}/{totalCount} reviewed
                             </p>
                         </div>
                         <div className="hidden md:block text-right">
-                            <p className="text-xs text-[#7c7c84]">Viewing as</p>
-                            <p className="text-sm font-medium text-[#d6d3cf]">{viewer.name}</p>
+                            <p className="text-xs text-white/68">Viewing as</p>
+                            <p className="text-sm font-medium text-white/90">{viewer.name}</p>
                         </div>
                     </div>
-                    <div className="md:hidden mt-2 h-1 bg-white/[0.08] rounded-full overflow-hidden">
+                    <div className="md:hidden mt-2 h-1 bg-white/[0.12] rounded-full overflow-hidden">
                         <div
-                            className="h-full bg-white/40 transition-all duration-500"
+                            className="h-full bg-white/60 transition-all duration-500"
                             style={{ width: `${reviewedPct}%` }}
                             data-testid="review-progress-bar-mobile"
                         />
@@ -358,12 +377,12 @@ export default function ClientView() {
             <div className="max-w-[1600px] mx-auto px-4 md:px-12 py-5 md:py-12">
                 <div className="hidden md:flex mb-8 items-center justify-between flex-wrap gap-3">
                     <div>
-                        <p className="eyebrow tracking-[0.12em] mb-2">{talents.length} Talents</p>
-                        <h2 className="font-display text-2xl md:text-3xl tracking-wide">
+                        <p className="eyebrow tracking-[0.12em] mb-2 text-white/68">{talents.length} Talents</p>
+                        <h2 className="font-display text-2xl md:text-3xl tracking-wide text-white/90">
                             Pick your winners.
                         </h2>
                     </div>
-                    <p className="text-xs text-[#7c7c84] max-w-sm">
+                    <p className="text-xs text-white/68 max-w-sm">
                         Tap any card to view the full portfolio. Actions and
                         comments are saved instantly.
                     </p>
@@ -373,15 +392,15 @@ export default function ClientView() {
                     className="mb-6 hidden md:flex items-center gap-4"
                     data-testid="review-progress"
                 >
-                    <div className="flex-1 h-1 bg-white/[0.08] rounded-full overflow-hidden">
+                    <div className="flex-1 h-1 bg-white/[0.12] rounded-full overflow-hidden">
                         <div
-                            className="h-full bg-white/40 transition-all duration-500"
+                            className="h-full bg-white/60 transition-all duration-500"
                             style={{ width: `${reviewedPct}%` }}
                             data-testid="review-progress-bar"
                         />
                     </div>
                     <div
-                        className="text-[11px] font-mono text-[#7c7c84] tracking-[0.08em] shrink-0"
+                        className="text-[11px] font-mono text-white/68 tracking-[0.08em] shrink-0"
                         data-testid="review-progress-label"
                     >
                         {seenCount} of {totalCount} reviewed
@@ -389,7 +408,7 @@ export default function ClientView() {
                 </div>
 
                 <div
-                    className="mb-6 md:mb-10 -mx-4 md:mx-0 px-4 md:px-0 flex items-center gap-2 overflow-x-auto md:flex-wrap whitespace-nowrap border-b border-white/[0.08] pb-3"
+                    className="mb-6 md:mb-10 -mx-4 md:mx-0 px-4 md:px-0 flex items-center gap-2 overflow-x-auto md:flex-wrap whitespace-nowrap border-b border-white/[0.12] pb-3"
                     style={{ scrollbarWidth: "none" }}
                     data-testid="client-view-tabs"
                 >
@@ -404,14 +423,14 @@ export default function ClientView() {
                                 data-testid={`client-tab-${tab.key}`}
                                 className={`inline-flex items-center gap-1.5 px-3 md:px-3.5 py-2 rounded-lg text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.98] ${
                                     active
-                                        ? "bg-white text-black border-white"
-                                        : "border-white/[0.08] text-[#7c7c84] hover:text-[#d6d3cf] hover:border-white/20"
+                                        ? "bg-[#f5f1eb] text-black border-[#f5f1eb]"
+                                        : "border-white/[0.12] text-white/68 hover:text-white/90 hover:border-white/30"
                                 }`}
                             >
                                 <tab.icon className="w-3.5 h-3.5" />
                                 {tab.label}
                                 <span
-                                    className={`font-mono text-[10px] ${active ? "text-black/60" : "text-[#7c7c84]/60"}`}
+                                    className={`font-mono text-[10px] ${active ? "text-black/60" : "text-white/40"}`}
                                 >
                                     {count}
                                 </span>
@@ -422,10 +441,10 @@ export default function ClientView() {
 
                 {projectBudget.length > 0 && (
                     <section
-                        className="mb-10 border border-white/[0.08] bg-white/[0.02] p-5 md:p-6 rounded-xl"
+                        className="mb-10 border border-white/[0.12] bg-white/[0.02] p-5 md:p-6 rounded-xl"
                         data-testid="project-budget-block"
                     >
-                        <p className="eyebrow tracking-[0.12em] mb-4">Project Budget</p>
+                        <p className="eyebrow tracking-[0.12em] mb-4 text-white/68">Project Budget</p>
                         <div className="grid gap-6 md:grid-cols-2">
                             {projectBudget.map((grp, gi) => (
                                 <div
@@ -434,20 +453,20 @@ export default function ClientView() {
                                     data-testid={`project-budget-group-${gi}`}
                                 >
                                     {grp.brand_name && projectBudget.length > 1 && (
-                                        <div className="text-[10px] tracking-[0.08em] uppercase text-[#7c7c84] mb-1">
+                                        <div className="text-[10px] tracking-[0.08em] uppercase text-white/68 mb-1">
                                             {grp.brand_name}
                                         </div>
                                     )}
                                     {(grp.lines || []).map((row, ri) => (
                                         <div
                                             key={`${row.label || ""}-${ri}`}
-                                            className="flex items-center justify-between gap-3 border-b border-white/[0.05] pb-2 text-sm"
+                                            className="flex items-center justify-between gap-3 border-b border-white/[0.08] pb-2 text-sm"
                                             data-testid={`project-budget-line-${gi}-${ri}`}
                                         >
-                                            <span className="text-[#a1a1aa]">
+                                            <span className="text-white/68">
                                                 {row.label || "—"}
                                             </span>
-                                            <span className="font-mono text-[#d6d3cf]">
+                                            <span className="font-mono text-white/90">
                                                 {row.value || "—"}
                                             </span>
                                         </div>
@@ -464,7 +483,7 @@ export default function ClientView() {
                 >
                     {filteredTalents.length === 0 ? (
                         <div
-                            className="col-span-full text-center py-16 text-[#7c7c84] text-sm"
+                            className="col-span-full text-center py-16 text-white/68 text-sm"
                             data-testid="client-tab-empty"
                         >
                             {activeTab === "new" && "Nothing new since your last visit."}
@@ -654,32 +673,35 @@ function TalentDetail({
         }
     }, [busyAction, setAction, talent.id, hasNextTalent, goNextTalent]);
 
+    // Production-safe download handler using IMAGE_URL and cross-browser DOM approach
     const download = useCallback(async (m) => {
         await logDownload(talent.id, m.id);
-        const url = m.url;
+        const url = IMAGE_URL(m);
         const a = document.createElement("a");
         a.href = url;
         a.download = m.original_filename || "file";
         a.target = "_blank";
+        document.body.appendChild(a);
         a.click();
+        a.remove();
     }, [logDownload, talent.id]);
 
     return (
         <div
             ref={overlayRef}
-            className="fixed inset-0 z-50 bg-[#111110]/95 backdrop-blur-md overflow-y-auto pb-[88px] md:pb-0"
+            className="fixed inset-0 z-50 bg-[#111110]/92 backdrop-blur-md overflow-y-auto pb-[88px] md:pb-0"
             data-testid="talent-detail-overlay"
         >
             <div className="md:hidden fixed top-3 left-3 z-50 flex items-center gap-1 text-[10px] font-mono tracking-[0.08em]">
                 {currentTalentIdx >= 0 && (
-                    <span className="px-2 py-1 bg-[#181818]/80 border border-white/[0.08] rounded-md text-[#a1a1aa]">
+                    <span className="px-2 py-1 bg-[#1F1F1F] border border-white/[0.12] rounded-md text-white/68">
                         {currentTalentIdx + 1} / {list.length}
                     </span>
                 )}
             </div>
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-50 w-11 h-11 border border-white/[0.08] hover:border-white/30 rounded-lg flex items-center justify-center bg-[#181818]/80 transition-colors duration-150 active:scale-95"
+                className="fixed top-5 right-5 z-50 w-11 h-11 border border-white/[0.12] hover:border-white/40 rounded-lg flex items-center justify-center bg-[#1F1F1F] transition-colors duration-150 active:scale-95"
                 data-testid="detail-close-btn"
             >
                 <X className="w-4 h-4" />
@@ -693,21 +715,21 @@ function TalentDetail({
                                 className="mb-8"
                                 data-testid="client-takes-section"
                             >
-                                <p className="eyebrow tracking-[0.12em] mb-3">Audition Takes</p>
+                                <p className="eyebrow tracking-[0.12em] mb-3 text-white/68">Audition Takes</p>
                                 <div className="grid md:grid-cols-2 gap-4">
                                     {takes.map((t, i) => (
                                         <div
                                             key={t.id}
                                             data-testid={`client-take-${i}`}
                                         >
-                                            <p className="text-[11px] text-[#a1a1aa] mb-2 font-mono tracking-[0.08em] truncate">
+                                            <p className="text-[11px] text-white/68 mb-2 font-mono tracking-[0.08em] truncate">
                                                 {t.label || `Take ${i + 1}`}
                                             </p>
                                             <video
                                                 src={t.url}
                                                 controls
                                                 preload="metadata"
-                                                className="w-full border border-white/[0.08] bg-[#151515] rounded-lg"
+                                                className="w-full border border-white/[0.12] bg-[#181818] rounded-lg"
                                             />
                                         </div>
                                     ))}
@@ -717,22 +739,22 @@ function TalentDetail({
 
                         {vis.intro_video && intro && (
                             <div className="mb-8">
-                                <p className="eyebrow tracking-[0.12em] mb-3">Introduction</p>
+                                <p className="eyebrow tracking-[0.12em] mb-3 text-white/68">Introduction</p>
                                 <video
                                     src={intro.url}
                                     controls
                                     preload="metadata"
-                                    className="w-full border border-white/[0.08] bg-[#151515] rounded-lg"
+                                    className="w-full border border-white/[0.12] bg-[#181818] rounded-lg"
                                     data-testid="client-intro-video"
                                 />
                             </div>
                         )}
 
                         {images.length > 0 && (
-                            <p className="eyebrow tracking-[0.12em] mb-3">Portfolio</p>
+                            <p className="eyebrow tracking-[0.12em] mb-3 text-white/68">Portfolio</p>
                         )}
                         {images.length > 0 ? (
-                            <div className="relative bg-[#151515] aspect-[3/4] border border-white/[0.08] overflow-hidden rounded-xl">
+                            <div className="relative bg-[#181818] aspect-[3/4] border border-white/[0.12] overflow-hidden rounded-xl">
                                 <img
                                     src={IMAGE_URL(images[idx])}
                                     alt={privatizeName(talent.name)}
@@ -742,17 +764,17 @@ function TalentDetail({
                                     <>
                                         <button
                                             onClick={prev}
-                                            className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#181818]/80 border border-white/[0.08] hover:bg-[#151515] rounded-lg flex items-center justify-center transition-colors duration-150"
+                                            className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#1F1F1F] border border-white/[0.12] hover:bg-[#181818] rounded-lg flex items-center justify-center transition-colors duration-150"
                                         >
                                             <ChevronLeft className="w-4 h-4" />
                                         </button>
                                         <button
                                             onClick={next}
-                                            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#181818]/80 border border-white/[0.08] hover:bg-[#151515] rounded-lg flex items-center justify-center transition-colors duration-150"
+                                            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#1F1F1F] border border-white/[0.12] hover:bg-[#181818] rounded-lg flex items-center justify-center transition-colors duration-150"
                                         >
                                             <ChevronRight className="w-4 h-4" />
                                         </button>
-                                        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-[#181818]/80 border border-white/[0.08] text-[10px] font-mono tracking-[0.08em] rounded-sm">
+                                        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-[#1F1F1F] border border-white/[0.12] text-[10px] font-mono tracking-[0.08em] rounded-sm text-white/68">
                                             {idx + 1} / {images.length}
                                         </div>
                                     </>
@@ -760,7 +782,7 @@ function TalentDetail({
                                 {vis.download && (
                                     <button
                                         onClick={() => download(images[idx])}
-                                        className="absolute top-2 right-2 w-9 h-9 bg-[#181818]/80 border border-white/[0.08] hover:bg-white hover:text-black rounded-lg flex items-center justify-center transition-colors duration-150"
+                                        className="absolute top-2 right-2 w-9 h-9 bg-[#1F1F1F] border border-white/[0.12] hover:bg-[#f5f1eb] hover:text-black rounded-lg flex items-center justify-center transition-colors duration-150"
                                         data-testid="detail-download-btn"
                                     >
                                         <Download className="w-4 h-4" />
@@ -768,7 +790,7 @@ function TalentDetail({
                                 )}
                             </div>
                         ) : (
-                            <div className="aspect-[3/4] bg-[#151515] border border-white/[0.08] rounded-xl flex items-center justify-center text-[#7c7c84]">
+                            <div className="aspect-[3/4] bg-[#181818] border border-white/[0.12] rounded-xl flex items-center justify-center text-white/68">
                                 No portfolio
                             </div>
                         )}
@@ -782,7 +804,7 @@ function TalentDetail({
                                     <button
                                         key={m.id}
                                         onClick={() => setIdx(i)}
-                                        className={`shrink-0 w-16 h-20 border ${i === idx ? "border-white/40" : "border-white/[0.08]"} rounded-md overflow-hidden`}
+                                        className={`shrink-0 w-16 h-20 border ${i === idx ? "border-white/60" : "border-white/[0.12]"} rounded-md overflow-hidden transition-colors duration-150`}
                                     >
                                         <img
                                             src={IMAGE_URL(m)}
@@ -796,9 +818,9 @@ function TalentDetail({
                     </div>
 
                     <div className="lg:col-span-2">
-                        <p className="eyebrow tracking-[0.12em] mb-3">Talent</p>
+                        <p className="eyebrow tracking-[0.12em] mb-3 text-white/68">Talent</p>
                         <h2
-                            className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-[#d6d3cf]"
+                            className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-white/90"
                             data-testid="client-talent-name"
                         >
                             {privatizeName(talent.name)}
@@ -857,17 +879,17 @@ function TalentDetail({
                                 return null;
                             return (
                                 <div
-                                    className="mb-8 border border-white/[0.08] p-4 space-y-4 rounded-xl"
+                                    className="mb-8 border border-white/[0.12] p-4 space-y-4 rounded-xl"
                                     data-testid="client-details-section"
                                 >
                                     {showAvail && (
                                         <div data-testid="client-availability">
-                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#7c7c84] mb-1">
+                                            <p className="text-[10px] tracking-[0.08em] uppercase text-white/68 mb-1">
                                                 Availability
                                             </p>
                                             {tProj?.shoot_dates && (
                                                 <p
-                                                    className="text-sm text-[#a1a1aa] mb-1"
+                                                    className="text-sm text-white/68 mb-1"
                                                     data-testid="client-shoot-dates"
                                                 >
                                                     {tProj.shoot_dates}
@@ -880,13 +902,13 @@ function TalentDetail({
                                                 if (!lbl) return null;
                                                 const tone =
                                                     lbl === "Available"
-                                                        ? "bg-[#5A7D5A]/15 text-[#8FB89F]"
+                                                        ? "bg-[#5A7D5A]/20 text-[#8FB89F]"
                                                         : lbl === "Not Available"
-                                                          ? "bg-[#9E4A4A]/15 text-[#CD8585]"
-                                                          : "bg-[#C9A961]/15 text-[#D6BC7D]";
+                                                          ? "bg-[#9E4A4A]/20 text-[#CD8585]"
+                                                          : "bg-[#C9A961]/20 text-[#D6BC7D]";
                                                 return (
                                                     <p className="text-sm">
-                                                        <span className="text-[#7c7c84] mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">
+                                                        <span className="text-white/68 mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">
                                                             Status
                                                         </span>
                                                         <span
@@ -897,7 +919,7 @@ function TalentDetail({
                                                         </span>
                                                         {talent.availability
                                                             ?.note && (
-                                                            <span className="text-[#a1a1aa]">
+                                                            <span className="text-white/68">
                                                                 {
                                                                     talent.availability
                                                                         .note
@@ -911,7 +933,7 @@ function TalentDetail({
                                     )}
                                     {showBudget && (
                                         <div data-testid="client-budget">
-                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#7c7c84] mb-1">
+                                            <p className="text-[10px] tracking-[0.08em] uppercase text-white/68 mb-1">
                                                 Budget
                                             </p>
                                             {(() => {
@@ -920,9 +942,9 @@ function TalentDetail({
                                                     (talent.budget?.value || "").trim()
                                                 ) {
                                                     return (
-                                                        <p className="text-sm text-[#d6d3cf]">
+                                                        <p className="text-sm text-white/90">
                                                             {talent.budget.value}
-                                                            <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-md bg-white/10 text-[#a1a1aa]">
+                                                            <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-md bg-white/15 text-white/68">
                                                                 Counter-offer
                                                             </span>
                                                         </p>
@@ -939,14 +961,14 @@ function TalentDetail({
                                                     lines.length
                                                 ) {
                                                     return (
-                                                        <ul className="text-sm text-[#d6d3cf] space-y-0.5">
+                                                        <ul className="text-sm text-white/90 space-y-0.5">
                                                             {lines.map((ln, i) => (
                                                                 <li
                                                                     key={`${ln.label}-${ln.value}`}
                                                                     className="flex justify-between gap-4"
                                                                     data-testid={`client-budget-line-${i}`}
                                                                 >
-                                                                    <span className="text-[#a1a1aa]">
+                                                                    <span className="text-white/68">
                                                                         {ln.label}
                                                                     </span>
                                                                     <span>{ln.value}</span>
@@ -961,7 +983,7 @@ function TalentDetail({
                                                 ) {
                                                     return (
                                                         <p className="text-sm">
-                                                            <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-md bg-[#5A7D5A]/15 text-[#8FB89F]">
+                                                            <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-md bg-[#5A7D5A]/20 text-[#8FB89F]">
                                                                 Agreed
                                                             </span>
                                                         </p>
@@ -969,13 +991,13 @@ function TalentDetail({
                                                 }
                                                 if (lines.length) {
                                                     return (
-                                                        <ul className="text-sm text-[#d6d3cf] space-y-0.5">
+                                                        <ul className="text-sm text-white/90 space-y-0.5">
                                                             {lines.map((ln) => (
                                                                 <li
                                                                     key={`${ln.label}-${ln.value}`}
                                                                     className="flex justify-between gap-4"
                                                                 >
-                                                                    <span className="text-[#a1a1aa]">
+                                                                    <span className="text-white/68">
                                                                         {ln.label}
                                                                     </span>
                                                                     <span>{ln.value}</span>
@@ -990,10 +1012,10 @@ function TalentDetail({
                                     )}
                                     {talent.competitive_brand && (
                                         <div data-testid="client-competitive-brand">
-                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#7c7c84] mb-1">
+                                            <p className="text-[10px] tracking-[0.08em] uppercase text-white/68 mb-1">
                                                 Competitive Brand
                                             </p>
-                                            <p className="text-sm text-[#d6d3cf]">
+                                            <p className="text-sm text-white/90">
                                                 {talent.competitive_brand}
                                             </p>
                                         </div>
@@ -1004,19 +1026,19 @@ function TalentDetail({
 
                         {(talent.custom_answers || []).length > 0 && (
                             <div
-                                className="mb-8 border border-white/[0.08] p-4 space-y-3 rounded-xl"
+                                className="mb-8 border border-white/[0.12] p-4 space-y-3 rounded-xl"
                                 data-testid="client-custom-answers"
                             >
-                                <p className="eyebrow tracking-[0.12em]">Additional Details</p>
+                                <p className="eyebrow tracking-[0.12em] text-white/68">Additional Details</p>
                                 {talent.custom_answers.map((qa, i) => (
                                     <div
                                         key={`${qa.question}-${i}`}
                                         data-testid={`custom-qa-${i}`}
                                     >
-                                        <p className="text-[10px] tracking-[0.08em] uppercase text-[#7c7c84] mb-0.5">
+                                        <p className="text-[10px] tracking-[0.08em] uppercase text-white/68 mb-0.5">
                                             {qa.question}
                                         </p>
-                                        <p className="text-sm text-[#d6d3cf] whitespace-pre-wrap">
+                                        <p className="text-sm text-white/90 whitespace-pre-wrap">
                                             {qa.answer}
                                         </p>
                                     </div>
@@ -1031,7 +1053,7 @@ function TalentDetail({
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     data-testid="client-instagram-link"
-                                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/[0.08] hover:border-white/30 rounded-lg text-xs transition-colors duration-150 text-[#d6d3cf]"
+                                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/[0.12] hover:border-white/40 rounded-lg text-xs transition-colors duration-150 text-white/90"
                                 >
                                     <Instagram className="w-3.5 h-3.5" />{" "}
                                     {talent.instagram_handle}
@@ -1042,7 +1064,7 @@ function TalentDetail({
                         {vis.work_links &&
                             (talent.work_links || []).length > 0 && (
                                 <div className="mb-8">
-                                    <p className="eyebrow tracking-[0.12em] mb-3">Work</p>
+                                    <p className="eyebrow tracking-[0.12em] mb-3 text-white/68">Work</p>
                                     <div className="space-y-2">
                                         {talent.work_links.map((w) => (
                                             <a
@@ -1050,7 +1072,7 @@ function TalentDetail({
                                                 href={w}
                                                 target="_blank"
                                                 rel="noreferrer"
-                                                className="flex items-center gap-2 text-sm text-[#a1a1aa] hover:text-[#d6d3cf] font-mono truncate transition-colors duration-150"
+                                                className="flex items-center gap-2 text-sm text-white/68 hover:text-white/90 font-mono truncate transition-colors duration-150"
                                             >
                                                 <ExternalLink className="w-3 h-3 shrink-0" />
                                                 <span className="truncate">
@@ -1062,8 +1084,8 @@ function TalentDetail({
                                 </div>
                             )}
 
-                        <div className="border-t border-white/[0.08] pt-6 mt-6">
-                            <p className="eyebrow tracking-[0.12em] mb-4">Your Decision</p>
+                        <div className="border-t border-white/[0.12] pt-6 mt-6">
+                            <p className="eyebrow tracking-[0.12em] mb-4 text-white/68">Your Decision</p>
                             <div className="grid grid-cols-2 gap-2 mb-6">
                                 {ACTIONS.map((a) => {
                                     const active = viewerAction?.action === a.key;
@@ -1078,7 +1100,7 @@ function TalentDetail({
                                             }
                                             data-testid={`action-${a.key}-${talent.id}`}
                                             className={`flex items-center gap-2 px-4 py-3 border rounded-lg text-sm transition-colors duration-150 ${
-                                                active ? "bg-white text-black border-white" : "border-white/[0.08] hover:border-white/20 text-[#d6d3cf]"
+                                                active ? "bg-[#f5f1eb] text-black border-[#f5f1eb]" : "border-white/[0.12] hover:border-white/30 text-white/90"
                                             }`}
                                         >
                                             <a.icon
@@ -1097,8 +1119,8 @@ function TalentDetail({
 
                             <div>
                                 <div className="flex items-center gap-2 mb-2">
-                                    <MessageSquare className="w-3.5 h-3.5 text-[#7c7c84]" />
-                                    <p className="eyebrow tracking-[0.12em]">Comment</p>
+                                    <MessageSquare className="w-3.5 h-3.5 text-white/68" />
+                                    <p className="eyebrow tracking-[0.12em] text-white/68">Comment</p>
                                 </div>
                                 <textarea
                                     value={commentDraft}
@@ -1108,12 +1130,12 @@ function TalentDetail({
                                     rows={3}
                                     placeholder="Share any notes about this talent..."
                                     data-testid="detail-comment-input"
-                                    className="w-full bg-transparent border border-white/[0.08] focus:border-white/30 rounded-lg p-3 text-sm outline-none transition-colors duration-150 text-[#d6d3cf] placeholder:text-[#7c7c84]"
+                                    className="w-full bg-transparent border border-white/[0.12] focus:border-white/40 rounded-lg p-3 text-sm outline-none transition-colors duration-150 text-white/90 placeholder:text-white/40"
                                 />
                                 <button
                                     onClick={saveComment}
                                     data-testid="detail-save-comment-btn"
-                                    className="mt-3 text-xs px-4 py-2 border border-white/[0.08] hover:border-white/30 rounded-lg transition-colors duration-150 text-[#a1a1aa] hover:text-[#d6d3cf]"
+                                    className="mt-3 text-xs px-4 py-2 border border-white/[0.12] hover:border-white/30 rounded-lg transition-colors duration-150 text-white/68 hover:text-white/90"
                                 >
                                     Save comment
                                 </button>
@@ -1124,7 +1146,7 @@ function TalentDetail({
             </div>
 
             <div
-                className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#111110]/95 backdrop-blur-md border-t border-white/[0.08] px-3 py-3"
+                className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#111110]/95 backdrop-blur-md border-t border-white/[0.12] px-3 py-3"
                 data-testid="detail-bottom-bar"
                 style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
             >
@@ -1134,7 +1156,7 @@ function TalentDetail({
                         onClick={() => quickAction("shortlist")}
                         disabled={Boolean(busyAction)}
                         data-testid="quick-shortlist-btn"
-                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[11px] tracking-[0.08em] uppercase active:scale-[0.98] transition-transform ${viewerAction?.action === "shortlist" ? "bg-[#C9A961] text-black border-[#C9A961]" : "border-white/[0.08] text-[#d6d3cf] hover:border-white/20"}`}
+                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[11px] tracking-[0.08em] uppercase active:scale-[0.98] transition-transform ${viewerAction?.action === "shortlist" ? "bg-[#C9A961] text-black border-[#C9A961]" : "border-white/[0.12] text-white/90 hover:border-white/30"}`}
                     >
                         {busyAction === "shortlist" ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -1148,7 +1170,7 @@ function TalentDetail({
                         onClick={() => quickAction("not_sure")}
                         disabled={Boolean(busyAction)}
                         data-testid="quick-hold-btn"
-                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[11px] tracking-[0.08em] uppercase active:scale-[0.98] transition-transform ${viewerAction?.action === "not_sure" ? "bg-white/10 text-white border-white/30" : "border-white/[0.08] text-[#a1a1aa] hover:border-white/20"}`}
+                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[11px] tracking-[0.08em] uppercase active:scale-[0.98] transition-transform ${viewerAction?.action === "not_sure" ? "bg-white/15 text-white border-white/40" : "border-white/[0.12] text-white/68 hover:border-white/30"}`}
                     >
                         {busyAction === "not_sure" ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -1162,7 +1184,7 @@ function TalentDetail({
                         onClick={() => quickAction("not_for_this")}
                         disabled={Boolean(busyAction)}
                         data-testid="quick-reject-btn"
-                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[11px] tracking-[0.08em] uppercase active:scale-[0.98] transition-transform ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-white/[0.08] text-[#a1a1aa] hover:border-[#9E4A4A]/50 hover:text-[#CD8585]"}`}
+                        className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[11px] tracking-[0.08em] uppercase active:scale-[0.98] transition-transform ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-white/[0.12] text-white/68 hover:border-[#9E4A4A]/50 hover:text-[#CD8585]"}`}
                     >
                         {busyAction === "not_for_this" ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -1173,7 +1195,7 @@ function TalentDetail({
                     </button>
                 </div>
                 {list.length > 1 && (
-                    <div className="flex items-center justify-between mt-2 text-[10px] font-mono tracking-[0.08em] text-[#7c7c84]">
+                    <div className="flex items-center justify-between mt-2 text-[10px] font-mono tracking-[0.08em] text-white/68">
                         <button
                             type="button"
                             onClick={goPrevTalent}
@@ -1250,7 +1272,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
             data-new={isNew ? "true" : "false"}
             className="group relative text-left"
         >
-            <div className="aspect-[3/4] bg-[#151515] overflow-hidden border border-white/[0.08] rounded-xl group-hover:border-white/20 transition-all relative">
+            <div className="aspect-[3/4] bg-[#181818] overflow-hidden border border-white/[0.12] rounded-xl group-hover:border-white/30 transition-all relative">
                 {cover ? (
                     <img
                         src={IMAGE_URL(cover)}
@@ -1259,22 +1281,22 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                         className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-700"
                     />
                 ) : (
-                    <div className="w-full h-full flex items-center justify-center text-[#7c7c84]">
+                    <div className="w-full h-full flex items-center justify-center text-white/68">
                         <Sparkles className="w-8 h-8" />
                     </div>
                 )}
                 {seen && (
-                    <div className="absolute inset-0 bg-black/30 pointer-events-none" />
+                    <div className="absolute inset-0 bg-black/40 pointer-events-none" />
                 )}
 
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#111110]/95 via-[#111110]/55 to-transparent p-4">
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#111110]/95 via-[#111110]/60 to-transparent p-4">
                     <div
-                        className="font-display text-lg md:text-xl tracking-wide text-[#d6d3cf]"
+                        className="font-display text-lg md:text-xl tracking-wide text-white/90"
                         data-testid={`client-card-name-${talent.id}`}
                     >
                         {privatizeName(talent.name)}
                     </div>
-                    <div className="text-[11px] text-[#a1a1aa] font-mono tracking-[0.08em] mt-1">
+                    <div className="text-[11px] text-white/68 font-mono tracking-[0.08em] mt-1">
                         {vis.location && talent.location ? talent.location : ""}
                     </div>
                 </div>
@@ -1299,7 +1321,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                         </span>
                     )}
                     {action && action !== "shortlist" && (
-                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-white/10 text-[#d6d3cf] text-[10px] tracking-[0.08em] uppercase rounded-md">
+                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-white/15 text-white/90 text-[10px] tracking-[0.08em] uppercase rounded-md">
                             {ACTIONS.find((a) => a.key === action)?.label}
                         </span>
                     )}
@@ -1307,7 +1329,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
 
                 {seen && (
                     <span
-                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-[#181818]/80 border border-white/[0.08] text-[#a1a1aa] text-[10px] tracking-[0.08em] uppercase rounded-md"
+                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-[#1F1F1F] border border-white/[0.12] text-white/68 text-[10px] tracking-[0.08em] uppercase rounded-md"
                         data-testid={`badge-seen-${talent.id}`}
                     >
                         <Eye className="w-3 h-3" />
@@ -1322,10 +1344,10 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
 function InfoRow({ label, value }) {
     return (
         <div>
-            <div className="text-[10px] tracking-[0.08em] uppercase text-[#7c7c84] mb-1">
+            <div className="text-[10px] tracking-[0.08em] uppercase text-white/68 mb-1">
                 {label}
             </div>
-            <div className="text-sm font-medium text-[#d6d3cf]">{value}</div>
+            <div className="text-sm font-medium text-white/90">{value}</div>
         </div>
     );
 }

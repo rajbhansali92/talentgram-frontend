@@ -24,14 +24,14 @@ import {
 } from "lucide-react";
 
 const ROLE_BADGE = {
-    admin: "bg-[#c9a961]/10 text-[#c9a961] border border-[#c9a961]/20 group-hover:border-[#c9a961]/40 transition-colors",
-    team: "bg-white/5 text-white/60 border border-white/10 group-hover:border-white/20 transition-colors",
+    admin: "bg-amber-50 text-amber-700 border border-amber-200 group-hover:border-amber-300 transition-colors",
+    team: "bg-slate-50 text-slate-600 border border-slate-200 group-hover:border-slate-300 transition-colors",
 };
 
 const STATUS_BADGE = {
-    active: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
-    invited: "bg-sky-500/10 text-sky-400 border border-sky-500/20",
-    disabled: "bg-white/5 text-white/40 border border-white/10",
+    active: "bg-emerald-50 text-emerald-700 border border-emerald-200",
+    invited: "bg-sky-50 text-sky-700 border border-sky-200",
+    disabled: "bg-slate-50 text-slate-500 border border-slate-200",
 };
 
 function StatCard({ label, value, icon: Icon, testid }) {
@@ -56,24 +56,24 @@ function StatCard({ label, value, icon: Icon, testid }) {
 
     return (
         <div
-            className="group relative overflow-hidden border border-white/[0.08] bg-gradient-to-br from-white/[0.02] to-transparent backdrop-blur-sm p-5 transition-all duration-500 hover:border-white/[0.15] hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] hover:-translate-y-0.5"
+            className="group relative overflow-hidden bg-white border border-slate-200 rounded-xl p-5 transition-all duration-500 hover:shadow-lg hover:shadow-slate-100 hover:-translate-y-0.5"
             data-testid={testid}
         >
-            <div className="absolute inset-0 bg-gradient-to-br from-white/0 via-white/0 to-white/[0.02] opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+            <div className="absolute inset-0 bg-gradient-to-br from-slate-50/0 via-slate-50/0 to-slate-50/30 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
             <div className="flex items-center gap-4 relative z-10">
-                <div className="w-10 h-10 rounded-sm border border-white/10 bg-black/20 flex items-center justify-center text-white/40 group-hover:text-white/70 group-hover:border-white/20 transition-all duration-300">
+                <div className="w-10 h-10 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 group-hover:text-slate-600 group-hover:border-slate-300 transition-all duration-300">
                     <Icon className="w-4 h-4" />
                 </div>
                 <div>
-                    <div className="text-[10px] tracking-[0.2em] uppercase text-white/50 group-hover:text-white/70 transition-colors">
+                    <div className="text-[10px] tracking-[0.2em] uppercase text-slate-400 group-hover:text-slate-500 transition-colors">
                         {label}
                     </div>
-                    <div className="font-display text-3xl mt-1 tracking-tight">
+                    <div className="font-display text-3xl mt-1 tracking-tight text-slate-900">
                         {displayValue}
                     </div>
                 </div>
             </div>
-            <div className="absolute bottom-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent group-hover:via-white/20 transition-all duration-500" />
+            <div className="absolute bottom-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-slate-200 to-transparent group-hover:via-slate-300 transition-all duration-500" />
         </div>
     );
 }
@@ -139,36 +139,32 @@ function InviteModal({ open, onClose, onInvited }) {
     if (!open) return null;
     return (
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm"
             data-testid="invite-modal"
-            style={{
-                background: "radial-gradient(ellipse at center, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.95) 100%)",
-                backdropFilter: "blur(8px)",
-            }}
         >
             <div className="relative w-full max-w-lg animate-in fade-in zoom-in-95 duration-300">
-                <div className="absolute inset-0 bg-gradient-to-br from-white/[0.05] via-transparent to-black/40 rounded-2xl blur-xl" />
-                <div className="relative border border-white/[0.08] bg-black/80 backdrop-blur-md p-6 md:p-8 rounded-2xl shadow-2xl">
+                <div className="absolute inset-0 bg-gradient-to-br from-slate-50 via-transparent to-white/40 rounded-2xl blur-xl" />
+                <div className="relative bg-white border border-slate-200 shadow-2xl rounded-2xl p-6 md:p-8">
                     <button
                         type="button"
                         onClick={() => {
                             onClose();
                             reset();
                         }}
-                        className="absolute top-5 right-5 text-white/40 hover:text-white/80 transition-all hover:scale-110"
+                        className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 transition-all hover:scale-110"
                         data-testid="invite-close-btn"
                     >
                         <X className="w-4 h-4" />
                     </button>
-                    <p className="eyebrow mb-1 text-[#c9a961]">Invite</p>
-                    <h2 className="font-display text-3xl tracking-tight mb-8 bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
+                    <p className="eyebrow mb-1 text-amber-600 text-[11px] tracking-[0.2em] uppercase font-semibold">Invite</p>
+                    <h2 className="font-display text-3xl tracking-tight mb-8 text-slate-900">
                         Add a team member
                     </h2>
 
                     {!result ? (
                         <>
                             <label className="block mb-6">
-                                <span className="text-[11px] tracking-[0.2em] uppercase text-white/50">
+                                <span className="text-[11px] tracking-[0.2em] uppercase text-slate-500">
                                     Full name
                                 </span>
                                 <input
@@ -176,11 +172,11 @@ function InviteModal({ open, onClose, onInvited }) {
                                     onChange={(e) => setName(e.target.value)}
                                     placeholder="e.g. Raj Khanna"
                                     data-testid="invite-name"
-                                    className="mt-2 w-full bg-white/[0.03] border-b border-white/10 focus:border-[#c9a961]/60 outline-none py-3 text-sm transition-all focus:bg-white/[0.05] text-white"
+                                    className="mt-2 w-full border-b border-slate-200 focus:border-amber-400 outline-none py-3 text-sm transition-all bg-transparent text-slate-900 placeholder:text-slate-400"
                                 />
                             </label>
                             <label className="block mb-6">
-                                <span className="text-[11px] tracking-[0.2em] uppercase text-white/50">
+                                <span className="text-[11px] tracking-[0.2em] uppercase text-slate-500">
                                     Email
                                 </span>
                                 <input
@@ -189,22 +185,22 @@ function InviteModal({ open, onClose, onInvited }) {
                                     onChange={(e) => setEmail(e.target.value)}
                                     placeholder="name@talentgram.com"
                                     data-testid="invite-email"
-                                    className="mt-2 w-full bg-white/[0.03] border-b border-white/10 focus:border-[#c9a961]/60 outline-none py-3 text-sm transition-all focus:bg-white/[0.05] text-white"
+                                    className="mt-2 w-full border-b border-slate-200 focus:border-amber-400 outline-none py-3 text-sm transition-all bg-transparent text-slate-900 placeholder:text-slate-400"
                                 />
                             </label>
                             <label className="block mb-8">
-                                <span className="text-[11px] tracking-[0.2em] uppercase text-white/50">
+                                <span className="text-[11px] tracking-[0.2em] uppercase text-slate-500">
                                     Role
                                 </span>
                                 <div className="mt-2" data-testid="invite-role-wrap">
                                     <Select value={role} onValueChange={setRole}>
                                         <SelectTrigger
-                                            className="w-full bg-white/[0.03] border-white/10 text-white hover:bg-white/[0.06] transition-all"
+                                            className="w-full bg-white border-slate-200 text-slate-900 hover:bg-slate-50 transition-all"
                                             data-testid="invite-role-trigger"
                                         >
                                             <SelectValue />
                                         </SelectTrigger>
-                                        <SelectContent className="bg-black/90 backdrop-blur-md border-white/10">
+                                        <SelectContent className="bg-white border-slate-200 shadow-lg">
                                             <SelectItem value="team">Team</SelectItem>
                                             <SelectItem value="admin">Admin</SelectItem>
                                         </SelectContent>
@@ -215,7 +211,7 @@ function InviteModal({ open, onClose, onInvited }) {
                                 onClick={submit}
                                 disabled={busy}
                                 data-testid="invite-submit-btn"
-                                className="relative w-full overflow-hidden bg-gradient-to-r from-white to-white/90 text-black py-3.5 rounded-lg text-sm font-medium hover:shadow-lg hover:shadow-white/10 transition-all duration-300 hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0 inline-flex items-center justify-center gap-2"
+                                className="relative w-full overflow-hidden bg-slate-900 text-white py-3.5 rounded-lg text-sm font-medium hover:bg-slate-800 transition-all duration-300 hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0 inline-flex items-center justify-center gap-2 shadow-sm"
                             >
                                 {busy && <Loader2 className="w-4 h-4 animate-spin" />}
                                 Create invite
@@ -223,18 +219,18 @@ function InviteModal({ open, onClose, onInvited }) {
                         </>
                     ) : (
                         <div data-testid="invite-result" className="animate-in fade-in duration-300">
-                            <div className="border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 mb-6 text-sm text-emerald-300 rounded-lg inline-flex items-center gap-2 backdrop-blur-sm">
-                                <Check className="w-4 h-4" /> Invite created for{" "}
+                            <div className="border border-emerald-200 bg-emerald-50 px-4 py-3 mb-6 text-sm text-emerald-800 rounded-lg inline-flex items-center gap-2">
+                                <Check className="w-4 h-4 text-emerald-600" /> Invite created for{" "}
                                 <span className="font-medium">{result.user.email}</span>
                             </div>
-                            <p className="text-xs text-white/60 mb-3">
+                            <p className="text-xs text-slate-600 mb-3">
                                 Send this link to the invitee. It is single-use and
                                 expires on {formatDate(result.expires_at)}.
                             </p>
-                            <div className="flex items-center gap-2 border border-white/10 bg-black/40 rounded-lg p-3 mb-6 backdrop-blur-sm">
-                                <Mail className="w-3.5 h-3.5 text-white/40 shrink-0" />
+                            <div className="flex items-center gap-2 border border-slate-200 bg-slate-50 rounded-lg p-3 mb-6">
+                                <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                                 <code
-                                    className="text-xs font-mono flex-1 truncate text-white/80"
+                                    className="text-xs font-mono flex-1 truncate text-slate-700"
                                     data-testid="invite-url"
                                 >
                                     {inviteUrl}
@@ -242,7 +238,7 @@ function InviteModal({ open, onClose, onInvited }) {
                                 <button
                                     type="button"
                                     onClick={copy}
-                                    className="text-xs px-3 py-1.5 border border-white/10 hover:border-white/30 rounded-md inline-flex items-center gap-1 transition-all hover:bg-white/5"
+                                    className="text-xs px-3 py-1.5 border border-slate-200 hover:border-slate-300 rounded-md inline-flex items-center gap-1 transition-all hover:bg-slate-100 text-slate-700"
                                     data-testid="invite-copy-btn"
                                 >
                                     <Copy className="w-3 h-3" /> Copy
@@ -253,7 +249,7 @@ function InviteModal({ open, onClose, onInvited }) {
                                     onClose();
                                     reset();
                                 }}
-                                className="w-full border border-white/10 hover:border-white/30 py-3.5 rounded-lg text-sm transition-all hover:bg-white/5"
+                                className="w-full border border-slate-200 hover:border-slate-300 py-3.5 rounded-lg text-sm transition-all hover:bg-slate-50 text-slate-700"
                                 data-testid="invite-done-btn"
                             >
                                 Done
@@ -276,24 +272,20 @@ function ResetLinkModal({ open, onClose, payload }) {
     };
     return (
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/20 backdrop-blur-sm"
             data-testid="reset-link-modal"
-            style={{
-                background: "radial-gradient(ellipse at center, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.95) 100%)",
-                backdropFilter: "blur(8px)",
-            }}
         >
             <div className="relative w-full max-w-md animate-in fade-in zoom-in-95 duration-300">
-                <div className="absolute inset-0 bg-gradient-to-br from-white/[0.05] via-transparent to-black/40 rounded-2xl blur-xl" />
-                <div className="relative border border-white/[0.08] bg-black/80 backdrop-blur-md p-6 md:p-8 rounded-2xl shadow-2xl">
-                    <p className="eyebrow mb-1 text-[#c9a961]">Password reset</p>
-                    <h2 className="font-display text-2xl tracking-tight mb-4">Single-use reset link</h2>
-                    <p className="text-sm text-white/60 mb-6 leading-relaxed">
-                        Send this link to <span className="text-white font-medium">{payload.email}</span> over a secure channel.
+                <div className="absolute inset-0 bg-gradient-to-br from-slate-50 via-transparent to-white/40 rounded-2xl blur-xl" />
+                <div className="relative bg-white border border-slate-200 shadow-2xl rounded-2xl p-6 md:p-8">
+                    <p className="eyebrow mb-1 text-amber-600 text-[11px] tracking-[0.2em] uppercase font-semibold">Password reset</p>
+                    <h2 className="font-display text-2xl tracking-tight mb-4 text-slate-900">Single-use reset link</h2>
+                    <p className="text-sm text-slate-600 mb-6 leading-relaxed">
+                        Send this link to <span className="text-slate-900 font-medium">{payload.email}</span> over a secure channel.
                         It expires in 1 hour and can only be used once. We never store the raw token.
                     </p>
                     <div
-                        className="text-xs font-mono break-all bg-black/40 border border-white/10 rounded-lg p-4 mb-6 text-white/80"
+                        className="text-xs font-mono break-all bg-slate-50 border border-slate-200 rounded-lg p-4 mb-6 text-slate-700"
                         data-testid="reset-link-value"
                     >
                         {fullLink}
@@ -301,14 +293,14 @@ function ResetLinkModal({ open, onClose, payload }) {
                     <div className="flex gap-3">
                         <button
                             onClick={copy}
-                            className="flex-1 border border-white/10 hover:border-white/30 py-3.5 rounded-lg text-sm inline-flex items-center justify-center gap-2 transition-all hover:bg-white/5"
+                            className="flex-1 border border-slate-200 hover:border-slate-300 py-3.5 rounded-lg text-sm inline-flex items-center justify-center gap-2 transition-all hover:bg-slate-50 text-slate-700"
                             data-testid="reset-link-copy-btn"
                         >
                             <Copy className="w-3.5 h-3.5" /> Copy link
                         </button>
                         <button
                             onClick={onClose}
-                            className="flex-1 bg-gradient-to-r from-white to-white/90 text-black py-3.5 rounded-lg text-sm font-medium hover:shadow-lg transition-all"
+                            className="flex-1 bg-slate-900 text-white py-3.5 rounded-lg text-sm font-medium hover:bg-slate-800 transition-all shadow-sm"
                             data-testid="reset-link-close-btn"
                         >
                             Done
@@ -426,31 +418,25 @@ export default function UserManagement() {
     if (!isAdmin()) return <Navigate to="/admin" replace />;
 
     return (
-        <div className="relative min-h-screen" data-testid="user-management-page">
-            {/* Cinematic atmospheric background */}
-            <div className="fixed inset-0 bg-black" />
-            <div className="fixed inset-0 bg-gradient-to-br from-black via-black/95 to-black/90" />
-            <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top_right,_rgba(201,169,97,0.08)_0%,_transparent_60%)]" />
-            <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_bottom_left,_rgba(255,255,255,0.03)_0%,_transparent_70%)]" />
-            
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-50/30" data-testid="user-management-page">
             <div className="relative z-10 p-6 md:p-12">
                 <div className="max-w-[1400px] mx-auto">
                     {/* Header */}
                     <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-10 animate-in fade-in slide-in-from-top-4 duration-700">
                         <div>
-                            <p className="text-[#c9a961] text-[11px] tracking-[0.3em] uppercase mb-2 font-semibold">
+                            <p className="text-amber-600 text-[11px] tracking-[0.3em] uppercase mb-2 font-semibold">
                                 Settings
                             </p>
-                            <h1 className="font-display text-5xl md:text-6xl tracking-tight bg-gradient-to-r from-white via-white to-white/70 bg-clip-text text-transparent">
+                            <h1 className="font-display text-5xl md:text-6xl tracking-tight text-slate-900">
                                 User Management
                             </h1>
-                            <p className="text-white/50 mt-3 text-sm">
+                            <p className="text-slate-500 mt-3 text-sm">
                                 Control access, roles, and team permissions
                             </p>
                         </div>
                         <button
                             onClick={() => setInviteOpen(true)}
-                            className="group relative overflow-hidden bg-gradient-to-r from-[#c9a961] to-[#b8944f] text-black px-6 py-3 rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:shadow-lg hover:shadow-[#c9a961]/20 transition-all duration-300 hover:-translate-y-0.5"
+                            className="group relative overflow-hidden bg-slate-900 text-white px-6 py-3 rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:shadow-lg hover:shadow-slate-200 transition-all duration-300 hover:-translate-y-0.5"
                             data-testid="invite-user-btn"
                         >
                             <UserPlus className="w-4 h-4 transition-transform group-hover:scale-110" /> 
@@ -488,9 +474,9 @@ export default function UserManagement() {
 
                     {/* Users Table - Desktop */}
                     <div className="hidden lg:block animate-in fade-in duration-700 delay-200">
-                        <div className="relative rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.02] backdrop-blur-sm">
+                        <div className="relative rounded-xl overflow-hidden bg-white border border-slate-200 shadow-sm">
                             {/* Table Header */}
-                            <div className="grid grid-cols-[1.5fr_2fr_0.8fr_0.8fr_1fr_1.2fr] gap-4 px-6 py-4 text-[10px] font-semibold tracking-[0.2em] uppercase text-white/50 border-b border-white/[0.06] bg-white/[0.02]">
+                            <div className="grid grid-cols-[1.5fr_2fr_0.8fr_0.8fr_1fr_1.2fr] gap-4 px-6 py-4 text-[10px] font-semibold tracking-[0.2em] uppercase text-slate-500 border-b border-slate-200 bg-slate-50/50">
                                 <div>Name</div>
                                 <div>Email</div>
                                 <div>Role</div>
@@ -502,16 +488,16 @@ export default function UserManagement() {
                             {/* Table Body */}
                             {loading && (
                                 <div className="p-16 text-center">
-                                    <Loader2 className="w-6 h-6 animate-spin mx-auto text-[#c9a961]/60" />
-                                    <p className="text-white/50 text-sm mt-3">Loading users...</p>
+                                    <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-600" />
+                                    <p className="text-slate-500 text-sm mt-3">Loading users...</p>
                                 </div>
                             )}
                             {!loading && sorted.length === 0 && (
                                 <div className="p-16 text-center">
-                                    <div className="w-16 h-16 mx-auto mb-4 rounded-full border border-white/10 flex items-center justify-center">
-                                        <UsersIcon className="w-8 h-8 text-white/20" />
+                                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center">
+                                        <UsersIcon className="w-8 h-8 text-slate-300" />
                                     </div>
-                                    <p className="text-white/50 text-sm">No users yet. Invite your first team member.</p>
+                                    <p className="text-slate-500 text-sm">No users yet. Invite your first team member.</p>
                                 </div>
                             )}
                             {!loading && sorted.map((u) => {
@@ -520,23 +506,23 @@ export default function UserManagement() {
                                 return (
                                     <div
                                         key={u.id}
-                                        className={`group relative grid grid-cols-[1.5fr_2fr_0.8fr_0.8fr_1fr_1.2fr] gap-4 px-6 py-4 items-center border-b border-white/[0.03] transition-all duration-300 hover:bg-white/[0.04] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ${dimmed ? "opacity-50" : ""}`}
+                                        className={`group relative grid grid-cols-[1.5fr_2fr_0.8fr_0.8fr_1fr_1.2fr] gap-4 px-6 py-4 items-center border-b border-slate-100 transition-all duration-300 hover:bg-slate-50/50 ${dimmed ? "opacity-50" : ""}`}
                                         data-testid={`user-row-${u.id}`}
                                     >
                                         <div className="flex items-center gap-2">
-                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-white/10 to-white/5 border border-white/10 flex items-center justify-center text-xs font-medium">
+                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center text-xs font-medium text-slate-700">
                                                 {u.name?.[0]?.toUpperCase() || u.email[0]?.toUpperCase()}
                                             </div>
-                                            <div className="truncate font-medium text-white/90">
+                                            <div className="truncate font-medium text-slate-900">
                                                 {u.name || "—"}
                                                 {self && (
-                                                    <span className="ml-2 text-[10px] font-mono text-[#c9a961]/70">
+                                                    <span className="ml-2 text-[10px] font-mono text-amber-600">
                                                         (you)
                                                     </span>
                                                 )}
                                             </div>
                                         </div>
-                                        <div className="truncate font-mono text-xs text-white/70">
+                                        <div className="truncate font-mono text-xs text-slate-600">
                                             {u.email}
                                         </div>
                                         <div>
@@ -553,7 +539,7 @@ export default function UserManagement() {
                                                 >
                                                     <SelectValue />
                                                 </SelectTrigger>
-                                                <SelectContent className="bg-black/90 backdrop-blur-md border-white/10">
+                                                <SelectContent className="bg-white border-slate-200 shadow-lg">
                                                     <SelectItem value="team">Team</SelectItem>
                                                     <SelectItem value="admin">Admin</SelectItem>
                                                 </SelectContent>
@@ -567,7 +553,7 @@ export default function UserManagement() {
                                                 {u.status}
                                             </span>
                                         </div>
-                                        <div className="text-xs font-mono text-white/50">
+                                        <div className="text-xs font-mono text-slate-500">
                                             {formatDate(u.last_login)}
                                         </div>
                                         <div className="flex items-center gap-1.5 justify-end">
@@ -576,7 +562,7 @@ export default function UserManagement() {
                                                 onClick={() => toggleDisable(u)}
                                                 title={u.status === "disabled" ? "Enable user" : "Disable user"}
                                                 data-testid={`disable-btn-${u.id}`}
-                                                className="p-2 rounded-md border border-white/10 hover:border-white/30 bg-white/[0.02] hover:bg-white/[0.06] transition-all disabled:opacity-30 hover:scale-105"
+                                                className="p-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 hover:scale-105 text-slate-600"
                                             >
                                                 {u.status === "disabled" ? (
                                                     <Check className="w-3.5 h-3.5" />
@@ -589,7 +575,7 @@ export default function UserManagement() {
                                                 onClick={() => resetPw(u)}
                                                 title="Reset password"
                                                 data-testid={`reset-pw-btn-${u.id}`}
-                                                className="p-2 rounded-md border border-white/10 hover:border-white/30 bg-white/[0.02] hover:bg-white/[0.06] transition-all disabled:opacity-30 hover:scale-105"
+                                                className="p-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 hover:scale-105 text-slate-600"
                                             >
                                                 <KeyRound className="w-3.5 h-3.5" />
                                             </button>
@@ -598,7 +584,7 @@ export default function UserManagement() {
                                                 onClick={() => remove(u)}
                                                 title="Delete user"
                                                 data-testid={`delete-btn-${u.id}`}
-                                                className="p-2 rounded-md border border-white/10 hover:border-red-500/50 hover:text-red-400 bg-white/[0.02] hover:bg-red-500/10 transition-all disabled:opacity-30 hover:scale-105"
+                                                className="p-2 rounded-md border border-slate-200 hover:border-red-300 hover:text-red-600 bg-white hover:bg-red-50 transition-all disabled:opacity-30 hover:scale-105 text-slate-600"
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                             </button>
@@ -613,16 +599,16 @@ export default function UserManagement() {
                     <div className="lg:hidden space-y-3 animate-in fade-in duration-700 delay-200">
                         {loading && (
                             <div className="p-16 text-center">
-                                <Loader2 className="w-6 h-6 animate-spin mx-auto text-[#c9a961]/60" />
-                                <p className="text-white/50 text-sm mt-3">Loading users...</p>
+                                <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-600" />
+                                <p className="text-slate-500 text-sm mt-3">Loading users...</p>
                             </div>
                         )}
                         {!loading && sorted.length === 0 && (
-                            <div className="p-16 text-center border border-white/10 rounded-xl bg-white/[0.02]">
-                                <div className="w-16 h-16 mx-auto mb-4 rounded-full border border-white/10 flex items-center justify-center">
-                                    <UsersIcon className="w-8 h-8 text-white/20" />
+                            <div className="p-16 text-center bg-white border border-slate-200 rounded-xl">
+                                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center">
+                                    <UsersIcon className="w-8 h-8 text-slate-300" />
                                 </div>
-                                <p className="text-white/50 text-sm">No users yet. Invite your first team member.</p>
+                                <p className="text-slate-500 text-sm">No users yet. Invite your first team member.</p>
                             </div>
                         )}
                         {!loading && sorted.map((u) => {
@@ -631,24 +617,24 @@ export default function UserManagement() {
                             return (
                                 <div
                                     key={u.id}
-                                    className={`relative p-5 rounded-xl border border-white/[0.08] bg-gradient-to-br from-white/[0.02] to-transparent backdrop-blur-sm transition-all duration-300 hover:border-white/[0.15] ${dimmed ? "opacity-50" : ""}`}
+                                    className={`relative p-5 bg-white border border-slate-200 rounded-xl transition-all duration-300 hover:shadow-md ${dimmed ? "opacity-50" : ""}`}
                                     data-testid={`user-row-${u.id}`}
                                 >
                                     <div className="flex items-start justify-between mb-4">
                                         <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-white/10 to-white/5 border border-white/10 flex items-center justify-center text-sm font-medium">
+                                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center text-sm font-medium text-slate-700">
                                                 {u.name?.[0]?.toUpperCase() || u.email[0]?.toUpperCase()}
                                             </div>
                                             <div>
-                                                <div className="font-semibold text-white/90">
+                                                <div className="font-semibold text-slate-900">
                                                     {u.name || "—"}
                                                     {self && (
-                                                        <span className="ml-2 text-[10px] font-mono text-[#c9a961]/70">
+                                                        <span className="ml-2 text-[10px] font-mono text-amber-600">
                                                             (you)
                                                         </span>
                                                     )}
                                                 </div>
-                                                <div className="font-mono text-xs text-white/60 mt-0.5">
+                                                <div className="font-mono text-xs text-slate-600 mt-0.5">
                                                     {u.email}
                                                 </div>
                                             </div>
@@ -662,7 +648,7 @@ export default function UserManagement() {
                                     </div>
                                     <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
                                         <div>
-                                            <div className="text-[10px] tracking-wider uppercase text-white/50 mb-1">Role</div>
+                                            <div className="text-[10px] tracking-wider uppercase text-slate-500 mb-1">Role</div>
                                             <Select
                                                 value={u.role}
                                                 onValueChange={(r) =>
@@ -676,26 +662,26 @@ export default function UserManagement() {
                                                 >
                                                     <SelectValue />
                                                 </SelectTrigger>
-                                                <SelectContent className="bg-black/90 backdrop-blur-md border-white/10">
+                                                <SelectContent className="bg-white border-slate-200 shadow-lg">
                                                     <SelectItem value="team">Team</SelectItem>
                                                     <SelectItem value="admin">Admin</SelectItem>
                                                 </SelectContent>
                                             </Select>
                                         </div>
                                         <div>
-                                            <div className="text-[10px] tracking-wider uppercase text-white/50 mb-1">Last login</div>
-                                            <div className="font-mono text-xs text-white/60">
+                                            <div className="text-[10px] tracking-wider uppercase text-slate-500 mb-1">Last login</div>
+                                            <div className="font-mono text-xs text-slate-600">
                                                 {formatDate(u.last_login)}
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-2 justify-end pt-2 border-t border-white/10">
+                                    <div className="flex items-center gap-2 justify-end pt-2 border-t border-slate-100">
                                         <button
                                             disabled={self || busyId === u.id}
                                             onClick={() => toggleDisable(u)}
                                             title={u.status === "disabled" ? "Enable user" : "Disable user"}
                                             data-testid={`disable-btn-${u.id}`}
-                                            className="flex-1 py-2 rounded-md border border-white/10 hover:border-white/30 bg-white/[0.02] hover:bg-white/[0.06] transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2"
+                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-slate-700"
                                         >
                                             {u.status === "disabled" ? (
                                                 <Check className="w-3.5 h-3.5" />
@@ -709,7 +695,7 @@ export default function UserManagement() {
                                             onClick={() => resetPw(u)}
                                             title="Reset password"
                                             data-testid={`reset-pw-btn-${u.id}`}
-                                            className="flex-1 py-2 rounded-md border border-white/10 hover:border-white/30 bg-white/[0.02] hover:bg-white/[0.06] transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2"
+                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-slate-700"
                                         >
                                             <KeyRound className="w-3.5 h-3.5" />
                                             Reset
@@ -719,7 +705,7 @@ export default function UserManagement() {
                                             onClick={() => remove(u)}
                                             title="Delete user"
                                             data-testid={`delete-btn-${u.id}`}
-                                            className="flex-1 py-2 rounded-md border border-white/10 hover:border-red-500/50 hover:text-red-400 bg-white/[0.02] hover:bg-red-500/10 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2"
+                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-red-300 hover:text-red-600 bg-white hover:bg-red-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-slate-700"
                                         >
                                             <Trash2 className="w-3.5 h-3.5" />
                                             Delete

@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState, useMemo, useRef } from "react"
 import { useParams } from "react-router-dom";
 import { IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import Logo from "@/components/Logo";
-import FeedbackComposer from "@/components/FeedbackComposer";
 import axios from "axios";
 import { toast } from "sonner";
 import {
@@ -58,7 +57,7 @@ function availabilityLabel(av) {
 // Refined actions with muted, premium colors
 const ACTIONS = [
     { key: "shortlist", label: "Shortlist", icon: Star, color: "#C9A961" },
-    { key: "interested", label: Interested | icon: ThumbsUp, color: "#5A7D5A" },
+    { key: "interested", label: "Interested", icon: ThumbsUp, color: "#5A7D5A" },
     { key: "not_for_this", label: "Not for this", icon: XCircle, color: "#9E4A4A" },
     { key: "not_sure", label: "Not sure", icon: HelpCircle, color: "#6B7280" },
 ];
@@ -668,14 +667,14 @@ function TalentDetail({
         >
             <div className="md:hidden fixed top-3 left-3 z-50 flex items-center gap-1 text-[10px] font-mono tracking-[0.08em]">
                 {currentTalentIdx >= 0 && (
-                    <span className="px-2 py-1 bg-black/60 border border-white/[0.08] rounded-md text-[#a1a1aa]">
+                    <span className="px-2 py-1 bg-[#181818]/80 border border-white/[0.08] rounded-md text-[#a1a1aa]">
                         {currentTalentIdx + 1} / {list.length}
                     </span>
                 )}
             </div>
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-50 w-11 h-11 border border-white/[0.08] hover:border-white/30 rounded-lg flex items-center justify-center bg-black/50 transition-colors duration-150 active:scale-95"
+                className="fixed top-5 right-5 z-50 w-11 h-11 border border-white/[0.08] hover:border-white/30 rounded-lg flex items-center justify-center bg-[#181818]/80 transition-colors duration-150 active:scale-95"
                 data-testid="detail-close-btn"
             >
                 <X className="w-4 h-4" />
@@ -703,7 +702,7 @@ function TalentDetail({
                                                 src={t.url}
                                                 controls
                                                 preload="metadata"
-                                                className="w-full border border-white/[0.08] bg-black rounded-lg"
+                                                className="w-full border border-white/[0.08] bg-[#151515] rounded-lg"
                                             />
                                         </div>
                                     ))}
@@ -718,7 +717,7 @@ function TalentDetail({
                                     src={intro.url}
                                     controls
                                     preload="metadata"
-                                    className="w-full border border-white/[0.08] bg-black rounded-lg"
+                                    className="w-full border border-white/[0.08] bg-[#151515] rounded-lg"
                                     data-testid="client-intro-video"
                                 />
                             </div>
@@ -728,7 +727,7 @@ function TalentDetail({
                             <p className="eyebrow tracking-[0.12em] mb-3">Portfolio</p>
                         )}
                         {images.length > 0 ? (
-                            <div className="relative bg-[#0a0a0a] aspect-[3/4] border border-white/[0.08] overflow-hidden rounded-xl">
+                            <div className="relative bg-[#151515] aspect-[3/4] border border-white/[0.08] overflow-hidden rounded-xl">
                                 <img
                                     src={IMAGE_URL(images[idx])}
                                     alt={privatizeName(talent.name)}
@@ -738,17 +737,17 @@ function TalentDetail({
                                     <>
                                         <button
                                             onClick={prev}
-                                            className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-black/50 border border-white/[0.08] hover:bg-black rounded-lg flex items-center justify-center transition-colors duration-150"
+                                            className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#181818]/80 border border-white/[0.08] hover:bg-[#151515] rounded-lg flex items-center justify-center transition-colors duration-150"
                                         >
                                             <ChevronLeft className="w-4 h-4" />
                                         </button>
                                         <button
                                             onClick={next}
-                                            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-black/50 border border-white/[0.08] hover:bg-black rounded-lg flex items-center justify-center transition-colors duration-150"
+                                            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#181818]/80 border border-white/[0.08] hover:bg-[#151515] rounded-lg flex items-center justify-center transition-colors duration-150"
                                         >
                                             <ChevronRight className="w-4 h-4" />
                                         </button>
-                                        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-black/60 border border-white/[0.08] text-[10px] font-mono tracking-[0.08em] rounded-sm">
+                                        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-[#181818]/80 border border-white/[0.08] text-[10px] font-mono tracking-[0.08em] rounded-sm">
                                             {idx + 1} / {images.length}
                                         </div>
                                     </>
@@ -756,7 +755,7 @@ function TalentDetail({
                                 {vis.download && (
                                     <button
                                         onClick={() => download(images[idx])}
-                                        className="absolute top-2 right-2 w-9 h-9 bg-black/60 border border-white/[0.08] hover:bg-white hover:text-black rounded-lg flex items-center justify-center transition-colors duration-150"
+                                        className="absolute top-2 right-2 w-9 h-9 bg-[#181818]/80 border border-white/[0.08] hover:bg-white hover:text-black rounded-lg flex items-center justify-center transition-colors duration-150"
                                         data-testid="detail-download-btn"
                                     >
                                         <Download className="w-4 h-4" />
@@ -1114,18 +1113,6 @@ function TalentDetail({
                                     Save comment
                                 </button>
                             </div>
-
-                            {talent.submission_id && talent.project_id && (
-                                <FeedbackComposer
-                                    slug={slug}
-                                    token={getViewerToken(slug)}
-                                    talent={talent}
-                                    submission={{
-                                        id: talent.submission_id,
-                                        project_id: talent.project_id,
-                                    }}
-                                />
-                            )}
                         </div>
                     </div>
                 </div>
@@ -1315,7 +1302,7 @@ function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen })
 
                 {seen && (
                     <span
-                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-black/70 border border-white/[0.08] text-[#a1a1aa] text-[10px] tracking-[0.08em] uppercase rounded-md"
+                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-[#181818]/80 border border-white/[0.08] text-[#a1a1aa] text-[10px] tracking-[0.08em] uppercase rounded-md"
                         data-testid={`badge-seen-${talent.id}`}
                     >
                         <Eye className="w-3 h-3" />

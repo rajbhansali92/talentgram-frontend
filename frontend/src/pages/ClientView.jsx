@@ -240,7 +240,7 @@ export default function ClientView() {
 
     if (!identified) {
         return (
-            <div className="min-h-screen bg-[#F7F5F2] relative">
+            <div className="min-h-screen bg-white relative">
                 <div
                     className="absolute inset-0 opacity-8"
                     style={{
@@ -250,7 +250,7 @@ export default function ClientView() {
                         backgroundPosition: "center",
                     }}
                 />
-                <div className="absolute inset-0 bg-gradient-to-b from-[#F7F5F2]/70 via-[#F7F5F2]/88 to-[#F7F5F2]" />
+                <div className="absolute inset-0 bg-gradient-to-b from-white/55 via-white/72 to-white" />
                 <div className="relative z-10 min-h-screen flex items-center justify-center px-6">
                     <form
                         onSubmit={identify}
@@ -312,7 +312,7 @@ export default function ClientView() {
 
     if (!data) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#F7F5F2] text-[#8A8A8A]">
+            <div className="min-h-screen flex items-center justify-center bg-white text-[#8A8A8A]">
                 <Loader2 className="w-6 h-6 animate-spin" />
             </div>
         );
@@ -345,7 +345,7 @@ export default function ClientView() {
     const reviewedPct = totalCount === 0 ? 0 : Math.round((seenCount / totalCount) * 100);
 
     return (
-        <div className="min-h-screen bg-[#F7F5F2] text-[#111111]" data-testid="client-view-page">
+        <div className="min-h-screen bg-white text-[#111111]" data-testid="client-view-page">
             <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-black/[0.04]">
                 <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-4 md:py-6">
                     <div className="flex items-center justify-between gap-3">
@@ -584,6 +584,8 @@ function TalentDetail({
     const [idx, setIdx] = useState(0);
     const [busyAction, setBusyAction] = useState(null);
     const overlayRef = useRef(null);
+    const rightPanelRef = useRef(null);
+    const [isModalOpen, setIsModalOpen] = useState(false);
 
     const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
     const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
@@ -609,6 +611,11 @@ function TalentDetail({
             onClose();
         }
     }, [hasNextTalent, onNavigate, list, currentTalentIdx, onClose]);
+
+    useEffect(() => {
+        // Trigger entrance animation
+        setIsModalOpen(true);
+    }, []);
 
     useEffect(() => {
         const node = overlayRef.current;
@@ -687,534 +694,294 @@ function TalentDetail({
     return (
         <div
             ref={overlayRef}
-            className="fixed inset-0 z-50 bg-[#F7F5F2]/98 backdrop-blur-sm overflow-y-auto pb-[88px] md:pb-0"
+            className={`fixed inset-0 z-50 bg-white overflow-hidden transition-all duration-300 ease-out ${isModalOpen ? "opacity-100" : "opacity-0"}`}
             data-testid="talent-detail-overlay"
         >
-            <div className="md:hidden fixed top-4 left-4 z-50 flex items-center gap-1 text-[10px] font-mono tracking-[0.08em]">
-                {currentTalentIdx >= 0 && (
-                    <span className="px-3 py-1.5 bg-white/95 border border-black/[0.04] rounded-full text-[#5C5C5C] shadow-sm">
-                        {currentTalentIdx + 1} / {list.length}
-                    </span>
-                )}
-            </div>
-            <button
-                onClick={onClose}
-                className="fixed top-5 right-5 z-50 w-12 h-12 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center justify-center bg-white/90 backdrop-blur-sm transition-all duration-150 active:scale-95 shadow-sm"
-                data-testid="detail-close-btn"
-            >
-                <X className="w-4 h-4" />
-            </button>
+            <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
+                <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+                    {/* Left Column - Image */}
+                    <div className="w-full md:w-[58%] lg:w-[60%] bg-[#FCFBF8] overflow-y-auto">
+                        <div className="p-4 md:p-8">
+                            {vis.takes !== false && takes.length > 0 && (
+                                <div className="mb-10">
+                                    <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Audition Takes</p>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        {takes.map((t, i) => (
+                                            <div key={t.id} data-testid={`client-take-${i}`}>
+                                                <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate">
+                                                    {t.label || `Take ${i + 1}`}
+                                                </p>
+                                                <video
+                                                    src={t.url}
+                                                    controls
+                                                    preload="metadata"
+                                                    className="w-full border border-black/[0.04] bg-white rounded-xl shadow-sm"
+                                                />
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
 
-            <div className="max-w-[1400px] mx-auto px-6 md:px-12 py-12 md:py-16">
-                <div className="grid lg:grid-cols-5 gap-10 lg:gap-14">
-                    <div className="lg:col-span-3">
-                        {vis.takes !== false && takes.length > 0 && (
-                            <div
-                                className="mb-12"
-                                data-testid="client-takes-section"
-                            >
-                                <p className="eyebrow tracking-[0.12em] mb-5 text-[#5C5C5C]">Audition Takes</p>
-                                <div className="grid md:grid-cols-2 gap-6">
-                                    {takes.map((t, i) => (
-                                        <div
-                                            key={t.id}
-                                            data-testid={`client-take-${i}`}
+                            {vis.intro_video && intro && (
+                                <div className="mb-10">
+                                    <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Introduction</p>
+                                    <video
+                                        src={intro.url}
+                                        controls
+                                        preload="metadata"
+                                        className="w-full border border-black/[0.04] bg-white rounded-xl shadow-sm"
+                                        data-testid="client-intro-video"
+                                    />
+                                </div>
+                            )}
+
+                            {images.length > 0 && (
+                                <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Portfolio</p>
+                            )}
+                            {images.length > 0 ? (
+                                <div className="relative bg-white rounded-xl overflow-hidden shadow-sm">
+                                    <div className="aspect-[3/4] md:max-h-[78vh]">
+                                        <img
+                                            src={IMAGE_URL(images[idx])}
+                                            alt={privatizeName(talent.name)}
+                                            className="w-full h-full object-contain"
+                                        />
+                                    </div>
+                                    {images.length > 1 && (
+                                        <>
+                                            <button
+                                                onClick={prev}
+                                                className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
+                                            >
+                                                <ChevronLeft className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={next}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
+                                            >
+                                                <ChevronRight className="w-4 h-4" />
+                                            </button>
+                                            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-white/90 backdrop-blur-sm border border-black/[0.04] text-[10px] font-mono tracking-[0.08em] rounded-full text-[#5C5C5C] shadow-sm">
+                                                {idx + 1} / {images.length}
+                                            </div>
+                                        </>
+                                    )}
+                                    {vis.download && (
+                                        <button
+                                            onClick={() => download(images[idx])}
+                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
+                                            data-testid="detail-download-btn"
                                         >
-                                            <p className="text-[11px] text-[#8A8A8A] mb-3 font-mono tracking-[0.08em] truncate">
-                                                {t.label || `Take ${i + 1}`}
-                                            </p>
-                                            <video
-                                                src={t.url}
-                                                controls
-                                                preload="metadata"
-                                                className="w-full border border-black/[0.04] bg-[#FCFBF8] rounded-2xl shadow-sm"
+                                            <Download className="w-4 h-4" />
+                                        </button>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="aspect-[3/4] md:max-h-[78vh] bg-[#FCFBF8] rounded-xl flex items-center justify-center text-[#8A8A8A] shadow-sm">
+                                    No portfolio
+                                </div>
+                            )}
+
+                            {images.length > 1 && (
+                                <div className="mt-7 flex gap-3 overflow-x-auto pb-3" data-stop-swipe="1">
+                                    {images.map((m, i) => (
+                                        <button
+                                            key={m.id}
+                                            onClick={() => setIdx(i)}
+                                            className={`shrink-0 w-20 h-24 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-all duration-150`}
+                                        >
+                                            <img
+                                                src={IMAGE_URL(m)}
+                                                alt=""
+                                                className="w-full h-full object-cover"
                                             />
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Right Column - Details (scrollable with soft shadow) */}
+                    <div 
+                        ref={rightPanelRef} 
+                        className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)]"
+                    >
+                        <div className="p-6 md:p-8">
+                            <button
+                                onClick={onClose}
+                                className="hidden md:flex absolute top-5 right-5 z-50 w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full items-center justify-center bg-white/90 backdrop-blur-sm transition-all duration-150 shadow-sm"
+                                data-testid="detail-close-btn"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+
+                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Talent</p>
+                            <h2 className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-[#111111]">
+                                {privatizeName(talent.name)}
+                            </h2>
+
+                            <div className="grid grid-cols-2 gap-y-5 mb-8 text-sm">
+                                {vis.age && talent.age && (
+                                    <InfoRow label="Age" value={talent.age} />
+                                )}
+                                {vis.height && talent.height && (
+                                    <InfoRow label="Height" value={talent.height} />
+                                )}
+                                {vis.location && talent.location && (
+                                    <InfoRow label="Location" value={talent.location} />
+                                )}
+                                {vis.ethnicity && talent.ethnicity && (
+                                    <InfoRow label="Ethnicity" value={talent.ethnicity} />
+                                )}
+                                {vis.instagram_followers && talent.instagram_followers && (
+                                    <InfoRow label="Followers" value={talent.instagram_followers} />
+                                )}
+                            </div>
+
+                            {(() => {
+                                const tProj = (talent.project_id && projectShootDates.find(p => p.project_id === talent.project_id)) || projectShootDates[0] || null;
+                                const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
+                                const showAvail = vis.availability !== false && ((talent.availability && talent.availability.status) || (tProj && tProj.shoot_dates));
+                                const showBudget = vis.budget && (talent.budget?.status || (tProjBudget && (tProjBudget.lines || []).length));
+                                if (!showAvail && !showBudget && !talent.competitive_brand) return null;
+                                return (
+                                    <div className="mb-8 bg-[#FCFBF8] p-5 space-y-4 rounded-xl shadow-sm">
+                                        {showAvail && (
+                                            <div data-testid="client-availability">
+                                                <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Availability</p>
+                                                {tProj?.shoot_dates && (
+                                                    <p className="text-sm text-[#4A4A4A] mb-2" data-testid="client-shoot-dates">{tProj.shoot_dates}</p>
+                                                )}
+                                                {(() => {
+                                                    const lbl = availabilityLabel(talent.availability);
+                                                    if (!lbl) return null;
+                                                    const tone = lbl === "Available" ? "bg-[#5A7D5A]/8 text-[#5A7D5A]" : lbl === "Not Available" ? "bg-[#9E4A4A]/8 text-[#9E4A4A]" : "bg-[#B89B5E]/8 text-[#B89B5E]";
+                                                    return (
+                                                        <p className="text-sm">
+                                                            <span className="text-[#8A8A8A] mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">Status</span>
+                                                            <span className={`inline-block px-2 py-0.5 mr-2 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full ${tone}`} data-testid="client-availability-status">{lbl}</span>
+                                                            {talent.availability?.note && <span className="text-[#4A4A4A]">{talent.availability.note}</span>}
+                                                        </p>
+                                                    );
+                                                })()}
+                                            </div>
+                                        )}
+                                        {showBudget && (
+                                            <div data-testid="client-budget">
+                                                <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Budget</p>
+                                                {(() => {
+                                                    if (talent.budget?.status === "custom" && (talent.budget?.value || "").trim()) {
+                                                        return <p className="text-sm text-[#111111]">{talent.budget.value} <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-black/4 text-[#8A8A8A]">Counter-offer</span></p>;
+                                                    }
+                                                    const lines = (tProjBudget?.lines || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
+                                                    if (talent.budget?.status === "accept" && lines.length) {
+                                                        return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln, i) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4" data-testid={`client-budget-line-${i}`}><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
+                                                    }
+                                                    if (talent.budget?.status === "accept" && !lines.length) {
+                                                        return <p className="text-sm"><span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A]">Agreed</span></p>;
+                                                    }
+                                                    if (lines.length) {
+                                                        return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4"><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
+                                                    }
+                                                    return null;
+                                                })()}
+                                            </div>
+                                        )}
+                                        {talent.competitive_brand && (
+                                            <div data-testid="client-competitive-brand">
+                                                <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Competitive Brand</p>
+                                                <p className="text-sm text-[#111111]">{talent.competitive_brand}</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })()}
+
+                            {(talent.custom_answers || []).length > 0 && (
+                                <div className="mb-8 bg-[#FCFBF8] p-5 space-y-3 rounded-xl shadow-sm">
+                                    <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Additional Details</p>
+                                    {talent.custom_answers.map((qa, i) => (
+                                        <div key={`${qa.question}-${i}`} data-testid={`custom-qa-${i}`}>
+                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-1">{qa.question}</p>
+                                            <p className="text-sm text-[#111111] whitespace-pre-wrap leading-relaxed">{qa.answer}</p>
                                         </div>
                                     ))}
                                 </div>
-                            </div>
-                        )}
+                            )}
 
-                        {vis.intro_video && intro && (
-                            <div className="mb-12">
-                                <p className="eyebrow tracking-[0.12em] mb-5 text-[#5C5C5C]">Introduction</p>
-                                <video
-                                    src={intro.url}
-                                    controls
-                                    preload="metadata"
-                                    className="w-full border border-black/[0.04] bg-[#FCFBF8] rounded-2xl shadow-sm"
-                                    data-testid="client-intro-video"
-                                />
-                            </div>
-                        )}
-
-                        {images.length > 0 && (
-                            <p className="eyebrow tracking-[0.12em] mb-5 text-[#5C5C5C]">Portfolio</p>
-                        )}
-                        {images.length > 0 ? (
-                            <div className="relative bg-[#FCFBF8] aspect-[3/4] overflow-hidden rounded-2xl shadow-sm">
-                                <img
-                                    src={IMAGE_URL(images[idx])}
-                                    alt={privatizeName(talent.name)}
-                                    className="w-full h-full object-contain"
-                                />
-                                {images.length > 1 && (
-                                    <>
-                                        <button
-                                            onClick={prev}
-                                            className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
-                                        >
-                                            <ChevronLeft className="w-4 h-4" />
-                                        </button>
-                                        <button
-                                            onClick={next}
-                                            className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
-                                        >
-                                            <ChevronRight className="w-4 h-4" />
-                                        </button>
-                                        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-white/90 backdrop-blur-sm border border-black/[0.04] text-[10px] font-mono tracking-[0.08em] rounded-full text-[#5C5C5C] shadow-sm">
-                                            {idx + 1} / {images.length}
-                                        </div>
-                                    </>
-                                )}
-                                {vis.download && (
-                                    <button
-                                        onClick={() => download(images[idx])}
-                                        className="absolute top-3 right-3 w-9 h-9 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
-                                        data-testid="detail-download-btn"
-                                    >
-                                        <Download className="w-4 h-4" />
-                                    </button>
+                            <div className="flex gap-3 mb-8 flex-wrap">
+                                {vis.instagram && talent.instagram_handle && (
+                                    <a href={`https://instagram.com/${talent.instagram_handle.replace("@", "")}`} target="_blank" rel="noopener noreferrer" data-testid="client-instagram-link" className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.06] hover:border-black/20 rounded-full text-xs transition-all duration-150 text-[#111111] bg-white/50">
+                                        <Instagram className="w-3.5 h-3.5" /> {talent.instagram_handle}
+                                    </a>
                                 )}
                             </div>
-                        ) : (
-                            <div className="aspect-[3/4] bg-[#FCFBF8] rounded-2xl flex items-center justify-center text-[#8A8A8A] shadow-sm">
-                                No portfolio
-                            </div>
-                        )}
 
-                        {images.length > 1 && (
-                            <div
-                                className="mt-5 flex gap-3 overflow-x-auto pb-3"
-                                data-stop-swipe="1"
-                            >
-                                {images.map((m, i) => (
-                                    <button
-                                        key={m.id}
-                                        onClick={() => setIdx(i)}
-                                        className={`shrink-0 w-20 h-24 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-all duration-150`}
-                                    >
-                                        <img
-                                            src={IMAGE_URL(m)}
-                                            alt=""
-                                            className="w-full h-full object-cover"
-                                        />
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="lg:col-span-2">
-                        <p className="eyebrow tracking-[0.12em] mb-3 text-[#5C5C5C]">Talent</p>
-                        <h2
-                            className="font-display text-4xl md:text-5xl tracking-wide mb-8 text-[#111111]"
-                            data-testid="client-talent-name"
-                        >
-                            {privatizeName(talent.name)}
-                        </h2>
-
-                        <div className="grid grid-cols-2 gap-y-6 mb-10 text-sm">
-                            {vis.age && talent.age && (
-                                <InfoRow label="Age" value={talent.age} />
-                            )}
-                            {vis.height && talent.height && (
-                                <InfoRow label="Height" value={talent.height} />
-                            )}
-                            {vis.location && talent.location && (
-                                <InfoRow label="Location" value={talent.location} />
-                            )}
-                            {vis.ethnicity && talent.ethnicity && (
-                                <InfoRow label="Ethnicity" value={talent.ethnicity} />
-                            )}
-                            {vis.instagram_followers &&
-                                talent.instagram_followers && (
-                                    <InfoRow
-                                        label="Followers"
-                                        value={talent.instagram_followers}
-                                    />
-                                )}
-                        </div>
-
-                        {(() => {
-                            const tProj =
-                                (talent.project_id &&
-                                    projectShootDates.find(
-                                        (p) => p.project_id === talent.project_id,
-                                    )) ||
-                                projectShootDates[0] ||
-                                null;
-                            const tProjBudget =
-                                (talent.project_id &&
-                                    projectBudget.find(
-                                        (p) => p.project_id === talent.project_id,
-                                    )) ||
-                                projectBudget[0] ||
-                                null;
-                            const showAvail =
-                                vis.availability !== false &&
-                                ((talent.availability && talent.availability.status) ||
-                                    (tProj && tProj.shoot_dates));
-                            const showBudget =
-                                vis.budget &&
-                                (talent.budget?.status ||
-                                    (tProjBudget && (tProjBudget.lines || []).length));
-                            if (
-                                !showAvail &&
-                                !showBudget &&
-                                !talent.competitive_brand
-                            )
-                                return null;
-                            return (
-                                <div
-                                    className="mb-10 bg-[#FCFBF8] p-6 space-y-5 rounded-2xl shadow-sm"
-                                    data-testid="client-details-section"
-                                >
-                                    {showAvail && (
-                                        <div data-testid="client-availability">
-                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">
-                                                Availability
-                                            </p>
-                                            {tProj?.shoot_dates && (
-                                                <p
-                                                    className="text-sm text-[#5C5C5C] mb-2"
-                                                    data-testid="client-shoot-dates"
-                                                >
-                                                    {tProj.shoot_dates}
-                                                </p>
-                                            )}
-                                            {(() => {
-                                                const lbl = availabilityLabel(
-                                                    talent.availability,
-                                                );
-                                                if (!lbl) return null;
-                                                const tone =
-                                                    lbl === "Available"
-                                                        ? "bg-[#5A7D5A]/8 text-[#5A7D5A]"
-                                                        : lbl === "Not Available"
-                                                          ? "bg-[#9E4A4A]/8 text-[#9E4A4A]"
-                                                          : "bg-[#B89B5E]/8 text-[#B89B5E]";
-                                                return (
-                                                    <p className="text-sm">
-                                                        <span className="text-[#8A8A8A] mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">
-                                                            Status
-                                                        </span>
-                                                        <span
-                                                            className={`inline-block px-2 py-0.5 mr-2 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full ${tone}`}
-                                                            data-testid="client-availability-status"
-                                                        >
-                                                            {lbl}
-                                                        </span>
-                                                        {talent.availability
-                                                            ?.note && (
-                                                            <span className="text-[#5C5C5C]">
-                                                                {
-                                                                    talent.availability
-                                                                        .note
-                                                                }
-                                                            </span>
-                                                        )}
-                                                    </p>
-                                                );
-                                            })()}
-                                        </div>
-                                    )}
-                                    {showBudget && (
-                                        <div data-testid="client-budget">
-                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">
-                                                Budget
-                                            </p>
-                                            {(() => {
-                                                if (
-                                                    talent.budget?.status === "custom" &&
-                                                    (talent.budget?.value || "").trim()
-                                                ) {
-                                                    return (
-                                                        <p className="text-sm text-[#111111]">
-                                                            {talent.budget.value}
-                                                            <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-black/4 text-[#8A8A8A]">
-                                                                Counter-offer
-                                                            </span>
-                                                        </p>
-                                                    );
-                                                }
-                                                const lines =
-                                                    (tProjBudget?.lines || []).filter(
-                                                        (l) =>
-                                                            (l.label || "").trim() ||
-                                                            (l.value || "").trim(),
-                                                    );
-                                                if (
-                                                    talent.budget?.status === "accept" &&
-                                                    lines.length
-                                                ) {
-                                                    return (
-                                                        <ul className="text-sm text-[#111111] space-y-2">
-                                                            {lines.map((ln, i) => (
-                                                                <li
-                                                                    key={`${ln.label}-${ln.value}`}
-                                                                    className="flex justify-between gap-4"
-                                                                    data-testid={`client-budget-line-${i}`}
-                                                                >
-                                                                    <span className="text-[#5C5C5C]">
-                                                                        {ln.label}
-                                                                    </span>
-                                                                    <span>{ln.value}</span>
-                                                                </li>
-                                                            ))}
-                                                        </ul>
-                                                    );
-                                                }
-                                                if (
-                                                    talent.budget?.status === "accept" &&
-                                                    !lines.length
-                                                ) {
-                                                    return (
-                                                        <p className="text-sm">
-                                                            <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A]">
-                                                                Agreed
-                                                            </span>
-                                                        </p>
-                                                    );
-                                                }
-                                                if (lines.length) {
-                                                    return (
-                                                        <ul className="text-sm text-[#111111] space-y-2">
-                                                            {lines.map((ln) => (
-                                                                <li
-                                                                    key={`${ln.label}-${ln.value}`}
-                                                                    className="flex justify-between gap-4"
-                                                                >
-                                                                    <span className="text-[#5C5C5C]">
-                                                                        {ln.label}
-                                                                    </span>
-                                                                    <span>{ln.value}</span>
-                                                                </li>
-                                                            ))}
-                                                        </ul>
-                                                    );
-                                                }
-                                                return null;
-                                            })()}
-                                        </div>
-                                    )}
-                                    {talent.competitive_brand && (
-                                        <div data-testid="client-competitive-brand">
-                                            <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">
-                                                Competitive Brand
-                                            </p>
-                                            <p className="text-sm text-[#111111]">
-                                                {talent.competitive_brand}
-                                            </p>
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })()}
-
-                        {(talent.custom_answers || []).length > 0 && (
-                            <div
-                                className="mb-10 bg-[#FCFBF8] p-6 space-y-4 rounded-2xl shadow-sm"
-                                data-testid="client-custom-answers"
-                            >
-                                <p className="eyebrow tracking-[0.12em] text-[#5C5C5C]">Additional Details</p>
-                                {talent.custom_answers.map((qa, i) => (
-                                    <div
-                                        key={`${qa.question}-${i}`}
-                                        data-testid={`custom-qa-${i}`}
-                                    >
-                                        <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-1">
-                                            {qa.question}
-                                        </p>
-                                        <p className="text-sm text-[#111111] whitespace-pre-wrap leading-relaxed">
-                                            {qa.answer}
-                                        </p>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        <div className="flex gap-4 mb-10 flex-wrap">
-                            {vis.instagram && talent.instagram_handle && (
-                                <a
-                                    href={`https://instagram.com/${talent.instagram_handle.replace("@", "")}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    data-testid="client-instagram-link"
-                                    className="inline-flex items-center gap-2 px-5 py-3 border border-black/[0.06] hover:border-black/20 rounded-full text-xs transition-all duration-150 text-[#111111] bg-white/50"
-                                >
-                                    <Instagram className="w-3.5 h-3.5" />{" "}
-                                    {talent.instagram_handle}
-                                </a>
-                            )}
-                        </div>
-
-                        {vis.work_links &&
-                            (talent.work_links || []).length > 0 && (
-                                <div className="mb-10">
-                                    <p className="eyebrow tracking-[0.12em] mb-4 text-[#5C5C5C]">Work</p>
+                            {vis.work_links && (talent.work_links || []).length > 0 && (
+                                <div className="mb-8">
+                                    <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
                                     <div className="space-y-2">
                                         {talent.work_links.map((w) => (
-                                            <a
-                                                key={w}
-                                                href={w}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className="flex items-center gap-2 text-sm text-[#5C5C5C] hover:text-[#111111] font-mono truncate transition-colors duration-150"
-                                            >
+                                            <a key={w} href={w} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
                                                 <ExternalLink className="w-3 h-3 shrink-0" />
-                                                <span className="truncate">
-                                                    {w}
-                                                </span>
+                                                <span className="truncate">{w}</span>
                                             </a>
                                         ))}
                                     </div>
                                 </div>
                             )}
 
-                        <div className="border-t border-black/[0.06] pt-8 mt-6">
-                            <p className="eyebrow tracking-[0.12em] mb-6 text-[#5C5C5C]">Your Decision</p>
-                            <div className="grid grid-cols-2 gap-3 mb-8">
-                                {ACTIONS.map((a) => {
-                                    const active = viewerAction?.action === a.key;
-                                    return (
-                                        <button
-                                            key={a.key}
-                                            onClick={() =>
-                                                setAction(
-                                                    talent.id,
-                                                    active ? null : a.key,
-                                                )
-                                            }
-                                            data-testid={`action-${a.key}-${talent.id}`}
-                                            className={`flex items-center gap-2 px-5 py-3.5 border rounded-xl text-sm transition-all duration-150 ${
-                                                active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"
-                                            }`}
-                                        >
-                                            <a.icon
-                                                className="w-4 h-4"
-                                                style={{
-                                                    color: active
-                                                        ? "#fff"
-                                                        : a.color,
-                                                }}
-                                            />
-                                            {a.label}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-
-                            <div>
-                                <div className="flex items-center gap-2 mb-3">
-                                    <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
-                                    <p className="eyebrow tracking-[0.12em] text-[#5C5C5C]">Comment</p>
+                            <div className="border-t border-black/[0.06] pt-6 mt-6">
+                                <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Your Decision</p>
+                                <div className="grid grid-cols-2 gap-2 mb-6">
+                                    {ACTIONS.map((a) => {
+                                        const active = viewerAction?.action === a.key;
+                                        return (
+                                            <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm transition-all duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"}`}>
+                                                <a.icon className="w-4 h-4" style={{ color: active ? "#fff" : a.color }} />
+                                                {a.label}
+                                            </button>
+                                        );
+                                    })}
                                 </div>
-                                <textarea
-                                    value={commentDraft}
-                                    onChange={(e) =>
-                                        setCommentDraft(e.target.value)
-                                    }
-                                    rows={3}
-                                    placeholder="Share any notes about this talent..."
-                                    data-testid="detail-comment-input"
-                                    className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-4 text-sm outline-none transition-all duration-150 text-[#111111] placeholder:text-black/30"
-                                />
-                                <button
-                                    onClick={saveComment}
-                                    data-testid="detail-save-comment-btn"
-                                    className="mt-4 text-xs px-5 py-2.5 border border-black/[0.08] hover:border-black/25 rounded-full transition-all duration-150 text-[#5C5C5C] hover:text-[#111111]"
-                                >
-                                    Save comment
-                                </button>
+
+                                <div>
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
+                                        <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
+                                    </div>
+                                    <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-all duration-150 text-[#111111] placeholder:text-black/30" />
+                                    <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-all duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <div
-                className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-black/[0.04] px-4 py-4"
-                data-testid="detail-bottom-bar"
-                style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}
-            >
-                <div className="grid grid-cols-3 gap-3">
-                    <button
-                        type="button"
-                        onClick={() => quickAction("shortlist")}
-                        disabled={Boolean(busyAction)}
-                        data-testid="quick-shortlist-btn"
-                        className={`min-h-[56px] flex flex-col items-center justify-center gap-1 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}
-                    >
-                        {busyAction === "shortlist" ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                            <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />
-                        )}
+            {/* Mobile bottom bar */}
+            <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-black/[0.04] px-4 py-3" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
+                <div className="grid grid-cols-3 gap-2">
+                    <button type="button" onClick={() => quickAction("shortlist")} disabled={Boolean(busyAction)} data-testid="quick-shortlist-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}>
+                        {busyAction === "shortlist" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />}
                         Shortlist
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => quickAction("not_sure")}
-                        disabled={Boolean(busyAction)}
-                        data-testid="quick-hold-btn"
-                        className={`min-h-[56px] flex flex-col items-center justify-center gap-1 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#5C5C5C] hover:border-black/20"}`}
-                    >
-                        {busyAction === "not_sure" ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                            <HelpCircle className="w-4 h-4" />
-                        )}
+                    <button type="button" onClick={() => quickAction("not_sure")} disabled={Boolean(busyAction)} data-testid="quick-hold-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#4A4A4A] hover:border-black/20"}`}>
+                        {busyAction === "not_sure" ? <Loader2 className="w-4 h-4 animate-spin" /> : <HelpCircle className="w-4 h-4" />}
                         Hold
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => quickAction("not_for_this")}
-                        disabled={Boolean(busyAction)}
-                        data-testid="quick-reject-btn"
-                        className={`min-h-[56px] flex flex-col items-center justify-center gap-1 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#5C5C5C] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}
-                    >
-                        {busyAction === "not_for_this" ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                            <XCircle className="w-4 h-4" />
-                        )}
+                    <button type="button" onClick={() => quickAction("not_for_this")} disabled={Boolean(busyAction)} data-testid="quick-reject-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#4A4A4A] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}>
+                        {busyAction === "not_for_this" ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
                         Reject
                     </button>
                 </div>
                 {list.length > 1 && (
-                    <div className="flex items-center justify-between mt-3 text-[10px] font-mono tracking-[0.08em] text-[#8A8A8A]">
-                        <button
-                            type="button"
-                            onClick={goPrevTalent}
-                            disabled={!hasPrevTalent}
-                            data-testid="quick-prev-btn"
-                            className="px-3 py-1.5 disabled:opacity-30 active:scale-[0.95] transition-transform"
-                            aria-label="Previous talent"
-                        >
-                            ← swipe right · prev
-                        </button>
+                    <div className="flex items-center justify-between mt-2 text-[10px] font-mono tracking-[0.08em] text-[#8A8A8A]">
+                        <button type="button" onClick={goPrevTalent} disabled={!hasPrevTalent} data-testid="quick-prev-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Previous talent">← swipe right · prev</button>
                         <span>{currentTalentIdx + 1} of {list.length}</span>
-                        <button
-                            type="button"
-                            onClick={goNextTalent}
-                            disabled={!hasNextTalent}
-                            data-testid="quick-next-btn"
-                            className="px-3 py-1.5 disabled:opacity-30 active:scale-[0.95] transition-transform"
-                            aria-label="Next talent"
-                        >
-                            next · swipe left →
-                        </button>
+                        <button type="button" onClick={goNextTalent} disabled={!hasNextTalent} data-testid="quick-next-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Next talent">next · swipe left →</button>
                     </div>
                 )}
             </div>
@@ -1284,10 +1051,10 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                     </div>
                 )}
                 {seen && (
-                    <div className="absolute inset-0 bg-[#F7F5F2]/30 pointer-events-none" />
+                    <div className="absolute inset-0 bg-white/40 pointer-events-none" />
                 )}
 
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-white via-white/90 to-transparent p-5">
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-white via-white/90 to-transparent p-4">
                     <div
                         className="font-display text-lg md:text-xl tracking-wide text-[#111111]"
                         data-testid={`client-card-name-${talent.id}`}
@@ -1299,10 +1066,10 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                     </div>
                 </div>
 
-                <div className="absolute top-3 left-3 flex flex-col gap-2 items-start">
+                <div className="absolute top-2 left-2 flex flex-col gap-1.5 items-start">
                     {isNew && (
                         <span
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#B89B5E] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-[#B89B5E] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
                             data-testid={`badge-new-${talent.id}`}
                         >
                             <Sparkles className="w-3 h-3" />
@@ -1311,7 +1078,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                     )}
                     {isShortlisted && (
                         <span
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#B89B5E] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-[#B89B5E] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
                             data-testid={`badge-shortlisted-${talent.id}`}
                         >
                             <Heart className="w-3 h-3 fill-current" />
@@ -1319,7 +1086,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                         </span>
                     )}
                     {action && action !== "shortlist" && (
-                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/95 backdrop-blur-sm text-[#111111] text-[10px] tracking-[0.08em] uppercase rounded-full border border-black/[0.06] shadow-sm">
+                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-white/95 backdrop-blur-sm text-[#111111] text-[10px] tracking-[0.08em] uppercase rounded-full border border-black/[0.06] shadow-sm">
                             {ACTIONS.find((a) => a.key === action)?.label}
                         </span>
                     )}
@@ -1327,7 +1094,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
 
                 {seen && (
                     <span
-                        className="absolute top-3 right-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/95 backdrop-blur-sm border border-black/[0.06] text-[#8A8A8A] text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-white/95 backdrop-blur-sm border border-black/[0.06] text-[#8A8A8A] text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
                         data-testid={`badge-seen-${talent.id}`}
                     >
                         <Eye className="w-3 h-3" />

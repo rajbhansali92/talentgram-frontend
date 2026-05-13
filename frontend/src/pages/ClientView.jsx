@@ -476,11 +476,10 @@ export default function ClientView() {
                             {activeTab === "all" && "No talents on this link."}
                         </div>
                     ) : (
-                        filteredTalents.map((t, i) => (
+                        filteredTalents.map((t) => (
                             <TalentCard
                                 key={t.id}
                                 talent={t}
-                                index={i}
                                 vis={vis}
                                 action={viewerActions[t.id]?.action}
                                 seen={seenIds.has(t.id)}
@@ -522,7 +521,7 @@ export default function ClientView() {
                             [activeTalent.id]: text,
                         })
                     }
-                    saveComment={saveComment}
+                    saveComment={() => saveComment(activeTalent.id)}
                     logDownload={logDownload}
                 />
             )}
@@ -571,7 +570,10 @@ function TalentDetail({
     const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
     const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
 
-    const list = Array.isArray(talents) ? talents : [];
+    const list = useMemo(() => (
+        Array.isArray(talents) ? talents : []
+    ), [talents]);
+
     const currentTalentIdx = list.findIndex((t) => t.id === talent.id);
     const hasPrevTalent = currentTalentIdx > 0;
     const hasNextTalent = currentTalentIdx >= 0 && currentTalentIdx < list.length - 1;
@@ -1200,7 +1202,7 @@ function TalentDetail({
     );
 }
 
-function TalentCard({ talent, index, vis, action, seen, isNew, onOpen, onSeen }) {
+function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
     const ref = useRef(null);
     const timerRef = useRef(null);
 

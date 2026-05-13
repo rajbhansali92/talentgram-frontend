@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
-import ThemeToggle from "@/components/ThemeToggle";
 import {
     Select,
     SelectContent,
@@ -35,7 +34,6 @@ import {
 } from "@/lib/talentSchema";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-const MAX_IMAGES = 8;
 // Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
 // `western` is independently capped at this value, NOT combined.
 const MAX_IMAGES_PER_CATEGORY = 10;
@@ -362,16 +360,16 @@ export default function ApplicationPage() {
     if (!started) {
         return (
             <div
-                className="min-h-screen bg-[#0c0c0c] text-white"
+                className="min-h-screen bg-[#faf9f6] text-[#1a1a1a]"
                 data-testid="application-identity-page"
             >
                 <Header />
                 <div className="max-w-xl mx-auto px-6 py-16 md:py-24">
-                    <p className="eyebrow mb-3">Talent Application</p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight mb-4">
+                    <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Talent Application</p>
+                    <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#1a1a1a] mb-4">
                         Apply to join Talentgram
                     </h1>
-                    <p className="text-white/60 text-sm mb-10 leading-relaxed">
+                    <p className="text-[#6b6b6b] text-sm mb-10 leading-relaxed">
                         Submit your portfolio once — get considered for every
                         brand, film, and campaign we cast. Takes about 5 minutes.
                     </p>
@@ -395,17 +393,17 @@ export default function ApplicationPage() {
 
                         {applyPrefill && !emailGateUnlocked && (
                             <div
-                                className="border border-[#c9a961]/40 bg-[#c9a961]/[0.06] p-4 rounded-sm flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
+                                className="bg-white rounded-xl border border-[#e8e6df] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
                                 data-testid="apply-prefill-card"
                             >
                                 <div className="min-w-0 flex-1">
-                                    <p className="text-sm text-white">
+                                    <p className="text-sm text-[#1a1a1a]">
                                         We found your profile.{" "}
-                                        <span className="text-white/60">
+                                        <span className="text-[#6b6b6b]">
                                             Use saved details?
                                         </span>
                                     </p>
-                                    <p className="text-[11px] text-white/40 tg-mono mt-1 truncate">
+                                    <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
                                         {applyPrefill.data.first_name}{" "}
                                         {applyPrefill.data.last_name || ""}
                                         {applyPrefill.data.location ? ` · ${applyPrefill.data.location}` : ""}
@@ -417,7 +415,7 @@ export default function ApplicationPage() {
                                         type="button"
                                         onClick={useApplyPrefill}
                                         data-testid="apply-prefill-use-btn"
-                                        className="bg-white text-black px-4 py-2.5 text-xs rounded-sm hover:opacity-90 inline-flex items-center gap-1.5 min-h-[44px]"
+                                        className="bg-[#1a1a1a] text-white px-4 py-2.5 text-xs rounded-lg hover:bg-[#333] transition-colors duration-150 inline-flex items-center gap-1.5 min-h-[44px]"
                                     >
                                         <Check className="w-3.5 h-3.5" />
                                         Use this
@@ -426,7 +424,7 @@ export default function ApplicationPage() {
                                         type="button"
                                         onClick={dismissApplyPrefill}
                                         data-testid="apply-prefill-dismiss-btn"
-                                        className="border border-white/20 text-white/70 hover:border-white px-4 py-2.5 text-xs rounded-sm inline-flex items-center gap-1.5 min-h-[44px]"
+                                        className="border border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#b0aea6] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
                                     >
                                         Edit manually
                                     </button>
@@ -461,7 +459,7 @@ export default function ApplicationPage() {
                         onClick={startApplication}
                         disabled={saving || !emailGateUnlocked}
                         data-testid="apply-start-btn"
-                        className="mt-10 inline-flex items-center gap-2 bg-white text-black px-6 py-3.5 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40"
+                        className="mt-10 inline-flex items-center gap-2 bg-[#1a1a1a] text-white px-6 py-3.5 rounded-lg text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40"
                     >
                         {saving ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -479,29 +477,29 @@ export default function ApplicationPage() {
     if (finalized) {
         return (
             <div
-                className="min-h-screen bg-[#0c0c0c] text-white flex flex-col"
+                className="min-h-screen bg-[#faf9f6] text-[#1a1a1a] flex flex-col"
                 data-testid="application-success-page"
             >
                 <Header />
                 <div className="flex-1 flex items-center justify-center p-6">
-                    <div className="max-w-md text-center">
-                        <div className="w-14 h-14 rounded-full bg-[#34C759]/20 text-[#34C759] inline-flex items-center justify-center mb-6">
+                    <div className="max-w-md text-center bg-white rounded-2xl p-8 md:p-10 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.08)] border border-[#e8e6df]">
+                        <div className="w-14 h-14 rounded-full bg-[#e6f7e6] text-[#2b6e2f] inline-flex items-center justify-center mb-6">
                             <Check className="w-6 h-6" />
                         </div>
-                        <p className="eyebrow mb-3">Submitted</p>
-                        <h1 className="font-display text-3xl md:text-4xl tracking-tight mb-4">
+                        <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Submitted</p>
+                        <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a] mb-4">
                             Thank you, {basics.first_name}
                         </h1>
-                        <p className="text-white/60 text-sm leading-relaxed mb-6">
+                        <p className="text-[#4a4a4a] text-sm leading-relaxed mb-6">
                             Your application has been received. Our team
                             reviews every profile. If shortlisted, we'll reach
                             out to{" "}
-                            <span className="text-white tg-mono">
+                            <span className="text-[#1a1a1a] font-mono">
                                 {basics.email}
                             </span>
                             .
                         </p>
-                        <div className="inline-flex items-center gap-2 text-xs text-white/50 tg-mono">
+                        <div className="inline-flex items-center gap-2 text-xs text-[#8b8b8b] font-mono">
                             <Mail className="w-3 h-3" />
                             Check your inbox for updates.
                         </div>
@@ -514,19 +512,19 @@ export default function ApplicationPage() {
     // --- Main form ---------------------------------------------------------
     return (
         <div
-            className="min-h-screen bg-[#0c0c0c] text-white"
+            className="min-h-screen bg-[#faf9f6] text-[#1a1a1a]"
             data-testid="application-form-page"
         >
             <Header />
             <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
-                <p className="eyebrow mb-3">Application · {basics.email}</p>
-                <h1 className="font-display text-3xl md:text-5xl tracking-tight mb-8">
+                <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Application · {basics.email}</p>
+                <h1 className="font-display text-3xl md:text-5xl tracking-tight text-[#1a1a1a] mb-8">
                     Your Profile
                 </h1>
 
                 {/* Section 2 — Profile Details */}
                 <Section title="Profile Details" index="01">
-                    <div className="grid md:grid-cols-2 gap-5">
+                    <div className="grid md:grid-cols-2 gap-6">
                         <Row
                             label="Date of Birth *"
                             type="date"
@@ -538,7 +536,7 @@ export default function ApplicationPage() {
                             <Label>
                                 Age {form.dob ? "(auto)" : ""}
                             </Label>
-                            <div className="mt-2 py-2.5 text-sm tg-mono text-white/70 border-b border-white/15">
+                            <div className="mt-2 h-11 flex items-center px-4 bg-white rounded-lg border border-[#e8e6df] text-[15px] text-[#1a1a1a]">
                                 {computedAge ?? "—"}
                             </div>
                         </div>
@@ -552,14 +550,14 @@ export default function ApplicationPage() {
                                 }
                             >
                                 <SelectTrigger
-                                    className="mt-2 bg-transparent border-0 border-b border-white/15 rounded-none px-0 h-auto py-2.5 text-sm"
+                                    className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] transition-all duration-150"
                                     data-testid="form-height"
                                 >
                                     <SelectValue placeholder="Select height" />
                                 </SelectTrigger>
-                                <SelectContent>
+                                <SelectContent className="bg-white border border-[#e8e6df] rounded-xl shadow-lg">
                                     {HEIGHT_OPTIONS.map((h) => (
-                                        <SelectItem key={h} value={h}>
+                                        <SelectItem key={h} value={h} className="text-[15px]">
                                             {h}
                                         </SelectItem>
                                     ))}
@@ -576,7 +574,7 @@ export default function ApplicationPage() {
                                 }
                                 placeholder="City, Country"
                                 data-testid="form-location"
-                                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
                             />
                         </div>
 
@@ -591,10 +589,10 @@ export default function ApplicationPage() {
                                             setForm({ ...form, gender: g.key })
                                         }
                                         data-testid={`form-gender-${g.key}`}
-                                        className={`px-4 py-2 rounded-full border text-xs tracking-widest uppercase transition-all ${
+                                        className={`px-4 py-2 rounded-full border text-xs tracking-[0.08em] uppercase transition-all duration-150 ${
                                             form.gender === g.key
-                                                ? "border-white bg-white text-black"
-                                                : "border-white/20 hover:border-white/50"
+                                                ? "border-[#1a1a1a] bg-[#1a1a1a] text-white"
+                                                : "border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#b0aea6]"
                                         }`}
                                     >
                                         {g.label}
@@ -607,7 +605,7 @@ export default function ApplicationPage() {
 
                 {/* Section 3 — Professional */}
                 <Section title="Professional Details" index="02">
-                    <div className="grid md:grid-cols-2 gap-5">
+                    <div className="grid md:grid-cols-2 gap-6">
                         <div>
                             <Label>Instagram Handle</Label>
                             <input
@@ -620,7 +618,7 @@ export default function ApplicationPage() {
                                 }
                                 placeholder="@yourhandle"
                                 data-testid="form-instagram"
-                                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
                             />
                         </div>
                         <div>
@@ -632,23 +630,23 @@ export default function ApplicationPage() {
                                 }
                             >
                                 <SelectTrigger
-                                    className="mt-2 bg-transparent border-0 border-b border-white/15 rounded-none px-0 h-auto py-2.5 text-sm"
+                                    className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] transition-all duration-150"
                                     data-testid="form-followers"
                                 >
                                     <SelectValue placeholder="Select range" />
                                 </SelectTrigger>
-                                <SelectContent className="max-h-72">
+                                <SelectContent className="bg-white border border-[#e8e6df] rounded-xl shadow-lg max-h-72">
                                     {FOLLOWER_TIERS.map((tier) => (
                                         <SelectGroup key={tier.label}>
-                                            <SelectLabel className="text-[10px] tracking-wide uppercase text-white/40">
+                                            <SelectLabel className="text-[10px] tracking-[0.08em] uppercase text-[#8b8b8b] px-2 py-1.5">
                                                 {tier.label}
                                             </SelectLabel>
                                             {tier.items.map((it) => (
-                                                <SelectItem key={it} value={it}>
+                                                <SelectItem key={it} value={it} className="text-[15px]">
                                                     {it}
                                                 </SelectItem>
                                             ))}
-                                            <SelectSeparator />
+                                            <SelectSeparator className="bg-[#e8e6df]" />
                                         </SelectGroup>
                                     ))}
                                 </SelectContent>
@@ -663,17 +661,18 @@ export default function ApplicationPage() {
                                 }
                             >
                                 <SelectTrigger
-                                    className="mt-2 bg-transparent border-0 border-b border-white/15 rounded-none px-0 h-auto py-2.5 text-sm"
+                                    className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] transition-all duration-150"
                                     data-testid="form-ethnicity"
                                 >
                                     <SelectValue placeholder="Select ethnicity" />
                                 </SelectTrigger>
-                                <SelectContent className="max-h-72">
+                                <SelectContent className="bg-white border border-[#e8e6df] rounded-xl shadow-lg max-h-72">
                                     {ETHNICITY_OPTIONS.map((e) => (
                                         <SelectItem
                                             key={e.key}
                                             value={e.key}
                                             data-testid={`form-ethnicity-${e.key}`}
+                                            className="text-[15px]"
                                         >
                                             {e.label}
                                         </SelectItem>
@@ -691,7 +690,7 @@ export default function ApplicationPage() {
                                 rows={4}
                                 placeholder="A few lines about yourself — experience, strengths, what you're looking for."
                                 data-testid="form-bio"
-                                className="mt-2 w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none"
+                                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg p-4 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150 resize-vertical"
                             />
                         </div>
                         <div className="md:col-span-2">
@@ -708,30 +707,30 @@ export default function ApplicationPage() {
 
                 {/* Section 4 — Media */}
                 <Section title="Media" index="03">
-                    <div className="space-y-6">
+                    <div className="space-y-8">
                         <div>
-                            <div className="flex items-center justify-between mb-3">
-                                <p className="text-sm text-white/80">
-                                    Introduction Video <span className="text-white/40 text-xs ml-1">(optional)</span>
+                            <div className="flex items-center justify-between mb-1">
+                                <p className="text-sm text-[#1a1a1a] font-medium">
+                                    Introduction Video <span className="text-[#8b8b8b] text-xs ml-1">(optional)</span>
                                 </p>
                                 {intro && (
                                     <button
                                         onClick={() => removeMedia(intro.id)}
-                                        className="text-[10px] tg-mono text-white/50 hover:text-[#FF3B30]"
+                                        className="text-[10px] font-mono text-[#8b8b8b] hover:text-[#d03a2a] transition-colors duration-150"
                                     >
                                         Replace
                                     </button>
                                 )}
                             </div>
-                            <p className="text-xs text-white/40 mb-3">
-                                Optional (recommended to improve selection chances). Your most recent professional introduction video, without contact info.
+                            <p className="text-xs text-[#8b8b8b] mb-3">
+                                Recommended. Your most recent professional introduction video, without contact info.
                             </p>
                             {intro ? (
                                 <video
                                     src={intro.url}
                                     controls
                                     preload="metadata"
-                                    className="w-full max-w-lg border border-white/10 bg-black rounded-sm"
+                                    className="w-full max-w-lg rounded-xl border border-[#e8e6df] bg-[#faf9f6] shadow-sm"
                                     data-testid="apply-intro-preview"
                                 />
                             ) : (
@@ -739,7 +738,7 @@ export default function ApplicationPage() {
                                     onClick={() => videoRef.current?.click()}
                                     data-testid="apply-intro-upload-btn"
                                     disabled={uploading === "intro_video"}
-                                    className="w-full max-w-lg border border-dashed border-white/20 hover:border-white/50 py-10 flex flex-col items-center gap-2 text-sm text-white/60"
+                                    className="w-full max-w-lg bg-[#f5f4f0] border border-dashed border-[#d1cfc8] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
                                 >
                                     {uploading === "intro_video" ? (
                                         <Loader2 className="w-5 h-5 animate-spin" />
@@ -789,16 +788,16 @@ export default function ApplicationPage() {
                         />
 
                         <div>
-                            <div className="flex items-center justify-between mb-3">
-                                <p className="text-sm text-white/80">
-                                    Profile / Headshot Image * <span className="text-white/40 text-xs ml-1">({images.length}/{MAX_IMAGES_PER_CATEGORY})</span>
+                            <div className="flex items-center justify-between mb-1">
+                                <p className="text-sm text-[#1a1a1a] font-medium">
+                                    Profile / Headshot Image * <span className="text-[#8b8b8b] text-xs ml-1">({images.length}/{MAX_IMAGES_PER_CATEGORY})</span>
                                 </p>
                                 {images.length < MAX_IMAGES_PER_CATEGORY && (
                                     <button
                                         onClick={() => imgRef.current?.click()}
                                         data-testid="apply-image-upload-btn"
                                         disabled={uploading === "image"}
-                                        className="inline-flex items-center gap-1.5 text-xs border border-white/15 hover:border-white px-3 py-1.5"
+                                        className="inline-flex items-center gap-1.5 text-xs border border-[#d1cfc8] bg-white hover:border-[#b0aea6] px-3 py-1.5 rounded-lg transition-colors duration-150"
                                     >
                                         {uploading === "image" ? (
                                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -809,7 +808,7 @@ export default function ApplicationPage() {
                                     </button>
                                 )}
                             </div>
-                            <p className="text-xs text-white/40 mb-3">
+                            <p className="text-xs text-[#8b8b8b] mb-3">
                                 Upload at least 1 clear profile/headshot image (required). Add more (up to {MAX_IMAGES_PER_CATEGORY} per category, including Indian / Western looks above) to improve your selection chances.
                             </p>
                             <input
@@ -823,17 +822,17 @@ export default function ApplicationPage() {
                             {images.length === 0 ? (
                                 <button
                                     onClick={() => imgRef.current?.click()}
-                                    className="w-full border border-dashed border-white/20 hover:border-white/50 py-10 flex flex-col items-center gap-2 text-sm text-white/60"
+                                    className="w-full bg-[#f5f4f0] border border-dashed border-[#d1cfc8] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
                                 >
                                     <Camera className="w-5 h-5" />
                                     <span>Upload images</span>
                                 </button>
                             ) : (
-                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
                                     {images.map((m) => (
                                         <div
                                             key={m.id}
-                                            className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
+                                            className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#e8e6df] overflow-hidden group shadow-sm"
                                         >
                                             <img
                                                 src={m.url}
@@ -843,7 +842,7 @@ export default function ApplicationPage() {
                                             />
                                             <button
                                                 onClick={() => removeMedia(m.id)}
-                                                className="absolute top-2 right-2 w-7 h-7 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#FF3B30]"
+                                                className="absolute top-2 right-2 w-7 h-7 bg-white/90 rounded-lg opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#d03a2a] hover:text-white transition-all duration-150 shadow-sm"
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                             </button>
@@ -859,7 +858,7 @@ export default function ApplicationPage() {
                     onClick={finalize}
                     disabled={saving}
                     data-testid="apply-submit-btn"
-                    className="mt-6 w-full bg-white text-black py-4 rounded-sm text-sm font-medium hover:opacity-90 disabled:opacity-40 inline-flex items-center justify-center gap-2"
+                    className="mt-6 w-full bg-[#1a1a1a] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40 inline-flex items-center justify-center gap-2"
                 >
                     {saving ? (
                         <Loader2 className="w-4 h-4 animate-spin" />
@@ -868,7 +867,7 @@ export default function ApplicationPage() {
                     )}
                     Submit Application
                 </button>
-                <p className="text-[11px] text-white/40 tg-mono text-center mt-3">
+                <p className="text-[11px] text-[#8b8b8b] font-mono text-center mt-3">
                     We'll auto-save as you go — feel free to come back and
                     finish later.
                 </p>
@@ -879,21 +878,20 @@ export default function ApplicationPage() {
 
 function Header() {
     return (
-        <header className="flex items-center justify-between px-6 py-5 border-b border-white/10">
+        <header className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-white/90 backdrop-blur-md border-b border-[#e8e6df]">
             <Logo className="h-8" />
-            <ThemeToggle />
         </header>
     );
 }
 
 function Section({ title, index, children }) {
     return (
-        <section className="mb-10 border border-white/10 p-6 md:p-8">
+        <section className="mb-10 bg-white rounded-xl border border-[#e8e6df] shadow-[0_8px_30px_-12px_rgba(0,0,0,0.04)] p-6 md:p-8">
             <div className="flex items-center gap-3 mb-6">
-                <span className="text-[10px] tg-mono text-white/40">
+                <span className="text-[10px] font-mono text-[#b0aea6]">
                     {index}
                 </span>
-                <p className="eyebrow">{title}</p>
+                <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b]">{title}</p>
             </div>
             {children}
         </section>
@@ -902,7 +900,7 @@ function Section({ title, index, children }) {
 
 function Label({ children }) {
     return (
-        <label className="text-[11px] text-white/50 tracking-widest uppercase">
+        <label className="block text-[11px] tracking-[0.08em] uppercase text-[#6b6b6b] font-medium">
             {children}
         </label>
     );
@@ -918,10 +916,10 @@ function Row({ label, value, onChange, onBlur, type = "text", testid, hint }) {
                 onChange={(e) => onChange(e.target.value)}
                 onBlur={onBlur}
                 data-testid={testid}
-                className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-white outline-none py-2.5 text-sm"
+                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
             />
             {hint && (
-                <p className="text-[10px] text-white/40 tg-mono mt-1.5">
+                <p className="text-[10px] text-[#8b8b8b] font-mono mt-1.5">
                     {hint}
                 </p>
             )}
@@ -947,13 +945,13 @@ function ApplyLookGroup({
     return (
         <div className="mb-2" data-testid={`apply-look-group-${testidPrefix}`}>
             <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-white/80">{label}</p>
-                <span className="text-[10px] tg-mono text-white/40">
+                <p className="text-sm text-[#1a1a1a] font-medium">{label}</p>
+                <span className="text-[10px] font-mono text-[#8b8b8b]">
                     {items.length}
                 </span>
             </div>
             {hint && (
-                <p className="text-xs text-white/40 mb-2">{hint}</p>
+                <p className="text-xs text-[#8b8b8b] mb-3">{hint}</p>
             )}
             <input
                 ref={inputRef}
@@ -963,12 +961,12 @@ function ApplyLookGroup({
                 className="hidden"
                 onChange={(e) => upload(e.target.files, category)}
             />
-            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                 {items.map((m) => (
                     <div
                         key={m.id}
                         data-testid={`${testidPrefix}-image-${m.id}`}
-                        className="relative aspect-[3/4] bg-[#0a0a0a] border border-white/10 overflow-hidden group"
+                        className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#e8e6df] overflow-hidden group shadow-sm"
                     >
                         <img
                             src={m.url}
@@ -979,7 +977,7 @@ function ApplyLookGroup({
                         <button
                             onClick={() => removeMedia(m.id)}
                             data-testid={`${testidPrefix}-image-remove-${m.id}`}
-                            className="absolute top-1 right-1 w-6 h-6 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#FF3B30] rounded-sm"
+                            className="absolute top-1 right-1 w-6 h-6 bg-white/90 rounded-lg opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#d03a2a] hover:text-white transition-all duration-150 shadow-sm"
                         >
                             <Trash2 className="w-3 h-3" />
                         </button>
@@ -991,7 +989,7 @@ function ApplyLookGroup({
                         onClick={() => inputRef.current?.click()}
                         disabled={isUploading}
                         data-testid={`apply-add-${testidPrefix}-btn`}
-                        className="aspect-[3/4] border border-dashed border-white/20 hover:border-white/50 flex flex-col items-center justify-center gap-1 text-xs text-white/60 disabled:opacity-50"
+                        className="aspect-[3/4] bg-[#f5f4f0] border border-dashed border-[#d1cfc8] rounded-xl flex flex-col items-center justify-center gap-1 text-xs text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150 disabled:opacity-50"
                     >
                         {isUploading ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -1021,15 +1019,15 @@ function ApplyWorkLinksEditor({ links, onChange }) {
             {(links || []).map((w, i) => (
                 <div
                     key={`${w}-${i}`}
-                    className="flex items-center justify-between gap-2 px-3 py-2 border border-white/10 rounded-sm text-xs tg-mono break-all"
+                    className="flex items-center justify-between gap-2 px-3 py-2 bg-[#faf9f6] border border-[#e8e6df] rounded-lg text-xs font-mono break-all"
                     data-testid={`apply-work-link-row-${i}`}
                 >
-                    <span className="truncate text-white/80">{w}</span>
+                    <span className="truncate text-[#4a4a4a]">{w}</span>
                     <button
                         type="button"
                         onClick={() => remove(i)}
                         data-testid={`apply-work-link-remove-${i}`}
-                        className="text-white/40 hover:text-white shrink-0"
+                        className="text-[#b0aea6] hover:text-[#d03a2a] shrink-0 transition-colors duration-150"
                     >
                         <X className="w-3.5 h-3.5" />
                     </button>
@@ -1048,13 +1046,13 @@ function ApplyWorkLinksEditor({ links, onChange }) {
                     inputMode="url"
                     placeholder="https://… (paste & press Enter)"
                     data-testid="apply-work-link-input"
-                    className="flex-1 bg-transparent border-b border-white/20 focus:border-white outline-none py-2 text-sm"
+                    className="flex-1 bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
                 />
                 <button
                     type="button"
                     onClick={add}
                     data-testid="apply-work-link-add-btn"
-                    className="text-xs px-3 py-2 border border-white/20 hover:border-white rounded-sm"
+                    className="text-xs px-4 py-2 border border-[#d1cfc8] bg-white rounded-lg hover:border-[#b0aea6] transition-colors duration-150 font-medium"
                 >
                     Add
                 </button>

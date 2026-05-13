@@ -138,7 +138,7 @@ export default function ClientView() {
         return m;
     }, [data]);
 
-    const setAction = async (talentId, action) => {
+    const setAction = useCallback(async (talentId, action) => {
         try {
             await axios.post(
                 `${API}/public/links/${slug}/action`,
@@ -153,9 +153,9 @@ export default function ClientView() {
         } catch {
             toast.error("Action failed");
         }
-    };
+    }, [slug, loadData]);
 
-    const saveComment = async (talentId) => {
+    const saveComment = useCallback(async (talentId) => {
         const text = commentDrafts[talentId];
         if (text === undefined) return;
         try {
@@ -178,9 +178,9 @@ export default function ClientView() {
         } catch {
             toast.error("Failed to save");
         }
-    };
+    }, [commentDrafts, viewerActions, slug, loadData]);
 
-    const logDownload = async (talentId, mediaId) => {
+    const logDownload = useCallback(async (talentId, mediaId) => {
         try {
             await axios.post(
                 `${API}/public/links/${slug}/download-log`,
@@ -192,7 +192,7 @@ export default function ClientView() {
                 },
             );
         } catch (e) { console.error(e); }
-    };
+    }, [slug]);
 
     const markSeen = useCallback(
         async (talentId) => {
@@ -522,7 +522,7 @@ export default function ClientView() {
                             [activeTalent.id]: text,
                         })
                     }
-                    saveComment={() => saveComment(activeTalent.id)}
+                    saveComment={saveComment}
                     logDownload={logDownload}
                 />
             )}
@@ -568,24 +568,27 @@ function TalentDetail({
     const [busyAction, setBusyAction] = useState(null);
     const overlayRef = useRef(null);
 
-    const prev = () => setIdx((i) => (i - 1 + images.length) % images.length);
-    const next = () => setIdx((i) => (i + 1) % images.length);
+    const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
+    const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
 
     const list = Array.isArray(talents) ? talents : [];
     const currentTalentIdx = list.findIndex((t) => t.id === talent.id);
     const hasPrevTalent = currentTalentIdx > 0;
-    const hasNextTalent =
-        currentTalentIdx >= 0 && currentTalentIdx < list.length - 1;
-    const goPrevTalent = () => {
-        if (hasPrevTalent && onNavigate) onNavigate(list[currentTalentIdx - 1]);
-    };
-    const goNextTalent = () => {
+    const hasNextTalent = currentTalentIdx >= 0 && currentTalentIdx < list.length - 1;
+
+    const goPrevTalent = useCallback(() => {
+        if (hasPrevTalent && onNavigate) {
+            onNavigate(list[currentTalentIdx - 1]);
+        }
+    }, [hasPrevTalent, onNavigate, list, currentTalentIdx]);
+
+    const goNextTalent = useCallback(() => {
         if (hasNextTalent && onNavigate) {
             onNavigate(list[currentTalentIdx + 1]);
         } else {
             onClose();
         }
-    };
+    }, [hasNextTalent, onNavigate, list, currentTalentIdx, onClose]);
 
     useEffect(() => {
         const node = overlayRef.current;
@@ -632,9 +635,9 @@ function TalentDetail({
             node.removeEventListener("touchmove", onTouchMove);
             node.removeEventListener("touchend", onTouchEnd);
         };
-    }, [talent.id, list.length, currentTalentIdx]);
+    }, [goNextTalent, goPrevTalent, onClose]);
 
-    const quickAction = async (key) => {
+    const quickAction = useCallback(async (key) => {
         if (busyAction) return;
         setBusyAction(key);
         try { navigator.vibrate?.(10); } catch (e) { console.error(e); }
@@ -647,9 +650,9 @@ function TalentDetail({
         } catch {
             setBusyAction(null);
         }
-    };
+    }, [busyAction, setAction, talent.id, hasNextTalent, goNextTalent]);
 
-    const download = async (m) => {
+    const download = useCallback(async (m) => {
         await logDownload(talent.id, m.id);
         const url = m.url;
         const a = document.createElement("a");
@@ -657,7 +660,7 @@ function TalentDetail({
         a.download = m.original_filename || "file";
         a.target = "_blank";
         a.click();
-    };
+    }, [logDownload, talent.id]);
 
     return (
         <div

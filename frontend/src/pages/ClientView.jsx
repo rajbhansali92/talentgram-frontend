@@ -74,6 +74,29 @@ const TABS = [
     { key: "new", label: "New", icon: Sparkles },
 ];
 
+// Helper to parse FastAPI/Pydantic validation errors safely
+function formatErrorMessage(error) {
+    const detail = error?.response?.data?.detail;
+    
+    if (typeof detail === "string") {
+        return detail;
+    }
+    
+    if (Array.isArray(detail) && detail.length > 0) {
+        return detail.map((err) => err.msg || err.message || "Validation error").join(", ");
+    }
+    
+    if (typeof error?.response?.data?.message === "string") {
+        return error.response.data.message;
+    }
+    
+    if (typeof error?.message === "string") {
+        return error.message;
+    }
+    
+    return "Failed to continue. Please try again.";
+}
+
 export default function ClientView() {
     const { slug } = useParams();
     const [identified, setIdentified] = useState(!!getViewerToken(slug));
@@ -139,12 +162,9 @@ export default function ClientView() {
                 throw new Error("No token received");
             }
         } catch (e) {
-            console.error("IDENTIFY ERROR:", e?.response?.data || e);
-            toast.error(
-                e?.response?.data?.detail ||
-                e?.response?.data?.message ||
-                "Failed to continue. Please try again."
-            );
+            const errorMessage = formatErrorMessage(e);
+            console.error("IDENTIFY ERROR:", errorMessage);
+            toast.error(errorMessage);
         } finally {
             setLoading(false);
         }

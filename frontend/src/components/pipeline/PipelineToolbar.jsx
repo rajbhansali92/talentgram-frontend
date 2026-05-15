@@ -13,6 +13,7 @@ const PipelineToolbar = memo(function PipelineToolbar({
     bulkMode,
     onToggleBulkMode,
     onOpenBulkAdd,
+    onOpenAddTalents,
 }) {
     return (
         <div className="mb-4 flex justify-between items-start flex-wrap gap-3">
@@ -54,6 +55,20 @@ const PipelineToolbar = memo(function PipelineToolbar({
                     "
                 >
                     + Bulk Add
+                </button>
+                <button
+                    type="button"
+                    onClick={onOpenAddTalents}
+                    data-testid="pipeline-add-talents-btn"
+                    className="
+                        px-4 py-1.5 text-[11px] tracking-[0.16em] uppercase font-medium
+                        rounded-full
+                        bg-white text-black
+                        hover:bg-white/90
+                        transition-colors duration-200
+                    "
+                >
+                    + Add Talents
                 </button>
             </div>
         </div>

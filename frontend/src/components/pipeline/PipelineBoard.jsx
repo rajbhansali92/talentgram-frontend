@@ -1,9 +1,8 @@
-import React, { memo, useCallback, useState } from "react";
+import React, { memo, useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 
 import { usePipelineData } from "@/hooks/usePipelineData";
-import { useTalentSearch } from "@/hooks/useTalentSearch";
 import { usePipelineFilters } from "@/hooks/usePipelineFilters";
 import { useBulkSelection } from "@/hooks/useBulkSelection";
 import { usePipelineDnD } from "@/hooks/usePipelineDnD";
@@ -15,8 +14,8 @@ import { BoardSection, BoardRow } from "./PipelineBoardSection";
 import BulkActionBar from "./BulkActionBar";
 import FollowUpLane from "./FollowUpLane";
 import { FilterEmptyState } from "./PipelineEmptyState";
-import QuickAddTalents from "./QuickAddTalents";
 import BulkAddModal from "./BulkAddModal";
+import TalentBrowserModal from "./TalentBrowserModal";
 
 import {
     INDEPENDENT_STAGES,
@@ -37,17 +36,6 @@ import {
 function PipelineBoard({ projectId }) {
     // ---- data ---------------------------------------------------------
     const { data, setData, loading, error, fetchPipeline } = usePipelineData(projectId);
-
-    // ---- talent search (Quick Add) ------------------------------------
-    const {
-        searchQuery,
-        setSearchQuery,
-        searchResults,
-        searchLoading,
-        selectedTalents,
-        toggleTalentSelect,
-        resetSearch,
-    } = useTalentSearch();
 
     // ---- filters ------------------------------------------------------
     const {
@@ -86,10 +74,18 @@ function PipelineBoard({ projectId }) {
         handleCardDrop,
     } = usePipelineDnD({ setData, refresh: fetchPipeline });
 
-    // ---- bulk-add modal ----------------------------------------------
+    // ---- bulk-add modal + talent browser modal -----------------------
     const [showBulkAdd, setShowBulkAdd] = useState(false);
     const [bulkTalentsInput, setBulkTalentsInput] = useState("");
     const [bulkAdding, setBulkAdding] = useState(false);
+    const [showTalentBrowser, setShowTalentBrowser] = useState(false);
+
+    // Set of talent_ids already in this project's pipeline — used by the
+    // TalentBrowserModal to disable duplicate selections.
+    const existingTalentIds = useMemo(
+        () => new Set((data || []).map((row) => row.talent_id).filter(Boolean)),
+        [data],
+    );
 
     // ---- handlers ----------------------------------------------------
     const handleToggleBulkMode = useCallback(() => {
@@ -107,23 +103,6 @@ function PipelineBoard({ projectId }) {
         setBulkIds(new Set());
         setBulkMode(false);
     }, [setBulkIds, setBulkMode]);
-
-    const addSelectedToPipeline = async () => {
-        if (selectedTalents.size === 0) return;
-        try {
-            await adminApi.post("/pipeline/add", {
-                project_id: projectId,
-                talent_ids: Array.from(selectedTalents),
-            });
-            const count = selectedTalents.size;
-            resetSearch();
-            await fetchPipeline();
-            toast.success(`Added ${count} talent(s) to pipeline`);
-        } catch (e) {
-            console.error("Failed to add talents:", e);
-            toast.error(e?.response?.data?.detail || "Failed to add talents to pipeline");
-        }
-    };
 
     const handleBulkAdd = async () => {
         const talentIds = bulkTalentsInput
@@ -226,16 +205,15 @@ function PipelineBoard({ projectId }) {
                 bulkMode={bulkMode}
                 onToggleBulkMode={handleToggleBulkMode}
                 onOpenBulkAdd={() => setShowBulkAdd(true)}
+                onOpenAddTalents={() => setShowTalentBrowser(true)}
             />
 
-            <QuickAddTalents
-                searchQuery={searchQuery}
-                onSearchQueryChange={setSearchQuery}
-                searchLoading={searchLoading}
-                searchResults={searchResults}
-                selectedTalents={selectedTalents}
-                onToggleTalent={toggleTalentSelect}
-                onAddSelected={addSelectedToPipeline}
+            <TalentBrowserModal
+                open={showTalentBrowser}
+                onClose={() => setShowTalentBrowser(false)}
+                projectId={projectId}
+                existingTalentIds={existingTalentIds}
+                onAdded={fetchPipeline}
             />
 
             {showBulkAdd && (

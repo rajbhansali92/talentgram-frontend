@@ -11,8 +11,8 @@
  *     • /components/pipeline/BulkActionBar.jsx   — floating action bar
  *     • /components/pipeline/FollowUpLane.jsx    — virtual read-only lane
  *     • /components/pipeline/PipelineEmptyState.jsx
- *     • /components/pipeline/QuickAddTalents.jsx
  *     • /components/pipeline/BulkAddModal.jsx
+ *     • /components/pipeline/TalentBrowserModal.jsx
  *     • /components/pipeline/TalentAvatar.jsx
  *     • /components/pipeline/constants.js
  *   Plus hooks:
@@ -20,7 +20,6 @@
  *     • /hooks/usePipelineFilters.js
  *     • /hooks/useBulkSelection.js
  *     • /hooks/usePipelineDnD.js
- *     • /hooks/useTalentSearch.js
  *
  * This wrapper exists so existing imports (`pages/ProjectPipeline`) keep
  * working unchanged. All behaviour, styling, data-testids, and the

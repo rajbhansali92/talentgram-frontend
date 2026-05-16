@@ -1,4 +1,4 @@
-import React, { memo, useState } from "react";
+import React, { memo, useState, useCallback } from "react";
 import PipelineCard from "./PipelineCard";
 import { EmptyLane } from "./PipelineEmptyState";
 import {
@@ -8,24 +8,6 @@ import {
     getStageLabel,
 } from "./constants";
 
-/**
- * PipelineColumn — single stage column.
- *
- * Cinematic glass-panelled card with:
- *   • thin stage-accent line at the very top
- *   • sticky header that survives vertical scroll
- *   • optional "Select all in column" affordance (PATCH 4C)
- *   • calm empty state
- *   • native HTML5 drop target (PATCH 4D)
- *
- * A column is "droppable" when:
- *   • drag is supported (pointer-fine device)
- *   • the lane is not read-only (follow-up is opt-out)
- *   • there's an active drag (`dragId` set in parent)
- *   • a drop callback is wired
- *
- * `isDragOver` is local — only this column re-renders during hover.
- */
 const PipelineColumn = memo(function PipelineColumn({
     stage,
     items,
@@ -40,13 +22,11 @@ const PipelineColumn = memo(function PipelineColumn({
     onCardDragStart,
     onCardDragEnd,
     onCardDrop,
+    compact = false,
 }) {
     const accent = STAGE_ACCENTS[stage] || DEFAULT_ACCENT;
-    const emptyCopy = EMPTY_STATE_COPY[stage] || "Nothing here yet";
+    const emptyCopy = EMPTY_STATE_COPY[stage] || "Empty";
 
-    // Per-column "Select all" affordance. Only surfaces when we're in
-    // bulk mode AND the lane is mutable (read-only lanes like follow_up
-    // are explicitly excluded by the spec).
     const canSelectAll =
         bulkMode && !readOnly && items.length > 0 && typeof onSelectAll === "function";
     const allInColumnSelected =
@@ -57,36 +37,34 @@ const PipelineColumn = memo(function PipelineColumn({
 
     const [isDragOver, setIsDragOver] = useState(false);
 
-    const handleDragOver = (e) => {
+    const handleDragOver = useCallback((e) => {
         if (!isDroppable) return;
-        // preventDefault is what tells the browser "yes, this is a drop
-        // target". Without it the onDrop handler never fires.
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-    };
+    }, [isDroppable]);
 
-    const handleDragEnter = (e) => {
+    const handleDragEnter = useCallback((e) => {
         if (!isDroppable) return;
         e.preventDefault();
         setIsDragOver(true);
-    };
+    }, [isDroppable]);
 
-    const handleDragLeave = (e) => {
+    const handleDragLeave = useCallback((e) => {
         if (!isDroppable) return;
-        // Only clear when the pointer truly leaves the column shell —
-        // dragenter/leave bubble through every child, so we guard with
-        // currentTarget vs relatedTarget.
         if (e.currentTarget.contains(e.relatedTarget)) return;
         setIsDragOver(false);
-    };
+    }, [isDroppable]);
 
-    const handleDrop = (e) => {
+    const handleDrop = useCallback((e) => {
         if (!isDroppable) return;
         e.preventDefault();
         setIsDragOver(false);
         const droppedId = e.dataTransfer.getData("text/plain");
         if (droppedId) onCardDrop(stage, droppedId);
-    };
+    }, [isDroppable, stage, onCardDrop]);
+
+    // Accessibility: Announce column count to screen readers
+    const columnLabel = `${getStageLabel(stage)} column with ${items.length} items`;
 
     return (
         <div
@@ -95,93 +73,113 @@ const PipelineColumn = memo(function PipelineColumn({
             onDragEnter={handleDragEnter}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
+            role="region"
+            aria-label={columnLabel}
             className={`
-                relative shrink-0 w-[280px] md:w-[300px]
-                rounded-xl overflow-hidden
-                bg-gradient-to-b from-white/[0.04] to-white/[0.015]
-                border transition-all duration-200
-                backdrop-blur-xl
+                relative shrink-0 w-[300px] min-w-[300px] max-w-[300px]
+                rounded-lg overflow-visible
+                bg-white
+                shadow-[0_1px_2px_rgba(0,0,0,0.04)]
+                border border-black/[0.08] transition-all duration-150
                 ${
                     isDragOver
-                        ? "border-white/30 ring-1 ring-white/10 shadow-[0_12px_36px_-12px_rgba(0,0,0,0.7),inset_0_0_0_1px_rgba(255,255,255,0.05)]"
-                        : "border-white/[0.06] shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.04)]"
+                        ? `
+                            bg-black/[0.01]
+                            ring-1 ring-black/[0.06]
+                            border-black/[0.10]
+                          `
+                        : ""
                 }
             `}
         >
-            {/* Stage accent — paper-thin gradient line that gives each lane
-                a quiet sense of identity without colouring the whole card. */}
+            {/* Stage accent line — simple solid muted operational indicator */}
             <div
-                className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r ${accent} pointer-events-none`}
-                aria-hidden
+                className={`absolute inset-x-0 top-0 h-[2px] ${accent} pointer-events-none rounded-t-lg`}
+                aria-hidden="true"
             />
 
-            {/* Sticky header — survives vertical scroll inside the column.
-                Slight backdrop-blur so cards passing under it stay legible. */}
+            {/* Sticky header — operational clarity */}
             <div
                 className="
-                    sticky top-0 z-10
+                    sticky top-[52px] z-10
                     px-4 py-3
-                    bg-black/40 backdrop-blur-md
-                    border-b border-white/[0.05]
-                    flex items-center justify-between gap-2
+                    bg-white/96 backdrop-blur-sm
+                    border-b border-black/[0.06]
+                    rounded-t-lg
+                    flex items-center justify-between gap-3
                 "
             >
                 <div className="min-w-0 flex items-center gap-2">
-                    <span className="text-[10px] tracking-[0.22em] uppercase text-white/70 font-medium truncate">
+                    <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-medium truncate">
                         {getStageLabel(stage)}
                     </span>
                     {readOnly && (
-                        <span className="text-[9px] tracking-[0.18em] uppercase text-amber-200/60 tg-mono">
-                            read-only
+                        <span 
+                            className="text-[8px] tracking-wide uppercase text-black/35 font-mono"
+                            aria-label="Read only column"
+                        >
+                            view
                         </span>
                     )}
                 </div>
                 <span
                     className="
-                        text-[10px] tg-mono text-white/50
-                        px-2 py-0.5 rounded-full
-                        bg-white/[0.04] border border-white/[0.06]
+                        text-[11px] font-mono text-black/55
+                        px-2 py-0.5 rounded
+                        bg-black/[0.04] border border-black/[0.06]
                         shrink-0
                     "
                     data-testid={`pipeline-column-count-${stage}`}
+                    aria-label={`${items.length} items`}
                 >
                     {items.length}
                 </span>
             </div>
 
-            {/* Per-column Select-all affordance (PATCH 4C). */}
+            {/* Select all — subtle operational area */}
             {canSelectAll && (
-                <div className="px-4 py-2 border-b border-white/[0.04] bg-black/20">
+                <div className="px-4 py-2 border-b border-black/[0.04] bg-black/[0.015]">
                     <button
                         type="button"
                         onClick={() => onSelectAll(items)}
                         data-testid={`pipeline-select-all-${stage}`}
+                        aria-label={allInColumnSelected ? "Deselect all items in column" : "Select all items in column"}
                         className="
                             w-full text-left flex items-center justify-between gap-2
-                            text-[10px] tracking-[0.18em] uppercase
-                            text-white/55 hover:text-white/90
-                            transition-colors duration-200
+                            text-[10px] tracking-wide uppercase
+                            text-black/45 hover:text-black/70
+                            transition-colors duration-100
+                            focus:outline-none focus:ring-1 focus:ring-black/20 rounded
                         "
                     >
                         <span>
                             {allInColumnSelected
-                                ? "Deselect column"
-                                : "Select all in column"}
+                                ? "Deselect all"
+                                : "Select all"}
                         </span>
-                        <span className="tg-mono text-white/35">
+                        <span className="font-mono text-black/25" aria-hidden="true">
                             {items.length}
                         </span>
                     </button>
                 </div>
             )}
 
-            {/* Card stream — independent vertical scroll. The fixed
-                viewport height keeps the board cinematic and predictable. */}
-            <div className="
-                px-3 py-3 space-y-2
-                max-h-[68vh] min-h-[180px]
-                overflow-y-auto tg-pipeline-scroll
-            ">
+            {/* Card stream - dense operational lane background */}
+            <div
+                className={`
+                    px-2.5 py-2.5 space-y-2.5
+                    overflow-y-auto overflow-x-visible
+                    bg-[#fafafa]
+                    tg-pipeline-scroll
+                    ${
+                        compact
+                            ? "min-h-[180px] max-h-[240px]"
+                            : "min-h-[180px] max-h-[64vh]"
+                    }
+                `}
+                role="list"
+                aria-label={`Cards in ${getStageLabel(stage)} stage`}
+            >
                 {items.length === 0 ? (
                     <EmptyLane label={emptyCopy} />
                 ) : (
@@ -198,10 +196,19 @@ const PipelineColumn = memo(function PipelineColumn({
                             isDragging={dragId === item.id}
                             onDragStart={onCardDragStart}
                             onDragEnd={onCardDragEnd}
+                            compact={compact}
                         />
                     ))
                 )}
             </div>
+
+            {/* Drop overlay — minimal operational feedback */}
+            {isDragOver && (
+                <div 
+                    className="absolute inset-0 pointer-events-none bg-black/[0.005] rounded-lg transition-opacity duration-100"
+                    aria-hidden="true"
+                />
+            )}
         </div>
     );
 });

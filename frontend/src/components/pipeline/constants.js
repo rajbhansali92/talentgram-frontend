@@ -11,6 +11,7 @@
  * row with stage="sent" renders into the Approved column without a
  * data migration.
  * ------------------------------------------------------------------- */
+
 export const MAIN_FLOW_STAGES = [
     "ask_to_test",
     "approved",
@@ -30,9 +31,7 @@ export const PIPELINE_STAGE_ORDER = [
     ...INDEPENDENT_STAGES,
 ];
 
-// Bulk-action toolbar exposes only the funnel destinations (no
-// terminal/independent stages — those are still reachable via per-card
-// buttons but rarely needed in bulk).
+// Bulk-action toolbar exposes only the funnel destinations
 export const BULK_MOVE_TARGETS = ["ask_to_test", "approved", "shortlisted", "locked"];
 
 export const LEGACY_STAGE_ALIASES = {
@@ -56,61 +55,55 @@ export const STAGE_LABELS = {
     not_available: "NOT AVAILABLE",
     not_interested: "NOT INTERESTED",
     pitch: "PITCH",
-    // Virtual read-only lane (PATCH 3C). Never stored in DB.
     follow_up: "FOLLOW-UP",
 };
 
-// Per-stage accent colours. Used as a thin top bar on the column header
-// (cinematic stage indicator). Kept muted on purpose — no neon, no rainbow.
-// Outcome lanes share a deep slate, follow-up gets a soft amber pulse so it
-// reads as "attention needed" without screaming.
+// Refined stage accents — very subtle, almost invisible
 export const STAGE_ACCENTS = {
-    ask_to_test: "from-sky-300/60 to-sky-500/0",
-    approved: "from-emerald-300/60 to-emerald-500/0",
-    hold: "from-amber-300/60 to-amber-500/0",
-    shortlisted: "from-violet-300/60 to-violet-500/0",
-    already_tested: "from-fuchsia-300/60 to-fuchsia-500/0",
-    locked: "from-yellow-200/70 to-yellow-500/0",
-    rejected: "from-rose-300/40 to-rose-500/0",
-    not_available: "from-zinc-300/30 to-zinc-500/0",
-    not_interested: "from-zinc-300/30 to-zinc-500/0",
-    pitch: "from-teal-300/60 to-teal-500/0",
-    follow_up: "from-amber-300/70 to-amber-500/0",
+    ask_to_test: "from-slate-400/20 to-transparent",
+    approved: "from-emerald-400/20 to-transparent",
+    hold: "from-amber-400/20 to-transparent",
+    shortlisted: "from-violet-400/20 to-transparent",
+    already_tested: "from-fuchsia-400/15 to-transparent",
+    locked: "from-amber-300/15 to-transparent",
+    rejected: "from-rose-400/12 to-transparent",
+    not_available: "from-zinc-500/10 to-transparent",
+    not_interested: "from-zinc-500/10 to-transparent",
+    pitch: "from-teal-400/20 to-transparent",
+    follow_up: "from-amber-400/15 to-transparent",
 };
-export const DEFAULT_ACCENT = "from-white/30 to-white/0";
+export const DEFAULT_ACCENT = "from-white/5 to-transparent";
 
-// Cinematic empty-state copy keyed by stage. Falls back to a generic line.
+/* ---------------------------------------------------------------------
+ * ISSUE 7 FIX: Clearer empty state copy
+ * Replaced abstract text with more descriptive, actionable copy
+ * ------------------------------------------------------------------- */
 export const EMPTY_STATE_COPY = {
-    ask_to_test: "Awaiting first invitations",
-    approved: "No approvals yet",
-    hold: "Nothing on hold",
-    shortlisted: "Empty shortlist",
-    already_tested: "No prior tests",
-    locked: "Not finalised yet",
-    rejected: "Cleanly clear",
-    not_available: "Everyone's available",
-    not_interested: "All in",
-    pitch: "No pitches in flight",
+    // Main flow stages — clear action-oriented copy
+    ask_to_test: "No pending invitations",
+    approved: "Awaiting approvals",
+    hold: "On hold",  // Fixed: was "Paused" - clearer
+    shortlisted: "No shortlisted talents",
+    already_tested: "No completed tests",
+    locked: "No finalised placements",
+    
+    // Outcome stages — clear terminal states
+    rejected: "No rejected talents",
+    not_available: "All talents available",
+    not_interested: "Open to opportunities",  // Fixed: was "Open" - clearer
+    
+    // Independent stages
+    pitch: "No active pitches",  // Fixed: was "No active" - more descriptive
+    
+    // Follow-up
     follow_up: "All caught up",
 };
 
-// Stable references used by the read-only follow-up lane. Defining them
-// at module scope (not inside render) keeps the `memo` comparators on
-// Column/Card from invalidating every render.
 export const EMPTY_BULK_SET = new Set();
 export const NOOP = () => {};
 
 /* ---------------------------------------------------------------------
- * Filter primitives (PATCH 4E)
- *
- * STATUS_FOCUS_OPTIONS — segmented quick-filter at the top of the
- * board. `follow_up` is special: it collapses every other section so the
- * casting team can drill into "needs attention" in one click.
- * `pending`  → ask_to_test + hold (everything awaiting a decision)
- * Other entries map 1:1 to the canonical stage.
- *
- * TRISTATE_OPTIONS — used by Has-submission / Has-Instagram filters.
- * Three states keeps the control compact (no extra dropdown surface).
+ * Filter primitives
  * ------------------------------------------------------------------- */
 export const STATUS_FOCUS_OPTIONS = [
     { value: "all", label: "All" },
@@ -136,54 +129,54 @@ export const DEFAULT_FILTERS = {
 };
 
 /* ---------------------------------------------------------------------
- * Status tones (PATCH 4B)
- * Used by the Card footer for terminal/locked states. All tones stay
- * muted on purpose — luxury, not dashboard. Borders are 8-12% opacity,
- * backgrounds 5-8%, text 60-70%.
+ * Status tones — refined, minimal
  * ------------------------------------------------------------------- */
 export const STATUS_TONES = {
     locked: {
-        // Elegant finalised state — soft gold, no neon.
-        label: "Finalised",
-        dot: "bg-yellow-200/80",
-        text: "text-yellow-200/75",
-        chip: "border-yellow-200/15 bg-yellow-200/[0.04]",
+        label: "Final",
+        dot: "bg-amber-300/40",
+        text: "text-amber-300/50",
+        chip: "border-amber-400/8 bg-amber-400/[0.01]",
     },
     approved: {
         label: "Approved",
-        dot: "bg-emerald-300/80",
-        text: "text-emerald-300/75",
-        chip: "border-emerald-300/15 bg-emerald-300/[0.04]",
+        dot: "bg-emerald-400/40",
+        text: "text-emerald-400/50",
+        chip: "border-emerald-400/8 bg-emerald-400/[0.01]",
     },
     hold: {
-        label: "On hold",
-        dot: "bg-amber-300/80",
-        text: "text-amber-200/75",
-        chip: "border-amber-300/15 bg-amber-300/[0.04]",
+        label: "Hold",
+        dot: "bg-amber-400/35",
+        text: "text-amber-300/45",
+        chip: "border-amber-400/8 bg-amber-400/[0.01]",
     },
     rejected: {
         label: "Rejected",
-        dot: "bg-rose-300/70",
-        text: "text-rose-300/70",
-        chip: "border-rose-300/15 bg-rose-300/[0.04]",
+        dot: "bg-rose-400/30",
+        text: "text-rose-400/40",
+        chip: "border-rose-400/6 bg-rose-400/[0.005]",
     },
     not_available: {
-        label: "Not available",
-        dot: "bg-zinc-300/60",
-        text: "text-zinc-300/65",
-        chip: "border-zinc-300/15 bg-zinc-300/[0.04]",
+        label: "Unavailable",
+        dot: "bg-zinc-500/30",
+        text: "text-zinc-400/40",
+        chip: "border-zinc-500/6 bg-zinc-500/[0.005]",
     },
     not_interested: {
-        label: "Not interested",
-        dot: "bg-zinc-300/60",
-        text: "text-zinc-300/65",
-        chip: "border-zinc-300/15 bg-zinc-300/[0.04]",
+        label: "Declined",
+        dot: "bg-zinc-500/30",
+        text: "text-zinc-400/40",
+        chip: "border-zinc-500/6 bg-zinc-500/[0.005]",
     },
 };
 
-// Per-stage next-step suggestions for the card action buttons. `pitch`,
-// terminal stages, and `locked` are intentionally empty — no automatic
-// onward transitions, but admins can still bulk-move via the toolbar.
+// Only show 2 primary actions per card — others in overflow menu
+export const VISIBLE_ACTIONS_PER_CARD = 2;
+
+/* ---------------------------------------------------------------------
+ * Next stage flow definitions
+ * Controls which transition buttons appear on each card
+ * ------------------------------------------------------------------- */
 export const NEXT_STAGE_FLOW = {
     ask_to_test: ["approved", "not_interested", "not_available"],
     approved: ["shortlisted", "hold", "rejected"],
@@ -197,5 +190,75 @@ export const NEXT_STAGE_FLOW = {
     pitch: ["ask_to_test", "rejected"],
 };
 
+/* ---------------------------------------------------------------------
+ * Helper: Get human-readable stage label
+ * ------------------------------------------------------------------- */
 export const getStageLabel = (stage) =>
     STAGE_LABELS[stage] || stage.replaceAll("_", " ").toUpperCase();
+
+/* ---------------------------------------------------------------------
+ * Additional helpers for better type safety and DX
+ * ------------------------------------------------------------------- */
+
+/**
+ * Check if a stage is a terminal state (outcome)
+ */
+export const isTerminalStage = (stage) => {
+    const normalised = normaliseStage(stage);
+    return OUTCOME_STAGES.includes(normalised);
+};
+
+/**
+ * Check if a stage is in the main flow
+ */
+export const isMainFlowStage = (stage) => {
+    const normalised = normaliseStage(stage);
+    return MAIN_FLOW_STAGES.includes(normalised);
+};
+
+/**
+ * Get all available stages for a given current stage
+ */
+export const getAvailableTransitions = (currentStage) => {
+    const normalised = normaliseStage(currentStage);
+    return NEXT_STAGE_FLOW[normalised] || [];
+};
+
+/**
+ * Get stage color for UI indicators (simplified mapping)
+ */
+export const getStageColor = (stage) => {
+    const normalised = normaliseStage(stage);
+    const colorMap = {
+        ask_to_test: "slate",
+        approved: "emerald",
+        hold: "amber",
+        shortlisted: "violet",
+        already_tested: "fuchsia",
+        locked: "amber",
+        rejected: "rose",
+        not_available: "zinc",
+        not_interested: "zinc",
+        pitch: "teal",
+        follow_up: "amber",
+    };
+    return colorMap[normalised] || "white";
+};
+
+/**
+ * Check if a stage can accept drag-drop operations
+ */
+export const isDroppableStage = (stage) => {
+    const nonDroppable = [...OUTCOME_STAGES, "locked", "pitch"];
+    return !nonDroppable.includes(normaliseStage(stage));
+};
+
+/**
+ * Get placeholder text for empty state based on context
+ */
+export const getEmptyStateMessage = (stage, hasFilters = false) => {
+    if (hasFilters) {
+        return "No matching talents";
+    }
+    return EMPTY_STATE_COPY[stage] || "Empty";
+};

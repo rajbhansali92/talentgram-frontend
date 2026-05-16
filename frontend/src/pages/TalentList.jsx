@@ -73,49 +73,49 @@ export default function TalentList() {
 
     return (
         <div
-            className="p-6 md:p-12 max-w-7xl mx-auto"
+            className="p-6 md:p-10 max-w-7xl mx-auto"
             data-testid="talent-list-page"
         >
-            <div className="flex items-end justify-between mb-10 flex-wrap gap-4">
+            <div className="flex items-end justify-between mb-8 flex-wrap gap-4">
                 <div>
                     <p className="eyebrow mb-3">Roster</p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight">
+                    <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
                         Talents
                     </h1>
                 </div>
                 <Link
                     to="/admin/talents/new"
                     data-testid="new-talent-btn"
-                    className="inline-flex items-center gap-2 bg-white text-black px-5 py-3 rounded-sm text-xs tracking-wide hover:opacity-90 transition-all"
+                    className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors duration-150"
                 >
                     <Plus className="w-4 h-4" strokeWidth={1.5} /> Add Talent
                 </Link>
             </div>
 
             <div className="mb-8 relative max-w-md">
-                <Search className="absolute left-0 top-3 w-4 h-4 text-white/40" />
+                <Search className="absolute left-0 top-3 w-4 h-4 text-black/35" />
                 <input
                     type="text"
                     value={q}
                     onChange={(e) => setQ(e.target.value)}
                     placeholder="Search by name..."
                     data-testid="talent-search-input"
-                    className="w-full bg-transparent border-b border-white/20 focus:border-white outline-none py-3 pl-7 text-sm"
+                    className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 text-sm text-black/85 placeholder:text-black/30"
                 />
             </div>
 
             {loading ? (
-                <div className="text-white/40 text-sm">Loading...</div>
+                <div className="text-black/45 text-sm">Loading...</div>
             ) : talents.length === 0 ? (
-                <div className="border border-white/10 p-12 text-center">
+                <div className="border border-black/[0.08] bg-white rounded-xl p-12 text-center">
                     <ImageIcon
-                        className="w-10 h-10 text-white/20 mx-auto mb-4"
+                        className="w-10 h-10 text-black/20 mx-auto mb-4"
                         strokeWidth={1}
                     />
-                    <p className="text-white/60 mb-6">No talents yet</p>
+                    <p className="text-black/60 mb-6">No talents yet</p>
                     <Link
                         to="/admin/talents/new"
-                        className="inline-flex items-center gap-2 bg-white text-black px-5 py-2.5 rounded-sm text-xs"
+                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors duration-150"
                     >
                         Add your first talent
                     </Link>
@@ -142,7 +142,11 @@ export default function TalentList() {
                             <div
                                 key={t.id}
                                 data-testid={`talent-card-${t.id}`}
-                                className={`group relative border transition-all tg-fade-up ${checked ? "border-white" : "border-white/10 hover:border-white/30"}`}
+                                className={`group relative border rounded-xl transition-colors duration-150 ${
+                                    checked 
+                                        ? "border-black/40 bg-white" 
+                                        : "border-black/[0.08] bg-white hover:border-black/[0.16]"
+                                }`}
                             >
                                 {canBulkDelete && (
                                     <button
@@ -155,10 +159,14 @@ export default function TalentList() {
                                             checked ? "Deselect" : "Select"
                                         }
                                         data-testid={`talent-check-${t.id}`}
-                                        className={`absolute top-2 left-2 z-10 w-6 h-6 rounded-sm border flex items-center justify-center transition-all ${checked ? "bg-white border-white text-black" : "bg-black/60 border-white/40 text-transparent group-hover:text-white/60 opacity-0 group-hover:opacity-100"} ${isSelectionMode ? "opacity-100" : ""}`}
+                                        className={`absolute top-3 left-3 z-10 w-5 h-5 rounded-md border flex items-center justify-center transition-colors duration-150 ${
+                                            checked 
+                                                ? "bg-black border-black text-white" 
+                                                : "bg-white border-black/[0.2] text-transparent group-hover:border-black/40"
+                                        } ${isSelectionMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                                     >
                                         {checked && (
-                                            <Check className="w-3.5 h-3.5" />
+                                            <Check className="w-3 h-3" />
                                         )}
                                     </button>
                                 )}
@@ -217,26 +225,26 @@ export default function TalentList() {
 function Inner({ t, anyImg }) {
     return (
         <>
-            <div className="aspect-[3/4] bg-[#0c0c0c] overflow-hidden">
+            <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-xl overflow-hidden">
                 {anyImg ? (
                     <img
                         src={anyImg.url}
                         alt={t.name}
-                        className="w-full h-full object-cover group-hover:scale-[1.02] transition-all duration-500"
+                        className="w-full h-full object-cover"
                     />
                 ) : (
-                    <div className="w-full h-full flex items-center justify-center text-white/20">
+                    <div className="w-full h-full flex items-center justify-center text-black/20">
                         <ImageIcon className="w-8 h-8" strokeWidth={1} />
                     </div>
                 )}
             </div>
             <div className="p-4">
-                <div className="font-display text-lg tracking-tight">
+                <div className="font-display text-base tracking-tight text-black/85">
                     {t.name}
                 </div>
-                <div className="text-[11px] text-white/40 mt-1 tg-mono">
+                <div className="text-[11px] text-black/45 mt-1">
                     {t.location ? t.location + " · " : ""}
-                    {(t.media || []).length} assets
+                    {(t.media || []).length} asset{(t.media || []).length === 1 ? "" : "s"}
                 </div>
             </div>
         </>

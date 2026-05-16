@@ -1,12 +1,109 @@
-import React, { memo, useState, useCallback } from "react";
+import React, { memo, useState, useCallback, useMemo } from "react";
+import { ChevronDown, Focus, TrendingUp, Clock, AlertCircle, Maximize2 } from "lucide-react";
 import PipelineCard from "./PipelineCard";
 import { EmptyLane } from "./PipelineEmptyState";
 import {
     DEFAULT_ACCENT,
-    EMPTY_STATE_COPY,
     STAGE_ACCENTS,
     getStageLabel,
+    STAGE_ORDER, // Single source of truth from constants
 } from "./constants";
+
+// Pure utility functions - moved outside for testability
+const isStale = (lastActivityTimestamp) => {
+    const fiveDaysInMs = 5 * 24 * 60 * 60 * 1000;
+    return Date.now() - lastActivityTimestamp > fiveDaysInMs;
+};
+
+const calculateStaleCount = (items) => {
+    return items.filter(item => {
+        const timestamp = item.lastActivityTimestamp || item.updatedAtTimestamp;
+        return timestamp && isStale(timestamp);
+    }).length;
+};
+
+const calculateAvgResponseAge = (items) => {
+    const itemsWithTimestamp = items.filter(item => 
+        item.lastActivityTimestamp || item.updatedAtTimestamp
+    );
+    
+    if (itemsWithTimestamp.length === 0) return null;
+    
+    const totalDays = itemsWithTimestamp.reduce((sum, item) => {
+        const timestamp = item.lastActivityTimestamp || item.updatedAtTimestamp;
+        const daysSince = (Date.now() - timestamp) / (1000 * 60 * 60 * 24);
+        return sum + Math.max(0, daysSince);
+    }, 0);
+    
+    return (totalDays / itemsWithTimestamp.length).toFixed(1);
+};
+
+const calculateConversionRate = (stage, stageItemsMap) => {
+    const currentIndex = STAGE_ORDER.indexOf(stage);
+    if (currentIndex <= 0) return null;
+    
+    const previousStage = STAGE_ORDER[currentIndex - 1];
+    const previousCount = stageItemsMap[previousStage]?.length || 0;
+    const currentCount = stageItemsMap[stage]?.length || 0;
+    
+    if (previousCount === 0) return null;
+    return ((currentCount / previousCount) * 100).toFixed(1);
+};
+
+// Separate component for focus mode - reduces main component complexity
+const FocusedPipelineView = memo(function FocusedPipelineView({
+    stage,
+    items,
+    refresh,
+    bulkMode,
+    bulkIds,
+    onToggleBulkSelect,
+    readOnly,
+    compact,
+    emptyCopy,
+    onExitFocus,
+}) {
+    return (
+        <div className="fixed inset-0 z-50 bg-white/98 backdrop-blur-sm flex items-center justify-center p-8">
+            <div className="w-full max-w-2xl h-full max-h-[90vh] bg-white rounded-xl shadow-2xl border border-black/10 overflow-hidden flex flex-col">
+                <div className="sticky top-0 z-20 bg-white border-b border-black/10 p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={onExitFocus}
+                            className="text-black/50 hover:text-black/80 transition-colors p-1 rounded"
+                            aria-label="Exit focus mode"
+                        >
+                            <ChevronDown className="w-5 h-5 rotate-90" />
+                        </button>
+                        <span className="text-sm font-medium uppercase tracking-wider text-black/70">
+                            {getStageLabel(stage)}
+                        </span>
+                        <span className="text-xs font-mono text-black/40">{items.length} items</span>
+                    </div>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#fafafa]">
+                    {items.length === 0 ? (
+                        <EmptyLane label={emptyCopy} />
+                    ) : (
+                        items.map((item) => (
+                            <PipelineCard
+                                key={`${stage}-${item.id}`}
+                                item={item}
+                                refresh={refresh}
+                                bulkMode={bulkMode && !readOnly}
+                                isSelected={bulkIds.has(item.id)}
+                                onToggleSelect={onToggleBulkSelect}
+                                readOnly={readOnly}
+                                dragSupported={false}
+                                compact={compact}
+                            />
+                        ))
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+});
 
 const PipelineColumn = memo(function PipelineColumn({
     stage,
@@ -23,9 +120,57 @@ const PipelineColumn = memo(function PipelineColumn({
     onCardDragEnd,
     onCardDrop,
     compact = false,
+    isCollapsed = false,
+    onToggleCollapse,
+    isFocused = false,
+    onFocus,
+    stageMetrics = {},
+    stageItemsMap = {},
+    // New props for virtualization (future)
+    virtualizerRef = null,
+    // Responsive width system
+    columnWidth = 300,
 }) {
     const accent = STAGE_ACCENTS[stage] || DEFAULT_ACCENT;
-    const emptyCopy = EMPTY_STATE_COPY[stage] || "Empty";
+    const emptyCopy = EMPTY_STATE_COPY?.[stage] || "Empty";
+
+    // CRITICAL FIX #1: Memoize expensive computations
+    const displayMetrics = useMemo(() => {
+        // Use external metrics if provided (backend-calculated)
+        if (stageMetrics.count !== undefined) {
+            return {
+                count: stageMetrics.count,
+                stale: stageMetrics.stale ?? 0,
+                avgResponse: stageMetrics.avgResponse ?? null,
+                conversion: stageMetrics.conversion ?? null,
+            };
+        }
+        
+        // Otherwise compute locally (still memoized)
+        const staleCount = calculateStaleCount(items);
+        const avgResponseAge = calculateAvgResponseAge(items);
+        const conversionRate = calculateConversionRate(stage, stageItemsMap);
+        
+        return {
+            count: items.length,
+            stale: staleCount,
+            avgResponse: avgResponseAge,
+            conversion: conversionRate,
+        };
+    }, [items, stage, stageItemsMap, stageMetrics]);
+
+    // Memoize stable callbacks to prevent Card re-renders
+    const handleToggleSelect = useCallback((id) => {
+        onToggleBulkSelect?.(id);
+    }, [onToggleBulkSelect]);
+
+    const handleDragStart = useCallback((id) => {
+        onCardDragStart?.(id);
+    }, [onCardDragStart]);
+
+    const handleDragEnd = useCallback(() => {
+        onCardDragEnd?.();
+    }, [onCardDragEnd]);
 
     const canSelectAll =
         bulkMode && !readOnly && items.length > 0 && typeof onSelectAll === "function";
@@ -38,16 +183,16 @@ const PipelineColumn = memo(function PipelineColumn({
     const [isDragOver, setIsDragOver] = useState(false);
 
     const handleDragOver = useCallback((e) => {
-        if (!isDroppable) return;
+        if (!isDroppable || isCollapsed) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-    }, [isDroppable]);
+    }, [isDroppable, isCollapsed]);
 
     const handleDragEnter = useCallback((e) => {
-        if (!isDroppable) return;
+        if (!isDroppable || isCollapsed) return;
         e.preventDefault();
         setIsDragOver(true);
-    }, [isDroppable]);
+    }, [isDroppable, isCollapsed]);
 
     const handleDragLeave = useCallback((e) => {
         if (!isDroppable) return;
@@ -56,15 +201,40 @@ const PipelineColumn = memo(function PipelineColumn({
     }, [isDroppable]);
 
     const handleDrop = useCallback((e) => {
-        if (!isDroppable) return;
+        if (!isDroppable || isCollapsed) return;
         e.preventDefault();
         setIsDragOver(false);
         const droppedId = e.dataTransfer.getData("text/plain");
         if (droppedId) onCardDrop(stage, droppedId);
-    }, [isDroppable, stage, onCardDrop]);
+    }, [isDroppable, isCollapsed, stage, onCardDrop]);
 
-    // Accessibility: Announce column count to screen readers
-    const columnLabel = `${getStageLabel(stage)} column with ${items.length} items`;
+    // Focus mode delegated to separate component
+    if (isFocused) {
+        return (
+            <FocusedPipelineView
+                stage={stage}
+                items={items}
+                refresh={refresh}
+                bulkMode={bulkMode}
+                bulkIds={bulkIds}
+                onToggleBulkSelect={handleToggleSelect}
+                readOnly={readOnly}
+                compact={compact}
+                emptyCopy={emptyCopy}
+                onExitFocus={() => onFocus?.(null)}
+            />
+        );
+    }
+
+    const columnLabel = `${getStageLabel(stage)} column with ${displayMetrics.count} items${displayMetrics.stale ? `, ${displayMetrics.stale} stale candidates` : ""}`;
+
+    // Responsive width classes based on prop
+    const widthClasses = useMemo(() => {
+        if (columnWidth === 300) return "w-[300px] min-w-[300px] max-w-[300px]";
+        if (columnWidth === 350) return "w-[350px] min-w-[350px] max-w-[350px]";
+        if (columnWidth === 400) return "w-[400px] min-w-[400px] max-w-[400px]";
+        return "w-[300px] min-w-[300px] max-w-[300px]";
+    }, [columnWidth]);
 
     return (
         <div
@@ -76,133 +246,175 @@ const PipelineColumn = memo(function PipelineColumn({
             role="region"
             aria-label={columnLabel}
             className={`
-                relative shrink-0 w-[300px] min-w-[300px] max-w-[300px]
+                relative shrink-0 ${widthClasses}
                 rounded-lg overflow-visible
                 bg-white
                 shadow-[0_1px_2px_rgba(0,0,0,0.04)]
-                border border-black/[0.08] transition-all duration-150
-                ${
-                    isDragOver
-                        ? `
-                            bg-black/[0.01]
-                            ring-1 ring-black/[0.06]
-                            border-black/[0.10]
-                          `
-                        : ""
-                }
+                border border-black/[0.08] transition-all duration-200
+                ${isCollapsed ? "h-auto" : "h-full"}
+                ${isDragOver ? "ring-1 ring-black/[0.06] border-black/[0.10] bg-black/[0.01]" : ""}
             `}
         >
-            {/* Stage accent line — simple solid muted operational indicator */}
+            {/* Stage accent line */}
             <div
                 className={`absolute inset-x-0 top-0 h-[2px] ${accent} pointer-events-none rounded-t-lg`}
                 aria-hidden="true"
             />
 
-            {/* Sticky header — operational clarity */}
-            <div
-                className="
-                    sticky top-[52px] z-10
-                    px-4 py-3
-                    bg-white/96 backdrop-blur-sm
-                    border-b border-black/[0.06]
-                    rounded-t-lg
-                    flex items-center justify-between gap-3
-                "
-            >
-                <div className="min-w-0 flex items-center gap-2">
-                    <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-medium truncate">
-                        {getStageLabel(stage)}
-                    </span>
-                    {readOnly && (
-                        <span 
-                            className="text-[8px] tracking-wide uppercase text-black/35 font-mono"
-                            aria-label="Read only column"
+            {/* Sticky header with intelligence metrics */}
+            <div className="sticky top-[52px] z-10 px-4 py-2.5 bg-white/96 backdrop-blur-sm border-b border-black/[0.06] rounded-t-lg transition-all duration-150">
+                {/* Primary header row */}
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="min-w-0 flex items-center gap-2">
+                        <button
+                            onClick={() => onToggleCollapse?.(stage)}
+                            className="text-black/40 hover:text-black/70 transition-colors p-0.5 -ml-1"
+                            aria-label={isCollapsed ? "Expand column" : "Collapse column"}
                         >
-                            view
+                            <ChevronDown 
+                                className={`w-3.5 h-3.5 transform transition-transform duration-150 ${isCollapsed ? "-rotate-90" : ""}`}
+                            />
+                        </button>
+                        <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-medium truncate">
+                            {getStageLabel(stage)}
+                        </span>
+                        {readOnly && (
+                            <span 
+                                className="text-[8px] tracking-wide uppercase text-black/35 font-mono"
+                                aria-label="Read only column"
+                            >
+                                view
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                        {/* Focus mode button */}
+                        {typeof onFocus === "function" && items.length > 0 && (
+                            <button
+                                onClick={() => onFocus(stage)}
+                                className="text-black/35 hover:text-black/60 transition-colors p-0.5"
+                                aria-label={`Focus on ${getStageLabel(stage)} column`}
+                                title="Focus mode"
+                            >
+                                <Maximize2 className="w-3 h-3" />
+                            </button>
+                        )}
+                        <span
+                            className="text-[11px] font-mono text-black/55 px-2 py-0.5 rounded bg-black/[0.04] border border-black/[0.06] shrink-0"
+                            data-testid={`pipeline-column-count-${stage}`}
+                            aria-label={`${displayMetrics.count} items`}
+                        >
+                            {displayMetrics.count}
+                        </span>
+                    </div>
+                </div>
+
+                {/* Intelligence metrics row */}
+                <div className="flex flex-wrap items-center gap-2 text-[9px] font-mono text-black/45">
+                    {displayMetrics.conversion && (
+                        <span className="flex items-center gap-1" title="Conversion from previous stage">
+                            <TrendingUp className="w-2.5 h-2.5" />
+                            {displayMetrics.conversion}%
+                        </span>
+                    )}
+                    {displayMetrics.avgResponse && (
+                        <span className="flex items-center gap-1" title="Average response time (days)">
+                            <Clock className="w-2.5 h-2.5" />
+                            {displayMetrics.avgResponse}d
+                        </span>
+                    )}
+                    {displayMetrics.stale > 0 && (
+                        <span className="flex items-center gap-1 text-amber-600" title="Candidates with no activity for 5+ days">
+                            <AlertCircle className="w-2.5 h-2.5" />
+                            {displayMetrics.stale}
                         </span>
                     )}
                 </div>
-                <span
-                    className="
-                        text-[11px] font-mono text-black/55
-                        px-2 py-0.5 rounded
-                        bg-black/[0.04] border border-black/[0.06]
-                        shrink-0
-                    "
-                    data-testid={`pipeline-column-count-${stage}`}
-                    aria-label={`${items.length} items`}
-                >
-                    {items.length}
-                </span>
             </div>
 
-            {/* Select all — subtle operational area */}
-            {canSelectAll && (
-                <div className="px-4 py-2 border-b border-black/[0.04] bg-black/[0.015]">
-                    <button
-                        type="button"
-                        onClick={() => onSelectAll(items)}
-                        data-testid={`pipeline-select-all-${stage}`}
-                        aria-label={allInColumnSelected ? "Deselect all items in column" : "Select all items in column"}
-                        className="
-                            w-full text-left flex items-center justify-between gap-2
-                            text-[10px] tracking-wide uppercase
-                            text-black/45 hover:text-black/70
-                            transition-colors duration-100
-                            focus:outline-none focus:ring-1 focus:ring-black/20 rounded
-                        "
+            {/* Collapsible content */}
+            {!isCollapsed && (
+                <>
+                    {/* Select all section */}
+                    {canSelectAll && (
+                        <div className="px-4 py-2 border-b border-black/[0.04] bg-black/[0.015]">
+                            <button
+                                type="button"
+                                onClick={() => onSelectAll(items)}
+                                data-testid={`pipeline-select-all-${stage}`}
+                                aria-label={allInColumnSelected ? "Deselect all items in column" : "Select all items in column"}
+                                className="w-full text-left flex items-center justify-between gap-2 text-[10px] tracking-wide uppercase text-black/45 hover:text-black/70 transition-colors duration-100 focus:outline-none focus:ring-1 focus:ring-black/20 rounded"
+                            >
+                                <span>
+                                    {allInColumnSelected ? "Deselect all" : "Select all"}
+                                </span>
+                                <span className="font-mono text-black/25" aria-hidden="true">
+                                    {displayMetrics.count}
+                                </span>
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Card stream - using dynamic height to avoid viewport issues */}
+                    <div
+                        className={`
+                            px-2.5 py-2.5 space-y-2.5
+                            overflow-y-auto overflow-x-visible
+                            bg-[#fafafa]
+                            tg-pipeline-scroll
+                            ${compact ? "min-h-[180px]" : "min-h-[180px]"}
+                        `}
+                        style={{
+                            maxHeight: compact ? "240px" : "min(64vh, 800px)", // Cap at 800px for Safari
+                        }}
+                        role="list"
+                        aria-label={`Cards in ${getStageLabel(stage)} stage`}
                     >
-                        <span>
-                            {allInColumnSelected
-                                ? "Deselect all"
-                                : "Select all"}
-                        </span>
-                        <span className="font-mono text-black/25" aria-hidden="true">
-                            {items.length}
-                        </span>
-                    </button>
+                        {items.length === 0 ? (
+                            <EmptyLane 
+                                label={emptyCopy}
+                                stage={stage}
+                                suggestions={[
+                                    "Source candidates via LinkedIn",
+                                    `Set ${getStageLabel(stage)} automation rules`,
+                                    "Review candidate pool health"
+                                ]}
+                            />
+                        ) : (
+                            // TODO: Replace with @tanstack/react-virtual when items.length > 100
+                            // For now, standard render with stable props
+                            items.map((item) => (
+                                <PipelineCard
+                                    key={`${stage}-${item.id}`}
+                                    item={item}
+                                    refresh={refresh}
+                                    bulkMode={bulkMode && !readOnly}
+                                    isSelected={bulkIds.has(item.id)}
+                                    onToggleSelect={handleToggleSelect}
+                                    readOnly={readOnly}
+                                    dragSupported={dragSupported}
+                                    isDragging={dragId === item.id}
+                                    onDragStart={handleDragStart}
+                                    onDragEnd={handleDragEnd}
+                                    compact={compact}
+                                />
+                            ))
+                        )}
+                    </div>
+                </>
+            )}
+
+            {/* Collapsed summary view */}
+            {isCollapsed && items.length > 0 && (
+                <div className="px-4 py-2 border-t border-black/[0.04] bg-black/[0.01] text-[10px] text-black/40 font-mono flex justify-between">
+                    <span>{displayMetrics.count} candidates</span>
+                    {displayMetrics.stale > 0 && (
+                        <span className="text-amber-600">{displayMetrics.stale} stale</span>
+                    )}
                 </div>
             )}
 
-            {/* Card stream - dense operational lane background */}
-            <div
-                className={`
-                    px-2.5 py-2.5 space-y-2.5
-                    overflow-y-auto overflow-x-visible
-                    bg-[#fafafa]
-                    tg-pipeline-scroll
-                    ${
-                        compact
-                            ? "min-h-[180px] max-h-[240px]"
-                            : "min-h-[180px] max-h-[64vh]"
-                    }
-                `}
-                role="list"
-                aria-label={`Cards in ${getStageLabel(stage)} stage`}
-            >
-                {items.length === 0 ? (
-                    <EmptyLane label={emptyCopy} />
-                ) : (
-                    items.map((item) => (
-                        <PipelineCard
-                            key={`${stage}-${item.id}`}
-                            item={item}
-                            refresh={refresh}
-                            bulkMode={bulkMode && !readOnly}
-                            isSelected={bulkIds.has(item.id)}
-                            onToggleSelect={onToggleBulkSelect}
-                            readOnly={readOnly}
-                            dragSupported={dragSupported}
-                            isDragging={dragId === item.id}
-                            onDragStart={onCardDragStart}
-                            onDragEnd={onCardDragEnd}
-                            compact={compact}
-                        />
-                    ))
-                )}
-            </div>
-
-            {/* Drop overlay — minimal operational feedback */}
+            {/* Drop overlay */}
             {isDragOver && (
                 <div 
                     className="absolute inset-0 pointer-events-none bg-black/[0.005] rounded-lg transition-opacity duration-100"

@@ -1,4 +1,10 @@
-import React, { memo, useState } from "react";
+import React, {
+    memo,
+    useState,
+    useEffect,
+    useRef,
+    useCallback,
+} from "react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 import TalentAvatar from "./TalentAvatar";
@@ -8,24 +14,9 @@ import {
     STATUS_TONES,
     getStageLabel,
     normaliseStage,
+    VISIBLE_ACTIONS_PER_CARD,
 } from "./constants";
 
-/**
- * PipelineCard — single talent card.
- *
- * Renders two modes:
- *   • BULK MODE — compact row, checkbox + small avatar + name + email.
- *     No actions, no metadata. Designed for fast multi-select scanning.
- *   • NORMAL MODE — premium cinematic card with three zones:
- *       Top    — avatar + name + instagram + optional status chip
- *       Middle — email + phone metadata rows
- *       Bottom — action pills (suppressed in readOnly mode)
- *
- * Drag & Drop (PATCH 4D) — card = draggable source. Disabled when:
- *   • pointer-coarse device (touch) — `dragSupported` is false
- *   • read-only lane (follow-up) — drag is meaningless here
- *   • bulk mode is active — drag would conflict with multi-select
- */
 const PipelineCard = memo(function PipelineCard({
     item,
     refresh,
@@ -37,10 +28,47 @@ const PipelineCard = memo(function PipelineCard({
     isDragging = false,
     onDragStart,
     onDragEnd,
+    compact = false,
 }) {
     const [moving, setMoving] = useState(false);
+    const [showMoreActions, setShowMoreActions] = useState(false);
+    const overflowRef = useRef(null);
+    const moreButtonRef = useRef(null);
 
-    const move = async (stage) => {
+    // PERFORMANCE FIX: Only attach global listeners when menu is open
+    useEffect(() => {
+        if (!showMoreActions) return;
+
+        function handleClickOutside(e) {
+            if (
+                overflowRef.current &&
+                !overflowRef.current.contains(e.target) &&
+                moreButtonRef.current &&
+                !moreButtonRef.current.contains(e.target)
+            ) {
+                setShowMoreActions(false);
+            }
+        }
+
+        function handleEsc(e) {
+            if (e.key === "Escape") {
+                setShowMoreActions(false);
+            }
+        }
+
+        // Add listeners only when menu is open
+        document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener("keydown", handleEsc);
+
+        return () => {
+            // Clean up listeners when menu closes
+            document.removeEventListener("mousedown", handleClickOutside);
+            document.removeEventListener("keydown", handleEsc);
+        };
+    }, [showMoreActions]); // Re-run when menu open state changes
+
+    // Memoized move function to prevent unnecessary re-renders
+    const move = useCallback(async (stage) => {
         setMoving(true);
         try {
             await adminApi.patch("/pipeline/move", {
@@ -48,23 +76,33 @@ const PipelineCard = memo(function PipelineCard({
                 stage,
             });
             await refresh();
+            // Close overflow menu after successful move (menu is already handled)
         } catch (e) {
             console.error("Move failed:", e);
             toast.error(e?.response?.data?.detail || "Move failed");
         } finally {
             setMoving(false);
         }
-    };
+    }, [item.id, refresh]);
 
-    // Legacy `sent` rows render as `approved` so action buttons match the
-    // column the card sits in, and terminal/locked rows expose no onward
-    // transitions.
+    // Memoized close menu function
+    const closeMoreMenu = useCallback(() => {
+        setShowMoreActions(false);
+    }, []);
+
+    // Memoized toggle menu function
+    const toggleMoreMenu = useCallback(() => {
+        setShowMoreActions(prev => !prev);
+    }, []);
+
     const canonicalStage = normaliseStage(item.stage);
     const nextStages = NEXT_STAGE_FLOW[canonicalStage] || [];
     const statusTone = STATUS_TONES[canonicalStage];
 
-    // Display fields with sensible fallbacks. `talent_email` is the new
-    // hydrated field (Patch 2); `email` is the legacy pre-hydration alias.
+    // Show only first N actions, rest in overflow
+    const visibleActions = nextStages.slice(0, VISIBLE_ACTIONS_PER_CARD);
+    const overflowActions = nextStages.slice(VISIBLE_ACTIONS_PER_CARD);
+
     const displayName = item.talent_name || item.talent_id || "Unknown";
     const displayEmail = item.talent_email || item.email || null;
     const displayPhone = item.talent_phone || null;
@@ -72,42 +110,50 @@ const PipelineCard = memo(function PipelineCard({
 
     const draggable = dragSupported && !readOnly && !bulkMode;
 
-    const handleDragStart = (e) => {
+    const handleDragStart = useCallback((e) => {
         if (!draggable) return;
-        // text/plain so any drop target — including outside the app — can
-        // read the id without us having to guess MIME types.
         e.dataTransfer.setData("text/plain", item.id);
         e.dataTransfer.effectAllowed = "move";
-        // Notify parent so all columns can react to the drag context.
-        // Wrap in a microtask so the drag image is already snapshotted
-        // before the visual state changes (otherwise the ghost image
-        // shows the half-faded card).
         setTimeout(() => onDragStart && onDragStart(item.id), 0);
-    };
+    }, [draggable, item.id, onDragStart]);
 
-    const handleDragEnd = () => {
+    const handleDragEnd = useCallback(() => {
         if (!draggable) return;
         if (onDragEnd) onDragEnd();
-    };
+    }, [draggable, onDragEnd]);
 
-    // Cinematic shell — glass card with luxury hover lift. Follow-up
-    // (readOnly) cards stay quieter: no hover lift, dimmer surface.
-    // During drag: slight scale-down + opacity dim + elevated shadow.
+    const handleKeyDown = useCallback((e) => {
+        // Accessibility: Enter or Space triggers selection in bulk mode
+        if (bulkMode && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            onToggleSelect(item.id);
+        }
+    }, [bulkMode, item.id, onToggleSelect]);
+
+    // Handle overflow action click - closes menu AFTER move completes
+    const handleOverflowAction = useCallback(async (stage) => {
+        // Close menu immediately for better UX
+        setShowMoreActions(false);
+        await move(stage);
+    }, [move]);
+
+    // Operational card styling - calm, stable, recruiter-focused
     const shellClass = [
-        "group relative rounded-xl overflow-hidden",
-        "border transition-all duration-300",
-        "bg-gradient-to-b from-white/[0.05] to-white/[0.02]",
-        "backdrop-blur-md",
-        "shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_0_0_rgba(255,255,255,0.04)]",
+        "group relative rounded-lg overflow-hidden",
+        "transition-all duration-150",
+        "bg-white",
+        "shadow-[0_1px_2px_rgba(0,0,0,0.04)]",
+        "border",
+        "min-h-[108px]",
         isSelected
-            ? "border-white/40 ring-1 ring-white/20"
-            : "border-white/[0.07]",
+            ? "border-black/20 ring-1 ring-black/10"
+            : "border-black/[0.08]",
         readOnly
-            ? "opacity-80"
-            : "hover:border-white/15 hover:-translate-y-[1px] hover:shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.06)]",
+            ? ""
+            : "hover:border-black/[0.12]",
         moving ? "opacity-40 pointer-events-none" : "",
         isDragging
-            ? "opacity-60 scale-[0.97] ring-1 ring-white/15 shadow-[0_18px_48px_-12px_rgba(0,0,0,0.8)]"
+            ? "opacity-75 scale-[0.995]"
             : "",
         draggable ? "cursor-grab active:cursor-grabbing" : "",
     ].join(" ");
@@ -117,30 +163,44 @@ const PipelineCard = memo(function PipelineCard({
             <div
                 data-testid={`pipeline-card-${item.id}`}
                 onClick={() => onToggleSelect(item.id)}
+                onKeyDown={handleKeyDown}
                 draggable={draggable}
                 onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
-                className={`${shellClass} px-3 py-2.5 cursor-pointer`}
+                className="group relative rounded-lg overflow-hidden transition-all duration-150 bg-[#fafafa] border border-black/[0.08] min-h-[108px] px-3 py-2.5 cursor-pointer hover:border-black/[0.12]"
+                role="checkbox"
+                aria-checked={isSelected}
+                tabIndex={0}
             >
                 <div className="flex items-center gap-2.5">
-                    <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => onToggleSelect(item.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-4 h-4 accent-white/80 shrink-0"
-                    />
+                    <div className="relative flex-shrink-0">
+                        <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => onToggleSelect(item.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="
+                                w-4 h-4 rounded-[3px]
+                                border border-black/30 bg-white
+                                checked:bg-black checked:border-black
+                                transition-all duration-100
+                                cursor-pointer
+                                focus:outline-none focus:ring-1 focus:ring-black/20
+                            "
+                            aria-label={`Select ${displayName}`}
+                        />
+                    </div>
                     <TalentAvatar
                         src={item.image_url}
                         name={displayName}
-                        size="sm"
+                        size="md"
                     />
                     <div className="flex-1 min-w-0">
-                        <p className="text-[13px] text-white/90 font-medium truncate leading-tight">
+                        <p className="text-[13px] text-black/85 font-medium leading-[1.25] truncate">
                             {displayName}
                         </p>
                         {displayEmail && (
-                            <p className="text-[10px] text-white/45 truncate tg-mono mt-0.5">
+                            <p className="text-[9px] text-black/45 truncate mt-1">
                                 {displayEmail}
                             </p>
                         )}
@@ -157,17 +217,11 @@ const PipelineCard = memo(function PipelineCard({
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
             className={shellClass}
+            aria-label={`Talent: ${displayName}`}
         >
-            {/* Subtle inner accent stripe that lights up on hover.
-                Pure CSS, no JS animation. */}
-            <div
-                aria-hidden
-                className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"
-            />
-
-            <div className="p-3 space-y-2.5">
-                {/* TOP — identity */}
-                <div className="flex items-start gap-3">
+            <div className="p-3 space-y-2">
+                {/* Identity row */}
+                <div className="flex items-start gap-2.5">
                     <TalentAvatar
                         src={item.image_url}
                         name={displayName}
@@ -175,40 +229,37 @@ const PipelineCard = memo(function PipelineCard({
                     />
                     <div className="flex-1 min-w-0">
                         <p
-                            className="text-[13px] text-white/95 font-medium truncate leading-tight"
+                            className="text-[13px] text-black/85 font-medium leading-[1.25] truncate"
                             title={displayName}
                         >
                             {displayName}
                         </p>
                         {displayIg && (
-                            <p className="text-[10px] text-white/45 truncate tg-mono mt-0.5">
-                                {displayIg}
+                            <p className="text-[8.5px] text-black/55 truncate mt-1">
+                                @{displayIg}
                             </p>
                         )}
                         {!displayIg && item.talent_name && (
-                            <p
-                                className="text-[10px] text-white/30 truncate tg-mono mt-0.5"
-                                title={item.talent_id}
-                            >
+                            <p className="text-[8.5px] text-black/40 truncate font-mono mt-1">
                                 {item.talent_id?.slice(0, 8)}…
                             </p>
                         )}
                     </div>
 
-                    {/* Status chip — only on terminal/locked lanes.
-                        Mid-funnel stages (ask_to_test, shortlisted,
-                        already_tested, pitch) intentionally stay
-                        un-chipped to keep the eye on the next action. */}
+                    {/* Status chip - operational utility indicator */}
                     {statusTone && (
                         <span
-                            className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border ${statusTone.chip}`}
+                            className={`shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border ${statusTone.chip}`}
                             title={statusTone.label}
+                            role="status"
+                            aria-label={`Status: ${statusTone.label}`}
                         >
                             <span
                                 className={`w-1 h-1 rounded-full ${statusTone.dot}`}
+                                aria-hidden="true"
                             />
                             <span
-                                className={`text-[9px] tracking-[0.14em] uppercase ${statusTone.text}`}
+                                className={`text-[7.5px] tracking-wide uppercase ${statusTone.text}`}
                             >
                                 {statusTone.label}
                             </span>
@@ -216,51 +267,105 @@ const PipelineCard = memo(function PipelineCard({
                     )}
                 </div>
 
-                {/* MIDDLE — metadata. Each row is a single line, truncate,
-                    monospaced for that "casting CRM" feel. Hidden entirely
-                    when there's no data → keeps the card compact. */}
+                {/* Metadata - clear operational hierarchy, minimal monospace */}
                 {(displayEmail || displayPhone) && (
-                    <div className="space-y-0.5 pt-0.5">
+                    <div className="space-y-1" aria-label="Contact information">
                         {displayEmail && (
-                            <p className="text-[10.5px] text-white/55 truncate tg-mono">
+                            <p className="text-[9.5px] text-black/60 truncate" title={displayEmail}>
                                 {displayEmail}
                             </p>
                         )}
                         {displayPhone && (
-                            <p className="text-[10.5px] text-white/40 truncate tg-mono">
+                            <p className="text-[9.5px] text-black/45 truncate" title={displayPhone}>
                                 {displayPhone}
                             </p>
                         )}
                     </div>
                 )}
 
-                {/* BOTTOM — action pills. Suppressed for the readOnly
-                    follow-up lane (Patch 3C) and for stages that have no
-                    onward transitions (locked / terminal lanes). */}
-                {!readOnly && nextStages.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-1.5 border-t border-white/[0.05]">
-                        {nextStages.map((stage) => (
+                {/* Action controls - operational utility, not pill buttons */}
+                {!readOnly && visibleActions.length > 0 && (
+                    <div 
+                        className="flex flex-wrap items-center gap-1 pt-2 border-t border-black/[0.05]"
+                        role="group"
+                        aria-label="Stage actions"
+                    >
+                        {visibleActions.map((stage) => (
                             <button
                                 key={stage}
                                 type="button"
                                 onClick={() => move(stage)}
                                 disabled={moving}
                                 data-testid={`pipeline-card-move-${item.id}-${stage}`}
-                                title={`Move to ${getStageLabel(stage)}`}
+                                aria-label={`Move to ${getStageLabel(stage)}`}
                                 className="
-                                    px-2 py-1 rounded-full
-                                    text-[9.5px] tracking-[0.12em] uppercase
-                                    text-white/65 hover:text-white
-                                    bg-white/[0.04] hover:bg-white/[0.08]
-                                    border border-white/[0.06] hover:border-white/15
-                                    transition-all duration-200
-                                    hover:shadow-[0_0_0_3px_rgba(255,255,255,0.03)]
-                                    disabled:opacity-40 disabled:cursor-not-allowed
+                                    px-2.5 py-1 rounded-md
+                                    text-[9px] tracking-[0.08em] uppercase
+                                    text-black/60 hover:text-black/85
+                                    bg-black/[0.04] hover:bg-black/[0.07]
+                                    border border-black/[0.05] hover:border-black/[0.10]
+                                    transition-all duration-100
+                                    disabled:opacity-40
                                 "
                             >
                                 {STAGE_LABELS[stage] || getStageLabel(stage)}
                             </button>
                         ))}
+                        {overflowActions.length > 0 && (
+                            <div
+                                className="relative"
+                                ref={overflowRef}
+                            >
+                                <button
+                                    ref={moreButtonRef}
+                                    type="button"
+                                    onClick={toggleMoreMenu}
+                                    aria-label="More actions"
+                                    aria-expanded={showMoreActions}
+                                    aria-haspopup="true"
+                                    className="
+                                        flex items-center justify-center
+                                        w-5 h-5 rounded-md
+                                        text-[10px] font-mono
+                                        text-black/45 hover:text-black/70
+                                        hover:bg-black/[0.04]
+                                        transition-colors duration-100
+                                        focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black/20
+                                    "
+                                >
+                                    ⋯
+                                </button>
+                                {showMoreActions && (
+                                    <div 
+                                        className="absolute bottom-full right-0 mb-1.5 z-20 
+                                            bg-white
+                                            border border-black/[0.08] 
+                                            shadow-[0_8px_24px_-16px_rgba(0,0,0,0.12)]
+                                            rounded-md py-1.5 min-w-[110px]"
+                                        role="menu"
+                                        aria-label="More stage actions"
+                                    >
+                                        {overflowActions.map((stage) => (
+                                            <button
+                                                key={stage}
+                                                type="button"
+                                                onClick={() => handleOverflowAction(stage)}
+                                                className="
+                                                    w-full text-left px-3 py-1.5
+                                                    text-[9px] tracking-[0.08em] uppercase
+                                                    text-black/65 hover:text-black/90 hover:bg-black/[0.02]
+                                                    transition-colors duration-100
+                                                "
+                                                role="menuitem"
+                                                aria-label={`Move to ${getStageLabel(stage)}`}
+                                            >
+                                                {STAGE_LABELS[stage] || getStageLabel(stage)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

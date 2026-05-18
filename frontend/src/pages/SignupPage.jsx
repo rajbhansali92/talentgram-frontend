@@ -1,10 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
 import { saveAdminSession } from "@/lib/api";
 import Logo from "@/components/Logo";
-import ThemeToggle from "@/components/ThemeToggle";
 import { Loader2, Check, Sparkles, Eye, EyeOff, RefreshCw } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -23,12 +22,14 @@ export default function SignupPage() {
     const [showConfirm, setShowConfirm] = useState(false);
     const [passwordsMatch, setPasswordsMatch] = useState(true);
 
-    const validate = useCallback(async () => {
+    const validate = async () => {
         if (!token) {
             setState("notfound");
             return;
         }
+
         setState("loading");
+
         try {
             const { data } = await axios.post(
                 `${API}/public/signup/validate`,
@@ -36,17 +37,17 @@ export default function SignupPage() {
             );
             setInvite(data);
             setState("ready");
-        } catch (e) {
+        } catch (e: any) {
             const status = e?.response?.status;
             if (status === 410) setState("expired");
             else if (e?.request && !e?.response) setState("error");
             else setState("notfound");
         }
-    }, [token]);
+    };
 
     useEffect(() => {
         validate();
-    }, [validate]);
+    }, [token]);
 
     // Check password match in real-time
     useEffect(() => {
@@ -81,7 +82,7 @@ export default function SignupPage() {
             saveAdminSession(data.token, data.admin);
             toast.success(`Welcome, ${invite.name.split(" ")[0]}`);
             nav("/admin");
-        } catch (err) {
+        } catch (err: any) {
             toast.error(err?.response?.data?.detail || "Failed to complete signup");
         } finally {
             setSaving(false);

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
@@ -22,7 +22,7 @@ export default function SignupPage() {
     const [showConfirm, setShowConfirm] = useState(false);
     const [passwordsMatch, setPasswordsMatch] = useState(true);
 
-    const validate = async () => {
+    const validate = useCallback(async () => {
         if (!token) {
             setState("notfound");
             return;
@@ -43,11 +43,11 @@ export default function SignupPage() {
             else if (e?.request && !e?.response) setState("error");
             else setState("notfound");
         }
-    };
+    }, [token]);
 
     useEffect(() => {
         validate();
-    }, [token]);
+    }, [validate]);
 
     // Check password match in real-time
     useEffect(() => {

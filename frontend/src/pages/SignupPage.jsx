@@ -13,8 +13,8 @@ export default function SignupPage() {
     const nav = useNavigate();
     const token = params.get("token") || "";
 
-    const [state, setState] = useState<"loading" | "ready" | "expired" | "notfound" | "error">("loading");
-    const [invite, setInvite] = useState<any>(null);
+    const [state, setState] = useState("loading");
+    const [invite, setInvite] = useState(null);
     const [password, setPassword] = useState("");
     const [confirm, setConfirm] = useState("");
     const [saving, setSaving] = useState(false);
@@ -37,7 +37,7 @@ export default function SignupPage() {
             );
             setInvite(data);
             setState("ready");
-        } catch (e: any) {
+        } catch (e) {
             const status = e?.response?.status;
             if (status === 410) setState("expired");
             else if (e?.request && !e?.response) setState("error");
@@ -58,7 +58,7 @@ export default function SignupPage() {
         }
     }, [password, confirm]);
 
-    const submit = async (e: React.FormEvent) => {
+    const submit = async (e) => {
         e.preventDefault();
         if (password.length < 8) {
             toast.error("Password must be at least 8 characters");
@@ -82,7 +82,7 @@ export default function SignupPage() {
             saveAdminSession(data.token, data.admin);
             toast.success(`Welcome, ${invite.name.split(" ")[0]}`);
             nav("/admin");
-        } catch (err: any) {
+        } catch (err) {
             toast.error(err?.response?.data?.detail || "Failed to complete signup");
         } finally {
             setSaving(false);

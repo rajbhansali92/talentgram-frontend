@@ -64,6 +64,14 @@ const empty = {
     require_reapproval_on_edit: true,
 };
 
+// ISSUE 2 & 3: More robust file validation using startsWith()
+const MAX_FILE_SIZE = {
+    script: 10 * 1024 * 1024, // 10MB
+    image: 20 * 1024 * 1024,  // 20MB
+    audio: 30 * 1024 * 1024,  // 30MB
+    video_file: 100 * 1024 * 1024, // 100MB
+};
+
 function TextField({ label, value, onChange, type = "text", ...rest }) {
     return (
         <label className="block">
@@ -86,40 +94,62 @@ export default function ProjectEdit() {
     const nav = useNavigate();
     const isEdit = Boolean(id);
     const isAdminRole = isAdmin();
+    const isMounted = useRef(true);
 
     const [project, setProject] = useState(empty);
     const [saving, setSaving] = useState(false);
+    const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(null); // category string
     const [videoInput, setVideoInput] = useState("");
     const [showMaterialModal, setShowMaterialModal] = useState(false);
     const [submissions, setSubmissions] = useState([]);
     const [reviewingSid, setReviewingSid] = useState(null);
     const [showForwardModal, setShowForwardModal] = useState(false);
-    const [submissionFilter, setSubmissionFilter] = useState("all"); // all | pending | approved | rejected | hold | updated
+    const [submissionFilter, setSubmissionFilter] = useState("all");
+    const [deleteSubmissionId, setDeleteSubmissionId] = useState(null);
+    const [deleteMaterialId, setDeleteMaterialId] = useState(null);
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
     const videoFileRef = useRef();
 
-    // Stable reference (uses only `pid` param + `setSubmissions` setter)
-    // so adding it to `useEffect` deps never causes spurious re-runs but
-    // still avoids any future stale-closure pitfall under React Strict Mode.
+    const updateProject = useCallback((patch) => {
+        setProject(prev => ({
+            ...prev,
+            ...patch
+        }));
+    }, []);
+
     const loadSubmissions = useCallback(async (pid) => {
         try {
             const { data } = await adminApi.get(`/projects/${pid}/submissions`);
-            setSubmissions(data);
+            if (isMounted.current) setSubmissions(data);
         } catch (e) { console.error(e); }
     }, []);
 
     useEffect(() => {
-        if (!isEdit) return;
+        isMounted.current = true;
+        return () => { isMounted.current = false; };
+    }, []);
+
+    useEffect(() => {
+        if (!isEdit) {
+            setLoading(false);
+            return;
+        }
         (async () => {
             try {
                 const { data } = await adminApi.get(`/projects/${id}`);
-                setProject({ ...empty, ...data });
+                if (isMounted.current) {
+                    setProject({ ...empty, ...data });
+                    setLoading(false);
+                }
                 loadSubmissions(id);
             } catch {
-                toast.error("Failed to load project");
+                if (isMounted.current) {
+                    toast.error("Failed to load project");
+                    setLoading(false);
+                }
             }
         })();
     }, [id, isEdit, loadSubmissions]);
@@ -132,10 +162,15 @@ export default function ProjectEdit() {
         loadSubmissions(id);
     };
 
-    const deleteSubmission = async (sid) => {
-        if (!window.confirm("Delete this submission?")) return;
-        await adminApi.delete(`/projects/${id}/submissions/${sid}`);
+    const confirmDeleteSubmission = (sid) => {
+        setDeleteSubmissionId(sid);
+    };
+
+    const handleDeleteSubmission = async () => {
+        if (!deleteSubmissionId) return;
+        await adminApi.delete(`/projects/${id}/submissions/${deleteSubmissionId}`);
         loadSubmissions(id);
+        setDeleteSubmissionId(null);
     };
 
     const submissionUrl = project?.slug
@@ -143,8 +178,33 @@ export default function ProjectEdit() {
         : "";
 
     const copySubmitLink = () => {
-        navigator.clipboard.writeText(submissionUrl);
-        toast.success("Submission link copied");
+        if (!submissionUrl) {
+            toast.error("No submission link available");
+            return;
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(submissionUrl).then(() => {
+                toast.success("Submission link copied");
+            }).catch(() => {
+                fallbackCopy(submissionUrl);
+            });
+        } else {
+            fallbackCopy(submissionUrl);
+        }
+    };
+
+    const fallbackCopy = (text) => {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand("copy");
+            toast.success("Submission link copied");
+        } catch (err) {
+            toast.error("Failed to copy link");
+        }
+        document.body.removeChild(textarea);
     };
 
     const shareWhatsApp = () => {
@@ -186,7 +246,6 @@ export default function ProjectEdit() {
         if (!isEdit) return;
         try {
             const res = await adminApi.delete(`/projects/${id}`);
-             
             console.info("[delete project]", id, res?.data);
             toast.success(
                 `Project deleted${res?.data?.cascaded_submissions ? ` (+${res.data.cascaded_submissions} submissions removed)` : ""}`,
@@ -194,7 +253,6 @@ export default function ProjectEdit() {
             setConfirmDeleteOpen(false);
             nav("/admin/projects");
         } catch (err) {
-             
             console.error("[delete project] failed", err?.response?.data || err);
             toast.error(
                 err?.response?.data?.detail ||
@@ -205,27 +263,56 @@ export default function ProjectEdit() {
         }
     };
 
+    // ISSUE 2: More robust file validation using startsWith() for broad compatibility
+    const validateFile = (file, category) => {
+        const maxSize = MAX_FILE_SIZE[category];
+        
+        // Check file size
+        if (file.size > maxSize) {
+            toast.error(`${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB — max ${maxSize / 1024 / 1024} MB`);
+            return false;
+        }
+        
+        // Type validation based on category
+        if (category === "script") {
+            if (!file.type === "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+                toast.error(`${file.name} must be a PDF file`);
+                return false;
+            }
+        } else if (category === "image") {
+            // Allow any image type broadly
+            if (!file.type.startsWith("image/")) {
+                toast.error(`${file.name} must be an image file`);
+                return false;
+            }
+        } else if (category === "audio") {
+            if (!file.type.startsWith("audio/")) {
+                toast.error(`${file.name} must be an audio file`);
+                return false;
+            }
+        } else if (category === "video_file") {
+            if (!file.type.startsWith("video/")) {
+                toast.error(`${file.name} must be a video file`);
+                return false;
+            }
+        }
+        
+        return true;
+    };
+
     const uploadMaterial = async (files, category) => {
         if (!isEdit) {
             toast.error("Save the project before uploading materials");
             return;
         }
-        // Early size guard for reference videos (server also enforces)
-        if (category === "video_file") {
-            const MAX = 100 * 1024 * 1024;
-            for (const f of files) {
-                if (f.size > MAX) {
-                    toast.error(
-                        `${f.name} is ${(f.size / 1024 / 1024).toFixed(1)} MB — max 100 MB`,
-                    );
-                    return;
-                }
-                if (!f.type.startsWith("video/")) {
-                    toast.error(`${f.name} is not a video file`);
-                    return;
-                }
+        
+        // Validate all files first
+        for (const f of files) {
+            if (!validateFile(f, category)) {
+                return;
             }
         }
+        
         setUploading(category);
         try {
             for (const file of files) {
@@ -237,7 +324,9 @@ export default function ProjectEdit() {
                     fd,
                     { headers: { "Content-Type": "multipart/form-data" } },
                 );
-                setProject({ ...empty, ...data });
+                if (isMounted.current) {
+                    setProject({ ...empty, ...data });
+                }
             }
             toast.success(`${files.length} uploaded`);
         } catch (e) {
@@ -247,18 +336,24 @@ export default function ProjectEdit() {
         }
     };
 
-    const removeMaterial = async (mid) => {
-        if (!window.confirm("Remove this material?")) return;
-        await adminApi.delete(`/projects/${id}/material/${mid}`);
+    const confirmRemoveMaterial = (mid) => {
+        setDeleteMaterialId(mid);
+    };
+
+    const handleRemoveMaterial = async () => {
+        if (!deleteMaterialId) return;
+        await adminApi.delete(`/projects/${id}/material/${deleteMaterialId}`);
         const { data } = await adminApi.get(`/projects/${id}`);
-        setProject({ ...empty, ...data });
+        if (isMounted.current) {
+            setProject({ ...empty, ...data });
+        }
+        setDeleteMaterialId(null);
     };
 
     const addVideoLink = () => {
         const v = videoInput.trim();
         if (!v) return;
-        setProject({
-            ...project,
+        updateProject({
             video_links: [...(project.video_links || []), v],
         });
         setVideoInput("");
@@ -268,8 +363,7 @@ export default function ProjectEdit() {
     const addCustomQuestion = () => {
         const q = cqInput.trim();
         if (!q) return;
-        setProject({
-            ...project,
+        updateProject({
             custom_questions: [
                 ...(project.custom_questions || []),
                 { id: crypto.randomUUID(), question: q, type: "text" },
@@ -279,6 +373,47 @@ export default function ProjectEdit() {
     };
 
     const materialsCount = (project.materials || []).length + (project.video_links || []).length;
+
+    // ISSUE 4: Centralized filtered submissions to avoid duplicate filter logic
+    const filteredSubmissions = submissions.filter((s) => {
+        if (submissionFilter === "all") return true;
+        if (submissionFilter === "updated") return s.status === "updated";
+        return (s.decision || "pending") === submissionFilter;
+    });
+
+    const approvedCount = submissions.filter((s) => s.decision === "approved").length;
+    const rejectedCount = submissions.filter((s) => s.decision === "rejected").length;
+    const pendingCount = submissions.filter((s) => !s.decision || s.decision === "pending").length;
+    const updatedCount = submissions.filter((s) => s.status === "updated").length;
+
+    // Loading skeleton
+    if (loading) {
+        return (
+            <div className="p-6 md:p-10 max-w-7xl mx-auto">
+                <div className="animate-pulse">
+                    <div className="h-4 w-32 bg-black/10 rounded mb-6"></div>
+                    <div className="flex items-end justify-between flex-wrap gap-4 mb-8">
+                        <div>
+                            <div className="h-3 w-24 bg-black/10 rounded mb-3"></div>
+                            <div className="h-12 w-64 bg-black/10 rounded"></div>
+                        </div>
+                        <div className="h-10 w-32 bg-black/10 rounded"></div>
+                    </div>
+                    <div className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6">
+                        <div className="h-4 w-32 bg-black/10 rounded mb-6"></div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                            {[...Array(10)].map((_, i) => (
+                                <div key={i}>
+                                    <div className="h-3 w-20 bg-black/10 rounded mb-2"></div>
+                                    <div className="h-10 w-full bg-black/5 rounded"></div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div
@@ -307,7 +442,7 @@ export default function ProjectEdit() {
                             <button
                                 onClick={() => setShowMaterialModal(true)}
                                 data-testid="view-audition-material-btn"
-                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs transition-all"
+                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs transition-colors"
                             >
                                 <FolderOpen className="w-3.5 h-3.5" /> View Audition
                                 Material ({materialsCount})
@@ -325,7 +460,7 @@ export default function ProjectEdit() {
                         onClick={save}
                         disabled={saving}
                         data-testid="save-project-btn"
-                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-sm text-xs font-medium hover:bg-black/90"
+                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-sm text-xs font-medium hover:bg-black/90 transition-colors"
                     >
                         {saving && <Loader2 className="w-3 h-3 animate-spin" />}
                         {isEdit ? "Save changes" : "Create project"}
@@ -340,41 +475,31 @@ export default function ProjectEdit() {
                     <TextField
                         label="Project / Brand Name"
                         value={project.brand_name}
-                        onChange={(v) =>
-                            setProject({ ...project, brand_name: v })
-                        }
+                        onChange={(v) => updateProject({ brand_name: v })}
                         data-testid="project-brand-input"
                     />
                     <TextField
                         label="Project / Brand Link"
                         value={project.brand_link}
-                        onChange={(v) =>
-                            setProject({ ...project, brand_link: v })
-                        }
+                        onChange={(v) => updateProject({ brand_link: v })}
                         placeholder="https://..."
                     />
                     <TextField
                         label="Character"
                         value={project.character}
-                        onChange={(v) =>
-                            setProject({ ...project, character: v })
-                        }
+                        onChange={(v) => updateProject({ character: v })}
                         placeholder="e.g. Young Mother, 28-35"
                     />
                     <TextField
                         label="Shoot Dates"
                         value={project.shoot_dates}
-                        onChange={(v) =>
-                            setProject({ ...project, shoot_dates: v })
-                        }
+                        onChange={(v) => updateProject({ shoot_dates: v })}
                         placeholder="e.g. 15–18 March 2026"
                     />
                     <TextField
                         label="Budget per Day"
                         value={project.budget_per_day}
-                        onChange={(v) =>
-                            setProject({ ...project, budget_per_day: v })
-                        }
+                        onChange={(v) => updateProject({ budget_per_day: v })}
                         placeholder="e.g. ₹50,000"
                     />
                     <div>
@@ -384,12 +509,7 @@ export default function ProjectEdit() {
                         <div className="mt-2">
                             <Select
                                 value={project.commission_percent || ""}
-                                onValueChange={(v) =>
-                                    setProject({
-                                        ...project,
-                                        commission_percent: v,
-                                    })
-                                }
+                                onValueChange={(v) => updateProject({ commission_percent: v })}
                             >
                                 <SelectTrigger
                                     data-testid="commission-select-trigger"
@@ -415,24 +535,18 @@ export default function ProjectEdit() {
                     <TextField
                         label="Medium / Usage"
                         value={project.medium_usage}
-                        onChange={(v) =>
-                            setProject({ ...project, medium_usage: v })
-                        }
+                        onChange={(v) => updateProject({ medium_usage: v })}
                         placeholder="e.g. TVC · Digital · Print — 1yr"
                     />
                     <TextField
                         label="Director"
                         value={project.director}
-                        onChange={(v) =>
-                            setProject({ ...project, director: v })
-                        }
+                        onChange={(v) => updateProject({ director: v })}
                     />
                     <TextField
                         label="Production House"
                         value={project.production_house}
-                        onChange={(v) =>
-                            setProject({ ...project, production_house: v })
-                        }
+                        onChange={(v) => updateProject({ production_house: v })}
                     />
                 </div>
                 <div className="mt-6">
@@ -441,12 +555,7 @@ export default function ProjectEdit() {
                     </span>
                     <textarea
                         value={project.additional_details || ""}
-                        onChange={(e) =>
-                            setProject({
-                                ...project,
-                                additional_details: e.target.value,
-                            })
-                        }
+                        onChange={(e) => updateProject({ additional_details: e.target.value })}
                         rows={3}
                         className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
                     />
@@ -502,13 +611,13 @@ export default function ProjectEdit() {
                         <UploadTile
                             title="Reference Videos"
                             icon={Film}
-                            accept="video/mp4,video/quicktime,video/*"
+                            accept="video/*"
                             multiple
                             onPick={(files) => uploadMaterial(files, "video_file")}
                             inputRef={videoFileRef}
                             uploading={uploading === "video_file"}
                             testid="upload-video-file"
-                            hint="Max 100 MB · mp4/mov"
+                            hint="Max 100 MB · mp4/mov/webm"
                         />
                     </div>
 
@@ -534,15 +643,13 @@ export default function ProjectEdit() {
                                     </a>
                                     <button
                                         onClick={() =>
-                                            setProject({
-                                                ...project,
-                                                video_links:
-                                                    project.video_links.filter(
-                                                        (_, j) => j !== i,
-                                                    ),
+                                            updateProject({
+                                                video_links: project.video_links.filter(
+                                                    (_, j) => j !== i,
+                                                ),
                                             })
                                         }
-                                        className="text-black/40 hover:text-red-600"
+                                        className="text-black/40 hover:text-red-600 transition-colors"
                                     >
                                         <X className="w-3.5 h-3.5" />
                                     </button>
@@ -559,7 +666,7 @@ export default function ProjectEdit() {
                             />
                             <button
                                 onClick={addVideoLink}
-                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black"
+                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
                             >
                                 <Plus className="w-3 h-3" /> Add link
                             </button>
@@ -606,9 +713,7 @@ export default function ProjectEdit() {
                         </p>
                         <BudgetLines
                             lines={project.talent_budget || []}
-                            onChange={(lines) =>
-                                setProject({ ...project, talent_budget: lines })
-                            }
+                            onChange={(lines) => updateProject({ talent_budget: lines })}
                             testidPrefix="talent-budget"
                         />
                     </div>
@@ -623,9 +728,7 @@ export default function ProjectEdit() {
                         </p>
                         <BudgetLines
                             lines={project.client_budget || []}
-                            onChange={(lines) =>
-                                setProject({ ...project, client_budget: lines })
-                            }
+                            onChange={(lines) => updateProject({ client_budget: lines })}
                             testidPrefix="client-budget"
                         />
                     </div>
@@ -655,12 +758,7 @@ export default function ProjectEdit() {
                         <input
                             type="checkbox"
                             checked={project.require_reapproval_on_edit !== false}
-                            onChange={(e) =>
-                                setProject({
-                                    ...project,
-                                    require_reapproval_on_edit: e.target.checked,
-                                })
-                            }
+                            onChange={(e) => updateProject({ require_reapproval_on_edit: e.target.checked })}
                             data-testid="require-reapproval-toggle"
                             className="w-5 h-5 accent-black"
                         />
@@ -678,17 +776,15 @@ export default function ProjectEdit() {
                         <button
                             type="button"
                             onClick={() =>
-                                setProject({
-                                    ...project,
-                                    competitive_brand_enabled:
-                                        !project.competitive_brand_enabled,
+                                updateProject({
+                                    competitive_brand_enabled: !project.competitive_brand_enabled,
                                 })
                             }
                             data-testid="toggle-competitive-brand"
-                            className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
+                            className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${project.competitive_brand_enabled ? "translate-x-5 bg-white" : "bg-black"}`}
+                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${project.competitive_brand_enabled ? "translate-x-5 bg-white" : "bg-black"}`}
                             />
                         </button>
                     </label>
@@ -713,15 +809,13 @@ export default function ProjectEdit() {
                                     </span>
                                     <button
                                         onClick={() =>
-                                            setProject({
-                                                ...project,
-                                                custom_questions:
-                                                    project.custom_questions.filter(
-                                                        (_, j) => j !== i,
-                                                    ),
+                                            updateProject({
+                                                custom_questions: project.custom_questions.filter(
+                                                    (_, j) => j !== i,
+                                                ),
                                             })
                                         }
-                                        className="text-black/40 hover:text-red-600"
+                                        className="text-black/40 hover:text-red-600 transition-colors"
                                     >
                                         <X className="w-3.5 h-3.5" />
                                     </button>
@@ -739,7 +833,7 @@ export default function ProjectEdit() {
                             <button
                                 onClick={addCustomQuestion}
                                 data-testid="cq-add-btn"
-                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black"
+                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
                             >
                                 <Plus className="w-3 h-3" /> Add
                             </button>
@@ -770,21 +864,21 @@ export default function ProjectEdit() {
                                 href={submissionUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
                             >
                                 <ExternalLink className="w-3.5 h-3.5" /> Preview
                             </a>
                             <button
                                 onClick={copySubmitLink}
                                 data-testid="copy-submit-link-btn"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
                             >
                                 <Copy className="w-3.5 h-3.5" /> Copy
                             </button>
                             <button
                                 onClick={shareWhatsApp}
                                 data-testid="whatsapp-submit-link-btn"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 bg-[#25D366] text-black hover:opacity-90 rounded-sm"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 bg-[#25D366] text-black hover:opacity-90 rounded-sm transition-opacity"
                             >
                                 <MessageCircle className="w-3.5 h-3.5" />{" "}
                                 WhatsApp
@@ -807,19 +901,7 @@ export default function ProjectEdit() {
                         <div>
                             <p className="eyebrow">Submissions</p>
                             <p className="text-xs text-black/45 mt-1">
-                                {submissions.length} total ·{" "}
-                                {
-                                    submissions.filter(
-                                        (s) => s.decision === "approved",
-                                    ).length
-                                }{" "}
-                                approved ·{" "}
-                                {
-                                    submissions.filter(
-                                        (s) => s.decision === "rejected",
-                                    ).length
-                                }{" "}
-                                rejected
+                                {submissions.length} total · {approvedCount} approved · {rejectedCount} rejected
                             </p>
                         </div>
                         <button
@@ -833,7 +915,7 @@ export default function ProjectEdit() {
                                 ).length === 0
                             }
                             data-testid="create-client-link-btn"
-                            className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-black text-white rounded-sm hover:bg-black/90 disabled:opacity-30 disabled:cursor-not-allowed"
+                            className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-black text-white rounded-sm hover:bg-black/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         >
                             <Sparkles className="w-3.5 h-3.5" /> Create Client
                             Link from Approved
@@ -850,60 +932,73 @@ export default function ProjectEdit() {
                                 className="px-6 py-3 border-b border-black/[0.08] flex items-center gap-2 flex-wrap"
                                 data-testid="submission-filters"
                             >
-                                {SUBMISSION_FILTER_TABS.map((tab) => {
-                                    const f = {
-                                        ...tab,
-                                        count:
-                                            tab.key === "all"
-                                                ? submissions.length
-                                                : tab.key === "updated"
-                                                  ? submissions.filter(
-                                                        (s) => s.status === "updated",
-                                                    ).length
-                                                  : submissions.filter(
-                                                        (s) =>
-                                                            (s.decision || "pending") ===
-                                                            tab.key,
-                                                    ).length,
-                                    };
-                                    const active = submissionFilter === f.key;
-                                    return (
-                                        <button
-                                            key={f.key}
-                                            type="button"
-                                            onClick={() => setSubmissionFilter(f.key)}
-                                            data-testid={`filter-chip-${f.key}`}
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-all ${active ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
-                                        >
-                                            {f.label}
-                                            <span className={`ml-2 tg-mono ${active ? "text-white/60" : "text-black/40"}`}>
-                                                {f.count}
-                                            </span>
-                                        </button>
-                                    );
-                                })}
+                                <button
+                                    type="button"
+                                    onClick={() => setSubmissionFilter("all")}
+                                    data-testid="filter-chip-all"
+                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "all" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                >
+                                    All
+                                    <span className={`ml-2 tg-mono ${submissionFilter === "all" ? "text-white/60" : "text-black/40"}`}>
+                                        {submissions.length}
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setSubmissionFilter("pending")}
+                                    data-testid="filter-chip-pending"
+                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "pending" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                >
+                                    Pending
+                                    <span className={`ml-2 tg-mono ${submissionFilter === "pending" ? "text-white/60" : "text-black/40"}`}>
+                                        {pendingCount}
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setSubmissionFilter("approved")}
+                                    data-testid="filter-chip-approved"
+                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "approved" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                >
+                                    Approved
+                                    <span className={`ml-2 tg-mono ${submissionFilter === "approved" ? "text-white/60" : "text-black/40"}`}>
+                                        {approvedCount}
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setSubmissionFilter("rejected")}
+                                    data-testid="filter-chip-rejected"
+                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "rejected" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                >
+                                    Rejected
+                                    <span className={`ml-2 tg-mono ${submissionFilter === "rejected" ? "text-white/60" : "text-black/40"}`}>
+                                        {rejectedCount}
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setSubmissionFilter("updated")}
+                                    data-testid="filter-chip-updated"
+                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "updated" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                >
+                                    Updated
+                                    <span className={`ml-2 tg-mono ${submissionFilter === "updated" ? "text-white/60" : "text-black/40"}`}>
+                                        {updatedCount}
+                                    </span>
+                                </button>
                             </div>
                             <div className="divide-y divide-black/[0.06]">
-                                {submissions
-                                    .filter((s) => {
-                                        if (submissionFilter === "all") return true;
-                                        if (submissionFilter === "updated") return s.status === "updated";
-                                        return (s.decision || "pending") === submissionFilter;
-                                    })
-                                    .map((s) => (
-                                        <SubmissionRow
-                                            key={s.id}
-                                            submission={s}
-                                            onOpen={() => setReviewingSid(s.id)}
-                                            onDecision={(d) => setDecision(s.id, d)}
-                                            onDelete={isAdminRole ? () => deleteSubmission(s.id) : null}
-                                        />
-                                    ))}
-                                {submissions.filter((s) => {
-                                    if (submissionFilter === "all") return true;
-                                    if (submissionFilter === "updated") return s.status === "updated";
-                                    return (s.decision || "pending") === submissionFilter;
-                                }).length === 0 && (
+                                {filteredSubmissions.map((s) => (
+                                    <SubmissionRow
+                                        key={s.id}
+                                        submission={s}
+                                        onOpen={() => setReviewingSid(s.id)}
+                                        onDecision={(d) => setDecision(s.id, d)}
+                                        onDelete={isAdminRole ? () => confirmDeleteSubmission(s.id) : null}
+                                    />
+                                ))}
+                                {filteredSubmissions.length === 0 && (
                                     <div
                                         className="p-8 text-center text-black/35 text-sm"
                                         data-testid="filter-empty-state"
@@ -927,7 +1022,7 @@ export default function ProjectEdit() {
                 <MaterialModal
                     project={project}
                     onClose={() => setShowMaterialModal(false)}
-                    onRemove={removeMaterial}
+                    onRemove={confirmRemoveMaterial}
                 />
             )}
 
@@ -963,6 +1058,7 @@ export default function ProjectEdit() {
                     }}
                 />
             )}
+            
             <ConfirmDeleteDialog
                 open={confirmDeleteOpen}
                 title={`Delete "${project.brand_name || "this project"}"?`}
@@ -971,6 +1067,26 @@ export default function ProjectEdit() {
                 typeToConfirm="DELETE"
                 onCancel={() => setConfirmDeleteOpen(false)}
                 onConfirm={deleteProject}
+            />
+            
+            <ConfirmDeleteDialog
+                open={!!deleteSubmissionId}
+                title="Delete Submission"
+                description={`Are you sure you want to delete this submission? This action cannot be undone.`}
+                confirmLabel="Delete Submission"
+                typeToConfirm="DELETE"
+                onCancel={() => setDeleteSubmissionId(null)}
+                onConfirm={handleDeleteSubmission}
+            />
+            
+            <ConfirmDeleteDialog
+                open={!!deleteMaterialId}
+                title="Remove Material"
+                description={`Are you sure you want to remove this material? This action cannot be undone.`}
+                confirmLabel="Remove"
+                typeToConfirm="REMOVE"
+                onCancel={() => setDeleteMaterialId(null)}
+                onConfirm={handleRemoveMaterial}
             />
         </div>
     );
@@ -1045,14 +1161,14 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
             <div className="flex gap-1 flex-wrap">
                 <button
                     onClick={onOpen}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
                     data-testid={`review-submission-${s.id}`}
                 >
                     Review
                 </button>
                 <button
                     onClick={() => onDecision("approved")}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70 transition-colors"
                     data-testid={`approve-${s.id}`}
                     title="Approve"
                 >
@@ -1060,7 +1176,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 </button>
                 <button
                     onClick={() => onDecision("hold")}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm text-black/70"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm text-black/70 transition-colors"
                     data-testid={`hold-${s.id}`}
                     title="Hold"
                 >
@@ -1068,7 +1184,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 </button>
                 <button
                     onClick={() => onDecision("rejected")}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70"
+                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70 transition-colors"
                     data-testid={`reject-${s.id}`}
                     title="Reject"
                 >
@@ -1077,7 +1193,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                 {onDelete && (
                     <button
                         onClick={onDelete}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/40 text-black/50 rounded-sm"
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/40 text-black/50 rounded-sm transition-colors"
                         title="Delete"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1112,7 +1228,6 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
     const portfolioImages = media.filter((m) => m.category === "image");
     const indianImages = media.filter((m) => m.category === "indian");
     const westernImages = media.filter((m) => m.category === "western");
-    const totalImages = portfolioImages.length + indianImages.length + westernImages.length;
 
     const save = async () => {
         setSaving(true);
@@ -1156,7 +1271,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-black/[0.08] hover:border-black/[0.20] rounded-sm flex items-center justify-center bg-white/80 text-black/70 hover:text-black"
+                className="fixed top-5 right-5 z-10 w-10 h-10 border border-black/[0.08] hover:border-black/[0.20] rounded-sm flex items-center justify-center bg-white/80 text-black/70 hover:text-black transition-colors"
             >
                 <X className="w-4 h-4" />
             </button>
@@ -1177,7 +1292,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         type="button"
                         onClick={openInDrive}
                         data-testid="open-in-drive-btn"
-                        className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm text-black/70 hover:text-black"
+                        className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm text-black/70 hover:text-black transition-colors"
                         title="Opens the Google Drive backup folder for this submission"
                     >
                         <Cloud className="w-3.5 h-3.5" />
@@ -1233,10 +1348,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Visible to client"
                                             : "Hidden from client"
                                     }
-                                    className={`mt-5 w-10 h-5 rounded-full relative transition-all shrink-0 ${fv[f.key] ? "bg-black" : "bg-black/15"}`}
+                                    className={`mt-5 w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv[f.key] ? "translate-x-5 bg-white" : "bg-black"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] ? "translate-x-5 bg-white" : "bg-black"}`}
                                     />
                                 </button>
                             </div>
@@ -1262,10 +1377,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Hidden from client"
                                             : "Visible to client"
                                     }
-                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
+                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.availability !== false ? "translate-x-5 bg-white" : "bg-black"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.availability !== false ? "translate-x-5 bg-white" : "bg-black"}`}
                                     />
                                 </button>
                             </div>
@@ -1336,10 +1451,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                             ? "Visible to client"
                                             : "Hidden from client"
                                     }
-                                    className={`w-10 h-5 rounded-full relative transition-all shrink-0 ${fv.budget ? "bg-black" : "bg-black/15"}`}
+                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv.budget ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-all ${fv.budget ? "translate-x-5 bg-white" : "bg-black"}`}
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.budget ? "translate-x-5 bg-white" : "bg-black"}`}
                                     />
                                 </button>
                             </div>
@@ -1421,7 +1536,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         onClick={save}
                         disabled={saving}
                         data-testid="review-save-btn"
-                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-black text-white rounded-sm text-xs font-medium hover:bg-black/90"
+                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-black text-white rounded-sm text-xs font-medium hover:bg-black/90 transition-colors"
                     >
                         {saving && (
                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -1581,7 +1696,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             onClose();
                         }}
                         data-testid="review-approve-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-sm text-xs font-medium hover:bg-green-700"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-sm text-xs font-medium hover:bg-green-700 transition-colors"
                     >
                         <Check className="w-3.5 h-3.5" /> Approve — Forward
                     </button>
@@ -1591,7 +1706,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             onClose();
                         }}
                         data-testid="review-hold-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-sm text-xs font-medium"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-sm text-xs font-medium transition-colors"
                     >
                         <PauseCircle className="w-3.5 h-3.5" /> Hold
                     </button>
@@ -1601,7 +1716,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             onClose();
                         }}
                         data-testid="review-reject-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-sm text-xs"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-sm text-xs transition-colors"
                     >
                         <XCircle className="w-3.5 h-3.5" /> Reject
                     </button>
@@ -1627,7 +1742,7 @@ function UploadTile({
             onClick={() => inputRef.current?.click()}
             data-testid={`${testid}-btn`}
             disabled={uploading}
-            className="border border-dashed border-black/[0.08] hover:border-black/[0.18] p-5 text-left transition-all bg-white rounded-xl"
+            className="border border-dashed border-black/[0.08] hover:border-black/[0.18] p-5 text-left transition-colors bg-white rounded-xl"
         >
             <div className="flex items-center justify-between mb-3">
                 <Icon className="w-4 h-4 text-black/50" strokeWidth={1.5} />

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
@@ -38,25 +38,111 @@ const ACTION_META = {
     },
 };
 
+// Helper function for safe clipboard operations
+const copyToClipboard = async (text) => {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch (err) {
+        // Fallback for older browsers or permission issues
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.top = "-9999px";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand("copy");
+            return true;
+        } catch (e) {
+            return false;
+        } finally {
+            document.body.removeChild(textarea);
+        }
+    }
+};
+
+// Centralized date formatter
+const formatDate = (dateString) => {
+    if (!dateString) return "N/A";
+    try {
+        return new Date(dateString).toLocaleString();
+    } catch {
+        return "Invalid date";
+    }
+};
+
+// Simple loading skeleton
+const LoadingSkeleton = () => (
+    <div className="animate-pulse">
+        <div className="flex items-start justify-between flex-wrap gap-6 mb-10">
+            <div className="flex-1">
+                <div className="h-4 bg-black/[0.08] rounded w-20 mb-3"></div>
+                <div className="h-12 bg-black/[0.08] rounded w-3/4 mb-3"></div>
+                <div className="h-4 bg-black/[0.08] rounded w-1/2"></div>
+            </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+            {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="bg-white border border-black/[0.08] rounded-xl p-5">
+                    <div className="h-10 bg-black/[0.08] rounded w-20 mb-2"></div>
+                    <div className="h-3 bg-black/[0.08] rounded w-16"></div>
+                </div>
+            ))}
+        </div>
+        <div className="bg-white border border-black/[0.08] rounded-xl mb-10 overflow-hidden">
+            <div className="px-6 py-4 border-b border-black/[0.06]">
+                <div className="h-4 bg-black/[0.08] rounded w-32"></div>
+            </div>
+            <div className="p-8">
+                <div className="h-4 bg-black/[0.08] rounded w-48"></div>
+            </div>
+        </div>
+    </div>
+);
+
 export default function LinkResults() {
     const { id } = useParams();
     const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
 
     useEffect(() => {
-        (async () => {
-            const res = await adminApi.get(`/links/${id}/results`);
-            setData(res.data);
-        })();
+        const fetchResults = async () => {
+            try {
+                setLoading(true);
+                setError(null);
+                const res = await adminApi.get(`/links/${id}/results`);
+                setData(res.data);
+            } catch (err) {
+                console.error("Failed to fetch link results:", err);
+                setError(err.message || "Failed to load results");
+                toast.error("Failed to load results. Please try again.");
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchResults();
     }, [id]);
 
     const subjects = data?.subjects || {};
-
     const url = data ? `${window.location.origin}/l/${data.link.slug}` : "";
+    const totalDownloads = data?.downloads?.length || 0;
+    const viewers = data?.viewers || [];
+    const downloads = data?.downloads || [];
+    const actions = data?.actions || [];
 
-    const copyLink = () => {
-        navigator.clipboard.writeText(url);
-        toast.success("Link copied");
+    const copyLink = async () => {
+        const success = await copyToClipboard(url);
+        if (success) {
+            toast.success("Link copied");
+        } else {
+            toast.error("Failed to copy link. Please copy manually.");
+        }
     };
+
     const whatsApp = () => {
         const msg = encodeURIComponent(
             `${data.link.title}\n\nCurated portfolio review — ${url}`,
@@ -64,8 +150,28 @@ export default function LinkResults() {
         window.open(`https://wa.me/?text=${msg}`, "_blank");
     };
 
-    const summary = data?.summary || [];
-    const totalDownloads = data?.downloads?.length || 0;
+    if (error) {
+        return (
+            <div className="p-6 md:p-10 max-w-7xl mx-auto">
+                <Link
+                    to="/admin/links"
+                    className="inline-flex items-center gap-2 text-xs text-black/45 hover:text-black/80 mb-6 transition-colors duration-150"
+                >
+                    <ArrowLeft className="w-3 h-3" /> Back to links
+                </Link>
+                <div className="bg-red-50 border border-red-200 rounded-xl p-8 text-center">
+                    <div className="text-red-600 mb-2">Failed to load results</div>
+                    <div className="text-sm text-red-500 mb-4">{error}</div>
+                    <button
+                        onClick={() => window.location.reload()}
+                        className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 transition-colors"
+                    >
+                        Try Again
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div
@@ -79,8 +185,8 @@ export default function LinkResults() {
                 <ArrowLeft className="w-3 h-3" /> Back to links
             </Link>
 
-            {!data ? (
-                <div className="text-black/45 text-sm">Loading...</div>
+            {loading ? (
+                <LoadingSkeleton />
             ) : (
                 <>
                     <div className="flex items-start justify-between flex-wrap gap-6 mb-10">
@@ -135,9 +241,7 @@ export default function LinkResults() {
                             },
                             {
                                 label: "Total Actions",
-                                value: (data.actions || []).filter(
-                                    (a) => a.action,
-                                ).length,
+                                value: actions.filter((a) => a.action).length,
                             },
                             { label: "Downloads", value: totalDownloads },
                         ].map((s) => (
@@ -159,16 +263,21 @@ export default function LinkResults() {
                         <div className="px-6 py-4 border-b border-black/[0.06] flex items-center justify-between">
                             <p className="eyebrow">Talent Breakdown</p>
                             <p className="text-xs text-black/45">
-                                {summary.length} talents
+                                {data.summary?.length || 0} talents
                             </p>
                         </div>
-                        {summary.length === 0 ? (
-                            <div className="p-8 text-black/45 text-sm">
-                                No feedback yet.
+                        {!data.summary || data.summary.length === 0 ? (
+                            <div className="p-8 text-center">
+                                <div className="text-black/70 text-sm mb-2">
+                                    No viewer feedback recorded yet.
+                                </div>
+                                <div className="text-black/45 text-xs">
+                                    Share the link with clients to begin collecting responses.
+                                </div>
                             </div>
                         ) : (
                             <div className="divide-y divide-black/[0.06]">
-                                {summary.map((s) => {
+                                {data.summary.map((s) => {
                                     const t = subjects[s.talent_id];
                                     return (
                                         <div
@@ -207,7 +316,7 @@ export default function LinkResults() {
                                                 </div>
                                             </div>
                                             {s.comments?.length > 0 && (
-                                                <div className="mt-4 space-y-2">
+                                                <div className="mt-4 space-y-2 max-h-96 overflow-y-auto">
                                                     {s.comments.map((c, i) => (
                                                         <div
                                                             key={`${c.viewer_email}-${c.updated_at || i}`}
@@ -236,13 +345,13 @@ export default function LinkResults() {
                             <div className="px-6 py-4 border-b border-black/[0.06] flex items-center gap-2">
                                 <p className="eyebrow">Viewers</p>
                             </div>
-                            {data.viewers.length === 0 ? (
+                            {viewers.length === 0 ? (
                                 <div className="p-6 text-black/45 text-sm">
                                     No viewers yet
                                 </div>
                             ) : (
                                 <div className="divide-y divide-black/[0.06] max-h-96 overflow-y-auto">
-                                    {data.viewers.map((v) => (
+                                    {viewers.map((v) => (
                                         <div
                                             key={v.id}
                                             className="px-6 py-4 text-sm transition-colors duration-150 hover:bg-black/[0.02]"
@@ -254,9 +363,7 @@ export default function LinkResults() {
                                                 {v.viewer_email}
                                             </div>
                                             <div className="text-[10px] text-black/35 mt-1">
-                                                {new Date(
-                                                    v.created_at,
-                                                ).toLocaleString()}
+                                                {formatDate(v.created_at)}
                                             </div>
                                         </div>
                                     ))}
@@ -268,13 +375,13 @@ export default function LinkResults() {
                                 <Download className="w-3.5 h-3.5 text-black/45" />
                                 <p className="eyebrow">Download Log</p>
                             </div>
-                            {data.downloads.length === 0 ? (
+                            {downloads.length === 0 ? (
                                 <div className="p-6 text-black/45 text-sm">
                                     No downloads yet
                                 </div>
                             ) : (
                                 <div className="divide-y divide-black/[0.06] max-h-96 overflow-y-auto">
-                                    {data.downloads.map((d) => (
+                                    {downloads.map((d) => (
                                         <div
                                             key={d.id}
                                             className="px-6 py-4 text-sm transition-colors duration-150 hover:bg-black/[0.02]"
@@ -287,9 +394,7 @@ export default function LinkResults() {
                                                     d.talent_id}
                                             </div>
                                             <div className="text-[10px] text-black/35 mt-1">
-                                                {new Date(
-                                                    d.created_at,
-                                                ).toLocaleString()}
+                                                {formatDate(d.created_at)}
                                             </div>
                                         </div>
                                     ))}

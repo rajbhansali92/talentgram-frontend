@@ -1,5 +1,5 @@
 import React, { memo, useState, useCallback, useMemo } from "react";
-import { ChevronDown, Focus, TrendingUp, Clock, AlertCircle, Maximize2 } from "lucide-react";
+import { ChevronDown, TrendingUp, Clock, AlertCircle, Maximize2 } from "lucide-react";
 import PipelineCard from "./PipelineCard";
 import { EmptyLane } from "./PipelineEmptyState";
 import {
@@ -135,7 +135,15 @@ const PipelineColumn = memo(function PipelineColumn({
     const accent = STAGE_ACCENTS[stage] || DEFAULT_ACCENT;
     const emptyCopy = EMPTY_STATE_COPY?.[stage] || "Empty";
 
-    // CRITICAL FIX #1: Memoize expensive computations
+    // ============================================
+    // ALL HOOKS MUST BE CALLED BEFORE ANY CONDITIONAL RETURNS
+    // Order: useState, useMemo, useCallback
+    // ============================================
+
+    // 1. useState hooks
+    const [isDragOver, setIsDragOver] = useState(false);
+
+    // 2. useMemo hooks
     const displayMetrics = useMemo(() => {
         // Use external metrics if provided (backend-calculated)
         if (stageMetrics.count !== undefined) {
@@ -160,7 +168,25 @@ const PipelineColumn = memo(function PipelineColumn({
         };
     }, [items, stage, stageItemsMap, stageMetrics]);
 
-    // Memoize stable callbacks to prevent Card re-renders
+    const widthClasses = useMemo(() => {
+        if (columnWidth === 300) return "w-[300px] min-w-[300px] max-w-[300px]";
+        if (columnWidth === 350) return "w-[350px] min-w-[350px] max-w-[350px]";
+        if (columnWidth === 400) return "w-[400px] min-w-[400px] max-w-[400px]";
+        return "w-[300px] min-w-[300px] max-w-[300px]";
+    }, [columnWidth]);
+
+    // 3. Derived variables (non-hook calculations - MUST be before useCallback that depends on them)
+    const canSelectAll =
+        bulkMode && !readOnly && items.length > 0 && typeof onSelectAll === "function";
+    const allInColumnSelected =
+        canSelectAll && items.every((i) => bulkIds.has(i.id));
+
+    const isDroppable =
+        dragSupported && !readOnly && Boolean(dragId) && typeof onCardDrop === "function";
+
+    const columnLabel = `${getStageLabel(stage)} column with ${displayMetrics.count} items${displayMetrics.stale ? `, ${displayMetrics.stale} stale candidates` : ""}`;
+
+    // 4. useCallback hooks (depend on isDroppable, isCollapsed, etc.)
     const handleToggleSelect = useCallback((id) => {
         onToggleBulkSelect?.(id);
     }, [onToggleBulkSelect]);
@@ -172,16 +198,6 @@ const PipelineColumn = memo(function PipelineColumn({
     const handleDragEnd = useCallback(() => {
         onCardDragEnd?.();
     }, [onCardDragEnd]);
-
-    const canSelectAll =
-        bulkMode && !readOnly && items.length > 0 && typeof onSelectAll === "function";
-    const allInColumnSelected =
-        canSelectAll && items.every((i) => bulkIds.has(i.id));
-
-    const isDroppable =
-        dragSupported && !readOnly && Boolean(dragId) && typeof onCardDrop === "function";
-
-    const [isDragOver, setIsDragOver] = useState(false);
 
     const handleDragOver = useCallback((e) => {
         if (!isDroppable || isCollapsed) return;
@@ -209,6 +225,10 @@ const PipelineColumn = memo(function PipelineColumn({
         if (droppedId) onCardDrop(stage, droppedId);
     }, [isDroppable, isCollapsed, stage, onCardDrop]);
 
+    // ============================================
+    // CONDITIONAL RETURNS (allowed AFTER all hooks)
+    // ============================================
+    
     // Focus mode delegated to separate component
     if (isFocused) {
         return (
@@ -227,16 +247,10 @@ const PipelineColumn = memo(function PipelineColumn({
         );
     }
 
-    const columnLabel = `${getStageLabel(stage)} column with ${displayMetrics.count} items${displayMetrics.stale ? `, ${displayMetrics.stale} stale candidates` : ""}`;
-
-    // Responsive width classes based on prop
-    const widthClasses = useMemo(() => {
-        if (columnWidth === 300) return "w-[300px] min-w-[300px] max-w-[300px]";
-        if (columnWidth === 350) return "w-[350px] min-w-[350px] max-w-[350px]";
-        if (columnWidth === 400) return "w-[400px] min-w-[400px] max-w-[400px]";
-        return "w-[300px] min-w-[300px] max-w-[300px]";
-    }, [columnWidth]);
-
+    // ============================================
+    // FINAL JSX RENDER
+    // ============================================
+    
     return (
         <div
             data-testid={`pipeline-column-${stage}`}

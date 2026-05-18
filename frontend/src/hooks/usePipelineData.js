@@ -1,90 +1,69 @@
-import { useCallback, useState } from "react";
-import { toast } from "sonner";
+import { useCallback, useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
-import { getStageLabel, normaliseStage } from "@/components/pipeline/constants";
 
 /**
- * usePipelineDnD — native HTML5 drag-and-drop with optimistic updates.
- *
- * Architecture (PATCH 4D, preserved verbatim):
- *   • `dragId` state — which pipeline row id is currently being dragged.
- *     Stored at the parent so every Column can render its own drag-over
- *     highlight without prop-drilling complex state.
- *   • `dragSupported` — gated by `matchMedia('(hover:hover) and
- *     (pointer:fine)')` so touch devices fall back to taps + buttons.
- *   • `handleCardDrop(targetStage, droppedId)` — optimistic update:
- *     mutate local `data` in-place (set new stage), call backend,
- *     refetch on failure to roll back cleanly.
+ * usePipelineData — owns the project pipeline fetch + cache.
  */
-export function usePipelineDnD({ projectId, setData, refresh }) {
-    const [dragId, setDragId] = useState(null);
+export function usePipelineData(projectId) {
+    const [data, setData] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
 
-    const dragSupported =
-        typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    const fetchPipeline = useCallback(async () => {
+        if (!projectId) return;
 
-    const handleCardDragStart = useCallback((id) => {
-        setDragId(id);
-    }, []);
+        try {
+            setError(null);
 
-    const handleCardDragEnd = useCallback(() => {
-        setDragId(null);
-    }, []);
+            const res = await adminApi.get(
+                `/projects/${projectId}/pipeline`
+            );
 
-    const handleCardDrop = useCallback(
-        async (targetStage, droppedId) => {
-            // Hard-clear drag state up front — independent of network result.
-            setDragId(null);
-            if (!droppedId || !targetStage) return;
+            setData(res.data?.data || []);
+        } catch (e) {
+            console.error("Failed to fetch pipeline:", e);
+            setError("Failed to load pipeline data");
+        } finally {
+            setLoading(false);
+        }
+    }, [projectId]);
 
-            // Capture pre-move snapshot for clean rollback if backend fails.
-            let snapshot = null;
-            let toastUndo = null;
-            setData((prev) => {
-                snapshot = prev;
-                const row = prev.find((r) => r.id === droppedId);
-                if (!row) return prev;
-                const current = normaliseStage(row.stage);
-                if (current === targetStage) return prev; // no-op drops
-                toastUndo = `Moving ${row.talent_name || "talent"} → ${getStageLabel(
-                    targetStage,
-                )}`;
-                // Functional setter: clone the row with the new stage; leave
-                // other rows untouched so memoised Cards skip re-render.
-                return prev.map((r) =>
-                    r.id === droppedId ? { ...r, stage: targetStage } : r,
-                );
-            });
-            if (!toastUndo) return; // no-op drop (same stage or row not found)
+    useEffect(() => {
+        if (!projectId) return;
 
+        let alive = true;
+
+        (async () => {
             try {
-                await adminApi.patch(`/projects/${projectId}/pipeline/move`, {
-                    ids: [droppedId],
-                    stage: targetStage,
-                });
-                // Soft confirmation — single line, no spam.
-                toast.success(`Moved to ${getStageLabel(targetStage)}`);
-                // Refresh in background to pick up `is_follow_up`
-                // recomputation + updated_at — no await so the drop feels
-                // instant.
-                refresh();
+                setError(null);
+
+                const res = await adminApi.get(
+                    `/projects/${projectId}/pipeline`
+                );
+
+                if (!alive) return;
+
+                setData(res.data?.data || []);
             } catch (e) {
-                console.error("Drag move failed:", e);
-                // Roll back to the pre-drop snapshot. Cheap because we
-                // captured the exact reference before mutation.
-                if (snapshot) setData(snapshot);
-                toast.error(e?.response?.data?.detail || "Move failed — reverted");
+                if (!alive) return;
+
+                console.error("Failed to fetch pipeline:", e);
+                setError("Failed to load pipeline data");
+            } finally {
+                if (alive) setLoading(false);
             }
-        },
-        [projectId, setData, refresh],
-    );
+        })();
+
+        return () => {
+            alive = false;
+        };
+    }, [projectId]);
 
     return {
-        dragSupported,
-        dragId,
-        handleCardDragStart,
-        handleCardDragEnd,
-        handleCardDrop,
+        data,
+        setData,
+        loading,
+        error,
+        fetchPipeline,
     };
 }

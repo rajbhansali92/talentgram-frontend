@@ -64,13 +64,18 @@ function PipelineBoard({ projectId, projectName }) {
         selectAllInColumn,
     } = useBulkSelection();
 
+    // FIX 1: Added projectId to usePipelineDnD
     const {
         dragSupported,
         dragId,
         handleCardDragStart,
         handleCardDragEnd,
         handleCardDrop,
-    } = usePipelineDnD({ setData, refresh: fetchPipeline });
+    } = usePipelineDnD({
+        projectId,
+        setData,
+        refresh: fetchPipeline,
+    });
 
     const [showBulkAdd, setShowBulkAdd] = useState(false);
     const [bulkTalentsInput, setBulkTalentsInput] = useState("");
@@ -93,7 +98,8 @@ function PipelineBoard({ projectId, projectName }) {
     const addSelectedToPipeline = async () => {
         if (selectedTalents.size === 0) return;
         try {
-            await adminApi.post("/pipeline/add", {
+            // FIX 2: First occurrence - added projectId to URL
+            await adminApi.post(`/projects/${projectId}/pipeline/add`, {
                 project_id: projectId,
                 talent_ids: Array.from(selectedTalents),
             });
@@ -120,7 +126,8 @@ function PipelineBoard({ projectId, projectName }) {
 
         setBulkAdding(true);
         try {
-            await adminApi.post("/pipeline/add", {
+            // FIX 2: Second occurrence - added projectId to URL
+            await adminApi.post(`/projects/${projectId}/pipeline/add`, {
                 project_id: projectId,
                 talent_ids: talentIds,
             });
@@ -140,7 +147,8 @@ function PipelineBoard({ projectId, projectName }) {
         if (bulkIds.size === 0) return;
         const count = bulkIds.size;
         try {
-            await adminApi.patch("/pipeline/move", {
+            // FIX 3: Added projectId to URL
+            await adminApi.patch(`/projects/${projectId}/pipeline/move`, {
                 ids: Array.from(bulkIds),
                 stage: targetStage,
             });

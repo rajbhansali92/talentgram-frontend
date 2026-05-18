@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState, useMemo } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -16,15 +16,177 @@ import {
     DialogDescription,
     DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Loader2, Phone, Mail, Users as UsersIcon, MessageSquare, Calendar, Building2, PhoneCall, Clock, TrendingUp, Users, Activity, ChevronRight, Sparkles, Zap, Target } from "lucide-react";
+import { 
+    Plus, Loader2, Phone, Mail, Users as UsersIcon, MessageSquare, 
+    Calendar, Building2, PhoneCall, Clock, TrendingUp, Users, Activity, 
+    ChevronRight, Sparkles, Zap, Target, AlertCircle 
+} from "lucide-react";
 
-/**
- * MarketingHub — enterprise-grade CRM dashboard.
- * Backed by /api/marketing/{clients,interactions}.
- */
+// ============================================================================
+// UTILITY FUNCTIONS - Centralized
+// ============================================================================
+
+const formatDate = (iso) => {
+    if (!iso) return "—";
+    try {
+        return new Date(iso).toLocaleDateString(undefined, {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+        });
+    } catch {
+        return "—";
+    }
+};
+
+const formatDateTime = (iso) => {
+    if (!iso) return "—";
+    try {
+        return new Date(iso).toLocaleString(undefined, {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+        });
+    } catch {
+        return "—";
+    }
+};
+
+const getDaysSinceContact = (date) => {
+    if (!date) return null;
+    const lastContact = new Date(date);
+    const now = new Date();
+    // Remove Math.abs - future dates shouldn't happen
+    const diffTime = now - lastContact;
+    if (diffTime < 0) return 0; // Future date edge case
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+};
+
+const getRelationshipHealth = (lastContacted) => {
+    const days = getDaysSinceContact(lastContacted);
+    if (days === null) return { status: "inactive", label: "No contact", color: "text-rose-600 bg-rose-50", icon: Zap };
+    if (days <= 7) return { status: "healthy", label: "Active", color: "text-emerald-700 bg-emerald-50", icon: TrendingUp };
+    if (days <= 30) return { status: "warming", label: "Engaged", color: "text-amber-700 bg-amber-50", icon: Clock };
+    return { status: "cold", label: "Needs attention", color: "text-slate-500 bg-slate-50", icon: Target };
+};
+
+const getMomentum = (lastContacted) => {
+    const days = getDaysSinceContact(lastContacted);
+    if (days === null) return "No activity";
+    if (days <= 3) return "High momentum";
+    if (days <= 7) return "Active";
+    if (days <= 14) return "Warming";
+    return "Needs follow-up";
+};
+
+// ============================================================================
+// Skeleton Loading Component
+// ============================================================================
+
+const ClientCardSkeleton = () => (
+    <div className="bg-white border border-slate-200 rounded-2xl p-6 animate-pulse">
+        <div className="flex items-start justify-between gap-6 flex-wrap">
+            <div className="flex-1">
+                <div className="flex items-center gap-3 mb-3">
+                    <div className="h-7 w-48 bg-slate-200 rounded-lg" />
+                    <div className="h-5 w-16 bg-slate-200 rounded-lg" />
+                </div>
+                <div className="flex gap-5 mb-3">
+                    <div className="h-5 w-32 bg-slate-200 rounded" />
+                    <div className="h-5 w-28 bg-slate-200 rounded" />
+                </div>
+                <div className="flex gap-5">
+                    <div className="h-4 w-24 bg-slate-200 rounded" />
+                    <div className="h-4 w-20 bg-slate-200 rounded" />
+                </div>
+            </div>
+            <div className="w-4 h-4 bg-slate-200 rounded" />
+        </div>
+    </div>
+);
+
+// ============================================================================
+// Error State Component
+// ============================================================================
+
+const ErrorState = ({ message, onRetry }) => (
+    <div className="border-2 border-rose-200 bg-rose-50 rounded-2xl py-16 sm:py-20 text-center">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-rose-100 mb-4">
+            <AlertCircle className="w-6 h-6 text-rose-500" />
+        </div>
+        <div className="text-rose-600 text-sm mb-2">Failed to load clients</div>
+        <p className="text-slate-500 text-sm mb-4">{message || "Please try again."}</p>
+        <button
+            onClick={onRetry}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 hover:border-slate-300 transition-colors"
+        >
+            <Loader2 className="w-3.5 h-3.5" />
+            Retry
+        </button>
+    </div>
+);
+
+// ============================================================================
+// Empty State Component
+// ============================================================================
+
+const EmptyState = ({ hasSearch, hasFilters, onClearFilters }) => (
+    <div className="border-2 border-dashed border-slate-200 rounded-2xl py-16 sm:py-20 text-center">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-50 mb-4">
+            <Users className="w-6 h-6 text-slate-300" />
+        </div>
+        {hasSearch || hasFilters ? (
+            <>
+                <div className="text-slate-400 text-sm mb-2">No matching clients found</div>
+                <p className="text-slate-500 text-sm">Try adjusting your search or filters.</p>
+                <button
+                    onClick={onClearFilters}
+                    className="mt-4 text-sm text-slate-500 hover:text-slate-700 underline transition-colors"
+                >
+                    Clear all filters
+                </button>
+            </>
+        ) : (
+            <>
+                <div className="text-slate-400 text-sm mb-2">No clients yet</div>
+                <p className="text-slate-500 text-sm">Click "Add Client" to create your first relationship record.</p>
+            </>
+        )}
+    </div>
+);
+
+// ============================================================================
+// Field Input Component
+// ============================================================================
+
+const FieldInput = ({ label, value, onChange, required, testId, autoFocus }) => (
+    <label className="block">
+        <div className="text-xs font-medium text-slate-600 mb-1.5">
+            {label}
+            {required && <span className="text-slate-400 ml-0.5">*</span>}
+        </div>
+        <input
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            required={required}
+            autoFocus={autoFocus}
+            data-testid={testId}
+            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors"
+        />
+    </label>
+);
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
 export default function MarketingHub() {
     const [clients, setClients] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
     const [activeClient, setActiveClient] = useState(null);
     const [addOpen, setAddOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
@@ -32,11 +194,16 @@ export default function MarketingHub() {
 
     const load = useCallback(async () => {
         setLoading(true);
+        setError(null);
         try {
             const { data } = await adminApi.get("/marketing/clients");
-            setClients(Array.isArray(data) ? data : []);
+            // Handle both array response and paginated response
+            const clientsData = Array.isArray(data) ? data : (data?.items || []);
+            setClients(clientsData);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to load clients");
+            const errorMsg = e?.response?.data?.detail || "Failed to load clients";
+            setError(errorMsg);
+            toast.error(errorMsg);
         } finally {
             setLoading(false);
         }
@@ -46,75 +213,56 @@ export default function MarketingHub() {
         load();
     }, [load]);
 
-    const fmtDate = (iso) => {
-        if (!iso) return "—";
-        try {
-            return new Date(iso).toLocaleDateString(undefined, {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-            });
-        } catch {
-            return "—";
-        }
-    };
+    // Memoized filtered clients for performance
+    const filteredClients = useMemo(() => {
+        return clients.filter(client => {
+            const matchesSearch = searchQuery === "" || 
+                client.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                client.company_name?.toLowerCase().includes(searchQuery.toLowerCase());
+            
+            if (!matchesSearch) return false;
+            
+            if (filterType === "recent") {
+                const days = getDaysSinceContact(client.last_contacted_date);
+                return days !== null && days <= 7;
+            }
+            if (filterType === "dormant") {
+                const days = getDaysSinceContact(client.last_contacted_date);
+                return days === null || days > 30;
+            }
+            
+            return true;
+        });
+    }, [clients, searchQuery, filterType]);
 
-    const getDaysSinceContact = (date) => {
-        if (!date) return null;
-        const lastContact = new Date(date);
-        const now = new Date();
-        const diffTime = Math.abs(now - lastContact);
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        return diffDays;
-    };
-
-    const getRelationshipHealth = (lastContacted) => {
-        const days = getDaysSinceContact(lastContacted);
-        if (!days) return { status: "inactive", label: "No contact", color: "text-rose-600 bg-rose-50", icon: Zap };
-        if (days <= 7) return { status: "healthy", label: "Active", color: "text-emerald-700 bg-emerald-50", icon: TrendingUp };
-        if (days <= 30) return { status: "warming", label: "Engaged", color: "text-amber-700 bg-amber-50", icon: Clock };
-        return { status: "cold", label: "Needs attention", color: "text-slate-500 bg-slate-50", icon: Target };
-    };
-
-    const getMomentum = (lastContacted) => {
-        const days = getDaysSinceContact(lastContacted);
-        if (!days) return "No activity";
-        if (days <= 3) return "High momentum";
-        if (days <= 7) return "Active";
-        if (days <= 14) return "Warming";
-        return "Needs follow-up";
-    };
-
-    const filteredClients = clients.filter(client => {
-        const matchesSearch = client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                             (client.company_name?.toLowerCase() || "").includes(searchQuery.toLowerCase());
-        
-        if (!matchesSearch) return false;
-        
-        if (filterType === "recent") {
-            const days = getDaysSinceContact(client.last_contacted_date);
+    const stats = useMemo(() => {
+        const active = clients.filter(c => {
+            const days = getDaysSinceContact(c.last_contacted_date);
             return days !== null && days <= 7;
-        }
-        if (filterType === "dormant") {
-            const days = getDaysSinceContact(client.last_contacted_date);
+        }).length;
+        const dormant = clients.filter(c => {
+            const days = getDaysSinceContact(c.last_contacted_date);
             return days === null || days > 30;
-        }
-        
-        return true;
-    });
+        }).length;
+        return { active, dormant, total: clients.length };
+    }, [clients]);
 
-    const handleClientCreated = (newClient) => {
-        setClients((prev) => [newClient, ...prev]);
+    const handleClientCreated = useCallback((newClient) => {
+        setClients(prev => [newClient, ...prev]);
         setAddOpen(false);
         toast.success(`${newClient.name} added`);
-    };
+    }, []);
 
-    const handleInteractionAdded = (updatedDate) => {
+    const handleInteractionAdded = useCallback((updatedDate) => {
         if (!activeClient) return;
-        const bumped = { ...activeClient, last_contacted_date: updatedDate, interaction_count: (activeClient.interaction_count || 0) + 1 };
+        const bumped = { 
+            ...activeClient, 
+            last_contacted_date: updatedDate, 
+            interaction_count: (activeClient.interaction_count || 0) + 1 
+        };
         setActiveClient(bumped);
-        setClients((prev) => {
-            const next = prev.map((c) => (c.id === bumped.id ? bumped : c));
+        setClients(prev => {
+            const next = prev.map(c => c.id === bumped.id ? bumped : c);
             next.sort((a, b) => {
                 const da = new Date(a.last_contacted_date || 0).getTime();
                 const db = new Date(b.last_contacted_date || 0).getTime();
@@ -122,37 +270,31 @@ export default function MarketingHub() {
             });
             return next;
         });
-    };
+    }, [activeClient]);
 
-    const activeClientsCount = clients.filter(c => {
-        const days = getDaysSinceContact(c.last_contacted_date);
-        return days !== null && days <= 7;
-    }).length;
-    
-    const dormantClientsCount = clients.filter(c => {
-        const days = getDaysSinceContact(c.last_contacted_date);
-        return days === null || days > 30;
-    }).length;
+    const clearFilters = useCallback(() => {
+        setFilterType("all");
+        setSearchQuery("");
+    }, []);
+
+    const hasActiveFilters = filterType !== "all" || searchQuery;
 
     return (
-        <div
-            className="max-w-6xl mx-auto px-6 py-10 bg-white min-h-screen"
-            data-testid="marketing-hub-page"
-        >
-            {/* Ambient atmospheric layer */}
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-10 bg-white min-h-screen" data-testid="marketing-hub-page">
+            {/* Optimized atmospheric layer - smaller, lower opacity */}
             <div className="fixed inset-0 pointer-events-none overflow-hidden">
-                <div className="absolute -top-96 -right-96 w-[600px] h-[600px] bg-slate-100/30 rounded-full blur-3xl" />
-                <div className="absolute -bottom-96 -left-96 w-[600px] h-[600px] bg-emerald-50/20 rounded-full blur-3xl" />
+                <div className="absolute -top-96 -right-96 w-[420px] h-[420px] bg-slate-100/20 rounded-full blur-3xl" />
+                <div className="absolute -bottom-96 -left-96 w-[420px] h-[420px] bg-emerald-50/15 rounded-full blur-3xl" />
             </div>
 
             {/* Executive Dashboard Header */}
-            <div className="relative mb-12">
-                <div className="flex items-center justify-between gap-6 flex-wrap mb-10">
-                    <div className="min-w-0">
-                        <h1 className="text-4xl font-light tracking-tight text-slate-900">
+            <div className="relative mb-8 sm:mb-12">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8 sm:mb-10">
+                    <div>
+                        <h1 className="text-3xl sm:text-4xl font-light tracking-tight text-slate-900">
                             Client Intelligence
                         </h1>
-                        <p className="text-base text-slate-500 mt-2 font-light">
+                        <p className="text-sm sm:text-base text-slate-500 mt-2 font-light">
                             Executive relationship operating system
                         </p>
                     </div>
@@ -160,7 +302,7 @@ export default function MarketingHub() {
                         type="button"
                         onClick={() => setAddOpen(true)}
                         data-testid="marketing-add-client-btn"
-                        className="shrink-0 inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-slate-800 transition-all duration-200 hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] whitespace-nowrap"
+                        className="shrink-0 inline-flex items-center gap-2 bg-slate-900 text-white px-4 sm:px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-slate-800 transition-colors hover:shadow-lg active:scale-[0.98] whitespace-nowrap"
                     >
                         <Plus className="w-4 h-4" />
                         <span className="hidden sm:inline">Add Client</span>
@@ -168,9 +310,9 @@ export default function MarketingHub() {
                     </button>
                 </div>
 
-                {/* Executive Dashboard Cards - Asymmetric hierarchy */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-5 mb-10">
-                    <div className="md:col-span-2 bg-gradient-to-br from-slate-50 to-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition-all duration-300">
+                {/* Executive Dashboard Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5 mb-8 sm:mb-10">
+                    <div className="md:col-span-2 bg-gradient-to-br from-slate-50 to-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow duration-300">
                         <div className="flex items-center justify-between mb-4">
                             <div className="flex items-center gap-2">
                                 <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center">
@@ -180,35 +322,35 @@ export default function MarketingHub() {
                             </div>
                             <Sparkles className="w-4 h-4 text-emerald-400" />
                         </div>
-                        <div className="text-4xl font-light text-slate-900 mb-1">{activeClientsCount}</div>
+                        <div className="text-4xl font-light text-slate-900 mb-1">{stats.active}</div>
                         <div className="text-sm text-slate-500">Active relationships · Last 7 days</div>
                         <div className="mt-3 h-px bg-slate-200 rounded-full overflow-hidden">
-                            <div className="h-full bg-slate-300 rounded-full" style={{ width: `${(activeClientsCount / (clients.length || 1)) * 100}%` }} />
+                            <div className="h-full bg-slate-300 rounded-full" style={{ width: `${(stats.active / (stats.total || 1)) * 100}%` }} />
                         </div>
                     </div>
                     
-                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all duration-300">
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow duration-300">
                         <div className="flex items-center gap-2 mb-3">
                             <Users className="w-4 h-4 text-slate-400" />
                             <span className="text-xs font-mono text-slate-400">Total</span>
                         </div>
-                        <div className="text-2xl font-light text-slate-900 mb-1">{clients.length}</div>
+                        <div className="text-2xl font-light text-slate-900 mb-1">{stats.total}</div>
                         <div className="text-xs text-slate-500">Active clients in ecosystem</div>
                     </div>
                     
-                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all duration-300">
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow duration-300">
                         <div className="flex items-center gap-2 mb-3">
                             <Clock className="w-4 h-4 text-amber-500" />
                             <span className="text-xs font-mono text-slate-400">Needs attention</span>
                         </div>
-                        <div className="text-2xl font-light text-slate-900 mb-1">{dormantClientsCount}</div>
+                        <div className="text-2xl font-light text-slate-900 mb-1">{stats.dormant}</div>
                         <div className="text-xs text-slate-500">Dormant · Requires outreach</div>
                     </div>
                 </div>
 
-                {/* Search and Filter Bar - Refined spacing */}
-                <div className="flex flex-col lg:flex-row lg:items-center gap-5 justify-between border-b border-slate-100 pb-7">
-                    <div className="relative flex-1 max-w-md">
+                {/* Search and Filter Bar */}
+                <div className="flex flex-col lg:flex-row lg:items-center gap-5 justify-between border-b border-slate-100 pb-6 sm:pb-7">
+                    <div className="relative flex-1 max-w-full lg:max-w-md">
                         <div className="absolute left-4 top-1/2 -translate-y-1/2">
                             <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -219,7 +361,7 @@ export default function MarketingHub() {
                             placeholder="Search clients or companies..."
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200/70 rounded-xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-all shadow-inner"
+                            className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200/70 rounded-xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors shadow-inner"
                         />
                     </div>
                     <div className="flex gap-2">
@@ -231,7 +373,7 @@ export default function MarketingHub() {
                             <button
                                 key={filter.id}
                                 onClick={() => setFilterType(filter.id)}
-                                className={`px-5 py-2 text-sm rounded-full transition-all duration-200 font-medium ${
+                                className={`px-4 sm:px-5 py-2 text-sm rounded-full transition-colors duration-200 font-medium ${
                                     filterType === filter.id 
                                         ? "bg-slate-900 text-white shadow-sm" 
                                         : "text-slate-500 hover:bg-slate-50"
@@ -244,30 +386,25 @@ export default function MarketingHub() {
                 </div>
             </div>
 
-            {/* Client Relationship List */}
+            {/* Client Relationship List with Error and Loading States */}
             {loading ? (
-                <div
-                    className="py-20 flex justify-center"
-                    data-testid="marketing-loading"
-                >
-                    <Loader2 className="w-6 h-6 animate-spin text-slate-300" />
+                <div className="space-y-3" data-testid="marketing-loading">
+                    <ClientCardSkeleton />
+                    <ClientCardSkeleton />
+                    <ClientCardSkeleton />
                 </div>
+            ) : error ? (
+                <ErrorState message={error} onRetry={load} />
             ) : filteredClients.length === 0 ? (
-                <div
-                    className="border-2 border-dashed border-slate-200 rounded-2xl py-20 text-center"
-                    data-testid="marketing-empty"
-                >
-                    <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-50 mb-4">
-                        <Users className="w-6 h-6 text-slate-300" />
-                    </div>
-                    <div className="text-slate-400 text-sm mb-2">No clients found</div>
-                    <p className="text-slate-500 text-sm">Click "Add Client" to create your first relationship record.</p>
-                </div>
+                <EmptyState 
+                    hasSearch={!!searchQuery} 
+                    hasFilters={hasActiveFilters} 
+                    onClearFilters={clearFilters}
+                />
             ) : (
-                <div className="space-y-3 animate-in fade-in duration-500" data-testid="marketing-clients-list">
-                    {filteredClients.map((c, idx) => {
+                <div className="space-y-3" data-testid="marketing-clients-list">
+                    {filteredClients.map((c) => {
                         const health = getRelationshipHealth(c.last_contacted_date);
-                        const daysSince = getDaysSinceContact(c.last_contacted_date);
                         const momentum = getMomentum(c.last_contacted_date);
                         const HealthIcon = health.icon;
                         return (
@@ -275,13 +412,12 @@ export default function MarketingHub() {
                                 key={c.id}
                                 onClick={() => setActiveClient(c)}
                                 data-testid={`marketing-client-row-${c.id}`}
-                                className="group bg-white border border-slate-200 rounded-2xl p-6 cursor-pointer hover:border-slate-300 hover:shadow-lg transition-all duration-300 hover:-translate-y-0.5"
-                                style={{ animationDelay: `${idx * 50}ms` }}
+                                className="group bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 cursor-pointer hover:border-slate-300 hover:shadow-lg transition-shadow duration-300"
                             >
                                 <div className="flex items-start justify-between gap-6 flex-wrap">
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-3 mb-3 flex-wrap">
-                                            <h3 className="text-[22px] leading-tight font-medium text-slate-900 group-hover:text-slate-700 transition-colors">
+                                        <div className="flex items-center gap-3 mb-2 flex-wrap">
+                                            <h3 className="text-xl sm:text-[22px] leading-tight font-medium text-slate-900 group-hover:text-slate-700 transition-colors">
                                                 {c.name}
                                             </h3>
                                             <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-xs font-medium ${health.color}`}>
@@ -289,7 +425,7 @@ export default function MarketingHub() {
                                                 {health.label}
                                             </span>
                                         </div>
-                                        <div className="flex flex-wrap gap-5 text-sm mb-3">
+                                        <div className="flex flex-wrap gap-4 sm:gap-5 text-sm mb-3">
                                             {c.company_name && (
                                                 <div className="flex items-center gap-1.5 text-slate-400">
                                                     <Building2 className="w-3.5 h-3.5" />
@@ -303,10 +439,10 @@ export default function MarketingHub() {
                                                 </div>
                                             )}
                                         </div>
-                                        <div className="flex flex-wrap gap-5 text-xs">
+                                        <div className="flex flex-wrap gap-4 sm:gap-5 text-xs">
                                             <div className="flex items-center gap-1.5 text-slate-400">
                                                 <Calendar className="w-3.5 h-3.5" />
-                                                <span>Last contact: {fmtDate(c.last_contacted_date)}</span>
+                                                <span>Last contact: {formatDate(c.last_contacted_date)}</span>
                                             </div>
                                             <div className="flex items-center gap-1.5 text-slate-400">
                                                 <TrendingUp className="w-3.5 h-3.5" />
@@ -345,9 +481,10 @@ export default function MarketingHub() {
     );
 }
 
-/* --------------------------------------------------------------------- */
-/* Add Client dialog - Premium Enterprise                                */
-/* --------------------------------------------------------------------- */
+// ============================================================================
+// ADD CLIENT DIALOG
+// ============================================================================
+
 function AddClientDialog({ open, onClose, onCreated }) {
     const [name, setName] = useState("");
     const [company, setCompany] = useState("");
@@ -433,7 +570,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             type="submit"
                             disabled={saving}
                             data-testid="marketing-add-submit-btn"
-                            className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2 rounded-xl text-sm font-medium hover:bg-slate-800 transition-all duration-200 disabled:opacity-50"
+                            className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2 rounded-xl text-sm font-medium hover:bg-slate-800 transition-colors disabled:opacity-50"
                         >
                             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                             Save Client
@@ -445,29 +582,10 @@ function AddClientDialog({ open, onClose, onCreated }) {
     );
 }
 
-function FieldInput({ label, value, onChange, required, testId, autoFocus }) {
-    return (
-        <label className="block">
-            <div className="text-xs font-medium text-slate-600 mb-1.5">
-                {label}
-                {required && <span className="text-slate-400 ml-0.5">*</span>}
-            </div>
-            <input
-                type="text"
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                required={required}
-                autoFocus={autoFocus}
-                data-testid={testId}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-all"
-            />
-        </label>
-    );
-}
+// ============================================================================
+// CLIENT DRAWER
+// ============================================================================
 
-/* --------------------------------------------------------------------- */
-/* Client drawer - Executive relationship intelligence panel            */
-/* --------------------------------------------------------------------- */
 const INTERACTION_TYPES = [
     { value: "call", label: "Call", icon: Phone },
     { value: "email", label: "Email", icon: Mail },
@@ -487,7 +605,8 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
         setLoadingList(true);
         try {
             const { data } = await adminApi.get(`/marketing/interactions/${cid}`);
-            setInteractions(Array.isArray(data) ? data : []);
+            const interactionsData = Array.isArray(data) ? data : (data?.items || []);
+            setInteractions(interactionsData);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to load interactions");
         } finally {
@@ -520,42 +639,15 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
             onInteractionAdded(data.created_at);
             toast.success("Interaction logged");
         } catch (err) {
-            toast.error(
-                err?.response?.data?.detail || "Failed to log interaction",
-            );
+            toast.error(err?.response?.data?.detail || "Failed to log interaction");
         } finally {
             setSaving(false);
         }
     };
 
-    const fmt = (iso) => {
-        if (!iso) return "—";
-        try {
-            return new Date(iso).toLocaleString(undefined, {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-                hour: "numeric",
-                minute: "2-digit",
-            });
-        } catch {
-            return "—";
-        }
-    };
-
     const getInteractionIcon = (type) => {
         const found = INTERACTION_TYPES.find(t => t.value === type);
-        const Icon = found?.icon || MessageSquare;
-        return Icon;
-    };
-
-    const getDaysSinceContact = (date) => {
-        if (!date) return null;
-        const lastContact = new Date(date);
-        const now = new Date();
-        const diffTime = Math.abs(now - lastContact);
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        return diffDays;
+        return found?.icon || MessageSquare;
     };
 
     const daysSince = getDaysSinceContact(client?.last_contacted_date);
@@ -569,45 +661,45 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
             >
                 {client && (
                     <div className="h-full flex flex-col">
-                        {/* Drawer Header - With cinematic atmosphere */}
-                        <div className="bg-gradient-to-b from-slate-50/80 to-white border-b border-slate-100 px-6 py-8">
+                        {/* Drawer Header */}
+                        <div className="bg-gradient-to-b from-slate-50/80 to-white border-b border-slate-100 px-5 sm:px-6 py-6 sm:py-8">
                             <SheetHeader className="space-y-2">
                                 <SheetTitle
-                                    className="text-slate-900 text-3xl font-light tracking-tight"
+                                    className="text-slate-900 text-2xl sm:text-3xl font-light tracking-tight"
                                     data-testid="marketing-drawer-title"
                                 >
                                     {client.name}
                                 </SheetTitle>
-                                <SheetDescription className="text-slate-500 text-base">
+                                <SheetDescription className="text-slate-500 text-sm sm:text-base">
                                     {client.company_name || "Independent relationship"}
                                 </SheetDescription>
                             </SheetHeader>
                         </div>
 
                         {/* Scrollable Content */}
-                        <div className="flex-1 overflow-y-auto px-6 py-6 space-y-8">
+                        <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 sm:py-6 space-y-6 sm:space-y-8">
                             {/* Client Intelligence Section */}
                             <div className="space-y-4">
                                 <div className="flex items-center gap-2">
                                     <Sparkles className="w-4 h-4 text-slate-400" />
                                     <h3 className="text-xs font-mono text-slate-400">Relationship Intelligence</h3>
                                 </div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="bg-slate-50 rounded-xl p-4">
+                                <div className="grid grid-cols-2 gap-3 sm:gap-4">
+                                    <div className="bg-slate-50 rounded-xl p-3 sm:p-4">
                                         <div className="text-xs text-slate-500 mb-1">Primary Contact</div>
                                         <div className="flex items-center gap-2">
                                             <Phone className="w-3.5 h-3.5 text-slate-400" />
-                                            <span className="text-sm font-mono text-slate-700">
+                                            <span className="text-sm font-mono text-slate-700 break-all">
                                                 {client.phone_number || "Not provided"}
                                             </span>
                                         </div>
                                     </div>
-                                    <div className="bg-slate-50 rounded-xl p-4">
+                                    <div className="bg-slate-50 rounded-xl p-3 sm:p-4">
                                         <div className="text-xs text-slate-500 mb-1">Last Engagement</div>
                                         <div className="flex items-center gap-2">
                                             <Calendar className="w-3.5 h-3.5 text-slate-400" />
                                             <span className="text-sm text-slate-700">
-                                                {fmt(client.last_contacted_date)}
+                                                {formatDateTime(client.last_contacted_date)}
                                                 {daysSince && (
                                                     <span className="ml-2 text-xs text-slate-400">({daysSince} days ago)</span>
                                                 )}
@@ -615,7 +707,7 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                         </div>
                                     </div>
                                 </div>
-                                <div className="bg-slate-50 rounded-xl p-4">
+                                <div className="bg-slate-50 rounded-xl p-3 sm:p-4">
                                     <div className="text-xs text-slate-500 mb-2">Engagement Frequency</div>
                                     <div className="flex items-center justify-between">
                                         <span className="text-sm text-slate-700">{client.interaction_count || 0} total interactions</span>
@@ -626,7 +718,7 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                 </div>
                             </div>
 
-                            {/* Log interaction form - Refined hierarchy */}
+                            {/* Log interaction form */}
                             <div className="space-y-4">
                                 <div className="flex items-center gap-2">
                                     <MessageSquare className="w-4 h-4 text-slate-400" />
@@ -647,7 +739,7 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                                     type="button"
                                                     onClick={() => setType(t.value)}
                                                     data-testid={`marketing-type-${t.value}`}
-                                                    className={`inline-flex items-center gap-2 px-4 py-2 text-sm rounded-xl border transition-all duration-200 ${
+                                                    className={`inline-flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 text-sm rounded-xl border transition-colors duration-200 ${
                                                         active
                                                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
                                                             : "bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50"
@@ -665,24 +757,22 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                         placeholder="Add notes about this interaction..."
                                         rows={3}
                                         data-testid="marketing-interaction-notes"
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none resize-none transition-all"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none"
                                     />
                                     <button
                                         type="submit"
                                         disabled={saving}
                                         data-testid="marketing-interaction-submit-btn"
-                                        className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-800 transition-all duration-200 disabled:opacity-50 shadow-sm"
+                                        className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-800 transition-colors disabled:opacity-50 shadow-sm"
                                     >
-                                        {saving && (
-                                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                        )}
+                                        {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                                         Log Touchpoint
                                     </button>
                                 </form>
                             </div>
 
-                            {/* Interaction timeline - Refined visuals */}
-                            <div className="space-y-4">
+                            {/* Interaction timeline */}
+                            <div className="space-y-4 pb-6">
                                 <div className="flex items-center gap-2">
                                     <Clock className="w-4 h-4 text-slate-400" />
                                     <h3 className="text-xs font-mono text-slate-400">
@@ -716,20 +806,20 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                                     )}
                                                     <div className="absolute left-0 top-1 w-4 h-4 rounded-full bg-slate-700 border-2 border-white shadow-sm" />
                                                     
-                                                    <div className="bg-white border border-slate-200 rounded-xl p-4 ml-2 shadow-[0_2px_12px_rgba(15,23,42,0.03)] hover:shadow-md transition-shadow duration-200">
-                                                        <div className="flex items-center justify-between gap-3 mb-2">
+                                                    <div className="bg-white border border-slate-200 rounded-xl p-3 sm:p-4 ml-2 shadow-[0_2px_12px_rgba(15,23,42,0.03)] hover:shadow-md transition-shadow duration-200">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                             <div className="flex items-center gap-2">
                                                                 <Icon className="w-3.5 h-3.5 text-slate-500" />
-                                                                <span className="text-xs font-medium text-slate-600">
+                                                                <span className="text-xs font-medium text-slate-600 capitalize">
                                                                     {it.type}
                                                                 </span>
                                                             </div>
                                                             <span className="font-mono text-[10px] text-slate-400">
-                                                                {fmt(it.created_at)}
+                                                                {formatDateTime(it.created_at)}
                                                             </span>
                                                         </div>
                                                         {it.notes && (
-                                                            <div className="text-sm text-slate-700 mt-2 whitespace-pre-wrap">
+                                                            <div className="text-sm text-slate-700 mt-2 whitespace-pre-wrap break-words">
                                                                 {it.notes}
                                                             </div>
                                                         )}

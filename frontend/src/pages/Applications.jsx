@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useCallback, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -30,7 +30,7 @@ export default function Applications() {
     const [filter, setFilter] = useState("pending");
     const [active, setActive] = useState(null);
 
-    const load = async () => {
+    const load = useCallback(async () => {
         setLoading(true);
         try {
             const f = STATUS_FILTERS.find((s) => s.key === filter);
@@ -42,12 +42,11 @@ export default function Applications() {
         } finally {
             setLoading(false);
         }
-    };
+    }, [filter]);
 
     useEffect(() => {
         load();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [filter]);
+    }, [load]);
 
     const decide = async (aid, decision) => {
         try {
@@ -68,17 +67,6 @@ export default function Applications() {
             toast.error(e?.response?.data?.detail || "Failed");
         }
     };
-
-    const counts = useMemo(() => {
-        const c = { all: items.length, pending: 0, approved: 0, rejected: 0, drafts: 0 };
-        for (const i of items) {
-            if (i.status === "draft") c.drafts++;
-            else if (i.decision === "approved") c.approved++;
-            else if (i.decision === "rejected") c.rejected++;
-            else if (i.status === "submitted" && i.decision === "pending") c.pending++;
-        }
-        return c;
-    }, [items]);
 
     return (
         <div
@@ -129,12 +117,24 @@ export default function Applications() {
             </div>
 
             {loading ? (
-                <div className="py-20 flex justify-center">
-                    <Loader2 className="w-6 h-6 animate-spin text-black/40" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                    {[1, 2, 3, 4, 5, 6].map((i) => (
+                        <SkeletonCard key={i} />
+                    ))}
                 </div>
             ) : items.length === 0 ? (
-                <div className="border border-dashed border-black/[0.08] rounded-xl bg-white py-20 text-center text-black/45 text-sm">
-                    No applications match this filter.
+                <div className="border border-dashed border-black/[0.08] rounded-xl bg-white py-20 text-center">
+                    <p className="text-black/45 text-sm">
+                        {filter === "pending" 
+                            ? "No pending applications to review right now."
+                            : filter === "approved"
+                            ? "No approved applications yet."
+                            : filter === "rejected"
+                            ? "No rejected applications."
+                            : filter === "drafts"
+                            ? "No draft applications."
+                            : "No applications match this filter."}
+                    </p>
                 </div>
             ) : (
                 <div
@@ -147,7 +147,6 @@ export default function Applications() {
                             app={a}
                             onReview={() => setActive(a)}
                             onDecide={(d) => decide(a.id, d)}
-                            counts={counts}
                         />
                     ))}
                 </div>
@@ -164,14 +163,47 @@ export default function Applications() {
     );
 }
 
+function SkeletonCard() {
+    return (
+        <div className="bg-white border border-black/[0.08] rounded-xl overflow-hidden animate-pulse">
+            <div className="aspect-[4/5] bg-[#f0f0ea]" />
+            <div className="p-4 space-y-3">
+                <div className="h-5 bg-[#f0f0ea] rounded w-3/4" />
+                <div className="space-y-2">
+                    <div className="h-3 bg-[#f0f0ea] rounded w-full" />
+                    <div className="h-3 bg-[#f0f0ea] rounded w-2/3" />
+                    <div className="h-3 bg-[#f0f0ea] rounded w-1/2" />
+                </div>
+                <div className="flex gap-2 pt-2">
+                    <div className="h-8 bg-[#f0f0ea] rounded flex-1" />
+                    <div className="w-8 h-8 bg-[#f0f0ea] rounded" />
+                    <div className="w-8 h-8 bg-[#f0f0ea] rounded" />
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function ApplicationCard({ app, onReview, onDecide }) {
+    const [decisionLoading, setDecisionLoading] = useState(null);
     const fd = app.form_data || {};
     const imgs = (app.media || []).filter((m) => m.category === "image");
     const cover = imgs[0];
     const badge = getStatusBadge(app);
+
+    const handleDecide = async (decision) => {
+        if (decisionLoading) return;
+        setDecisionLoading(decision);
+        try {
+            await onDecide(decision);
+        } finally {
+            setDecisionLoading(null);
+        }
+    };
+
     return (
         <div
-            className="bg-white border border-black/[0.08] rounded-xl overflow-hidden transition-colors duration-150 hover:bg-black/[0.01] flex flex-col"
+            className="bg-white border border-black/[0.08] rounded-xl overflow-hidden transition-colors transition-shadow duration-150 hover:shadow-sm hover:bg-black/[0.01] flex flex-col"
             data-testid={`app-card-${app.id}`}
         >
             <div className="relative aspect-[4/5] bg-[#fafaf8] overflow-hidden">
@@ -193,7 +225,7 @@ function ApplicationCard({ app, onReview, onDecide }) {
                     {badge.label}
                 </span>
                 {imgs.length > 0 && (
-                    <span className="absolute bottom-3 right-3 px-2 py-0.5 bg-white/80 backdrop-blur-sm text-black/60 text-[10px] font-mono rounded-md">
+                    <span className="absolute bottom-3 right-3 px-2 py-0.5 bg-white/90 text-black/60 text-[10px] font-mono rounded-md">
                         {imgs.length} img
                     </span>
                 )}
@@ -233,20 +265,38 @@ function ApplicationCard({ app, onReview, onDecide }) {
                     {app.status === "submitted" && app.decision === "pending" && (
                         <>
                             <button
-                                onClick={() => onDecide("approved")}
+                                onClick={() => handleDecide("approved")}
+                                disabled={decisionLoading}
                                 data-testid={`approve-${app.id}`}
                                 title="Approve"
-                                className="w-9 h-9 inline-flex items-center justify-center rounded-lg bg-black/5 border border-black/[0.08] text-black/70 hover:bg-black/10 hover:text-black/90 transition-colors duration-150"
+                                className={`w-9 h-9 inline-flex items-center justify-center rounded-lg bg-black/5 border border-black/[0.08] text-black/70 transition-colors duration-150 ${
+                                    decisionLoading
+                                        ? "opacity-50 cursor-not-allowed"
+                                        : "hover:bg-black/10 hover:text-black/90"
+                                }`}
                             >
-                                <Check className="w-4 h-4" />
+                                {decisionLoading === "approved" ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                    <Check className="w-4 h-4" />
+                                )}
                             </button>
                             <button
-                                onClick={() => onDecide("rejected")}
+                                onClick={() => handleDecide("rejected")}
+                                disabled={decisionLoading}
                                 data-testid={`reject-${app.id}`}
                                 title="Reject"
-                                className="w-9 h-9 inline-flex items-center justify-center rounded-lg border border-red-500/20 text-red-600/80 hover:bg-red-50 hover:text-red-700 transition-colors duration-150"
+                                className={`w-9 h-9 inline-flex items-center justify-center rounded-lg border border-red-500/20 text-red-600/80 transition-colors duration-150 ${
+                                    decisionLoading
+                                        ? "opacity-50 cursor-not-allowed"
+                                        : "hover:bg-red-50 hover:text-red-700"
+                                }`}
                             >
-                                <XCircle className="w-4 h-4" />
+                                {decisionLoading === "rejected" ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                    <XCircle className="w-4 h-4" />
+                                )}
                             </button>
                         </>
                     )}
@@ -270,16 +320,54 @@ function getStatusBadge(app) {
 }
 
 function ReviewModal({ app, onClose, onDecide }) {
+    const [decisionLoading, setDecisionLoading] = useState(null);
     const fd = app.form_data || {};
     const media = app.media || [];
     const intro = media.find((m) => m.category === "intro_video");
     const images = media.filter((m) => m.category === "image");
     const badge = getStatusBadge(app);
 
+    // Lock body scroll when modal opens
+    useEffect(() => {
+        const originalOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        
+        return () => {
+            document.body.style.overflow = originalOverflow;
+        };
+    }, []);
+
+    // Handle escape key
+    const handleKeyDown = useCallback((e) => {
+        if (e.key === "Escape") {
+            onClose();
+        }
+    }, [onClose]);
+
+    useEffect(() => {
+        document.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [handleKeyDown]);
+
+    const handleDecide = async (decision) => {
+        if (decisionLoading) return;
+        setDecisionLoading(decision);
+        try {
+            await onDecide(decision);
+        } finally {
+            setDecisionLoading(null);
+        }
+    };
+
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm overflow-y-auto"
+            className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
             data-testid="application-review-modal"
+            onClick={(e) => {
+                if (e.target === e.currentTarget) onClose();
+            }}
         >
             <button
                 onClick={onClose}
@@ -367,7 +455,7 @@ function ReviewModal({ app, onClose, onDecide }) {
                                         href={m.url}
                                         target="_blank"
                                         rel="noreferrer"
-                                        className="aspect-[3/4] bg-[#fafaf8] overflow-hidden border border-black/[0.08] rounded-lg"
+                                        className="aspect-[3/4] bg-[#fafaf8] overflow-hidden border border-black/[0.08] rounded-lg hover:opacity-90 transition-opacity"
                                     >
                                         <img
                                             src={m.url}
@@ -386,18 +474,38 @@ function ReviewModal({ app, onClose, onDecide }) {
                         app.decision === "pending" && (
                             <div className="sticky bottom-4 flex gap-3 justify-end mt-8 pt-4 border-t border-black/[0.08]">
                                 <button
-                                    onClick={() => onDecide("approved")}
+                                    onClick={() => handleDecide("approved")}
+                                    disabled={decisionLoading}
                                     data-testid="review-approve-btn"
-                                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-black/5 border border-black/[0.08] rounded-lg text-sm font-medium text-black/80 hover:bg-black/10 transition-colors duration-150"
+                                    className={`inline-flex items-center gap-2 px-5 py-2.5 bg-black/5 border border-black/[0.08] rounded-lg text-sm font-medium text-black/80 transition-colors duration-150 ${
+                                        decisionLoading
+                                            ? "opacity-50 cursor-not-allowed"
+                                            : "hover:bg-black/10"
+                                    }`}
                                 >
-                                    <Check className="w-3.5 h-3.5" /> Approve
+                                    {decisionLoading === "approved" ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                        <Check className="w-3.5 h-3.5" />
+                                    )}
+                                    Approve
                                 </button>
                                 <button
-                                    onClick={() => onDecide("rejected")}
+                                    onClick={() => handleDecide("rejected")}
+                                    disabled={decisionLoading}
                                     data-testid="review-reject-btn"
-                                    className="inline-flex items-center gap-2 px-5 py-2.5 border border-red-500/30 rounded-lg text-sm font-medium text-red-600/80 hover:bg-red-50 hover:text-red-700 transition-colors duration-150"
+                                    className={`inline-flex items-center gap-2 px-5 py-2.5 border border-red-500/30 rounded-lg text-sm font-medium text-red-600/80 transition-colors duration-150 ${
+                                        decisionLoading
+                                            ? "opacity-50 cursor-not-allowed"
+                                            : "hover:bg-red-50 hover:text-red-700"
+                                    }`}
                                 >
-                                    <XCircle className="w-3.5 h-3.5" /> Reject
+                                    {decisionLoading === "rejected" ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                        <XCircle className="w-3.5 h-3.5" />
+                                    )}
+                                    Reject
                                 </button>
                             </div>
                         )}

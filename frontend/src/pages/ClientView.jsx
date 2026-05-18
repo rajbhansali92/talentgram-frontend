@@ -97,6 +97,67 @@ function formatErrorMessage(error) {
     return "Failed to continue. Please try again.";
 }
 
+function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, vis }) {
+    const tProj = (talent.project_id && projectShootDates.find(p => p.project_id === talent.project_id)) || projectShootDates[0] || null;
+    const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
+    const showAvail = vis.availability !== false && ((talent.availability && talent.availability.status) || (tProj && tProj.shoot_dates));
+    const showBudget = vis.budget && (talent.budget?.status || (tProjBudget && (tProjBudget.lines || []).length));
+    
+    if (!showAvail && !showBudget && !talent.competitive_brand) return null;
+    
+    return (
+        <div className="mb-8 bg-[#FCFBF8] p-5 space-y-4 rounded-xl shadow-sm">
+            {showAvail && (
+                <div data-testid="client-availability">
+                    <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Availability</p>
+                    {tProj?.shoot_dates && (
+                        <p className="text-sm text-[#4A4A4A] mb-2" data-testid="client-shoot-dates">{tProj.shoot_dates}</p>
+                    )}
+                    {(() => {
+                        const lbl = availabilityLabel(talent.availability);
+                        if (!lbl) return null;
+                        const tone = lbl === "Available" ? "bg-[#5A7D5A]/8 text-[#5A7D5A]" : lbl === "Not Available" ? "bg-[#9E4A4A]/8 text-[#9E4A4A]" : "bg-[#B89B5E]/8 text-[#B89B5E]";
+                        return (
+                            <p className="text-sm">
+                                <span className="text-[#8A8A8A] mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">Status</span>
+                                <span className={`inline-block px-2 py-0.5 mr-2 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full ${tone}`} data-testid="client-availability-status">{lbl}</span>
+                                {talent.availability?.note && <span className="text-[#4A4A4A]">{talent.availability.note}</span>}
+                            </p>
+                        );
+                    })()}
+                </div>
+            )}
+            {showBudget && (
+                <div data-testid="client-budget">
+                    <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Budget</p>
+                    {(() => {
+                        if (talent.budget?.status === "custom" && (talent.budget?.value || "").trim()) {
+                            return <p className="text-sm text-[#111111]">{talent.budget.value} <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-black/4 text-[#8A8A8A]">Counter-offer</span></p>;
+                        }
+                        const lines = (tProjBudget?.lines || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
+                        if (talent.budget?.status === "accept" && lines.length) {
+                            return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln, i) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4" data-testid={`client-budget-line-${i}`}><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
+                        }
+                        if (talent.budget?.status === "accept" && !lines.length) {
+                            return <p className="text-sm"><span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A]">Agreed</span></p>;
+                        }
+                        if (lines.length) {
+                            return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4"><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
+                        }
+                        return null;
+                    })()}
+                </div>
+            )}
+            {talent.competitive_brand && (
+                <div data-testid="client-competitive-brand">
+                    <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Competitive Brand</p>
+                    <p className="text-sm text-[#111111]">{talent.competitive_brand}</p>
+                </div>
+            )}
+        </div>
+    );
+}
+
 export default function ClientView() {
     const { slug } = useParams();
     const [identified, setIdentified] = useState(!!getViewerToken(slug));
@@ -109,6 +170,32 @@ export default function ClientView() {
     const [commentDrafts, setCommentDrafts] = useState({});
     const [seenIds, setSeenIds] = useState(new Set());
     const [activeTab, setActiveTab] = useState("all");
+
+    const updateLocalAction = useCallback((talentId, action, comment) => {
+        setData(prev => {
+            if (!prev) return prev;
+            const actions = prev.actions || [];
+            const existingActionIndex = actions.findIndex(a => a.talent_id === talentId);
+            let newActions;
+            if (existingActionIndex >= 0) {
+                newActions = [...actions];
+                if (action === null) {
+                    newActions.splice(existingActionIndex, 1);
+                } else {
+                    newActions[existingActionIndex] = {
+                        ...newActions[existingActionIndex],
+                        action,
+                        comment: comment !== undefined ? comment : newActions[existingActionIndex].comment
+                    };
+                }
+            } else if (action !== null) {
+                newActions = [...actions, { talent_id: talentId, action, comment: comment || "" }];
+            } else {
+                newActions = actions;
+            }
+            return { ...prev, actions: newActions };
+        });
+    }, []);
 
     const loadData = useCallback(async () => {
         try {
@@ -177,6 +264,7 @@ export default function ClientView() {
     }, [data]);
 
     const setAction = useCallback(async (talentId, action) => {
+        updateLocalAction(talentId, action);
         try {
             await axios.post(
                 `${API}/public/links/${slug}/action`,
@@ -187,17 +275,18 @@ export default function ClientView() {
                     },
                 },
             );
-            await loadData();
         } catch {
+            updateLocalAction(talentId, viewerActions[talentId]?.action);
             toast.error("Action failed");
         }
-    }, [slug, loadData]);
+    }, [slug, updateLocalAction, viewerActions]);
 
     const saveComment = useCallback(async (talentId) => {
         const text = commentDrafts[talentId];
         if (text === undefined) return;
+        const existing = viewerActions[talentId];
+        updateLocalAction(talentId, existing?.action || null, text);
         try {
-            const existing = viewerActions[talentId];
             await axios.post(
                 `${API}/public/links/${slug}/action`,
                 {
@@ -212,11 +301,11 @@ export default function ClientView() {
                 },
             );
             toast.success("Comment saved");
-            await loadData();
         } catch {
+            updateLocalAction(talentId, existing?.action, existing?.comment);
             toast.error("Failed to save");
         }
-    }, [commentDrafts, viewerActions, slug, loadData]);
+    }, [commentDrafts, viewerActions, slug, updateLocalAction]);
 
     const logDownload = useCallback(async (talentId, mediaId) => {
         try {
@@ -332,8 +421,15 @@ export default function ClientView() {
 
     if (!data) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-white text-[#8A8A8A]">
-                <Loader2 className="w-6 h-6 animate-spin" />
+            <div className="min-h-screen flex items-center justify-center bg-white">
+                <div className="animate-pulse space-y-4 w-full max-w-md px-6">
+                    <div className="h-4 bg-black/[0.04] rounded w-3/4 mx-auto"></div>
+                    <div className="h-32 bg-black/[0.04] rounded-xl"></div>
+                    <div className="space-y-2">
+                        <div className="h-3 bg-black/[0.04] rounded"></div>
+                        <div className="h-3 bg-black/[0.04] rounded w-5/6"></div>
+                    </div>
+                </div>
             </div>
         );
     }
@@ -366,7 +462,7 @@ export default function ClientView() {
 
     return (
         <div className="min-h-screen bg-white text-[#111111]" data-testid="client-view-page">
-            <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-black/[0.04]">
+            <header className="sticky top-0 z-30 bg-white/95 border-b border-black/[0.04]">
                 <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-4 md:py-6">
                     <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 flex-1">
@@ -440,7 +536,7 @@ export default function ClientView() {
                                 type="button"
                                 onClick={() => setActiveTab(tab.key)}
                                 data-testid={`client-tab-${tab.key}`}
-                                className={`inline-flex items-center gap-2 px-4 md:px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-all duration-150 border shrink-0 active:scale-[0.97] ${
+                                className={`inline-flex items-center gap-2 px-4 md:px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
                                     active
                                         ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
                                         : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
@@ -554,10 +650,10 @@ export default function ClientView() {
                         ""
                     }
                     setCommentDraft={(text) =>
-                        setCommentDrafts({
-                            ...commentDrafts,
+                        setCommentDrafts(prev => ({
+                            ...prev,
                             [activeTalent.id]: text,
-                        })
+                        }))
                     }
                     saveComment={() => saveComment(activeTalent.id)}
                     logDownload={logDownload}
@@ -604,8 +700,24 @@ function TalentDetail({
     const [idx, setIdx] = useState(0);
     const [busyAction, setBusyAction] = useState(null);
     const overlayRef = useRef(null);
-    const rightPanelRef = useRef(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
+
+    useEffect(() => {
+        document.body.style.overflow = "hidden";
+        setIsModalOpen(true);
+        
+        const handleEscape = (e) => {
+            if (e.key === "Escape") {
+                onClose();
+            }
+        };
+        document.addEventListener("keydown", handleEscape);
+        
+        return () => {
+            document.body.style.overflow = "";
+            document.removeEventListener("keydown", handleEscape);
+        };
+    }, [onClose]);
 
     const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
     const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
@@ -631,11 +743,6 @@ function TalentDetail({
             onClose();
         }
     }, [hasNextTalent, onNavigate, list, currentTalentIdx, onClose]);
-
-    useEffect(() => {
-        // Trigger entrance animation
-        setIsModalOpen(true);
-    }, []);
 
     useEffect(() => {
         const node = overlayRef.current;
@@ -687,7 +794,9 @@ function TalentDetail({
     const quickAction = useCallback(async (key) => {
         if (busyAction) return;
         setBusyAction(key);
-        try { navigator.vibrate?.(10); } catch (e) { console.error(e); }
+        if (typeof navigator !== "undefined" && navigator.vibrate) {
+            try { navigator.vibrate?.(10); } catch (e) { console.error(e); }
+        }
         try {
             await setAction(talent.id, key);
             setTimeout(() => {
@@ -714,7 +823,7 @@ function TalentDetail({
     return (
         <div
             ref={overlayRef}
-            className={`fixed inset-0 z-50 bg-white overflow-hidden transition-all duration-300 ease-out ${isModalOpen ? "opacity-100" : "opacity-0"}`}
+            className={`fixed inset-0 z-50 bg-white overflow-hidden transition-opacity duration-300 ease-out ${isModalOpen ? "opacity-100" : "opacity-0"}`}
             data-testid="talent-detail-overlay"
         >
             <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
@@ -772,17 +881,17 @@ function TalentDetail({
                                         <>
                                             <button
                                                 onClick={prev}
-                                                className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
+                                                className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm"
                                             >
                                                 <ChevronLeft className="w-4 h-4" />
                                             </button>
                                             <button
                                                 onClick={next}
-                                                className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm"
                                             >
                                                 <ChevronRight className="w-4 h-4" />
                                             </button>
-                                            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-white/90 backdrop-blur-sm border border-black/[0.04] text-[10px] font-mono tracking-[0.08em] rounded-full text-[#5C5C5C] shadow-sm">
+                                            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-3 py-1.5 bg-white/90 border border-black/[0.04] text-[10px] font-mono tracking-[0.08em] rounded-full text-[#5C5C5C] shadow-sm">
                                                 {idx + 1} / {images.length}
                                             </div>
                                         </>
@@ -790,7 +899,7 @@ function TalentDetail({
                                     {vis.download && (
                                         <button
                                             onClick={() => download(images[idx])}
-                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 backdrop-blur-sm border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-all duration-150 shadow-sm"
+                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm"
                                             data-testid="detail-download-btn"
                                         >
                                             <Download className="w-4 h-4" />
@@ -809,7 +918,7 @@ function TalentDetail({
                                         <button
                                             key={m.id}
                                             onClick={() => setIdx(i)}
-                                            className={`shrink-0 w-20 h-24 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-all duration-150`}
+                                            className={`shrink-0 w-20 h-24 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
                                         >
                                             <img
                                                 src={IMAGE_URL(m)}
@@ -824,14 +933,11 @@ function TalentDetail({
                     </div>
 
                     {/* Right Column - Details (scrollable with soft shadow) */}
-                    <div 
-                        ref={rightPanelRef} 
-                        className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)]"
-                    >
+                    <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)]">
                         <div className="p-6 md:p-8">
                             <button
                                 onClick={onClose}
-                                className="hidden md:flex absolute top-5 right-5 z-50 w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full items-center justify-center bg-white/90 backdrop-blur-sm transition-all duration-150 shadow-sm"
+                                className="hidden md:flex absolute top-5 right-5 z-50 w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full items-center justify-center bg-white/90 transition-colors duration-150 shadow-sm"
                                 data-testid="detail-close-btn"
                             >
                                 <X className="w-4 h-4" />
@@ -860,64 +966,12 @@ function TalentDetail({
                                 )}
                             </div>
 
-                            {(() => {
-                                const tProj = (talent.project_id && projectShootDates.find(p => p.project_id === talent.project_id)) || projectShootDates[0] || null;
-                                const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
-                                const showAvail = vis.availability !== false && ((talent.availability && talent.availability.status) || (tProj && tProj.shoot_dates));
-                                const showBudget = vis.budget && (talent.budget?.status || (tProjBudget && (tProjBudget.lines || []).length));
-                                if (!showAvail && !showBudget && !talent.competitive_brand) return null;
-                                return (
-                                    <div className="mb-8 bg-[#FCFBF8] p-5 space-y-4 rounded-xl shadow-sm">
-                                        {showAvail && (
-                                            <div data-testid="client-availability">
-                                                <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Availability</p>
-                                                {tProj?.shoot_dates && (
-                                                    <p className="text-sm text-[#4A4A4A] mb-2" data-testid="client-shoot-dates">{tProj.shoot_dates}</p>
-                                                )}
-                                                {(() => {
-                                                    const lbl = availabilityLabel(talent.availability);
-                                                    if (!lbl) return null;
-                                                    const tone = lbl === "Available" ? "bg-[#5A7D5A]/8 text-[#5A7D5A]" : lbl === "Not Available" ? "bg-[#9E4A4A]/8 text-[#9E4A4A]" : "bg-[#B89B5E]/8 text-[#B89B5E]";
-                                                    return (
-                                                        <p className="text-sm">
-                                                            <span className="text-[#8A8A8A] mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">Status</span>
-                                                            <span className={`inline-block px-2 py-0.5 mr-2 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full ${tone}`} data-testid="client-availability-status">{lbl}</span>
-                                                            {talent.availability?.note && <span className="text-[#4A4A4A]">{talent.availability.note}</span>}
-                                                        </p>
-                                                    );
-                                                })()}
-                                            </div>
-                                        )}
-                                        {showBudget && (
-                                            <div data-testid="client-budget">
-                                                <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Budget</p>
-                                                {(() => {
-                                                    if (talent.budget?.status === "custom" && (talent.budget?.value || "").trim()) {
-                                                        return <p className="text-sm text-[#111111]">{talent.budget.value} <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-black/4 text-[#8A8A8A]">Counter-offer</span></p>;
-                                                    }
-                                                    const lines = (tProjBudget?.lines || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
-                                                    if (talent.budget?.status === "accept" && lines.length) {
-                                                        return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln, i) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4" data-testid={`client-budget-line-${i}`}><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
-                                                    }
-                                                    if (talent.budget?.status === "accept" && !lines.length) {
-                                                        return <p className="text-sm"><span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A]">Agreed</span></p>;
-                                                    }
-                                                    if (lines.length) {
-                                                        return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4"><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
-                                                    }
-                                                    return null;
-                                                })()}
-                                            </div>
-                                        )}
-                                        {talent.competitive_brand && (
-                                            <div data-testid="client-competitive-brand">
-                                                <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Competitive Brand</p>
-                                                <p className="text-sm text-[#111111]">{talent.competitive_brand}</p>
-                                            </div>
-                                        )}
-                                    </div>
-                                );
-                            })()}
+                            <AvailabilityBudgetSection 
+                                talent={talent}
+                                projectShootDates={projectShootDates}
+                                projectBudget={projectBudget}
+                                vis={vis}
+                            />
 
                             {(talent.custom_answers || []).length > 0 && (
                                 <div className="mb-8 bg-[#FCFBF8] p-5 space-y-3 rounded-xl shadow-sm">
@@ -933,7 +987,7 @@ function TalentDetail({
 
                             <div className="flex gap-3 mb-8 flex-wrap">
                                 {vis.instagram && talent.instagram_handle && (
-                                    <a href={`https://instagram.com/${talent.instagram_handle.replace("@", "")}`} target="_blank" rel="noopener noreferrer" data-testid="client-instagram-link" className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.06] hover:border-black/20 rounded-full text-xs transition-all duration-150 text-[#111111] bg-white/50">
+                                    <a href={`https://instagram.com/${talent.instagram_handle.replace("@", "")}`} target="_blank" rel="noopener noreferrer" data-testid="client-instagram-link" className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.06] hover:border-black/20 rounded-full text-xs transition-colors duration-150 text-[#111111] bg-white/50">
                                         <Instagram className="w-3.5 h-3.5" /> {talent.instagram_handle}
                                     </a>
                                 )}
@@ -959,7 +1013,7 @@ function TalentDetail({
                                     {ACTIONS.map((a) => {
                                         const active = viewerAction?.action === a.key;
                                         return (
-                                            <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm transition-all duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"}`}>
+                                            <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm transition-colors duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"}`}>
                                                 <a.icon className="w-4 h-4" style={{ color: active ? "#fff" : a.color }} />
                                                 {a.label}
                                             </button>
@@ -972,8 +1026,8 @@ function TalentDetail({
                                         <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
                                         <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
                                     </div>
-                                    <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-all duration-150 text-[#111111] placeholder:text-black/30" />
-                                    <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-all duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                    <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
+                                    <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
                                 </div>
                             </div>
                         </div>
@@ -982,17 +1036,17 @@ function TalentDetail({
             </div>
 
             {/* Mobile bottom bar */}
-            <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-black/[0.04] px-4 py-3" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
+            <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 border-t border-black/[0.04] px-4 py-3" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
                 <div className="grid grid-cols-3 gap-2">
-                    <button type="button" onClick={() => quickAction("shortlist")} disabled={Boolean(busyAction)} data-testid="quick-shortlist-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}>
+                    <button type="button" onClick={() => quickAction("shortlist")} disabled={Boolean(busyAction)} data-testid="quick-shortlist-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}>
                         {busyAction === "shortlist" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />}
                         Shortlist
                     </button>
-                    <button type="button" onClick={() => quickAction("not_sure")} disabled={Boolean(busyAction)} data-testid="quick-hold-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#4A4A4A] hover:border-black/20"}`}>
+                    <button type="button" onClick={() => quickAction("not_sure")} disabled={Boolean(busyAction)} data-testid="quick-hold-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#4A4A4A] hover:border-black/20"}`}>
                         {busyAction === "not_sure" ? <Loader2 className="w-4 h-4 animate-spin" /> : <HelpCircle className="w-4 h-4" />}
                         Hold
                     </button>
-                    <button type="button" onClick={() => quickAction("not_for_this")} disabled={Boolean(busyAction)} data-testid="quick-reject-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-all duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#4A4A4A] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}>
+                    <button type="button" onClick={() => quickAction("not_for_this")} disabled={Boolean(busyAction)} data-testid="quick-reject-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#4A4A4A] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}>
                         {busyAction === "not_for_this" ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
                         Reject
                     </button>
@@ -1057,7 +1111,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
             data-new={isNew ? "true" : "false"}
             className="group relative text-left"
         >
-            <div className="aspect-[3/4] bg-white overflow-hidden rounded-2xl group-hover:shadow-md transition-all duration-300 relative shadow-sm">
+            <div className="aspect-[3/4] bg-white overflow-hidden rounded-2xl group-hover:shadow-md transition-shadow duration-300 relative shadow-sm">
                 {cover ? (
                     <img
                         src={IMAGE_URL(cover)}
@@ -1106,7 +1160,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                         </span>
                     )}
                     {action && action !== "shortlist" && (
-                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-white/95 backdrop-blur-sm text-[#111111] text-[10px] tracking-[0.08em] uppercase rounded-full border border-black/[0.06] shadow-sm">
+                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-white/95 text-[#111111] text-[10px] tracking-[0.08em] uppercase rounded-full border border-black/[0.06] shadow-sm">
                             {ACTIONS.find((a) => a.key === action)?.label}
                         </span>
                     )}
@@ -1114,7 +1168,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
 
                 {seen && (
                     <span
-                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-white/95 backdrop-blur-sm border border-black/[0.06] text-[#8A8A8A] text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-white/95 border border-black/[0.06] text-[#8A8A8A] text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
                         data-testid={`badge-seen-${talent.id}`}
                     >
                         <Eye className="w-3 h-3" />

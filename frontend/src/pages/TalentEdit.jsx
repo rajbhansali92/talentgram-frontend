@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
@@ -17,7 +17,6 @@ import {
     ArrowLeft,
     Upload,
     Trash2,
-    Plus,
     Star,
     Loader2,
     X,
@@ -45,6 +44,11 @@ const emptyTalent = {
     bio: "",
     work_links: [],
 };
+
+// ISSUE 2: File validation constants
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/jpg"];
+const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
 
 function calcAge(dob) {
     if (!dob) return null;
@@ -80,16 +84,30 @@ export default function TalentEdit() {
     const nav = useNavigate();
     const isEdit = Boolean(id);
     const isAdminRole = isAdmin();
+    const [loading, setLoading] = useState(isEdit); // ISSUE 1: Fixed loading state
     const [talent, setTalent] = useState(emptyTalent);
     const [workInput, setWorkInput] = useState("");
     const [saving, setSaving] = useState(false);
-    const [uploading, setUploading] = useState(null); // category string
-    const fileRefs = {
-        indian: useRef(),
-        western: useRef(),
-        portfolio: useRef(),
-        video: useRef(),
+    const [uploading, setUploading] = useState(null);
+    const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+    const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
+    const [mediaToRemove, setMediaToRemove] = useState(null);
+    
+    // File refs
+    const fileRefs = useRef({
+        indian: null,
+        western: null,
+        portfolio: null,
+        video: null,
+    });
+    
+    const setFileRef = (key) => (el) => {
+        fileRefs.current[key] = el;
     };
+
+    const updateTalent = useCallback((patch) => {
+        setTalent(prev => ({ ...prev, ...patch }));
+    }, []);
 
     useEffect(() => {
         if (!isEdit) return;
@@ -99,6 +117,8 @@ export default function TalentEdit() {
                 setTalent({ ...emptyTalent, ...data });
             } catch {
                 toast.error("Failed to load talent");
+            } finally {
+                setLoading(false); // ISSUE 1: Set loading false after fetch
             }
         })();
     }, [id, isEdit]);
@@ -136,20 +156,20 @@ export default function TalentEdit() {
         [talent.dob, talent.age],
     );
 
-    const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-
     const deleteTalent = async () => {
         if (!isEdit) return;
         try {
             const res = await adminApi.delete(`/talents/${id}`);
-             
-            console.info("[delete talent]", id, res?.data);
+            if (process.env.NODE_ENV === "development") {
+                console.info("[delete talent]", id, res?.data);
+            }
             toast.success("Talent deleted");
             setConfirmDeleteOpen(false);
             nav("/admin/talents");
         } catch (err) {
-             
-            console.error("[delete talent] failed", err?.response?.data || err);
+            if (process.env.NODE_ENV === "development") {
+                console.error("[delete talent] failed", err?.response?.data || err);
+            }
             toast.error(
                 err?.response?.data?.detail ||
                     err?.message ||
@@ -159,27 +179,66 @@ export default function TalentEdit() {
         }
     };
 
+    // ISSUE 2: File validation function
+    const validateFile = (file, category) => {
+        // Check file size
+        if (file.size > MAX_FILE_SIZE) {
+            toast.error(`${file.name} is too large. Max size is 25MB`);
+            return false;
+        }
+        
+        // Check file type based on category
+        const isVideo = category === "video";
+        const allowedTypes = isVideo ? ALLOWED_VIDEO_TYPES : ALLOWED_IMAGE_TYPES;
+        
+        if (!allowedTypes.includes(file.type)) {
+            const allowedExtensions = isVideo ? "MP4, MOV, WEBM" : "JPEG, PNG, WEBP";
+            toast.error(`${file.name} has invalid format. Allowed: ${allowedExtensions}`);
+            return false;
+        }
+        
+        return true;
+    };
+
     const uploadFiles = async (files, category) => {
         if (!isEdit) {
             toast.error("Save talent first before uploading media");
             return;
         }
+        
+        // ISSUE 2: Validate all files first
+        const validFiles = [];
+        for (const file of files) {
+            if (validateFile(file, category)) {
+                validFiles.push(file);
+            }
+        }
+        
+        if (validFiles.length === 0) {
+            toast.error("No valid files to upload");
+            return;
+        }
+        
         setUploading(category);
         try {
-            for (const file of files) {
+            const uploadPromises = validFiles.map(async (file) => {
                 const fd = new FormData();
                 fd.append("file", file);
                 fd.append("category", category);
-                const { data } = await adminApi.post(
-                    `/talents/${id}/media`,
-                    fd,
-                    {
-                        headers: { "Content-Type": "multipart/form-data" },
-                    },
-                );
-                setTalent(data);
-            }
-            toast.success(`${files.length} upload(s) added`);
+                const { data } = await adminApi.post(`/talents/${id}/media`, fd, {
+                    headers: { "Content-Type": "multipart/form-data" },
+                });
+                return data;
+            });
+            
+            const results = await Promise.all(uploadPromises);
+            
+            const newMedia = results.flatMap(result => result.media || []);
+            updateTalent({ 
+                media: [...(talent.media || []), ...newMedia]
+            });
+            
+            toast.success(`${validFiles.length} upload(s) added`);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Upload failed");
         } finally {
@@ -187,31 +246,79 @@ export default function TalentEdit() {
         }
     };
 
-    const removeMedia = async (mid) => {
-        if (!window.confirm("Remove this media?")) return;
-        await adminApi.delete(`/talents/${id}/media/${mid}`);
-        const { data } = await adminApi.get(`/talents/${id}`);
-        setTalent(data);
+    const removeMedia = async () => {
+        if (!mediaToRemove) return;
+        
+        try {
+            await adminApi.delete(`/talents/${id}/media/${mediaToRemove}`);
+            
+            updateTalent({
+                media: (talent.media || []).filter(m => m.id !== mediaToRemove),
+                cover_media_id: talent.cover_media_id === mediaToRemove ? null : talent.cover_media_id
+            });
+            
+            toast.success("Media removed");
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Remove failed");
+        } finally {
+            setConfirmRemoveOpen(false);
+            setMediaToRemove(null);
+        }
     };
 
     const setCover = async (mid) => {
-        await adminApi.post(`/talents/${id}/cover/${mid}`);
-        const { data } = await adminApi.get(`/talents/${id}`);
-        setTalent(data);
-        toast.success("Cover updated");
+        try {
+            await adminApi.post(`/talents/${id}/cover/${mid}`);
+            updateTalent({ cover_media_id: mid });
+            toast.success("Cover updated");
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to set cover");
+        }
     };
 
     const addWorkLink = () => {
         if (!workInput.trim()) return;
-        setTalent({
-            ...talent,
-            work_links: [...(talent.work_links || []), workInput.trim()],
+        updateTalent({
+            work_links: [...(talent.work_links || []), workInput.trim()]
         });
         setWorkInput("");
     };
 
     const mediaBy = (cat) =>
         (talent.media || []).filter((m) => m.category === cat);
+
+    // Unsaved changes warning
+    useEffect(() => {
+        if (!isEdit || loading) return;
+        
+        const handleBeforeUnload = (e) => {
+            const hasChanges = JSON.stringify(talent) !== JSON.stringify(emptyTalent);
+            if (hasChanges) {
+                e.preventDefault();
+                e.returnValue = "You have unsaved changes. Are you sure you want to leave?";
+                return e.returnValue;
+            }
+        };
+        
+        window.addEventListener("beforeunload", handleBeforeUnload);
+        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+    }, [talent, isEdit, loading]);
+
+    // ISSUE 1: Fixed loading skeleton
+    if (loading) {
+        return (
+            <div className="p-6 md:p-10 max-w-7xl mx-auto">
+                <div className="animate-pulse">
+                    <div className="h-8 bg-black/5 rounded w-32 mb-6"></div>
+                    <div className="h-12 bg-black/5 rounded w-64 mb-8"></div>
+                    <div className="space-y-4">
+                        <div className="h-64 bg-black/5 rounded-xl"></div>
+                        <div className="h-64 bg-black/5 rounded-xl"></div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div
@@ -220,7 +327,7 @@ export default function TalentEdit() {
         >
             <Link
                 to="/admin/talents"
-                className="inline-flex items-center gap-2 text-xs text-black/45 hover:text-black/80 mb-6"
+                className="inline-flex items-center gap-2 text-xs text-black/45 hover:text-black/80 mb-6 transition-colors"
             >
                 <ArrowLeft className="w-3 h-3" /> Back to roster
             </Link>
@@ -239,17 +346,16 @@ export default function TalentEdit() {
                         <button
                             onClick={() => setConfirmDeleteOpen(true)}
                             data-testid="delete-talent-btn"
-                            className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-md text-xs transition-all"
+                            className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-md text-xs transition-colors"
                         >
-                            <Trash2 className="w-3 h-3" strokeWidth={1.5} />{" "}
-                            Delete
+                            <Trash2 className="w-3 h-3" strokeWidth={1.5} /> Delete
                         </button>
                     )}
                     <button
                         onClick={save}
                         disabled={saving}
                         data-testid="save-talent-btn"
-                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-all"
+                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors"
                     >
                         {saving && <Loader2 className="w-3 h-3 animate-spin" />}{" "}
                         {isEdit ? "Save changes" : "Create talent"}
@@ -264,13 +370,13 @@ export default function TalentEdit() {
                     <Field
                         label="Full Name"
                         value={talent.name}
-                        onChange={(v) => setTalent({ ...talent, name: v })}
+                        onChange={(v) => updateTalent({ name: v })}
                     />
                     <Field
                         label="Email"
                         type="email"
                         value={talent.email}
-                        onChange={(v) => setTalent({ ...talent, email: v })}
+                        onChange={(v) => updateTalent({ email: v })}
                         data-testid="talent-email-input"
                         placeholder="optional"
                     />
@@ -278,12 +384,11 @@ export default function TalentEdit() {
                         label="Phone"
                         type="tel"
                         value={talent.phone}
-                        onChange={(v) => setTalent({ ...talent, phone: v })}
+                        onChange={(v) => updateTalent({ phone: v })}
                         data-testid="talent-phone-input"
                         placeholder="optional"
                     />
 
-                    {/* DOB + auto Age (admin-only) */}
                     <label className="block" data-testid="field-dob">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Date of Birth
@@ -291,9 +396,7 @@ export default function TalentEdit() {
                         <input
                             type="date"
                             value={talent.dob || ""}
-                            onChange={(e) =>
-                                setTalent({ ...talent, dob: e.target.value })
-                            }
+                            onChange={(e) => updateTalent({ dob: e.target.value })}
                             max={new Date().toISOString().split("T")[0]}
                             data-testid="dob-input"
                             className="mt-2 w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2.5 text-sm text-black/85"
@@ -318,7 +421,6 @@ export default function TalentEdit() {
                         </div>
                     </div>
 
-                    {/* Gender pills — canonical 4-value list (shared schema) */}
                     <div data-testid="field-gender">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Gender
@@ -331,13 +433,12 @@ export default function TalentEdit() {
                                         key={g.key}
                                         type="button"
                                         onClick={() =>
-                                            setTalent({
-                                                ...talent,
+                                            updateTalent({
                                                 gender: active ? "" : g.key,
                                             })
                                         }
                                         data-testid={`gender-${g.key}-btn`}
-                                        className={`px-3 py-2.5 text-sm rounded-full border transition-all ${
+                                        className={`px-3 py-2.5 text-sm rounded-full border transition-colors ${
                                             active
                                                 ? "bg-black text-white border-black"
                                                 : "border-black/[0.15] hover:border-black/[0.30] text-black/70 hover:text-black"
@@ -350,7 +451,6 @@ export default function TalentEdit() {
                         </div>
                     </div>
 
-                    {/* Height dropdown */}
                     <div data-testid="field-height">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Height
@@ -358,9 +458,7 @@ export default function TalentEdit() {
                         <div className="mt-2">
                             <Select
                                 value={talent.height || ""}
-                                onValueChange={(v) =>
-                                    setTalent({ ...talent, height: v })
-                                }
+                                onValueChange={(v) => updateTalent({ height: v })}
                             >
                                 <SelectTrigger
                                     data-testid="height-select-trigger"
@@ -387,7 +485,7 @@ export default function TalentEdit() {
                     <Field
                         label="Location"
                         value={talent.location}
-                        onChange={(v) => setTalent({ ...talent, location: v })}
+                        onChange={(v) => updateTalent({ location: v })}
                     />
                     <div data-testid="field-ethnicity">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
@@ -396,9 +494,7 @@ export default function TalentEdit() {
                         <div className="mt-2">
                             <Select
                                 value={talent.ethnicity || ""}
-                                onValueChange={(v) =>
-                                    setTalent({ ...talent, ethnicity: v })
-                                }
+                                onValueChange={(v) => updateTalent({ ethnicity: v })}
                             >
                                 <SelectTrigger
                                     data-testid="ethnicity-select-trigger"
@@ -424,9 +520,7 @@ export default function TalentEdit() {
                     <Field
                         label="Instagram Handle"
                         value={talent.instagram_handle}
-                        onChange={(v) =>
-                            setTalent({ ...talent, instagram_handle: v })
-                        }
+                        onChange={(v) => updateTalent({ instagram_handle: v })}
                         placeholder="@username"
                     />
                     <div data-testid="field-followers">
@@ -436,12 +530,7 @@ export default function TalentEdit() {
                         <div className="mt-2">
                             <Select
                                 value={talent.instagram_followers || ""}
-                                onValueChange={(v) =>
-                                    setTalent({
-                                        ...talent,
-                                        instagram_followers: v,
-                                    })
-                                }
+                                onValueChange={(v) => updateTalent({ instagram_followers: v })}
                             >
                                 <SelectTrigger
                                     data-testid="followers-select-trigger"
@@ -481,11 +570,9 @@ export default function TalentEdit() {
                     </span>
                     <textarea
                         value={talent.bio || ""}
-                        onChange={(e) =>
-                            setTalent({ ...talent, bio: e.target.value })
-                        }
+                        onChange={(e) => updateTalent({ bio: e.target.value })}
                         rows={3}
-                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
+                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl resize-none"
                     />
                 </div>
                 <div className="mt-6">
@@ -500,15 +587,11 @@ export default function TalentEdit() {
                                 </span>
                                 <button
                                     onClick={() =>
-                                        setTalent({
-                                            ...talent,
-                                            work_links:
-                                                talent.work_links.filter(
-                                                    (_, j) => j !== i,
-                                                ),
+                                        updateTalent({
+                                            work_links: talent.work_links.filter((_, j) => j !== i),
                                         })
                                     }
-                                    className="text-black/40 hover:text-red-600"
+                                    className="text-black/40 hover:text-red-600 transition-colors"
                                 >
                                     <X className="w-3.5 h-3.5" />
                                 </button>
@@ -524,7 +607,7 @@ export default function TalentEdit() {
                             />
                             <button
                                 onClick={addWorkLink}
-                                className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black"
+                                className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors"
                             >
                                 + Add link
                             </button>
@@ -540,22 +623,26 @@ export default function TalentEdit() {
                         {
                             key: "indian",
                             label: "Indian Look Images",
-                            accept: "image/*",
+                            accept: "image/jpeg,image/png,image/webp,image/jpg",
+                            isVideo: false,
                         },
                         {
                             key: "western",
                             label: "Western Look Images",
-                            accept: "image/*",
+                            accept: "image/jpeg,image/png,image/webp,image/jpg",
+                            isVideo: false,
                         },
                         {
                             key: "portfolio",
                             label: "Additional Portfolio",
-                            accept: "image/*",
+                            accept: "image/jpeg,image/png,image/webp,image/jpg",
+                            isVideo: false,
                         },
                         {
                             key: "video",
                             label: "Introduction Video",
-                            accept: "video/*",
+                            accept: "video/mp4,video/quicktime,video/webm",
+                            isVideo: true,
                         },
                     ].map((cat) => (
                         <section
@@ -566,12 +653,10 @@ export default function TalentEdit() {
                             <div className="flex items-center justify-between mb-6">
                                 <p className="eyebrow">{cat.label}</p>
                                 <button
-                                    onClick={() =>
-                                        fileRefs[cat.key].current?.click()
-                                    }
+                                    onClick={() => fileRefs.current[cat.key]?.click()}
                                     disabled={uploading === cat.key}
                                     data-testid={`upload-${cat.key}-btn`}
-                                    className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-all"
+                                    className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors"
                                 >
                                     {uploading === cat.key ? (
                                         <Loader2 className="w-3 h-3 animate-spin" />
@@ -581,10 +666,10 @@ export default function TalentEdit() {
                                     Upload
                                 </button>
                                 <input
-                                    ref={fileRefs[cat.key]}
+                                    ref={setFileRef(cat.key)}
                                     type="file"
                                     accept={cat.accept}
-                                    multiple={cat.key !== "video"}
+                                    multiple={!cat.isVideo}
                                     className="hidden"
                                     onChange={(e) => {
                                         if (e.target.files?.length)
@@ -617,17 +702,16 @@ export default function TalentEdit() {
                                                 <img
                                                     src={m.url}
                                                     alt=""
+                                                    loading="lazy" // ISSUE 11: Lazy loading
                                                     className="w-full h-full object-cover"
                                                 />
                                             )}
                                             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/40 flex items-center justify-center gap-2">
-                                                {cat.key !== "video" && (
+                                                {!cat.isVideo && (
                                                     <button
-                                                        onClick={() =>
-                                                            setCover(m.id)
-                                                        }
+                                                        onClick={() => setCover(m.id)}
                                                         title="Set cover"
-                                                        className="p-1.5 bg-white/20 hover:bg-white/30 rounded-md"
+                                                        className="p-1.5 bg-white/20 hover:bg-white/30 rounded-md transition-colors"
                                                     >
                                                         <Star
                                                             className={`w-3.5 h-3.5 ${talent.cover_media_id === m.id ? "fill-black text-black" : "text-white"}`}
@@ -635,11 +719,12 @@ export default function TalentEdit() {
                                                     </button>
                                                 )}
                                                 <button
-                                                    onClick={() =>
-                                                        removeMedia(m.id)
-                                                    }
+                                                    onClick={() => {
+                                                        setMediaToRemove(m.id);
+                                                        setConfirmRemoveOpen(true);
+                                                    }}
                                                     title="Delete"
-                                                    className="p-1.5 bg-white/20 hover:bg-red-600/80 rounded-md"
+                                                    className="p-1.5 bg-white/20 hover:bg-red-600/80 rounded-md transition-colors"
                                                 >
                                                     <Trash2 className="w-3.5 h-3.5 text-white" />
                                                 </button>
@@ -663,6 +748,20 @@ export default function TalentEdit() {
                     Save this talent first to start uploading media.
                 </p>
             )}
+            
+            <ConfirmDeleteDialog
+                open={confirmRemoveOpen}
+                title={`Remove this media?`}
+                description="This will permanently delete this media file from the talent's portfolio. This action cannot be undone."
+                confirmLabel="Remove media"
+                typeToConfirm="REMOVE"
+                onCancel={() => {
+                    setConfirmRemoveOpen(false);
+                    setMediaToRemove(null);
+                }}
+                onConfirm={removeMedia}
+            />
+            
             <ConfirmDeleteDialog
                 open={confirmDeleteOpen}
                 title={`Delete "${talent.name || "this talent"}"?`}

@@ -24,7 +24,8 @@ export function usePipelineData(projectId) {
         if (!projectId) return;
         try {
             setError(null);
-            const res = await adminApi.get(`/pipeline/project/${projectId}`);
+            // ✅ FIXED
+            const res = await adminApi.get(`/projects/${projectId}/pipeline`);
             setData(res.data?.data || []);
         } catch (e) {
             console.error("Failed to fetch pipeline:", e);
@@ -42,7 +43,8 @@ export function usePipelineData(projectId) {
         (async () => {
             try {
                 setError(null);
-                const res = await adminApi.get(`/pipeline/project/${projectId}`);
+                // ✅ FIXED
+                const res = await adminApi.get(`/projects/${projectId}/pipeline`);
                 if (!alive) return;
                 setData(res.data?.data || []);
             } catch (e) {

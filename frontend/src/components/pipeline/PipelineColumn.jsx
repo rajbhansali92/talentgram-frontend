@@ -6,7 +6,8 @@ import {
     DEFAULT_ACCENT,
     STAGE_ACCENTS,
     getStageLabel,
-    STAGE_ORDER, // Single source of truth from constants
+    PIPELINE_STAGE_ORDER,
+    EMPTY_STATE_COPY,
 } from "./constants";
 
 // Pure utility functions - moved outside for testability
@@ -39,10 +40,10 @@ const calculateAvgResponseAge = (items) => {
 };
 
 const calculateConversionRate = (stage, stageItemsMap) => {
-    const currentIndex = STAGE_ORDER.indexOf(stage);
+    const currentIndex = PIPELINE_STAGE_ORDER.indexOf(stage);
     if (currentIndex <= 0) return null;
     
-    const previousStage = STAGE_ORDER[currentIndex - 1];
+    const previousStage = PIPELINE_STAGE_ORDER[currentIndex - 1];
     const previousCount = stageItemsMap[previousStage]?.length || 0;
     const currentCount = stageItemsMap[stage]?.length || 0;
     

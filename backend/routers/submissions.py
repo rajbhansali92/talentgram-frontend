@@ -231,6 +231,7 @@ async def submission_update(
 
 @router.post("/public/submissions/{sid}/upload")
 async def submission_upload(
+    request: Request,
     sid: str,
     category: str = Form(...),
     label: Optional[str] = Form(None),
@@ -276,11 +277,35 @@ async def submission_upload(
 
     media_id = str(uuid.uuid4())
     folder = f"{APP_NAME}/submissions/{sid}"
+
+    # P2-E — Reject oversized uploads BEFORE reading the body into RAM.
+    # A 150 MB video read fully into memory per concurrent upload can exhaust
+    # server RAM (Railway 512 MB limit). The Content-Length header is sent by
+    # all modern browsers and mobile apps before the body transfer begins.
+    # If absent we fall through and enforce the cap after read (legacy path).
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    raw_cl = request.headers.get("content-length")
+    if raw_cl is not None:
+        try:
+            declared_bytes = int(raw_cl)
+        except ValueError:
+            declared_bytes = 0
+        if is_video_slot and declared_bytes > MAX_SUBMISSION_VIDEO_BYTES:
+            cap_mb = MAX_SUBMISSION_VIDEO_BYTES // (1024 * 1024)
+            raise HTTPException(
+                413,
+                f"Video is too large. Max {cap_mb} MB — please compress and retry.",
+            )
+        if category in PORTFOLIO_IMAGE_CATEGORIES and declared_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+            cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
+            raise HTTPException(
+                413, f"Image is too large. Max {cap_mb} MB per image."
+            )
+
     data = await file.read()
 
-    # Enforce size caps up front so oversized bodies never make it to storage.
-    # Videos (intro/takes) are capped at 150 MB; images at 25 MB raw.
-    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    # Secondary size check against the actual bytes read (catches missing/spoofed
+    # Content-Length headers — defence in depth, not the primary guard).
     size_bytes = len(data)
     if is_video_slot and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
         mb = size_bytes // (1024 * 1024)
@@ -781,22 +806,36 @@ async def submissions_stats(
     pid: str,
     admin: dict = Depends(current_team_or_admin),
 ):
-    """Filter-chip counts for the project review queue."""
-    base = {"project_id": pid}
-    coll = db.submissions
-    all_total = await coll.count_documents(base)
-    pending = await coll.count_documents({**base, "decision": "pending"})
-    approved = await coll.count_documents({**base, "decision": "approved"})
-    hold = await coll.count_documents({**base, "decision": "hold"})
-    rejected = await coll.count_documents({**base, "decision": "rejected"})
-    updated = await coll.count_documents({**base, "status": "updated"})
+    """Filter-chip counts for the project review queue.
+
+    P1-A: Single $facet aggregation replaces 6 sequential count_documents
+    calls, reducing MongoDB round-trips from 6 to 1 per page load.
+    Compound indexes (project_id, decision) and (project_id, status) make
+    each facet branch index-covered.
+    """
+    pipeline = [
+        {"$match": {"project_id": pid}},
+        {"$facet": {
+            "all":      [{"$count": "n"}],
+            "pending":  [{"$match": {"decision": "pending"}},  {"$count": "n"}],
+            "approved": [{"$match": {"decision": "approved"}}, {"$count": "n"}],
+            "hold":     [{"$match": {"decision": "hold"}},     {"$count": "n"}],
+            "rejected": [{"$match": {"decision": "rejected"}}, {"$count": "n"}],
+            "updated":  [{"$match": {"status": "updated"}},   {"$count": "n"}],
+        }},
+    ]
+    results = await db.submissions.aggregate(pipeline).to_list(1)
+    facets = results[0] if results else {}
+    def _n(key: str) -> int:
+        bucket = facets.get(key) or []
+        return bucket[0]["n"] if bucket else 0
     return {
-        "all": all_total,
-        "pending": pending,
-        "approved": approved,
-        "hold": hold,
-        "rejected": rejected,
-        "updated": updated,
+        "all":      _n("all"),
+        "pending":  _n("pending"),
+        "approved": _n("approved"),
+        "hold":     _n("hold"),
+        "rejected": _n("rejected"),
+        "updated":  _n("updated"),
     }
 
 

@@ -469,9 +469,15 @@ async def seed_admin() -> None:
         # Phase 0: enforce one submission per (project, talent_email).
         ("submissions", [("project_id", 1), ("talent_email", 1)],
          {"unique": True, "name": "submissions_project_email_unique"}),
+        ("submissions", [("project_id", 1), ("decision", 1)],
+         {"name": "submissions_project_decision"}),
+        ("submissions", [("project_id", 1), ("status", 1)],
+         {"name": "submissions_project_status"}),
         # Phase 0: enforce one application per email.
         ("applications", [("talent_email", 1)],
          {"unique": True, "name": "applications_email_unique"}),
+        ("applications", [("decision", 1), ("status", 1)],
+         {"name": "applications_decision_status"}),
         ("links", [("slug", 1)], {"unique": True, "name": "slug_unique"}),
         ("link_views", [("link_id", 1), ("created_at", -1)], {}),
         ("link_actions", [("link_id", 1), ("viewer_email", 1)], {}),

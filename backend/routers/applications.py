@@ -16,7 +16,7 @@ Admin:
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pymongo.errors import DuplicateKeyError
 
 from core import (
@@ -150,6 +150,7 @@ async def update_application(
 
 @router.post("/public/apply/{aid}/upload")
 async def upload_application_media(
+    request: Request,
     aid: str,
     category: str = Form(...),
     file: UploadFile = File(...),
@@ -180,8 +181,33 @@ async def upload_application_media(
 
     media_id = str(uuid.uuid4())
     folder = f"{APP_NAME}/applications/{aid}"
+
+    # P2-E — Reject oversized uploads BEFORE reading the body into RAM.
+    # Mirrors the same guard in submissions.py. Content-Length is sent by
+    # all modern browsers/apps before body transfer begins.
+    is_video = category == "intro_video"
+    is_image = category in ("image", "indian", "western")
+    raw_cl = request.headers.get("content-length")
+    if raw_cl is not None:
+        try:
+            declared_bytes = int(raw_cl)
+        except ValueError:
+            declared_bytes = 0
+        if is_video and declared_bytes > MAX_SUBMISSION_VIDEO_BYTES:
+            cap_mb = MAX_SUBMISSION_VIDEO_BYTES // (1024 * 1024)
+            raise HTTPException(
+                413,
+                f"Video is too large. Max {cap_mb} MB — please compress and retry.",
+            )
+        if is_image and declared_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+            cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
+            raise HTTPException(
+                413, f"Image is too large. Max {cap_mb} MB per image."
+            )
+
     data = await file.read()
 
+    # Secondary check on actual bytes (defence in depth for missing/spoofed headers).
     size_bytes = len(data)
     if category == "intro_video" and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
         mb = size_bytes // (1024 * 1024)
@@ -303,23 +329,32 @@ async def list_applications(
 
 @router.get("/applications/stats")
 async def applications_stats(admin: dict = Depends(current_team_or_admin)):
-    """Lightweight counts for the filter chips. O(N) count_documents calls.
+    """Lightweight counts for the filter chips.
 
-    Returns counts for: all, pending (status=submitted, decision=pending),
-    approved, rejected, drafts.
+    P1-B: Single $facet aggregation replaces 5 sequential count_documents
+    calls, reducing MongoDB round-trips from 5 to 1 per page load.
+    Compound index (status, decision) makes facet branches index-covered.
     """
-    coll = db.applications
-    all_total = await coll.count_documents({})
-    pending = await coll.count_documents({"status": "submitted", "decision": "pending"})
-    approved = await coll.count_documents({"decision": "approved"})
-    rejected = await coll.count_documents({"decision": "rejected"})
-    drafts = await coll.count_documents({"status": "draft"})
+    pipeline = [
+        {"$facet": {
+            "all":      [{"$count": "n"}],
+            "pending":  [{"$match": {"status": "submitted", "decision": "pending"}}, {"$count": "n"}],
+            "approved": [{"$match": {"decision": "approved"}}, {"$count": "n"}],
+            "rejected": [{"$match": {"decision": "rejected"}}, {"$count": "n"}],
+            "drafts":   [{"$match": {"status": "draft"}},    {"$count": "n"}],
+        }},
+    ]
+    results = await db.applications.aggregate(pipeline).to_list(1)
+    facets = results[0] if results else {}
+    def _n(key: str) -> int:
+        bucket = facets.get(key) or []
+        return bucket[0]["n"] if bucket else 0
     return {
-        "all": all_total,
-        "pending": pending,
-        "approved": approved,
-        "rejected": rejected,
-        "drafts": drafts,
+        "all":      _n("all"),
+        "pending":  _n("pending"),
+        "approved": _n("approved"),
+        "rejected": _n("rejected"),
+        "drafts":   _n("drafts"),
     }
 
 

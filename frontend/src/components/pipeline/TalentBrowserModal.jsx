@@ -325,7 +325,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 abortControllerRef.current = null;
             }
         };
-    }, [open, talents.length, loading]);
+    }, [open, talents.length]);
     
     // Reset state when modal opens
     useEffect(() => {

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState, useMemo, useRef } from "react"
 import { useParams } from "react-router-dom";
 import { IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import Logo from "@/components/Logo";
-import axios from "axios";
+import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import {
     Instagram,

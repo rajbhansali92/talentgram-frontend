@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import axios from "axios";
+import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
@@ -2123,6 +2123,28 @@ function PremiumFormField({
     disabled,
     className = "",
 }) {
+    const [localValue, setLocalValue] = useState(value || "");
+
+    // Sync local state when prop value changes externally (e.g. from prefill)
+    useEffect(() => {
+        setLocalValue(value || "");
+    }, [value]);
+
+    // Debounce synchronization to parent state to avoid re-rendering parent tree on every keystroke
+    useEffect(() => {
+        const handler = setTimeout(() => {
+            if (localValue !== (value || "")) {
+                onChange(localValue);
+            }
+        }, 200);
+        return () => clearTimeout(handler);
+    }, [localValue, onChange, value]);
+
+    const handleBlur = (e) => {
+        onChange(localValue);
+        if (onBlur) onBlur(e);
+    };
+
     return (
         <label className={`block ${wide ? "md:col-span-2" : ""}`}>
             <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
@@ -2130,9 +2152,9 @@ function PremiumFormField({
             </span>
             <input
                 type={type}
-                value={value || ""}
-                onChange={(e) => onChange(e.target.value)}
-                onBlur={onBlur}
+                value={localValue}
+                onChange={(e) => setLocalValue(e.target.value)}
+                onBlur={handleBlur}
                 required={required}
                 placeholder={placeholder}
                 max={max}

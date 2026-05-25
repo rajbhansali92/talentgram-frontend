@@ -126,10 +126,10 @@ export default function AdminFeedback() {
             <div className="mb-10 flex items-end justify-between flex-wrap gap-4">
                 <div>
                     <p className="eyebrow mb-3">Moderation Queue</p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight">
+                    <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
                         Client Feedback
                     </h1>
-                    <p className="text-sm text-white/50 mt-3 max-w-xl inline-flex items-center gap-2">
+                    <p className="text-sm text-black/50 mt-3 max-w-xl inline-flex items-center gap-2">
                         <ShieldCheck className="w-4 h-4 text-[#c9a961]" />
                         You are the only relay between client and talent. Approve to
                         share, reject to discard, edit to refine the wording first.
@@ -138,7 +138,7 @@ export default function AdminFeedback() {
             </div>
 
             <div
-                className="mb-6 flex items-center gap-2 flex-wrap border-b border-white/10 pb-3"
+                className="mb-6 flex items-center gap-2 flex-wrap border-b border-black/[0.08] pb-3"
                 data-testid="feedback-filters"
             >
                 {FILTERS.map((f) => {
@@ -149,10 +149,10 @@ export default function AdminFeedback() {
                             type="button"
                             onClick={() => setFilter(f.key)}
                             data-testid={`feedback-filter-${f.key}`}
-                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-all ${
+                            className={`text-[11px] tracking-widest uppercase px-3.5 py-2 rounded-md border transition-all ${
                                 active
-                                    ? "border-white bg-white text-black"
-                                    : "border-white/15 text-white/60 hover:border-white/40 hover:text-white"
+                                    ? "border-black bg-black text-white shadow-sm"
+                                    : "border-black/[0.08] text-black/60 hover:border-black/[0.16] hover:text-black"
                             }`}
                         >
                             {f.label}
@@ -167,12 +167,12 @@ export default function AdminFeedback() {
             </div>
 
             {loading ? (
-                <div className="py-16 text-center text-white/40 text-sm inline-flex items-center gap-2 justify-center w-full">
+                <div className="py-16 text-center text-black/45 text-sm inline-flex items-center gap-2 justify-center w-full">
                     <Loader2 className="w-4 h-4 animate-spin" /> Loading…
                 </div>
             ) : items.length === 0 ? (
                 <div
-                    className="py-16 text-center text-white/40 text-sm border border-white/10 rounded-sm"
+                    className="py-16 text-center text-black/45 text-sm border border-black/[0.08] rounded-xl bg-white shadow-sm"
                     data-testid="feedback-empty"
                 >
                     {filter === "pending"
@@ -213,14 +213,14 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
     const isVoice = fb.type === "voice";
     const status = fb.status || "pending";
     const statusColor = {
-        pending: "text-white/60 border-white/15",
-        approved: "text-[#34C759] border-[#34C759]/40",
-        rejected: "text-[#FF3B30] border-[#FF3B30]/40",
+        pending: "text-black/60 border-black/[0.08]",
+        approved: "text-emerald-600 border-emerald-500/20 bg-emerald-50/30",
+        rejected: "text-red-600 border-red-500/20 bg-red-50/30",
     }[status];
 
     return (
         <div
-            className="border border-white/10 p-5 hover:border-white/30 transition-all"
+            className="border border-black/[0.08] bg-white rounded-xl p-5 hover:border-black/[0.16] transition-all shadow-sm"
             data-testid={`feedback-card-${fb.id}`}
         >
             <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -235,7 +235,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                             {status === "rejected" && <XCircle className="w-3 h-3" />}
                             {status}
                         </span>
-                        <span className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-white/40">
+                        <span className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-black/45">
                             {isVoice ? (
                                 <Mic className="w-3 h-3" />
                             ) : (
@@ -244,21 +244,21 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                             {isVoice ? "Voice" : "Text"}
                         </span>
                     </div>
-                    <div className="font-display text-lg truncate">
+                    <div className="font-display text-lg truncate text-black/90">
                         {fb.client_viewer_name || fb.client_viewer_email || "Client"}
                     </div>
-                    <div className="text-[11px] tg-mono text-white/40 mt-0.5 truncate">
+                    <div className="text-[11px] tg-mono text-black/45 mt-0.5 truncate">
                         {project?.brand_name || "—"} · sub {fb.submission_id?.slice(0, 8)} · {timeAgo(fb.created_at)}
                     </div>
                 </div>
-                <div className="flex items-center gap-1 flex-wrap">
+                <div className="flex items-center gap-1.5 flex-wrap">
                     {status === "pending" && (
                         <>
                             <button
                                 onClick={onApprove}
                                 data-testid={`feedback-approve-${fb.id}`}
                                 title="Approve & share"
-                                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 bg-[#34C759] text-black hover:opacity-90 rounded-sm"
+                                className="inline-flex items-center gap-1.5 text-xs px-3.5 py-2 bg-black text-white hover:bg-black/90 rounded-md transition-colors shadow-sm"
                             >
                                 <Check className="w-3.5 h-3.5" />
                                 Approve & Share
@@ -268,18 +268,18 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                                     onClick={onEdit}
                                     data-testid={`feedback-edit-${fb.id}`}
                                     title="Edit text"
-                                    className="inline-flex items-center text-xs px-3 py-2 border border-white/15 hover:border-white rounded-sm"
+                                    className="inline-flex items-center text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md transition-colors bg-[#fafaf8]"
                                 >
-                                    <Edit3 className="w-3.5 h-3.5" />
+                                    <Edit3 className="w-3.5 h-3.5 text-black/70" />
                                 </button>
                             )}
                             <button
                                 onClick={onReject}
                                 data-testid={`feedback-reject-${fb.id}`}
                                 title="Reject"
-                                className="inline-flex items-center text-xs px-3 py-2 border border-white/15 hover:border-[#FF3B30] hover:text-[#FF3B30] rounded-sm"
+                                className="inline-flex items-center text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-md transition-colors bg-[#fafaf8]"
                             >
-                                <XCircle className="w-3.5 h-3.5" />
+                                <XCircle className="w-3.5 h-3.5 text-black/50 hover:text-inherit" />
                             </button>
                         </>
                     )}
@@ -287,14 +287,14 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                         onClick={onDelete}
                         data-testid={`feedback-delete-${fb.id}`}
                         title="Delete"
-                        className="inline-flex items-center text-xs px-3 py-2 border border-white/15 hover:border-white/40 text-white/40 rounded-sm"
+                        className="inline-flex items-center text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 text-black/45 rounded-md transition-colors bg-[#fafaf8]"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
                     </button>
                 </div>
             </div>
 
-            <div className="mt-4 bg-white/[0.03] border border-white/5 p-4 rounded-sm">
+            <div className="mt-4 bg-[#fafaf8] border border-black/[0.04] p-4 rounded-lg">
                 {isVoice ? (
                     <audio
                         src={fb.content_url}
@@ -304,7 +304,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                     />
                 ) : (
                     <p
-                        className="text-sm text-white/85 whitespace-pre-wrap"
+                        className="text-sm text-black/80 whitespace-pre-wrap"
                         data-testid={`feedback-text-${fb.id}`}
                     >
                         {fb.text}
@@ -313,12 +313,12 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
             </div>
 
             {fb.edited_at && (
-                <p className="text-[10px] text-white/30 tg-mono mt-2">
+                <p className="text-[10px] text-black/40 tg-mono mt-2">
                     Edited {timeAgo(fb.edited_at)} · approve to push the latest text
                 </p>
             )}
             {fb.approved_at && (
-                <p className="text-[10px] text-[#34C759]/80 tg-mono mt-2 inline-flex items-center gap-1">
+                <p className="text-[10px] text-emerald-600 tg-mono mt-2 inline-flex items-center gap-1">
                     <ExternalLink className="w-3 h-3" />
                     Shared with talent {timeAgo(fb.approved_at)}
                 </p>
@@ -330,15 +330,15 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
 function EditModal({ text, onChange, onCancel, onSave }) {
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4"
             onClick={onCancel}
             data-testid="feedback-edit-modal"
         >
             <div
-                className="bg-[#0a0a0a] border border-white/10 max-w-xl w-full"
+                className="bg-white border border-black/[0.08] rounded-xl max-w-xl w-full shadow-lg"
                 onClick={(e) => e.stopPropagation()}
             >
-                <div className="px-6 py-4 border-b border-white/10">
+                <div className="px-6 py-4 border-b border-black/[0.08]">
                     <p className="eyebrow">Edit feedback before sharing</p>
                 </div>
                 <div className="p-6">
@@ -348,17 +348,17 @@ function EditModal({ text, onChange, onCancel, onSave }) {
                         rows={6}
                         maxLength={4000}
                         data-testid="feedback-edit-textarea"
-                        className="w-full bg-transparent border border-white/15 focus:border-white rounded-sm p-3 text-sm outline-none resize-none"
+                        className="w-full bg-[#fafaf8] border border-black/[0.08] focus:border-black/[0.16] rounded-lg p-3 text-sm outline-none resize-none text-black/80"
                     />
-                    <p className="text-[10px] text-white/30 tg-mono mt-2">
+                    <p className="text-[10px] text-black/40 tg-mono mt-2">
                         {text.length} / 4000 — saving does NOT auto-share. Click
                         Approve & Share separately.
                     </p>
                 </div>
-                <div className="px-6 py-4 border-t border-white/10 flex items-center justify-end gap-2">
+                <div className="px-6 py-4 border-t border-black/[0.08] flex items-center justify-end gap-2">
                     <button
                         onClick={onCancel}
-                        className="text-xs text-white/50 hover:text-white px-3 py-2"
+                        className="text-xs text-black/60 hover:text-black px-3 py-2"
                         data-testid="feedback-edit-cancel"
                     >
                         Cancel
@@ -367,7 +367,7 @@ function EditModal({ text, onChange, onCancel, onSave }) {
                         onClick={onSave}
                         disabled={!text.trim()}
                         data-testid="feedback-edit-save"
-                        className="bg-white text-black px-5 py-2 text-sm rounded-sm hover:opacity-90 disabled:opacity-40"
+                        className="bg-black text-white px-5 py-2 text-sm rounded-lg hover:bg-black/90 disabled:opacity-40"
                     >
                         Save edit
                     </button>

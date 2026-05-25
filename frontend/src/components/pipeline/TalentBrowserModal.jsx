@@ -256,6 +256,18 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return config.columns.desktop;
     }, [densityMode, isMobile, isTablet]);
     
+    // Filter setters
+    const setFilter = useCallback((key, value) => {
+        setFilters(prev => ({ ...prev, [key]: value }));
+        setFocusedIndex(-1);
+    }, []);
+    
+    const resetFilters = useCallback(() => {
+        setFilters(FILTER_DEFAULTS);
+        setFocusedIndex(-1);
+        setShowAdvancedFilters(false);
+    }, []);
+    
     // Fetch talents with proper abort controller
     useEffect(() => {
         if (!open || talents.length > 0 || loading) return;
@@ -372,7 +384,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         searchDebounceRef.current = setTimeout(() => {
             setFilter("search", value);
         }, 200);
-    }, []);
+    }, [setFilter]);
 
     // AUD-E1: Force refresh candidates by resetting cached state
     const handleForceRefresh = useCallback(() => {
@@ -493,18 +505,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return talents.filter(t => selected.has(t.id));
     }, [talents, selected]);
     
-    // Filter setters
-    const setFilter = useCallback((key, value) => {
-        setFilters(prev => ({ ...prev, [key]: value }));
-        setFocusedIndex(-1);
-    }, []);
-    
-    const resetFilters = useCallback(() => {
-        setFilters(FILTER_DEFAULTS);
-        setFocusedIndex(-1);
-        setShowAdvancedFilters(false);
-    }, []);
-    
+
     // Apply saved search
     const applySavedSearch = useCallback((preset) => {
         setFilters(prev => ({ ...prev, ...preset.filters }));

@@ -168,9 +168,9 @@ const sortTalents = (talents, sortBy, filters) => {
     
     switch(sortBy) {
         case "followers_high":
-            return sorted.sort((a, b) => (b.instagram_followers_count || parseFollowers(b.instagram_followers)) - (a.instagram_followers_count || parseFollowers(a.instagram_followers)));
+            return sorted.sort((a, b) => (b.instagram_followers_count || 0) - (a.instagram_followers_count || 0));
         case "followers_low":
-            return sorted.sort((a, b) => (a.instagram_followers_count || parseFollowers(a.instagram_followers)) - (b.instagram_followers_count || parseFollowers(b.instagram_followers)));
+            return sorted.sort((a, b) => (a.instagram_followers_count || 0) - (b.instagram_followers_count || 0));
         case "age_young":
             return sorted.sort((a, b) => (a.age || 99) - (b.age || 99));
         case "age_old":
@@ -183,11 +183,7 @@ const sortTalents = (talents, sortBy, filters) => {
             return sorted.sort((a, b) => (b.conversion_rate || 0) - (a.conversion_rate || 0));
         case "relevance":
         default:
-            return sorted.sort((a, b) => {
-                const scoreA = calculateMatchScore(a, filters);
-                const scoreB = calculateMatchScore(b, filters);
-                return scoreB - scoreA;
-            });
+            return sorted.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
     }
 };
 
@@ -442,12 +438,12 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             return true;
         });
         
-        filtered = sortTalents(filtered, sortBy, filters);
-        
-        return filtered.map(t => ({
+        const precomputed = filtered.map(t => ({
             ...t,
             matchScore: calculateMatchScore(t, filters),
         }));
+        
+        return sortTalents(precomputed, sortBy, filters);
     }, [talents, filters]);
     
     const filtersActive = useMemo(() => {
@@ -491,6 +487,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     
     const clearSelection = useCallback(() => {
         setSelected(new Set());
+    }, []);
+    
+    const registerCardRef = useCallback((index, el) => {
+        if (el) {
+            cardRefsMap.current.set(index, el);
+        } else {
+            cardRefsMap.current.delete(index);
+        }
     }, []);
     
     const removeSelected = useCallback((id) => {
@@ -873,18 +877,13 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                                 talent={talent}
                                                 selected={isSelected}
                                                 alreadyInPipeline={alreadyInPipeline}
-                                                onToggle={() => toggleSelect(talent.id, alreadyInPipeline)}
+                                                onToggle={toggleSelect}
                                                 densityMode={densityMode}
                                                 isFocused={isFocused}
                                                 showIntelligence={filters.showIntelligence}
                                                 isMobile={isMobile}
-                                                cardRef={(el) => {
-                                                    if (el) {
-                                                        cardRefsMap.current.set(globalIndex, el);
-                                                    } else {
-                                                        cardRefsMap.current.delete(globalIndex);
-                                                    }
-                                                }}
+                                                globalIndex={globalIndex}
+                                                registerRef={registerCardRef}
                                             />
                                         );
                                     })}
@@ -1170,15 +1169,19 @@ const FilterChip = ({ label, onRemove }) => (
 // TALENT CARD
 // ============================================================================
 
-const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densityMode, isFocused, showIntelligence, isMobile, cardRef }) => {
+const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densityMode, isFocused, showIntelligence, isMobile, globalIndex, registerRef }) => {
     const imageUrl = pickImage(talent);
     const config = DENSITY_CONFIG[densityMode];
     
+    const handleToggle = useCallback(() => {
+        onToggle(talent.id, alreadyInPipeline);
+    }, [onToggle, talent.id, alreadyInPipeline]);
+    
     return (
         <button
-            ref={cardRef}
+            ref={(el) => registerRef(globalIndex, el)}
             type="button"
-            onClick={onToggle}
+            onClick={handleToggle}
             disabled={alreadyInPipeline}
             data-testid={`talent-browser-card-${talent.id}`}
             className={`

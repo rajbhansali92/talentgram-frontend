@@ -404,7 +404,21 @@ function ReviewModal({ app, onClose, onDecide }) {
 
                     {/* Profile details */}
                     <section className="mb-8 border border-black/[0.08] rounded-lg p-5 bg-[#fafaf8] grid md:grid-cols-3 gap-6">
-                        <Field label="Age" value={fd.dob ? calcAge(fd.dob) : null} />
+                        <Field 
+                            label="Age" 
+                            value={
+                                (app.effective_age !== undefined && app.effective_age !== null) ? (
+                                    <span className="inline-flex items-center gap-1.5">
+                                        {app.effective_age}
+                                        {app.submitted_age_override !== undefined && app.submitted_age_override !== null && (
+                                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono font-medium bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wider">
+                                                Overridden
+                                            </span>
+                                        )}
+                                    </span>
+                                ) : (fd.dob ? calcAge(fd.dob) : null)
+                            } 
+                        />
                         <Field label="Height" value={fd.height} />
                         <Field label="Gender" value={fd.gender} />
                         <Field label="Location" value={fd.location} />

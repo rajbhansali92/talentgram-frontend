@@ -36,6 +36,7 @@ from core import (
     _resolve_cover_url,
     cloudinary_upload,
     compute_age,
+    compute_effective_age,
     current_admin,
     current_team_or_admin,
     db,
@@ -79,16 +80,26 @@ async def start_application(payload: ApplicationStartIn):
         token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
         return {"id": aid, "token": token, "resumed": True}
 
+    talent_age = None
+    talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+    if talent_doc:
+        talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+
     aid = str(uuid.uuid4())
+    form_data = {
+        "first_name": payload.first_name.strip(),
+        "last_name": payload.last_name.strip(),
+    }
+    effective_age_val = compute_effective_age(form_data, talent_age)
+
     doc = {
         "id": aid,
         "talent_email": email,
         "talent_phone": payload.phone,
         "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
-        "form_data": {
-            "first_name": payload.first_name.strip(),
-            "last_name": payload.last_name.strip(),
-        },
+        "form_data": form_data,
+        "submitted_age_override": None,
+        "effective_age": effective_age_val,
         "media": [],
         "status": "draft",
         "decision": "pending",
@@ -146,6 +157,24 @@ async def update_application(
         ln = merged.get("last_name")
         if fn or ln:
             update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or app_doc.get("talent_name")
+
+        talent_age = None
+        email = app_doc.get("talent_email")
+        if email:
+            talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+            if talent_doc:
+                talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+
+        submitted_age_override_val = None
+        override_active = merged.get("overrideAge") or merged.get("override_age")
+        if override_active and merged.get("submitted_age_override") not in (None, ""):
+            try:
+                submitted_age_override_val = int(merged.get("submitted_age_override"))
+            except Exception:
+                pass
+
+        update["submitted_age_override"] = submitted_age_override_val
+        update["effective_age"] = compute_effective_age(merged, talent_age)
     if update:
         await db.applications.update_one({"id": aid}, {"$set": update})
     return await db.applications.find_one({"id": aid}, {"_id": 0})

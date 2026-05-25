@@ -84,6 +84,8 @@ export default function SubmissionPage() {
             phone: "",
             dob: "",
             age: "",
+            overrideAge: false,
+            submitted_age_override: "",
             height: "",
             location: "",
             // Phase 2 — schema unification: every talent-facing form writes
@@ -208,10 +210,12 @@ export default function SubmissionPage() {
         })();
     }, [saved, slug]);
 
-    const computedAge = useMemo(
-        () => calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null),
-        [form.dob, form.age],
-    );
+    const computedAge = useMemo(() => {
+        if (form.overrideAge && form.submitted_age_override) {
+            return parseInt(form.submitted_age_override, 10) || null;
+        }
+        return calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null);
+    }, [form.dob, form.age, form.overrideAge, form.submitted_age_override]);
 
     const authCfg = useMemo(
         () =>
@@ -992,9 +996,15 @@ export default function SubmissionPage() {
                 {/* SECTION 1 — Project Info */}
                 <section className="mb-16 bg-white/60 rounded-3xl p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
-                    <h1 className="font-display text-3xl md:text-5xl tracking-tight text-slate-900 mb-8 leading-[1.05]">
-                        Talentgram × {project.brand_name}
-                    </h1>
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
+                        <h1 className="font-display text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
+                            Talentgram × {project.brand_name}
+                        </h1>
+                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            <span>Draft Auto-Saved</span>
+                        </div>
+                    </div>
                     <div className="grid grid-cols-2 gap-x-6 gap-y-5 border-t border-slate-200/50 pt-6">
                         <Info label="Character" value={project.character} />
                         <Info label="Shoot Dates" value={project.shoot_dates} />
@@ -1176,30 +1186,78 @@ export default function SubmissionPage() {
                                 onBlur={saveForm}
                                 testid="form-dob"
                                 className="[color-scheme:light]"
+                                autoComplete="bday"
                             />
+                            
+                            {/* Project-specific age override checkbox and input */}
+                            <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-slate-200/50 focus-within:border-amber-300 focus-within:ring-4 focus-within:ring-amber-50/50 transition-all duration-300 col-span-1 md:col-span-2">
+                                <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
+                                    <input
+                                        type="checkbox"
+                                        checked={form.overrideAge || false}
+                                        onChange={(e) => {
+                                            const active = e.target.checked;
+                                            setForm({
+                                                ...form,
+                                                overrideAge: active,
+                                                submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
+                                            });
+                                            setTimeout(saveForm, 0);
+                                        }}
+                                        data-testid="form-override-age-checkbox"
+                                        className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
+                                    />
+                                    <span className="text-sm font-medium text-slate-700 select-none">
+                                        Use different age for this project?
+                                    </span>
+                                </label>
+                                
+                                {form.overrideAge && (
+                                    <div className="mt-4 animate-fadeIn transition-all duration-300">
+                                        <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            Project-Specific Age Override *
+                                        </span>
+                                        <input
+                                            type="number"
+                                            inputMode="numeric"
+                                            pattern="[0-9]*"
+                                            value={form.submitted_age_override || ""}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    submitted_age_override: e.target.value,
+                                                })
+                                            }
+                                            onBlur={saveForm}
+                                            min={10}
+                                            max={80}
+                                            placeholder="e.g. 25"
+                                            data-testid="form-override-age-input"
+                                            className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                        />
+                                        <p className="text-[10px] text-slate-400 font-mono mt-1.5">
+                                            This age override is isolated to this submission only and will not change your global profile.
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+
                             <div data-testid="form-age-field">
                                 <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Age {form.dob ? "(auto)" : "*"}
+                                    Age {form.dob ? "(auto calculated)" : "*"}
                                 </span>
                                 <input
                                     type="number"
                                     value={
                                         form.dob
-                                            ? computedAge ?? ""
+                                            ? (calcAge(form.dob) ?? "")
                                             : form.age
                                     }
-                                    disabled={!!form.dob}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            age: e.target.value,
-                                        })
-                                    }
-                                    onBlur={saveForm}
+                                    disabled={true}
                                     min={10}
                                     max={80}
                                     data-testid="form-age-input"
-                                    className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 disabled:text-slate-400 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                    className="mt-2 w-full bg-slate-100 rounded-2xl border border-slate-200 outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                 />
                             </div>
                             <div data-testid="form-height-field">

@@ -56,9 +56,10 @@ export default function ApplicationPage() {
         email: "",
         phone: "",
     });
-    const [form, setForm] = useState({
         dob: "",
         age: "",
+        overrideAge: false,
+        submitted_age_override: "",
         height: "",
         gender: "",
         ethnicity: "",
@@ -67,7 +68,6 @@ export default function ApplicationPage() {
         instagram_followers: "",
         bio: "",
         work_links: [],
-    });
     const [media, setMedia] = useState([]);
     const [uploading, setUploading] = useState(null);
     const [saving, setSaving] = useState(false);
@@ -136,10 +136,12 @@ export default function ApplicationPage() {
         );
     };
 
-    const computedAge = useMemo(
-        () => calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null),
-        [form.dob, form.age],
-    );
+    const computedAge = useMemo(() => {
+        if (form.overrideAge && form.submitted_age_override) {
+            return parseInt(form.submitted_age_override, 10) || null;
+        }
+        return calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null);
+    }, [form.dob, form.age, form.overrideAge, form.submitted_age_override]);
 
     // Email-first prefill on blur. Calls EXISTING /api/public/prefill — no
     // backend changes. Decision tree:
@@ -553,9 +555,15 @@ export default function ApplicationPage() {
             <Header />
             <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
                 <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Application · {basics.email}</p>
-                <h1 className="font-display text-3xl md:text-5xl tracking-tight text-[#1a1a1a] mb-8">
-                    Your Profile
-                </h1>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-[#e8e6df] pb-4">
+                    <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a]">
+                        Your Profile
+                    </h1>
+                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        <span>Draft Auto-Saved</span>
+                    </div>
+                </div>
 
                 {/* Section 2 — Profile Details */}
                 <Section title="Profile Details" index="01">
@@ -567,13 +575,63 @@ export default function ApplicationPage() {
                             onChange={(v) => setForm({ ...form, dob: v })}
                             testid="form-dob"
                         />
-                        <div>
+                        
+                        <div className="flex flex-col justify-end">
                             <Label>
-                                Age {form.dob ? "(auto)" : ""}
+                                Age {form.dob ? "(auto calculated)" : ""}
                             </Label>
-                            <div className="mt-2 h-11 flex items-center px-4 bg-white rounded-lg border border-[#e8e6df] text-[15px] text-[#1a1a1a]">
-                                {computedAge ?? "—"}
+                            <div className="mt-2 h-11 flex items-center px-4 bg-slate-50 rounded-lg border border-[#e8e6df] text-[15px] text-slate-500 font-mono">
+                                {form.dob ? (calcAge(form.dob) ?? "—") : (form.age || "—")}
                             </div>
+                        </div>
+
+                        {/* Project-specific age override checkbox and input */}
+                        <div className="col-span-1 md:col-span-2 p-4 rounded-xl bg-slate-50/50 border border-[#e8e6df] focus-within:border-[#b0aea6] transition-all duration-200">
+                            <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
+                                <input
+                                    type="checkbox"
+                                    checked={form.overrideAge || false}
+                                    onChange={(e) => {
+                                        const active = e.target.checked;
+                                        setForm({
+                                            ...form,
+                                            overrideAge: active,
+                                            submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
+                                        });
+                                    }}
+                                    data-testid="form-override-age-checkbox"
+                                    className="w-4 h-4 rounded border-[#e8e6df] text-amber-600 focus:ring-[#b0aea6] cursor-pointer transition duration-150 ease-in-out"
+                                />
+                                <span className="text-sm font-medium text-neutral-700 select-none">
+                                    Use different age for this application?
+                                </span>
+                            </label>
+                            
+                            {form.overrideAge && (
+                                <div className="mt-3 animate-fadeIn transition-all duration-300">
+                                    <Label>Application-Specific Age Override *</Label>
+                                    <input
+                                        type="number"
+                                        inputMode="numeric"
+                                        pattern="[0-9]*"
+                                        value={form.submitted_age_override || ""}
+                                        onChange={(e) =>
+                                            setForm({
+                                                ...form,
+                                                submitted_age_override: e.target.value,
+                                            })
+                                        }
+                                        min={10}
+                                        max={80}
+                                        placeholder="e.g. 25"
+                                        data-testid="form-override-age-input"
+                                        className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
+                                    />
+                                    <p className="text-[10px] text-slate-400 font-mono mt-1">
+                                        This age override is isolated to this application only and will not affect your global profile record.
+                                    </p>
+                                </div>
+                            )}
                         </div>
 
                         <div>

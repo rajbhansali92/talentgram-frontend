@@ -1149,9 +1149,15 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                         </span>
                     )}
                 </div>
-                <div className="text-xs text-black/45 tg-mono mt-1 truncate">
-                    {s.talent_email}
-                    {s.talent_phone ? ` · ${s.talent_phone}` : ""}
+                <div className="text-xs text-black/45 tg-mono mt-1 truncate flex items-center gap-1.5 flex-wrap">
+                    <span>{s.talent_email}</span>
+                    {s.talent_phone && <span>· {s.talent_phone}</span>}
+                    {s.effective_age !== undefined && s.effective_age !== null && <span>· {s.effective_age} yrs</span>}
+                    {s.submitted_age_override !== undefined && s.submitted_age_override !== null && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-mono font-medium bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wider">
+                            Override
+                        </span>
+                    )}
                 </div>
                 <div className="text-[11px] text-black/45 mt-2">
                     {mediaCounts.intro ? "1 intro video · " : "no intro · "}
@@ -1333,6 +1339,11 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                         data-testid={`review-field-${f.key}`}
                                         className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
                                     />
+                                    {f.key === "age" && submission.submitted_age_override !== undefined && submission.submitted_age_override !== null && (
+                                        <p className="text-[10px] text-amber-600 font-mono mt-1">
+                                            Project-Specific Age Override Active ({submission.submitted_age_override})
+                                        </p>
+                                    )}
                                 </div>
                                 <button
                                     type="button"

@@ -29,6 +29,7 @@ from core import (
     _submission_to_client_shape,
     cloudinary_upload,
     compute_age,
+    compute_effective_age,
     current_admin,
     current_team_or_admin,
     db,
@@ -168,6 +169,23 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
             "status": existing.get("status", "draft"),
         }
 
+    fd = payload.form_data or {}
+    talent_age = None
+    if email:
+        talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+        if talent_doc:
+            talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+
+    submitted_age_override_val = None
+    override_active = fd.get("overrideAge") or fd.get("override_age")
+    if override_active and fd.get("submitted_age_override") not in (None, ""):
+        try:
+            submitted_age_override_val = int(fd["submitted_age_override"])
+        except Exception:
+            pass
+
+    effective_age_val = compute_effective_age(fd, talent_age)
+
     sid = str(uuid.uuid4())
     doc = {
         "id": sid,
@@ -176,8 +194,10 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "talent_name": payload.name,
         "talent_email": email,
         "talent_phone": payload.phone,
-        "form_data": payload.form_data or {},
+        "form_data": fd,
         "field_visibility": {**DEFAULT_FIELD_VISIBILITY},
+        "submitted_age_override": submitted_age_override_val,
+        "effective_age": effective_age_val,
         "media": [],
         "status": "draft",
         "decision": "pending",
@@ -221,11 +241,30 @@ async def submission_update(
         raise HTTPException(404, "Submission not found")
     update: Dict[str, Any] = {}
     if payload.form_data is not None:
-        update["form_data"] = {**(sub.get("form_data") or {}), **payload.form_data}
-        fn = payload.form_data.get("first_name") or update["form_data"].get("first_name")
-        ln = payload.form_data.get("last_name") or update["form_data"].get("last_name")
+        merged_fd = {**(sub.get("form_data") or {}), **payload.form_data}
+        update["form_data"] = merged_fd
+        fn = payload.form_data.get("first_name") or merged_fd.get("first_name")
+        ln = payload.form_data.get("last_name") or merged_fd.get("last_name")
         if fn or ln:
             update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or sub.get("talent_name")
+
+        talent_age = None
+        email = sub.get("talent_email")
+        if email:
+            talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+            if talent_doc:
+                talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+
+        submitted_age_override_val = None
+        override_active = merged_fd.get("overrideAge") or merged_fd.get("override_age")
+        if override_active and merged_fd.get("submitted_age_override") not in (None, ""):
+            try:
+                submitted_age_override_val = int(merged_fd["submitted_age_override"])
+            except Exception:
+                pass
+
+        update["submitted_age_override"] = submitted_age_override_val
+        update["effective_age"] = compute_effective_age(merged_fd, talent_age)
     if update:
         await db.submissions.update_one({"id": sid}, {"$set": update})
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
@@ -952,11 +991,30 @@ async def admin_edit_submission(
         raise HTTPException(404, "Submission not found")
     update: Dict[str, Any] = {}
     if payload.form_data is not None:
-        update["form_data"] = {**(sub.get("form_data") or {}), **payload.form_data}
-        fn = update["form_data"].get("first_name") or sub.get("form_data", {}).get("first_name")
-        ln = update["form_data"].get("last_name") or sub.get("form_data", {}).get("last_name")
+        merged_fd = {**(sub.get("form_data") or {}), **payload.form_data}
+        update["form_data"] = merged_fd
+        fn = merged_fd.get("first_name")
+        ln = merged_fd.get("last_name")
         if fn or ln:
             update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or sub.get("talent_name")
+
+        talent_age = None
+        email = sub.get("talent_email")
+        if email:
+            talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+            if talent_doc:
+                talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+
+        submitted_age_override_val = None
+        override_active = merged_fd.get("overrideAge") or merged_fd.get("override_age")
+        if override_active and merged_fd.get("submitted_age_override") not in (None, ""):
+            try:
+                submitted_age_override_val = int(merged_fd["submitted_age_override"])
+            except Exception:
+                pass
+
+        update["submitted_age_override"] = submitted_age_override_val
+        update["effective_age"] = compute_effective_age(merged_fd, talent_age)
     if payload.field_visibility is not None:
         current_fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
         update["field_visibility"] = {**current_fv, **payload.field_visibility}

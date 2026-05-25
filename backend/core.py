@@ -482,6 +482,46 @@ def compute_age(dob: Optional[str]) -> Optional[int]:
         return None
 
 
+def compute_effective_age(form_data: Optional[dict], stored_age: Optional[int] = None) -> Optional[int]:
+    """Resolve the effective age for a project submission or application.
+    Priority:
+      1. submitted_age_override (if overrideAge is True/active)
+      2. calculated age from DOB
+      3. stored age from master profile
+      4. standard age field in form_data
+    """
+    if not form_data:
+        return stored_age
+
+    override_active = form_data.get("overrideAge") or form_data.get("override_age")
+    override_val = form_data.get("submitted_age_override")
+
+    if override_active:
+        if override_val not in (None, ""):
+            try:
+                return int(override_val)
+            except Exception:
+                pass
+
+    dob = form_data.get("dob")
+    if dob:
+        calculated = compute_age(dob)
+        if calculated is not None:
+            return calculated
+
+    if stored_age is not None:
+        return stored_age
+
+    age_val = form_data.get("age")
+    if age_val not in (None, ""):
+        try:
+            return int(age_val)
+        except Exception:
+            pass
+
+    return None
+
+
 def resolve_cover_media(doc: dict) -> Optional[dict]:
     """Find the best cover media item dict representing this talent."""
     media = doc.get("media") or []
@@ -824,6 +864,8 @@ CLIENT_ALLOWED_FIELDS = {
     # POSTing feedback. Empty/None for pure talent-share (M1) cards.
     "submission_id",
     "project_id",
+    "effective_age",
+    "submitted_age_override",
 }
 
 
@@ -1263,12 +1305,21 @@ def _submission_to_client_shape(sub: dict) -> dict:
     ln = (fd.get("last_name") or "").strip()
     name = f"{fn} {ln}".strip() or sub.get("talent_name") or "Unnamed"
 
-    age: Optional[int] = None
-    if fv.get("age") and fd.get("age") not in (None, ""):
-        try:
-            age = int(fd["age"])
-        except Exception:
-            age = None
+    submitted_age_override = sub.get("submitted_age_override")
+    effective_age = sub.get("effective_age")
+
+    if submitted_age_override is None:
+        override_active = fd.get("overrideAge") or fd.get("override_age")
+        if override_active and fd.get("submitted_age_override") not in (None, ""):
+            try:
+                submitted_age_override = int(fd["submitted_age_override"])
+            except Exception:
+                pass
+
+    if effective_age is None:
+        effective_age = compute_effective_age(fd)
+
+    age = effective_age if fv.get("age") else None
 
     # Media buckets
     media: List[dict] = []
@@ -1346,6 +1397,8 @@ def _submission_to_client_shape(sub: dict) -> dict:
         "project_id": sub.get("project_id"),
         "name": name,
         "age": age,
+        "effective_age": effective_age,
+        "submitted_age_override": submitted_age_override,
         "height": fd.get("height") if fv.get("height") else None,
         "location": fd.get("location") if fv.get("location") else None,
         "ethnicity": None,

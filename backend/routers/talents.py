@@ -22,6 +22,9 @@ from core import (
     current_team_or_admin,
     db,
     enrich_talent,
+    media_url,
+    video_poster_url,
+    resolve_cover_media,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,15 +129,26 @@ def _enrich_list(doc: dict) -> dict:
     cover_url backfill). Sets media_count from the stored field if present.
     Computes age from dob. Returns doc in-place.
     """
-    # cover_url is the denormalized scalar written on set_cover / add_media.
-    # Use it directly — no array walk required.
-    doc["image_url"] = doc.get("cover_url") or None
+    cover_url = doc.get("cover_url")
+    cover_thumb = doc.get("cover_thumbnail_url")
+    if not cover_thumb and cover_url:
+        cover_mid = doc.get("cover_media_id")
+        tid = doc.get("id")
+        if cover_mid and tid:
+            public_id = f"{APP_NAME}/talents/{tid}/{cover_mid}"
+            cover_thumb = media_url(public_id, preset="roster", resource_type="image")
+        else:
+            cover_thumb = cover_url
+
+    doc["image_url"] = cover_thumb or cover_url or None
+
     # media_count: optional stored field (set when cover is written).
     # Falls back to 0 if absent; exact counts shown on detail page.
     if "media_count" not in doc:
         doc["media_count"] = 0
-    # Remove internal scalar from the public payload
+    # Remove internal scalars from the public payload
     doc.pop("cover_url", None)
+    doc.pop("cover_thumbnail_url", None)
     # Age derivation
     dob = doc.get("dob")
     if dob:
@@ -367,6 +381,8 @@ async def add_media(
         resource_type=rt,
         content_type=file.content_type,
     )
+    is_video = rt == "video"
+    is_image = rt == "image"
     media = {
         "id": media_id,
         "category": category,
@@ -379,15 +395,17 @@ async def add_media(
         "created_at": _now(),
         "scope": "talent_portfolio",
         "talent_id": tid,
+        "thumbnail_url": media_url(result["public_id"], preset="roster", resource_type=result["resource_type"]) if is_image else None,
+        "poster_url": video_poster_url(result["public_id"]) if is_video else None,
     }
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
-    # Auto-assign cover on first image upload: write both cover_media_id AND
-    # the denormalized cover_url scalar used by the roster list endpoint.
+    # Auto-assign cover on first image upload
     if not talent.get("cover_media_id") and category in {"indian", "western", "portfolio"}:
         await db.talents.update_one(
             {"id": tid},
-            {"$set": {"cover_media_id": media["id"], "cover_url": media["url"]}},
+            {"$set": {"cover_media_id": media["id"]}},
         )
+    await update_talent_cover_cache(tid)
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     return enrich_talent(t)
 
@@ -407,14 +425,13 @@ async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin))
     if pid:
         rt = target.get("resource_type") or ("video" if target.get("category") == "video" else "image")
         cloudinary_destroy(pid, resource_type=rt)
-    # If the deleted item was the current cover, clear both cover fields.
-    # The roster card will fall back to the initials monogram until a new
-    # cover is explicitly set (or the talent is re-enriched on detail load).
+    # If the deleted item was the current cover, clear the cover ID reference first
     if talent.get("cover_media_id") == mid:
         await db.talents.update_one(
             {"id": tid},
-            {"$unset": {"cover_media_id": "", "cover_url": ""}},
+            {"$set": {"cover_media_id": None}}
         )
+    await update_talent_cover_cache(tid)
     return {"ok": True}
 
 
@@ -422,30 +439,50 @@ async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin))
 async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_admin)):
     """Set the cover image for a talent.
 
-    Writes cover_media_id (the item id reference) AND cover_url (the
-    denormalized Cloudinary URL scalar). The roster list endpoint reads
-    cover_url directly — no media[] fetch or array walk needed.
+    Writes cover_media_id (the item id reference) AND cover_url/cover_thumbnail_url
+    via update_talent_cover_cache.
     """
-    # Fetch the target media item's URL so we can denormalize it.
-    talent = await db.talents.find_one(
-        {"id": tid},
-        {"_id": 0, "media": {"$elemMatch": {"id": mid}}},
-    )
-    if not talent:
-        raise HTTPException(404, "Talent not found")
-    media_item = (talent.get("media") or [{}])[0] if talent.get("media") else None
-    cover_url = media_item.get("url") if media_item and media_item.get("id") == mid else None
-
-    update: dict = {"cover_media_id": mid}
-    if cover_url:
-        update["cover_url"] = cover_url
-    else:
-        # Item not found in media[] — still set the id, clear stale cover_url.
-        # Detail page will resolve correctly from full media[]; roster will
-        # show initials until the URL is resolvable.
-        update["cover_url"] = None
-
-    res = await db.talents.update_one({"id": tid}, {"$set": update})
+    res = await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": mid}})
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")
-    return {"ok": True, "cover_url": cover_url}
+    await update_talent_cover_cache(tid)
+    updated_talent = await db.talents.find_one({"id": tid}, {"cover_url": 1})
+    return {"ok": True, "cover_url": updated_talent.get("cover_url")}
+
+
+async def update_talent_cover_cache(tid: str) -> None:
+    """Fetch the full talent doc, resolve the best cover media, and update denormalized cover fields in DB."""
+    talent = await db.talents.find_one({"id": tid})
+    if not talent:
+        return
+    media_item = resolve_cover_media(talent)
+    if media_item:
+        mid = media_item.get("id")
+        url = media_item.get("url")
+        pid = media_item.get("public_id")
+        rt = media_item.get("resource_type") or "image"
+        thumb_url = media_url(pid, preset="roster", resource_type=rt) if pid else url
+
+        await db.talents.update_one(
+            {"id": tid},
+            {
+                "$set": {
+                    "cover_media_id": mid,
+                    "cover_url": url,
+                    "cover_thumbnail_url": thumb_url,
+                    "media_count": len(talent.get("media") or [])
+                }
+            }
+        )
+    else:
+        await db.talents.update_one(
+            {"id": tid},
+            {
+                "$set": {
+                    "cover_media_id": None,
+                    "cover_url": None,
+                    "cover_thumbnail_url": None,
+                    "media_count": len(talent.get("media") or [])
+                }
+            }
+        )

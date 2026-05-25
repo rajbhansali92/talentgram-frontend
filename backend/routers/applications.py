@@ -41,6 +41,8 @@ from core import (
     db,
     decode_submitter,
     make_token,
+    media_url,
+    video_poster_url,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -165,6 +167,22 @@ async def upload_application_media(
     if app_doc.get("status") == "submitted":
         raise HTTPException(400, "Application already finalized")
 
+    ct = (file.content_type or "").lower()
+    fn = (file.filename or "").lower()
+    is_video = category == "intro_video"
+    is_image = category in ("image", "indian", "western")
+
+    # Validation of content type / format (P5)
+    if is_video:
+        if not (ct.startswith("video/") or fn.endswith((".mp4", ".mov", ".avi", ".webm", ".mkv", ".3gp"))):
+            raise HTTPException(400, "Unsupported video format. Please upload MP4, MOV, or WEBM.")
+    else:
+        # Image categories
+        if ct in {"image/bmp", "image/tiff", "image/heic", "image/heif"} or fn.endswith((".bmp", ".tiff", ".heic", ".heif")):
+            raise HTTPException(400, "HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.")
+        if not (ct.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+            raise HTTPException(400, "Unsupported image format. Please upload JPG, PNG, or WEBP.")
+
     if category in ("image", "indian", "western"):
         # Phase 3: per-category cap (10 each) — NOT a combined total.
         existing = sum(
@@ -183,10 +201,6 @@ async def upload_application_media(
     folder = f"{APP_NAME}/applications/{aid}"
 
     # P2-E — Reject oversized uploads BEFORE reading the body into RAM.
-    # Mirrors the same guard in submissions.py. Content-Length is sent by
-    # all modern browsers/apps before body transfer begins.
-    is_video = category == "intro_video"
-    is_image = category in ("image", "indian", "western")
     raw_cl = request.headers.get("content-length")
     if raw_cl is not None:
         try:
@@ -207,25 +221,23 @@ async def upload_application_media(
 
     data = await file.read()
 
-    # Secondary check on actual bytes (defence in depth for missing/spoofed headers).
+    # Secondary check on actual bytes
     size_bytes = len(data)
-    if category == "intro_video" and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
+    if is_video and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
         mb = size_bytes // (1024 * 1024)
         cap_mb = MAX_SUBMISSION_VIDEO_BYTES // (1024 * 1024)
         raise HTTPException(
             400,
             f"Video is too large ({mb} MB). Max {cap_mb} MB — please compress and retry.",
         )
-    if category in ("image", "indian", "western") and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
+    if is_image and size_bytes > MAX_SUBMISSION_IMAGE_BYTES:
         mb = size_bytes // (1024 * 1024)
         cap_mb = MAX_SUBMISSION_IMAGE_BYTES // (1024 * 1024)
         raise HTTPException(
             400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
         )
 
-    # Cloudinary auto-detects video/image/raw by content type. Server-side
-    # resize is dropped (v37m) — Cloudinary URL transforms (f_auto, q_auto,
-    # w_1600) do this on demand at delivery time.
+    # Cloudinary auto-detects video/image/raw by content type.
     rt = "video" if (category == "intro_video" or (file.content_type or "").startswith("video/")) else "image"
     result = cloudinary_upload(
         data,
@@ -234,6 +246,8 @@ async def upload_application_media(
         resource_type=rt,
         content_type=file.content_type,
     )
+    is_video_uploaded = rt == "video"
+    is_image_uploaded = rt == "image"
     media = {
         "id": media_id,
         "category": category,
@@ -246,6 +260,8 @@ async def upload_application_media(
         "created_at": _now(),
         "scope": "application",
         "application_id": aid,
+        "thumbnail_url": media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image_uploaded else None,
+        "poster_url": video_poster_url(result["public_id"]) if is_video_uploaded else None,
     }
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
     updated = await db.applications.find_one({"id": aid}, {"_id": 0})

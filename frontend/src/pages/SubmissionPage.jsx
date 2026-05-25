@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
+import { thumbnailUrl } from "@/lib/mediaUtils";
 import {
     Select,
     SelectContent,
@@ -535,12 +536,35 @@ export default function SubmissionPage() {
     }
 
     const uploadFile = async (file, category, label = null) => {
-        // Client-side guard mirrors backend cap (150 MB videos / 25 MB images)
+        // Client-side guard mirrors backend cap (200 MB videos / 20 MB images) (P5)
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
-        const CAP_MB = isVideoSlot ? 150 : 25;
-        if (file && file.size > CAP_MB * 1024 * 1024) {
-            toast.error(`File too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
-            return;
+        const CAP_MB = isVideoSlot ? 200 : 20;
+        if (file) {
+            const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+            if (isVideoSlot) {
+                if (file.size > CAP_MB * 1024 * 1024) {
+                    toast.error(`Video is too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
+                    return;
+                }
+                const allowedVideoExts = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.3gp'];
+                if (!allowedVideoExts.includes(ext) && !file.type.startsWith('video/')) {
+                    toast.error(`Unsupported video format. Please upload MP4, MOV, or WEBM.`);
+                    return;
+                }
+            } else {
+                if (file.size > CAP_MB * 1024 * 1024) {
+                    toast.error(`Image too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
+                    return;
+                }
+                if (['.bmp', '.tiff', '.heic', '.heif'].includes(ext) || ['image/bmp', 'image/tiff', 'image/heic', 'image/heif'].includes(file.type)) {
+                    toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
+                    return;
+                }
+                if (!file.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+                    toast.error(`Unsupported image format. Please upload JPG, PNG, or WEBP.`);
+                    return;
+                }
+            }
         }
         const slotKey = label ? `${category}:${label}` : category;
         setUploading(slotKey);
@@ -663,10 +687,26 @@ export default function SubmissionPage() {
         if (files.length > room) {
             toast.info(`Only ${room} more ${imageCategory} images allowed (max ${MAX_IMAGES_PER_CATEGORY})`);
         }
-        // Client-side per-image cap (25 MB)
-        const over = accepted.find((f) => f.size > 25 * 1024 * 1024);
+        // Client-side per-image cap (20 MB) (P5)
+        const over = accepted.find((f) => f.size > 20 * 1024 * 1024);
         if (over) {
-            toast.error(`"${over.name}" is too large (max 25 MB per image).`);
+            toast.error(`"${over.name}" is too large (max 20 MB per image).`);
+            return;
+        }
+        const badFormat = accepted.find((f) => {
+            const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
+            return ['.bmp', '.tiff', '.heic', '.heif'].includes(ext) || ['image/bmp', 'image/tiff', 'image/heic', 'image/heif'].includes(f.type);
+        });
+        if (badFormat) {
+            toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
+            return;
+        }
+        const unsupportedImage = accepted.find((f) => {
+            const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
+            return !f.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+        });
+        if (unsupportedImage) {
+            toast.error(`"${unsupportedImage.name}" is not a supported image format. Please upload JPG, PNG, or WEBP.`);
             return;
         }
         setUploading(imageCategory);
@@ -1778,7 +1818,7 @@ export default function SubmissionPage() {
                                         className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
                                     >
                                         <img
-                                            src={m.url}
+                                            src={thumbnailUrl(m)}
                                             alt=""
                                             className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                         />
@@ -1991,7 +2031,7 @@ function PremiumPortfolioGroup({
                         data-testid={`${testidPrefix}-image-${m.id}`}
                     >
                         <img
-                            src={m.url}
+                            src={thumbnailUrl(m)}
                             alt=""
                             className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                         />

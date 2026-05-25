@@ -36,6 +36,8 @@ from core import (
     make_token,
     remove_synced_media_from_global_talent,
     sync_media_to_global_talent,
+    media_url,
+    video_poster_url,
 )
 from drive_backup import (
     drive_enabled,
@@ -247,14 +249,29 @@ async def submission_upload(
     if not sub:
         raise HTTPException(404, "Submission not found")
 
+    ct = (file.content_type or "").lower()
+    fn = (file.filename or "").lower()
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+
+    # Validation of content type / format (P5)
+    if is_video_slot:
+        if not (ct.startswith("video/") or fn.endswith((".mp4", ".mov", ".avi", ".webm", ".mkv", ".3gp"))):
+            raise HTTPException(400, "Unsupported video format. Please upload MP4, MOV, or WEBM.")
+    else:
+        # Image categories
+        if ct in {"image/bmp", "image/tiff", "image/heic", "image/heif"} or fn.endswith((".bmp", ".tiff", ".heic", ".heif")):
+            raise HTTPException(400, "HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.")
+        if not (ct.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+            raise HTTPException(400, "Unsupported image format. Please upload JPG, PNG, or WEBP.")
+
     if category in PORTFOLIO_IMAGE_CATEGORIES:
         # Phase 3: per-category cap (10 each) — NOT a combined total.
         existing = sum(
             1 for m in sub.get("media", []) if m.get("category") == category
         )
         if existing >= MAX_IMAGES_PER_CATEGORY:
-            label = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
-            raise HTTPException(400, f"{label} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
+            label_name = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
+            raise HTTPException(400, f"{label_name} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
 
     if category == "take":
         existing_takes = sum(
@@ -279,11 +296,6 @@ async def submission_upload(
     folder = f"{APP_NAME}/submissions/{sid}"
 
     # P2-E — Reject oversized uploads BEFORE reading the body into RAM.
-    # A 150 MB video read fully into memory per concurrent upload can exhaust
-    # server RAM (Railway 512 MB limit). The Content-Length header is sent by
-    # all modern browsers and mobile apps before the body transfer begins.
-    # If absent we fall through and enforce the cap after read (legacy path).
-    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
     raw_cl = request.headers.get("content-length")
     if raw_cl is not None:
         try:
@@ -304,8 +316,7 @@ async def submission_upload(
 
     data = await file.read()
 
-    # Secondary size check against the actual bytes read (catches missing/spoofed
-    # Content-Length headers — defence in depth, not the primary guard).
+    # Secondary size check against the actual bytes read
     size_bytes = len(data)
     if is_video_slot and size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
         mb = size_bytes // (1024 * 1024)
@@ -321,8 +332,7 @@ async def submission_upload(
             400, f"Image is too large ({mb} MB). Max {cap_mb} MB per image."
         )
 
-    # v37m — direct Cloudinary upload. Server-side resize is dropped in
-    # favour of on-the-fly URL transformations at delivery time.
+    # v37m — direct Cloudinary upload.
     rt = "video" if is_video_slot else "image"
     result = cloudinary_upload(
         data,
@@ -331,6 +341,8 @@ async def submission_upload(
         resource_type=rt,
         content_type=file.content_type,
     )
+    is_video = rt == "video"
+    is_image = rt == "image"
     media = {
         "id": media_id,
         "category": category,
@@ -344,6 +356,8 @@ async def submission_upload(
         "scope": "submission",
         "submission_id": sid,
         "project_id": sub["project_id"],
+        "thumbnail_url": media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image else None,
+        "poster_url": video_poster_url(result["public_id"]) if is_video else None,
     }
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"

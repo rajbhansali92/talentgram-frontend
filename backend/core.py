@@ -349,6 +349,56 @@ def cloudinary_url_for(
     return url
 
 
+def video_poster_url(public_id: Optional[str]) -> Optional[str]:
+    """Cloudinary video thumbnail: extract first frame as JPEG/AVIF."""
+    if not public_id:
+        return None
+    if public_id.startswith(("http://", "https://")):
+        return None
+    url, _ = cloudinary.utils.cloudinary_url(
+        public_id,
+        resource_type="video",
+        format="jpg",
+        transformation=[
+            {"width": 600, "height": 338, "crop": "fill"},
+            {"quality": "auto"}
+        ],
+        secure=True
+    )
+    return url
+
+
+def media_url(
+    public_id: Optional[str], preset: str = "detail", resource_type: str = "image"
+) -> Optional[str]:
+    """Build a transformation URL on the fly.
+
+    Presets:
+      roster     — w_400, c_fill, f_auto, q_auto   (roster card ~200px wide @2x)
+      thumb      — w_200, c_fill, f_auto, q_auto   (pipeline card / mini thumbnail)
+      detail     — w_1200, c_limit, f_auto, q_auto (detail page, mobile-friendly)
+      full       — w_1600, c_limit, f_auto, q_auto (lightbox / full-res view)
+      poster     — w_600, h_338, c_fill, f_auto, q_auto (video poster)
+    """
+    if not public_id:
+        return None
+    if public_id.startswith(("http://", "https://")):
+        return public_id
+
+    if preset == "roster":
+        return cloudinary_url_for(public_id, resource_type, width=400, crop="fill")
+    elif preset == "thumb":
+        return cloudinary_url_for(public_id, resource_type, width=200, crop="fill")
+    elif preset == "detail":
+        return cloudinary_url_for(public_id, resource_type, width=1200, crop="limit")
+    elif preset == "full":
+        return cloudinary_url_for(public_id, resource_type, width=1600, crop="limit")
+    elif preset == "poster":
+        return video_poster_url(public_id)
+
+    return cloudinary_url_for(public_id, resource_type)
+
+
 
 
 # --------------------------------------------------------------------------
@@ -371,6 +421,26 @@ def compute_age(dob: Optional[str]) -> Optional[int]:
         return None
 
 
+def resolve_cover_media(doc: dict) -> Optional[dict]:
+    """Find the best cover media item dict representing this talent."""
+    media = doc.get("media") or []
+    if not media:
+        return None
+    cover_id = doc.get("cover_media_id")
+    if cover_id:
+        for m in media:
+            if m.get("id") == cover_id and m.get("url"):
+                return m
+    image_cats = {"portfolio", "indian", "western", "image"}
+    for m in media:
+        if m.get("category") in image_cats and m.get("url"):
+            return m
+    for m in media:
+        if m.get("url"):
+            return m
+    return None
+
+
 def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
     """Annotate a talent document for API responses.
 
@@ -389,7 +459,20 @@ def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
         computed = compute_age(dob)
         if computed is not None:
             doc["age"] = computed
-    doc["image_url"] = _resolve_cover_url(doc) or None
+
+    media_item = resolve_cover_media(doc)
+    if media_item:
+        doc["image_url"] = media_item.get("url")
+        pid = media_item.get("public_id")
+        if pid:
+            rt = media_item.get("resource_type") or "image"
+            doc["cover_thumbnail_url"] = media_url(pid, preset="roster", resource_type=rt)
+        else:
+            doc["cover_thumbnail_url"] = media_item.get("url")
+    else:
+        doc["image_url"] = None
+        doc["cover_thumbnail_url"] = None
+
     return doc
 
 
@@ -402,22 +485,8 @@ def _resolve_cover_url(doc: dict) -> Optional[str]:
       3. first media item with any non-empty ``url``
     Returns ``None`` if no usable URL exists.
     """
-    media = doc.get("media") or []
-    if not media:
-        return None
-    cover_id = doc.get("cover_media_id")
-    if cover_id:
-        for m in media:
-            if m.get("id") == cover_id and m.get("url"):
-                return m["url"]
-    image_cats = {"portfolio", "indian", "western", "image"}
-    for m in media:
-        if m.get("category") in image_cats and m.get("url"):
-            return m["url"]
-    for m in media:
-        if m.get("url"):
-            return m["url"]
-    return None
+    media_item = resolve_cover_media(doc)
+    return media_item["url"] if media_item else None
 
 
 def _slugify(title: str) -> str:
@@ -612,10 +681,10 @@ MIN_SUBMISSION_IMAGES = 5
 # Talents can therefore upload up to 30 portfolio images total without
 # hitting a global ceiling.
 MAX_IMAGES_PER_CATEGORY = 10
-# Public audition upload size cap: 150 MB for videos (intro/take), 25 MB for images.
+# Public audition upload size cap: 200 MB for videos (intro/take), 20 MB for images.
 # Enforced server-side to protect against accidental/malicious bloat.
-MAX_SUBMISSION_VIDEO_BYTES = 150 * 1024 * 1024
-MAX_SUBMISSION_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_SUBMISSION_VIDEO_BYTES = 200 * 1024 * 1024
+MAX_SUBMISSION_IMAGE_BYTES = 20 * 1024 * 1024
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 

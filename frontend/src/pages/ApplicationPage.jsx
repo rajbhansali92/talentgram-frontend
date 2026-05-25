@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
+import LazyVideoPlayer from "@/components/LazyVideoPlayer";
+import { thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
 import {
     Select,
@@ -280,6 +282,39 @@ export default function ApplicationPage() {
 
     const upload = async (files, category) => {
         if (!files || !files.length) return;
+
+        // Size & type validation (P5)
+        const isVideoSlot = category === "intro_video";
+        for (const file of files) {
+            const sizeMB = file.size / (1024 * 1024);
+            const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+
+            if (isVideoSlot) {
+                if (sizeMB > 200) {
+                    toast.error(`Video is too large (${sizeMB.toFixed(1)} MB). Max limit is 200 MB.`);
+                    return;
+                }
+                const allowedVideoExts = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.3gp'];
+                if (!allowedVideoExts.includes(ext) && !file.type.startsWith('video/')) {
+                    toast.error(`Unsupported video format. Please upload MP4, MOV, or WEBM.`);
+                    return;
+                }
+            } else {
+                if (sizeMB > 20) {
+                    toast.error(`Image is too large (${sizeMB.toFixed(1)} MB). Max limit is 20 MB.`);
+                    return;
+                }
+                if (['.bmp', '.tiff', '.heic', '.heif'].includes(ext) || ['image/bmp', 'image/tiff', 'image/heic', 'image/heif'].includes(file.type)) {
+                    toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
+                    return;
+                }
+                if (!file.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+                    toast.error(`Unsupported image format. Please upload JPG, PNG, or WEBP.`);
+                    return;
+                }
+            }
+        }
+
         if (category === "image" || category === "indian" || category === "western") {
             // Phase 3 — per-category cap (10 each), not combined.
             const existing = media.filter((m) => m.category === category).length;
@@ -726,12 +761,11 @@ export default function ApplicationPage() {
                                 Recommended. Your most recent professional introduction video, without contact info.
                             </p>
                             {intro ? (
-                                <video
+                                <LazyVideoPlayer
                                     src={intro.url}
-                                    controls
-                                    preload="metadata"
-                                    className="w-full max-w-lg rounded-xl border border-[#e8e6df] bg-[#faf9f6] shadow-sm"
-                                    data-testid="apply-intro-preview"
+                                    poster={posterUrl(intro)}
+                                    label="Introduction Video"
+                                    className="max-w-lg shadow-sm border border-[#e8e6df]"
                                 />
                             ) : (
                                 <button
@@ -969,7 +1003,7 @@ function ApplyLookGroup({
                         className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#e8e6df] overflow-hidden group shadow-sm"
                     >
                         <img
-                            src={m.url}
+                            src={thumbnailUrl(m)}
                             alt=""
                             loading="lazy"
                             className="w-full h-full object-cover"

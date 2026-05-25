@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import LazyVideoPlayer from "@/components/LazyVideoPlayer";
+import { thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
@@ -840,30 +842,29 @@ function TalentDetail({
                                                 <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate">
                                                     {t.label || `Take ${i + 1}`}
                                                 </p>
-                                                <video
+                                                <LazyVideoPlayer
                                                     src={t.url}
-                                                    controls
-                                                    preload="metadata"
-                                                    className="w-full border border-black/[0.04] bg-white rounded-xl shadow-sm"
+                                                    poster={posterUrl(t)}
+                                                    label={t.label || `Take ${i + 1}`}
+                                                    className="w-full"
                                                 />
                                             </div>
                                         ))}
                                     </div>
                                 </div>
-                            )}
-
-                            {vis.intro_video && intro && (
-                                <div className="mb-10">
-                                    <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Introduction</p>
-                                    <video
-                                        src={intro.url}
-                                        controls
-                                        preload="metadata"
-                                        className="w-full border border-black/[0.04] bg-white rounded-xl shadow-sm"
-                                        data-testid="client-intro-video"
-                                    />
-                                </div>
-                            )}
+                             )}
+ 
+                             {vis.intro_video && intro && (
+                                 <div className="mb-10">
+                                     <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Introduction</p>
+                                     <LazyVideoPlayer
+                                         src={intro.url}
+                                         poster={posterUrl(intro)}
+                                         label="Introduction Video"
+                                         className="w-full"
+                                     />
+                                 </div>
+                             )}
 
                             {images.length > 0 && (
                                 <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Portfolio</p>
@@ -921,7 +922,7 @@ function TalentDetail({
                                             className={`shrink-0 w-20 h-24 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
                                         >
                                             <img
-                                                src={IMAGE_URL(m)}
+                                                src={thumbnailUrl(m)}
                                                 alt=""
                                                 className="w-full h-full object-cover"
                                             />
@@ -1114,7 +1115,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
             <div className="aspect-[3/4] bg-white overflow-hidden rounded-2xl group-hover:shadow-md transition-shadow duration-300 relative shadow-sm">
                 {cover ? (
                     <img
-                        src={IMAGE_URL(cover)}
+                        src={thumbnailUrl(cover)}
                         alt={privatizeName(talent.name)}
                         loading="lazy"
                         className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-700"

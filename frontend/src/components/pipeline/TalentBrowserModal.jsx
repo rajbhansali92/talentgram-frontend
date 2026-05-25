@@ -244,6 +244,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     const cardRefsMap = useRef(new Map());
     const abortControllerRef = useRef(null);
     const isFetchingRef = useRef(false);
+    const isSubmittingRef = useRef(false);
     
     // Get current columns based on screen size
     const getColumns = useCallback(() => {
@@ -329,18 +330,28 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         };
     }, [open, talents.length, setLoading, setError, setTalents]);
     
-    // Reset state when modal opens
+    // Reset state when modal opens, and abort in-flight requests when closed
     useEffect(() => {
         if (open) {
             setFocusedIndex(-1);
             setTimeout(() => searchInputRef.current?.focus(), 100);
+        } else {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+                abortControllerRef.current = null;
+            }
+            isFetchingRef.current = false;
         }
     }, [open]);
     
-    // Clear selection when project changes
+    // Clear selection, reset scroll, and reset filters when project changes to prevent cross-contamination
     useEffect(() => {
         setSelected(new Set());
-    }, [projectId]);
+        resetFilters();
+        if (gridScrollRef.current) {
+            gridScrollRef.current.scrollTop = 0;
+        }
+    }, [projectId, resetFilters]);
     
     // Body scroll lock
     useEffect(() => {
@@ -394,6 +405,11 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
 
     // AUD-E1: Force refresh candidates by resetting cached state
     const handleForceRefresh = useCallback(() => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            abortControllerRef.current = null;
+        }
+        isFetchingRef.current = false;
         setTalents([]);
     }, []);
     
@@ -537,8 +553,9 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     
     // Add to pipeline
     const handleSubmit = async () => {
-        if (selected.size === 0 || submitting) return;
+        if (selected.size === 0 || submitting || isSubmittingRef.current) return;
         
+        isSubmittingRef.current = true;
         setSubmitting(true);
         const count = selected.size;
         
@@ -556,6 +573,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             console.error("Add to pipeline failed:", err);
             toast.error(err?.response?.data?.detail || "Failed to add talents");
         } finally {
+            isSubmittingRef.current = false;
             setSubmitting(false);
         }
     };
@@ -658,8 +676,6 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     
     const config = DENSITY_CONFIG[densityMode];
     
-    if (!open) return null;
-    
     return (
         <ErrorBoundary>
             <div
@@ -667,7 +683,9 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 aria-modal="true"
                 aria-labelledby="talent-browser-title"
                 data-testid="talent-browser-modal"
-                className="fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-6"
+                className={`fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-6 transition-all duration-200 ${
+                    open ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+                }`}
                 onMouseDown={(e) => {
                     if (e.target === e.currentTarget) onClose();
                 }}
@@ -846,6 +864,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     <div
                         ref={gridScrollRef}
                         className="flex-1 overflow-auto"
+                        style={{ WebkitOverflowScrolling: "touch" }}
                         data-testid="talent-browser-grid"
                     >
                         {loading && talents.length === 0 ? (
@@ -905,6 +924,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             onSubmit={handleSubmit}
                             submitting={submitting}
                             isMobile={isMobile}
+                            onClear={clearSelection}
                         />
                     )}
                 </div>
@@ -1188,6 +1208,9 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
             type="button"
             onClick={handleToggle}
             disabled={alreadyInPipeline}
+            role="checkbox"
+            aria-checked={selected}
+            aria-label={`Select ${talent.name || "Unnamed Talent"}`}
             data-testid={`talent-browser-card-${talent.id}`}
             style={{
                 contentVisibility: "auto",
@@ -1199,6 +1222,7 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
                 ${selected ? "ring-2 ring-gray-900 shadow-md bg-gray-50/35" : "ring-1 ring-gray-200"}
                 ${isFocused && !alreadyInPipeline ? "ring-2 ring-blue-500 shadow-lg" : ""}
                 bg-white
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2
             `}
         >
             {/* Image */}
@@ -1290,21 +1314,45 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
 // SELECTION TRAY
 // ============================================================================
 
-const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit, submitting, isMobile }) => {
+const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit, submitting, isMobile, onClear }) => {
     return (
         <div className="sticky bottom-0 z-20 border-t border-gray-200 bg-white/95 backdrop-blur-sm shadow-lg shrink-0">
             <div className="px-4 sm:px-6 py-2 sm:py-3">
                 <div className="flex items-center justify-between gap-2 sm:gap-4">
                     <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
-                        <span className="text-xs sm:text-sm font-medium text-gray-700 whitespace-nowrap">{selectedCount} selected</span>
+                        <span className="text-xs sm:text-sm font-medium text-gray-700 whitespace-nowrap flex items-center">
+                            {selectedCount} selected
+                            <button
+                                type="button"
+                                onClick={onClear}
+                                aria-label="Clear all selections"
+                                className="text-xs text-gray-400 hover:text-gray-600 underline ml-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 rounded px-1 shrink-0"
+                            >
+                                Clear all
+                            </button>
+                        </span>
                         
                         <div className="hidden sm:flex items-center gap-2 overflow-x-auto flex-1">
                             {selectedTalents.slice(0, 8).map(talent => (
                                 <div key={talent.id} className="relative group shrink-0">
                                     <div className="w-8 h-8 rounded-full overflow-hidden bg-gray-100 ring-2 ring-white shadow-sm">
-                                        {pickImage(talent) ? <img src={pickImage(talent)} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-[10px]">?</div>}
+                                        {pickImage(talent) ? (
+                                            <img
+                                                src={pickImage(talent)}
+                                                alt=""
+                                                loading="lazy"
+                                                decoding="async"
+                                                className="w-full h-full object-cover"
+                                            />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-[10px]">?</div>
+                                        )}
                                     </div>
-                                    <button onClick={() => onRemove(talent.id)} className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white border border-gray-200 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm">
+                                    <button
+                                        onClick={() => onRemove(talent.id)}
+                                        aria-label={`Remove ${talent.name || "Unnamed Talent"} from selection`}
+                                        className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white border border-gray-200 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 transition-opacity shadow-sm"
+                                    >
                                         <X size={8} className="text-gray-500" />
                                     </button>
                                 </div>
@@ -1315,7 +1363,13 @@ const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit
                         {isMobile && selectedTalents.length > 0 && <div className="px-2 py-1 rounded-full bg-gray-100 text-xs text-gray-600">{selectedTalents.length}</div>}
                     </div>
                     
-                    <button onClick={onSubmit} disabled={submitting} data-testid="talent-browser-add-selected" className="px-4 sm:px-6 py-1.5 sm:py-2 rounded-lg bg-gray-900 text-white text-xs sm:text-sm font-medium hover:bg-gray-800 transition-colors shadow-sm shrink-0 disabled:bg-gray-300 disabled:cursor-not-allowed">
+                    <button
+                        onClick={onSubmit}
+                        disabled={submitting}
+                        aria-label={`Add ${selectedCount} selected talents to pipeline`}
+                        data-testid="talent-browser-add-selected"
+                        className="px-4 sm:px-6 py-1.5 sm:py-2 rounded-lg bg-gray-900 text-white text-xs sm:text-sm font-medium hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 transition-colors shadow-sm shrink-0 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
                         {submitting ? "Adding..." : `Add${!isMobile ? ` ${selectedCount}` : ""}`}
                     </button>
                 </div>

@@ -1,11 +1,188 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
-import { Search, Plus, Image as ImageIcon, Check } from "lucide-react";
+import { Search, Plus, Check, User } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 
+// ---------------------------------------------------------------------------
+// Skeleton card — prevents layout shift during load
+// ---------------------------------------------------------------------------
+function SkeletonCard() {
+    return (
+        <div className="rounded-xl border border-black/[0.06] bg-white overflow-hidden animate-pulse">
+            <div className="aspect-[3/4] bg-black/[0.05]" />
+            <div className="p-4 space-y-2">
+                <div className="h-3.5 bg-black/[0.07] rounded w-3/4" />
+                <div className="h-2.5 bg-black/[0.04] rounded w-1/2" />
+            </div>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Initials avatar — stable placeholder when no cover image is set
+// ---------------------------------------------------------------------------
+function Initials({ name }) {
+    const letters = (name || "")
+        .split(" ")
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((w) => w[0].toUpperCase())
+        .join("");
+    return (
+        <div className="w-full h-full flex items-center justify-center bg-black/[0.04]">
+            {letters ? (
+                <span className="text-2xl font-medium text-black/25 select-none tracking-wide">
+                    {letters}
+                </span>
+            ) : (
+                <User className="w-8 h-8 text-black/20" strokeWidth={1} />
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Lazy image with blur-up reveal — no layout shift
+// ---------------------------------------------------------------------------
+function TalentThumb({ src, alt }) {
+    const [loaded, setLoaded] = useState(false);
+    const [errored, setErrored] = useState(false);
+
+    // Reset state when src changes (e.g. after cover change)
+    const prevSrc = useRef(src);
+    if (prevSrc.current !== src) {
+        prevSrc.current = src;
+        if (loaded) setLoaded(false);
+        if (errored) setErrored(false);
+    }
+
+    if (!src || errored) {
+        return <Initials name={alt} />;
+    }
+
+    return (
+        <>
+            {/* Placeholder shown while image loads */}
+            {!loaded && <Initials name={alt} />}
+            <img
+                src={src}
+                alt={alt}
+                loading="lazy"
+                decoding="async"
+                onLoad={() => setLoaded(true)}
+                onError={() => setErrored(true)}
+                className={[
+                    "absolute inset-0 w-full h-full object-cover transition-opacity duration-300",
+                    loaded ? "opacity-100" : "opacity-0",
+                ].join(" ")}
+            />
+        </>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Single roster card — memoized to avoid re-renders on parent state changes
+// ---------------------------------------------------------------------------
+const TalentCard = React.memo(function TalentCard({
+    t,
+    checked,
+    isSelectionMode,
+    canBulkDelete,
+    onToggle,
+}) {
+    const handleToggle = useCallback(
+        (e) => {
+            e.stopPropagation();
+            onToggle(t.id);
+        },
+        [t.id, onToggle]
+    );
+
+    const cardContent = (
+        <>
+            {/* Thumbnail — aspect-ratio container prevents layout shift */}
+            <div className="aspect-[3/4] bg-black/[0.04] rounded-t-xl overflow-hidden relative">
+                <TalentThumb src={t.image_url} alt={t.name} />
+                {/* Asset count badge */}
+                {t.media_count > 0 && (
+                    <div className="absolute bottom-2 right-2 bg-black/60 text-white text-[10px] font-medium px-1.5 py-0.5 rounded-md backdrop-blur-sm">
+                        {t.media_count}
+                    </div>
+                )}
+            </div>
+
+            {/* Card metadata */}
+            <div className="p-3.5">
+                <div className="font-display text-[13px] leading-snug tracking-tight text-black/85 truncate">
+                    {t.name || "—"}
+                </div>
+                <div className="text-[11px] text-black/40 mt-0.5 truncate">
+                    {[t.location, t.category].filter(Boolean).join(" · ") || "\u00a0"}
+                </div>
+            </div>
+        </>
+    );
+
+    return (
+        <div
+            key={t.id}
+            data-testid={`talent-card-${t.id}`}
+            className={[
+                "group relative rounded-xl border bg-white transition-all duration-150",
+                checked
+                    ? "border-black/40 ring-1 ring-black/20"
+                    : "border-black/[0.07] hover:border-black/[0.18] hover:shadow-sm",
+            ].join(" ")}
+        >
+            {/* Selection checkbox */}
+            {canBulkDelete && (
+                <button
+                    type="button"
+                    onClick={handleToggle}
+                    aria-label={checked ? "Deselect talent" : "Select talent"}
+                    data-testid={`talent-check-${t.id}`}
+                    className={[
+                        "absolute top-2.5 left-2.5 z-10 w-5 h-5 rounded-md border flex items-center justify-center",
+                        "transition-all duration-150",
+                        checked
+                            ? "bg-black border-black text-white opacity-100"
+                            : "bg-white/90 border-black/20 text-transparent",
+                        isSelectionMode
+                            ? "opacity-100"
+                            : "opacity-0 group-hover:opacity-100 group-hover:border-black/35",
+                    ].join(" ")}
+                >
+                    {checked && <Check className="w-3 h-3" strokeWidth={2.5} />}
+                </button>
+            )}
+
+            {/* Card body — link or button depending on selection mode */}
+            {!isSelectionMode ? (
+                <Link
+                    to={`/admin/talents/${t.id}`}
+                    className="block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/30 rounded-xl"
+                >
+                    {cardContent}
+                </Link>
+            ) : (
+                <button
+                    type="button"
+                    onClick={() => onToggle(t.id)}
+                    className="block w-full text-left"
+                >
+                    {cardContent}
+                </button>
+            )}
+        </div>
+    );
+});
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
 export default function TalentList() {
     const [talents, setTalents] = useState([]);
     const [q, setQ] = useState("");
@@ -14,187 +191,161 @@ export default function TalentList() {
     const [confirmOpen, setConfirmOpen] = useState(false);
     const canBulkDelete = isAdmin();
 
-    const load = async (qq = "") => {
+    // ── Data fetching ────────────────────────────────────────────────────────
+    const load = useCallback(async (qq = "") => {
         setLoading(true);
         try {
             const { data } = await adminApi.get("/talents", {
                 params: qq ? { q: qq } : {},
             });
-            setTalents(data);
+            setTalents(Array.isArray(data) ? data : data?.items ?? []);
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
+
     useEffect(() => {
         load();
-    }, []);
+    }, [load]);
+
+    // Debounced search — 250 ms
     useEffect(() => {
         const t = setTimeout(() => load(q), 250);
         return () => clearTimeout(t);
-    }, [q]);
+    }, [q, load]);
 
-    const toggle = (id) => {
+    // ── Selection ────────────────────────────────────────────────────────────
+    const toggle = useCallback((id) => {
         setSelected((prev) => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id);
             else next.add(id);
             return next;
         });
-    };
+    }, []);
 
-    const clear = () => setSelected(new Set());
-    const selectAll = () => setSelected(new Set(talents.map((t) => t.id)));
+    const clear = useCallback(() => setSelected(new Set()), []);
+    const selectAll = useCallback(
+        () => setSelected(new Set(talents.map((t) => t.id))),
+        [talents]
+    );
 
-    const bulkDelete = async () => {
+    const isSelectionMode = selected.size > 0;
+
+    // ── Bulk delete ──────────────────────────────────────────────────────────
+    const bulkDelete = useCallback(async () => {
         const ids = Array.from(selected);
         try {
             const res = await adminApi.post("/talents/bulk-delete", { ids });
-             
-            console.info("[bulk-delete talents]", ids, res?.data);
             toast.success(
-                `Deleted ${res.data.deleted} talent${res.data.deleted === 1 ? "" : "s"}${res.data.missing ? ` (${res.data.missing} already gone)` : ""}`,
+                `Deleted ${res.data.deleted} talent${res.data.deleted === 1 ? "" : "s"}${
+                    res.data.missing ? ` (${res.data.missing} already gone)` : ""
+                }`
             );
             clear();
             setConfirmOpen(false);
             load(q);
         } catch (err) {
-             
-            console.error("[bulk-delete talents] failed", err?.response?.data || err);
             toast.error(
-                err?.response?.data?.detail ||
-                    err?.message ||
-                    "Bulk delete failed",
+                err?.response?.data?.detail ?? err?.message ?? "Bulk delete failed"
             );
             throw err;
         }
-    };
+    }, [selected, clear, load, q]);
 
-    const isSelectionMode = selected.size > 0;
+    // ── Stats bar ────────────────────────────────────────────────────────────
+    const totalAssets = useMemo(
+        () => talents.reduce((sum, t) => sum + (t.media_count || 0), 0),
+        [talents]
+    );
 
+    // ── Render ───────────────────────────────────────────────────────────────
     return (
-        <div
-            className="p-6 md:p-10 max-w-7xl mx-auto"
-            data-testid="talent-list-page"
-        >
+        <div className="p-6 md:p-10 max-w-7xl mx-auto" data-testid="talent-list-page">
+
+            {/* Header */}
             <div className="flex items-end justify-between mb-8 flex-wrap gap-4">
                 <div>
                     <p className="eyebrow mb-3">Roster</p>
                     <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
                         Talents
                     </h1>
+                    {!loading && talents.length > 0 && (
+                        <p className="text-[11px] text-black/35 mt-2 tracking-wide uppercase">
+                            {talents.length} talent{talents.length !== 1 ? "s" : ""}
+                            {totalAssets > 0 && ` · ${totalAssets} assets`}
+                        </p>
+                    )}
                 </div>
                 <Link
                     to="/admin/talents/new"
                     data-testid="new-talent-btn"
-                    className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors duration-150"
+                    className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/85 active:bg-black transition-colors duration-150"
                 >
-                    <Plus className="w-4 h-4" strokeWidth={1.5} /> Add Talent
+                    <Plus className="w-4 h-4" strokeWidth={1.5} />
+                    Add Talent
                 </Link>
             </div>
 
+            {/* Search */}
             <div className="mb-8 relative max-w-md">
-                <Search className="absolute left-0 top-3 w-4 h-4 text-black/35" />
+                <Search className="absolute left-0 top-3 w-4 h-4 text-black/30 pointer-events-none" />
                 <input
                     type="text"
                     value={q}
                     onChange={(e) => setQ(e.target.value)}
-                    placeholder="Search by name..."
+                    placeholder="Search by name…"
                     data-testid="talent-search-input"
-                    className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 text-sm text-black/85 placeholder:text-black/30"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 text-sm text-black/85 placeholder:text-black/28 transition-colors duration-150"
                 />
             </div>
 
+            {/* Grid */}
             {loading ? (
-                <div className="text-black/45 text-sm">Loading...</div>
+                <div
+                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-5 pb-20"
+                    aria-label="Loading talents"
+                >
+                    {Array.from({ length: 8 }).map((_, i) => (
+                        <SkeletonCard key={i} />
+                    ))}
+                </div>
             ) : talents.length === 0 ? (
-                <div className="border border-black/[0.08] bg-white rounded-xl p-12 text-center">
-                    <ImageIcon
-                        className="w-10 h-10 text-black/20 mx-auto mb-4"
-                        strokeWidth={1}
-                    />
-                    <p className="text-black/60 mb-6">No talents yet</p>
-                    <Link
-                        to="/admin/talents/new"
-                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors duration-150"
-                    >
-                        Add your first talent
-                    </Link>
+                <div className="border border-black/[0.08] bg-white rounded-xl p-14 text-center">
+                    <User className="w-10 h-10 text-black/18 mx-auto mb-4" strokeWidth={1} />
+                    <p className="text-black/55 mb-2 font-medium">
+                        {q ? `No results for "${q}"` : "No talents yet"}
+                    </p>
+                    {!q && (
+                        <Link
+                            to="/admin/talents/new"
+                            className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/85 transition-colors duration-150 mt-4"
+                        >
+                            Add your first talent
+                        </Link>
+                    )}
                 </div>
             ) : (
                 <div
-                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6 pb-20"
+                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-5 pb-20"
                     data-testid="talents-grid"
                 >
-                    {talents.map((t) => {
-                        const cover = (t.media || []).find(
-                            (m) => m.id === t.cover_media_id,
-                        );
-                        const anyImg =
-                            cover ||
-                            (t.media || []).find(
-                                (m) =>
-                                    m.category !== "video" &&
-                                    m.content_type?.startsWith("image/"),
-                            );
-                        const checked = selected.has(t.id);
-                        const goesToDetail = !isSelectionMode;
-                        return (
-                            <div
-                                key={t.id}
-                                data-testid={`talent-card-${t.id}`}
-                                className={`group relative border rounded-xl transition-colors duration-150 ${
-                                    checked 
-                                        ? "border-black/40 bg-white" 
-                                        : "border-black/[0.08] bg-white hover:border-black/[0.16]"
-                                }`}
-                            >
-                                {canBulkDelete && (
-                                    <button
-                                        type="button"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            toggle(t.id);
-                                        }}
-                                        aria-label={
-                                            checked ? "Deselect" : "Select"
-                                        }
-                                        data-testid={`talent-check-${t.id}`}
-                                        className={`absolute top-3 left-3 z-10 w-5 h-5 rounded-md border flex items-center justify-center transition-colors duration-150 ${
-                                            checked 
-                                                ? "bg-black border-black text-white" 
-                                                : "bg-white border-black/[0.2] text-transparent group-hover:border-black/40"
-                                        } ${isSelectionMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
-                                    >
-                                        {checked && (
-                                            <Check className="w-3 h-3" />
-                                        )}
-                                    </button>
-                                )}
-                                {goesToDetail ? (
-                                    <Link
-                                        to={`/admin/talents/${t.id}`}
-                                        className="block"
-                                    >
-                                        <Inner
-                                            t={t}
-                                            anyImg={anyImg}
-                                        />
-                                    </Link>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => toggle(t.id)}
-                                        className="block w-full text-left"
-                                    >
-                                        <Inner t={t} anyImg={anyImg} />
-                                    </button>
-                                )}
-                            </div>
-                        );
-                    })}
+                    {talents.map((t) => (
+                        <TalentCard
+                            key={t.id}
+                            t={t}
+                            checked={selected.has(t.id)}
+                            isSelectionMode={isSelectionMode}
+                            canBulkDelete={canBulkDelete}
+                            onToggle={toggle}
+                        />
+                    ))}
                 </div>
             )}
 
+            {/* Bulk action bar */}
             {canBulkDelete && (
                 <BulkSelectBar
                     count={selected.size}
@@ -208,6 +359,7 @@ export default function TalentList() {
                     testid="talents-bulk-bar"
                 />
             )}
+
             <ConfirmDeleteDialog
                 open={confirmOpen}
                 title={`Delete ${selected.size} talent${selected.size === 1 ? "" : "s"}?`}
@@ -219,34 +371,5 @@ export default function TalentList() {
                 testid="talents-bulk-confirm"
             />
         </div>
-    );
-}
-
-function Inner({ t, anyImg }) {
-    return (
-        <>
-            <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-xl overflow-hidden">
-                {anyImg ? (
-                    <img
-                        src={anyImg.url}
-                        alt={t.name}
-                        className="w-full h-full object-cover"
-                    />
-                ) : (
-                    <div className="w-full h-full flex items-center justify-center text-black/20">
-                        <ImageIcon className="w-8 h-8" strokeWidth={1} />
-                    </div>
-                )}
-            </div>
-            <div className="p-4">
-                <div className="font-display text-base tracking-tight text-black/85">
-                    {t.name}
-                </div>
-                <div className="text-[11px] text-black/45 mt-1">
-                    {t.location ? t.location + " · " : ""}
-                    {(t.media || []).length} asset{(t.media || []).length === 1 ? "" : "s"}
-                </div>
-            </div>
-        </>
     );
 }

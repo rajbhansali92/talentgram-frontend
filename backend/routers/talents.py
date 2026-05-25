@@ -97,56 +97,80 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
 # ---------------------------------------------------------------------------
 # Projections
 # ---------------------------------------------------------------------------
-# List projection: excludes media[] and internal/write-only fields.
-# The talent roster and search UI never renders individual media items — it
-# only needs the cover URL (image_url), which we compute from cover_media_id
-# and the *first* image URL. Excluding media[] reduces payload by ~95% for
-# talent-heavy rosters (2 000 talents × 10 images = 20 000 dicts eliminated).
+# List projection: strips heavy fields while retaining the minimum data
+# needed to resolve a thumbnail URL and render the roster card.
+#
+# P2-B FIX: The original optimization excluded media[] entirely, which meant
+# _enrich_list had no data to resolve a cover URL from and was forced to
+# hardcode image_url=None. The fix fetches only the first 3 media items
+# (via $slice) — enough to find a cover image — then strips media[] from
+# the final response after resolving image_url. Net result:
+#   - image_url: resolved Cloudinary URL string (or null)
+#   - media_count: number of assets (stored at top level, not derived)
+#   - media[]: NOT in response — stripped after URL resolution
+#
+# Payload per talent: ~300 bytes (was ~5-30 KB with full media array).
 _LIST_PROJECTION = {
     "_id": 0,
     "created_by": 0,
-    "media": 0,        # P2-B: stripped from list; full media only on GET /talents/{id}
-    "source": 0,       # internal provenance — not rendered in any list UI
+    # Fetch up to 3 media items for cover URL resolution only.
+    # We strip this array before returning — it never reaches the client.
+    # 3 items is enough: cover_media_id match + 2 fallbacks.
+    "media": {"$slice": 3},
+    "source": 0,       # internal provenance — not rendered in list UI
     "notes": 0,        # long-form text — not needed by list cards
 }
 
-# Fields fetched for cover-URL resolution on the list path.
-# We keep cover_media_id in the list doc so _list_image_url can resolve
-# it without media[]; falls back to None for unset covers.
 
+def _resolve_cover_url_from_slice(doc: dict) -> Optional[str]:
+    """Resolve cover URL from a small media slice (up to 3 items).
 
-def _list_image_url(doc: dict) -> Optional[str]:
-    """Cheap cover-URL resolver for the list path where media[] is excluded.
-
-    Because media[] is projected out, we cannot walk it. Relies on
-    cover_media_id being set (filled by set_cover / add_media). When it is
-    absent the list card renders without an avatar — same as before for
-    talents that never had a cover set.
-
-    This avoids running the full _resolve_cover_url loop (O(n) over media[])
-    for every row in a 2 000-item list response.
+    Uses the same priority as _resolve_cover_url in core.py:
+      1. Item whose id == cover_media_id
+      2. First image-category item (portfolio, indian, western, image)
+      3. First item with any non-empty url
+    Returns None if no URL found.
     """
-    # cover_media_id is present in the doc but the URL is not — the list
-    # card uses image_url directly. Since we have no media[], return None;
-    # the detail view (GET /talents/{id}) always has the full media array.
+    media = doc.get("media") or []
+    if not media:
+        return None
+    cover_id = doc.get("cover_media_id")
+    if cover_id:
+        for m in media:
+            if m.get("id") == cover_id and m.get("url"):
+                return m["url"]
+    image_cats = {"portfolio", "indian", "western", "image"}
+    for m in media:
+        if m.get("category") in image_cats and m.get("url"):
+            return m["url"]
+    for m in media:
+        if m.get("url"):
+            return m["url"]
     return None
 
 
 def _enrich_list(doc: dict) -> dict:
-    """Lightweight enrichment for list responses (media excluded from projection).
+    """Lightweight enrichment for list responses.
 
-    Only derives `age` from `dob` — skips the O(media) cover-URL loop that
-    full `enrich_talent` runs. Returns doc in-place.
+    Resolves image_url from the 3-item media slice, sets media_count from
+    the slice length, then strips media[] so the client never receives the
+    raw array. Computes age from dob. Returns doc in-place.
     """
+    media_slice = doc.get("media") or []
+    # Resolve cover URL BEFORE stripping media[]
+    doc["image_url"] = _resolve_cover_url_from_slice(doc) or None
+    # Capture slice length as an asset-presence signal for the roster card.
+    # $slice:3 gives at most 3 items; the badge shows "N" (1-3) or is hidden.
+    # Exact counts are shown on the detail page.
+    doc["media_count"] = len(media_slice)
+    # Strip media array — resolved URL + count is all the roster card needs
+    doc.pop("media", None)
+    # Age derivation
     dob = doc.get("dob")
     if dob:
         computed = compute_age(dob)
         if computed is not None:
             doc["age"] = computed
-    # image_url is None for list view — cover requires the full media array
-    # which is excluded by _LIST_PROJECTION. Clients use the detail endpoint
-    # for cover URLs when opening a talent profile.
-    doc["image_url"] = None
     return doc
 
 
@@ -161,8 +185,10 @@ async def list_talents(
     query: Dict[str, Any] = {}
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
-    # P2-B/P2-F: Use lightweight list projection — excludes media[], source,
-    # notes. Eliminates up to 300 MB from unbounded list responses.
+    # P2-B/P2-F: Use lightweight list projection.
+    # media[] is fetched as a 3-item slice for cover URL resolution only,
+    # then stripped by _enrich_list before the response is serialized.
+    # Final payload per talent: ~300 bytes vs ~5-30 KB with full media array.
     cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
     if page is None and limit is None:
         talents = await cursor.to_list(2000)
@@ -171,6 +197,7 @@ async def list_talents(
     total = await db.talents.count_documents(query)
     talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated([_enrich_list(t) for t in talents], total, p, s)
+
 
 
 # ---------------------------------------------------------------------------

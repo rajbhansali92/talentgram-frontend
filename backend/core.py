@@ -54,7 +54,14 @@ logger = logging.getLogger("talentgram")
 # --------------------------------------------------------------------------
 # Database
 # --------------------------------------------------------------------------
-mongo_client = AsyncIOMotorClient(MONGO_URL)
+mongo_client = AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=10_000,   # fail fast if Atlas is unreachable
+    connectTimeoutMS=10_000,           # socket connect cap
+    socketTimeoutMS=20_000,            # per-op socket cap
+    maxPoolSize=50,                    # match expected concurrent recruiter load
+    retryWrites=True,                  # survive transient Atlas failovers
+)
 db = mongo_client[DB_NAME]
 
 # --------------------------------------------------------------------------

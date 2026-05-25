@@ -376,7 +376,7 @@ const PipelineCard = memo(function PipelineCard({
         "bg-white",
         "shadow-[0_1px_2px_rgba(0,0,0,0.04)]",
         "border",
-        "min-h-[140px]", // Fixed minimum height for consistency (ISSUE 5)
+        "min-h-[120px]", // Minimum height — allows shorter cards to be compact
         isSelected
             ? "border-black/20 ring-1 ring-black/10"
             : "border-black/[0.08]",
@@ -461,11 +461,11 @@ const PipelineCard = memo(function PipelineCard({
             className={shellClass}
             aria-label={`Talent: ${displayName}`}
         >
-                <div className="p-4 space-y-3">
+                <div className="p-4 space-y-2.5">
                 {/* Row 1: Identity block — Avatar + Name/Handle + workflow chips inline */}
                 <div className="flex items-start gap-3">
-                    {/* Avatar */}
-                    <div className="flex-shrink-0 opacity-95">
+                    {/* Avatar — full opacity anchors identity */}
+                    <div className="flex-shrink-0">
                         <TalentAvatar
                             src={item.image_url}
                             name={displayName}
@@ -507,7 +507,7 @@ const PipelineCard = memo(function PipelineCard({
 
                         {/* Priority + Freshness row — workflow metadata, visually subordinate to identity */}
                         {(activePriority || freshness) && (
-                            <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                            <div className="flex flex-wrap items-center gap-1 mt-1">
                                 {activePriority && (
                                     <span
                                         className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${PRIORITY_VARIANTS[activePriority.variant]}`}
@@ -521,7 +521,7 @@ const PipelineCard = memo(function PipelineCard({
                                         title={`Last activity: ${formatRelativeTime(item.updated_at || item.created_at)}`}
                                     >
                                         <span className={`w-1.5 h-1.5 rounded-full ${freshness.dot}`} />
-                                        <span className="text-[9px] text-black/45 uppercase tracking-wide">
+                                        <span className="text-[9px] text-black/40">
                                             {freshness.label}
                                         </span>
                                     </span>
@@ -533,22 +533,22 @@ const PipelineCard = memo(function PipelineCard({
                 
                 {/* Row 2: Compact recruiter metadata */}
                 <div className="flex items-center justify-between text-[9px] text-black/50 border-t border-black/[0.04] pt-2">
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5">
                         <span className="flex items-center gap-1">
                             <User className="w-2.5 h-2.5 opacity-45" />
-                            <span>{recruiterName}</span>
+                            <span className="truncate max-w-[80px]">{recruiterName}</span>
                         </span>
-                        <span className="w-px h-2 bg-black/10" />
-                        <span className="flex items-center gap-1 text-black/40">
-                            <Clock className="w-2.5 h-2.5 opacity-40" />
+                        <span className="w-px h-2 bg-black/10 shrink-0" />
+                        <span className="flex items-center gap-1 text-black/35">
+                            <Clock className="w-2.5 h-2.5 opacity-35" />
                             <span>{lastActivity || 'N/A'}</span>
                         </span>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                        <span className="px-1.5 py-0.5 rounded bg-black/[0.03] text-black/50">
+                    <div className="flex items-center gap-1">
+                        <span className="px-1.5 py-0.5 rounded bg-black/[0.03] text-black/45 shrink-0">
                             {responseStatus}
                         </span>
-                        <span className="px-1.5 py-0.5 rounded bg-black/[0.03] text-black/50">
+                        <span className="px-1.5 py-0.5 rounded bg-black/[0.03] text-black/45 shrink-0">
                             {availability}
                         </span>
                     </div>

@@ -144,22 +144,29 @@ async def _project_exists(project_id: str) -> bool:
 # Submission → pipeline sync
 #
 # Called from `submissions.set_decision` whenever an admin approves / holds /
-# rejects a submission. Behaviour:
+# rejects a submission, and from `submissions.submission_finalize` on first
+# finalize so that every submitted talent is auto-entered in the pipeline.
 #
-#   • Only updates an EXISTING pipeline row — never creates one. The kanban
-#     is a curated list; we don't want decisions to silently auto-populate
-#     it for projects the casting team hasn't started yet.
+# Behaviour:
 #
-#   • Only mutates rows currently in {ask_to_test, approved, hold, rejected}
-#     — the four "fluid" lanes. Locked, shortlisted, already_tested are
-#     protected: those represent later human curation that an upstream
-#     decision change must not silently overwrite.
+#   Auto-SYNC (existing row):
+#     • Only mutates rows currently in AUTO_SYNC_OVERWRITABLE_STAGES.
+#       Locked, shortlisted, already_tested, pitch are protected —
+#       a submission decision must not silently overwrite later curation.
+#     • Touches at most ONE row (the (project_id, talent_id) pair).
 #
-#   • Touches at most ONE row (the (project_id, talent_id) pair). No fanout,
-#     no batch.
+#   Auto-CREATE (no existing row):
+#     • When a submission decision maps to a stage AND no pipeline row
+#       exists yet, a new row is inserted at the target stage.
+#     • Uses a single atomic upsert: the update path handles existing rows
+#       (with stage guard), and the insert path creates fresh rows.
+#     • Strictly scoped to project_id — no cross-project creation.
 #
-#   • Errors are swallowed and logged — never block the user-facing
-#     submission decision response on a pipeline sync failure.
+#   Shared invariants:
+#     • Best-effort — errors are swallowed/logged, never blocking the
+#       user-facing submission decision response.
+#     • Idempotent: re-running the same decision is a no-op (matched_count
+#       increments but modified_count stays 0).
 # ---------------------------------------------------------------------------
 SUBMISSION_DECISION_TO_STAGE = {
     "approved": "approved",
@@ -185,15 +192,25 @@ async def sync_pipeline_from_submission(
     talent_id: Optional[str],
     decision: Optional[str],
 ) -> None:
-    """Best-effort: bump the existing pipeline row to the stage implied by
-    the submission decision. No-op on any of:
+    """Best-effort: upsert the pipeline row for (project_id, talent_id) to
+    the stage implied by the submission decision.
 
-      • missing project_id / talent_id (submission not yet linked to a talent)
-      • decision not in the mapping (e.g. 'pending' — nothing to sync)
-      • no existing pipeline row for (project_id, talent_id)
-      • current stage is protected (locked / shortlisted / already_tested / pitch)
+    No-op when:
+      • project_id or talent_id are missing (submission not yet linked)
+      • decision is not in SUBMISSION_DECISION_TO_STAGE (e.g. 'pending')
 
-    The function NEVER raises — it returns silently and logs at WARNING.
+    Existing-row behaviour:
+      Only overwrites the stage when the current stage is in
+      AUTO_SYNC_OVERWRITABLE_STAGES. Protected stages (locked, shortlisted,
+      already_tested, pitch) are left untouched.
+
+    New-row behaviour:
+      If no pipeline row exists for (project_id, talent_id), one is created
+      at the target stage. This ensures that a submission decision is always
+      reflected in the pipeline — the recruiter never needs to manually add
+      a talent they have already reviewed.
+
+    This function NEVER raises — it returns silently and logs at WARNING.
     """
     try:
         if not project_id or not talent_id:
@@ -202,27 +219,130 @@ async def sync_pipeline_from_submission(
         if not target_stage:
             return
 
-        # Single round-trip conditional update: matches only rows whose
-        # current stage is in the overwritable set. Locked / shortlisted /
-        # already_tested / pitch rows simply fail the filter → no update.
+        now = _now()
+
+        # Step 1: conditional update of EXISTING row.
+        # Only touches the row when current stage is overwritable.
+        # Protected stages (locked/shortlisted/already_tested/pitch) are
+        # deliberately excluded from AUTO_SYNC_OVERWRITABLE_STAGES, so this
+        # update silently matches 0 rows for protected entries.
         res = await db.casting_pipeline.update_one(
             {
                 "project_id": project_id,
                 "talent_id": talent_id,
                 "stage": {"$in": list(AUTO_SYNC_OVERWRITABLE_STAGES)},
             },
-            {"$set": {"stage": target_stage, "updated_at": _now()}},
+            {"$set": {"stage": target_stage, "updated_at": now}},
         )
         if res.modified_count:
             logger.info(
-                "pipeline.auto-sync project=%s talent=%s decision=%s → stage=%s",
+                "pipeline.auto-sync.update project=%s talent=%s decision=%s → stage=%s",
                 project_id, talent_id, decision, target_stage,
+            )
+            return
+
+        # Step 2: check whether a protected row exists (should not be touched).
+        # If so, respect the manual curation and skip creation.
+        protected_exists = await db.casting_pipeline.find_one(
+            {
+                "project_id": project_id,
+                "talent_id": talent_id,
+            },
+            {"_id": 0, "stage": 1},
+        )
+        if protected_exists:
+            # Row exists but is in a protected stage — do not overwrite.
+            logger.info(
+                "pipeline.auto-sync.protected project=%s talent=%s "
+                "current_stage=%s — skipping overwrite",
+                project_id, talent_id, protected_exists.get("stage"),
+            )
+            return
+
+        # Step 3: no row exists — auto-create at the target stage.
+        # Uses insert_one rather than upsert to keep the duplicate-key
+        # error visible if a concurrent request races us here.
+        new_entry = {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "talent_id": talent_id,
+            "stage": target_stage,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            await db.casting_pipeline.insert_one(new_entry)
+            logger.info(
+                "pipeline.auto-sync.create project=%s talent=%s decision=%s → stage=%s",
+                project_id, talent_id, decision, target_stage,
+            )
+        except Exception as insert_exc:
+            # DuplicateKeyError: concurrent request won the race — harmless.
+            logger.warning(
+                "pipeline.auto-sync.create race project=%s talent=%s: %s",
+                project_id, talent_id, insert_exc,
             )
     except Exception:
         # Pipeline sync is an enrichment — never break the submission flow.
         logger.exception(
             "pipeline.auto-sync failed project=%s talent=%s decision=%s",
             project_id, talent_id, decision,
+        )
+
+
+async def ensure_pipeline_from_finalized_submission(
+    project_id: Optional[str],
+    talent_id: Optional[str],
+) -> None:
+    """Best-effort: auto-create a pipeline entry at ask_to_test when a
+    submission is first finalized and no pipeline row yet exists.
+
+    This is the entry point for submission → pipeline auto-creation at the
+    moment of first finalize. Subsequent decision changes are handled by
+    sync_pipeline_from_submission. Protected stages are respected: if the
+    talent is already in a curated stage the entry is left untouched.
+
+    This function NEVER raises.
+    """
+    try:
+        if not project_id or not talent_id:
+            return
+
+        now = _now()
+
+        # Check whether a row already exists for this (project, talent) pair.
+        existing = await db.casting_pipeline.find_one(
+            {"project_id": project_id, "talent_id": talent_id},
+            {"_id": 0, "id": 1},
+        )
+        if existing:
+            # Row already present — do not touch. The recruiter may have
+            # manually placed this talent before they submitted.
+            return
+
+        new_entry = {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "talent_id": talent_id,
+            "stage": DEFAULT_STAGE,   # ask_to_test
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            await db.casting_pipeline.insert_one(new_entry)
+            logger.info(
+                "pipeline.auto-create.finalize project=%s talent=%s → stage=%s",
+                project_id, talent_id, DEFAULT_STAGE,
+            )
+        except Exception as insert_exc:
+            logger.warning(
+                "pipeline.auto-create.finalize race project=%s talent=%s: %s",
+                project_id, talent_id, insert_exc,
+            )
+    except Exception:
+        logger.exception(
+            "pipeline.auto-create.finalize failed project=%s talent=%s",
+            project_id, talent_id,
         )
 
 

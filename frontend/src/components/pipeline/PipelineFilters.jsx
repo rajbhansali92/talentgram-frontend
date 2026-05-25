@@ -117,7 +117,7 @@ const PipelineFilters = memo(function PipelineFilters({
                 {/* Visual Divider (search vs filters) */}
                 <div className="hidden xl:block w-px h-6 bg-black/10 mx-2.5 shrink-0" aria-hidden="true" />
 
-                {/* Filter pills */}
+                {/* Filter pills — Status group / Portfolio+Instagram group separated by hairline */}
                 <div className="flex items-center gap-2 overflow-x-auto overflow-y-visible xl:overflow-visible px-0.5 pb-1 xl:pb-0 scrollbar-none">
                     <FilterSegmented
                         label="Status"
@@ -126,6 +126,8 @@ const PipelineFilters = memo(function PipelineFilters({
                         options={STATUS_FOCUS_OPTIONS}
                         testid="pipeline-filter-focus"
                     />
+                    {/* Divider: separates workflow-state filters from data-presence filters */}
+                    <span className="shrink-0 w-px h-4 bg-black/[0.08] mx-0.5" aria-hidden="true" />
                     <FilterSegmented
                         label="Portfolio Link"
                         value={hasSubmission}
@@ -196,7 +198,7 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
         >
             <span
                 className={`text-[10px] font-medium tracking-wide uppercase text-black/40 shrink-0 ${
-                    compact ? "hidden xl:inline" : ""
+                    compact ? "hidden lg:inline" : ""
                 }`}
             >
                 {label}

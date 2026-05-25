@@ -1,6 +1,18 @@
 import React, { memo } from "react";
 import { STATUS_FOCUS_OPTIONS, TRISTATE_OPTIONS } from "./constants";
 
+const PORTFOLIO_OPTIONS = [
+    { value: "any", label: "All" },
+    { value: "yes", label: "Attached" },
+    { value: "no", label: "Missing" },
+];
+
+const IG_OPTIONS = [
+    { value: "any", label: "All" },
+    { value: "yes", label: "Connected" },
+    { value: "no", label: "Unlinked" },
+];
+
 /**
  * PipelineFilters — visual filter toolbar component.
  * 
@@ -101,6 +113,9 @@ const PipelineFilters = memo(function PipelineFilters({
                         </button>
                     )}
                 </div>
+                
+                {/* Visual Divider (search vs filters) */}
+                <div className="hidden xl:block w-px h-6 bg-black/10 mx-2.5 shrink-0" aria-hidden="true" />
 
                 {/* Filter pills */}
                 <div className="flex items-center gap-2 overflow-x-auto overflow-y-visible xl:overflow-visible px-0.5 pb-1 xl:pb-0 scrollbar-none">
@@ -112,18 +127,18 @@ const PipelineFilters = memo(function PipelineFilters({
                         testid="pipeline-filter-focus"
                     />
                     <FilterSegmented
-                        label="Portfolio"
+                        label="Portfolio Link"
                         value={hasSubmission}
                         onChange={onHasSubmission}
-                        options={TRISTATE_OPTIONS}
+                        options={PORTFOLIO_OPTIONS}
                         testid="pipeline-filter-submitted"
                         compact
                     />
                     <FilterSegmented
-                        label="IG"
+                        label="Instagram"
                         value={hasIg}
                         onChange={onHasIg}
-                        options={TRISTATE_OPTIONS}
+                        options={IG_OPTIONS}
                         testid="pipeline-filter-ig"
                         compact
                     />
@@ -204,8 +219,8 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
                                 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black/15
                                 ${
                                     active
-                                        ? "bg-black text-white shadow-[0_1px_2px_rgba(0,0,0,0.05)]"
-                                        : "text-black/55 hover:text-black/85 hover:bg-black/[0.03]"
+                                        ? "bg-neutral-900 text-white shadow-[0_1px_2px_rgba(0,0,0,0.05)]"
+                                        : "text-black/55 bg-white border border-black/[0.04] hover:text-black/85 hover:bg-black/[0.02] hover:border-black/[0.08]"
                                 }
                             `}
                         >

@@ -433,58 +433,64 @@ const PipelineCard = memo(function PipelineCard({
             className={shellClass}
             aria-label={`Talent: ${displayName}`}
         >
-            <div className="p-3 space-y-2.5">
-                {/* Row 1: Identity + Priority + Freshness */}
-                <div className="flex items-start gap-2.5">
-                    {/* Avatar - less dominant */}
-                    <div className="flex-shrink-0 opacity-90">
+            <div className="p-4 space-y-3">
+                {/* Row 1: Identity + Priority + Freshness (Enlarged Two-Column Split Layout) */}
+                <div className="flex items-start gap-3">
+                    {/* Avatar - larger & premium presence */}
+                    <div className="flex-shrink-0 opacity-95">
                         <TalentAvatar
                             src={item.image_url}
                             name={displayName}
-                            size="sm"
+                            size="md"
                         />
                     </div>
                     
-                    <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
+                    <div className="flex-1 min-w-0 pr-14">
+                        <div className="flex flex-col gap-0.5">
                             <p
-                                className="text-[13px] text-black/85 font-medium leading-[1.25] truncate"
+                                className="text-[13.5px] text-black/85 font-semibold leading-[1.2] truncate tracking-tight"
                                 title={displayName}
                             >
                                 {displayName}
                             </p>
-                            {/* Priority Badge */}
-                            {activePriority && (
-                                <span
-                                    className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-medium border ${PRIORITY_VARIANTS[activePriority.variant]}`}
-                                >
-                                    {activePriority.label}
-                                </span>
+                            
+                            {/* IG or ID - elegant handle layout */}
+                            {displayIg && (
+                                <p className="text-[10px] text-black/45 truncate mt-0.5">
+                                    @{displayIg}
+                                </p>
                             )}
+                            
+                            {/* Badges block: Priority + Freshness stacked cleanly */}
+                            <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                                {/* Priority Badge */}
+                                {activePriority && (
+                                    <span
+                                        className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-medium border ${PRIORITY_VARIANTS[activePriority.variant]}`}
+                                    >
+                                        {activePriority.label}
+                                    </span>
+                                )}
+                                
+                                {/* Freshness Indicator */}
+                                {freshness && (
+                                    <span 
+                                        className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-white border border-black/[0.04]"
+                                        title={`Last activity: ${formatRelativeTime(item.updated_at || item.created_at)}`}
+                                    >
+                                        <span className={`w-1.5 h-1.5 rounded-full ${freshness.dot}`} />
+                                        <span className="text-[7px] text-black/45 uppercase tracking-wide">
+                                            {freshness.label}
+                                        </span>
+                                    </span>
+                                )}
+                            </div>
                         </div>
-                        
-                        {/* IG or ID - subtle secondary info */}
-                        {displayIg && (
-                            <p className="text-[8px] text-black/45 truncate mt-0.5">
-                                @{displayIg}
-                            </p>
-                        )}
                     </div>
                     
-                    {/* Status Chip + Freshness Indicator */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                        {freshness && (
-                            <span 
-                                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-white border border-black/[0.04]"
-                                title={`Last activity: ${formatRelativeTime(item.updated_at || item.created_at)}`}
-                            >
-                                <span className={`w-1.5 h-1.5 rounded-full ${freshness.dot}`} />
-                                <span className="text-[7px] text-black/45 uppercase tracking-wide">
-                                    {freshness.label}
-                                </span>
-                            </span>
-                        )}
-                        {statusTone && (
+                    {/* Status Chip positioned absolutely in the top-right corner */}
+                    {statusTone && (
+                        <div className="absolute top-4 right-4 shrink-0 z-10">
                             <span
                                 className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border ${statusTone.chip}`}
                                 title={statusTone.label}
@@ -495,12 +501,12 @@ const PipelineCard = memo(function PipelineCard({
                                     {statusTone.label}
                                 </span>
                             </span>
-                        )}
-                    </div>
+                        </div>
+                    )}
                 </div>
                 
-                {/* Row 2: Compact Recruiter Metadata - using Lucide icons */}
-                <div className="flex items-center justify-between text-[9px] text-black/55 border-t border-black/[0.04] pt-1.5">
+                {/* Row 2: Compact Recruiter Metadata - using Lucide icons with custom margins */}
+                <div className="flex items-center justify-between text-[9px] text-black/55 border-t border-black/[0.04] pt-2 mt-1">
                     <div className="flex items-center gap-2 flex-wrap">
                         <span className="flex items-center gap-1">
                             <User className="w-2.5 h-2.5 opacity-50" />

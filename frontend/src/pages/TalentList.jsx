@@ -75,7 +75,7 @@ function TalentThumb({ src, alt }) {
                 onLoad={() => setLoaded(true)}
                 onError={() => setErrored(true)}
                 className={[
-                    "absolute inset-0 w-full h-full object-cover transition-opacity duration-300",
+                    "absolute inset-0 w-full h-full object-cover transition-all duration-500 ease-out group-hover:scale-105",
                     loaded ? "opacity-100" : "opacity-0",
                 ].join(" ")}
             />
@@ -115,11 +115,11 @@ const TalentCard = React.memo(function TalentCard({
             </div>
 
             {/* Card metadata */}
-            <div className="p-3.5">
-                <div className="font-display text-[13px] leading-snug tracking-tight text-black/85 truncate">
+            <div className="p-3">
+                <div className="font-semibold text-[13.5px] leading-snug tracking-tight text-neutral-800 truncate">
                     {t.name || "—"}
                 </div>
-                <div className="text-[11px] text-black/40 mt-0.5 truncate">
+                <div className="text-[11px] text-neutral-400 mt-0.5 truncate">
                     {[t.location, t.category].filter(Boolean).join(" · ") || "\u00a0"}
                 </div>
             </div>
@@ -131,10 +131,10 @@ const TalentCard = React.memo(function TalentCard({
             key={t.id}
             data-testid={`talent-card-${t.id}`}
             className={[
-                "group relative rounded-xl border bg-white transition-all duration-150",
+                "group relative rounded-xl border bg-white transition-all duration-300 ease-out",
                 checked
-                    ? "border-black/40 ring-1 ring-black/20"
-                    : "border-black/[0.07] hover:border-black/[0.18] hover:shadow-sm",
+                    ? "border-black/45 ring-1 ring-black/25 shadow-sm"
+                    : "border-black/[0.07] hover:border-black/[0.18] hover:shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:-translate-y-0.5",
             ].join(" ")}
         >
             {/* Selection checkbox */}

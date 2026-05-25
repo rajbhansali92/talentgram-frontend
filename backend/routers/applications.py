@@ -43,6 +43,7 @@ from core import (
     make_token,
     media_url,
     video_poster_url,
+    update_talent_cover_cache,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -245,6 +246,7 @@ async def upload_application_media(
         public_id=media_id,
         resource_type=rt,
         content_type=file.content_type,
+        keep_original=False,
     )
     is_video_uploaded = rt == "video"
     is_image_uploaded = rt == "image"
@@ -435,12 +437,14 @@ async def set_application_decision(
             if not existing.get("cover_media_id") and talent.get("cover_media_id"):
                 update["cover_media_id"] = talent["cover_media_id"]
             await db.talents.update_one({"id": existing["id"]}, {"$set": update})
+            await update_talent_cover_cache(existing["id"])
             await db.applications.update_one(
                 {"id": aid}, {"$set": {"talent_id": existing["id"], "merged": True}}
             )
             return {"ok": True, "talent_id": existing["id"], "merged": True}
         else:
             await db.talents.insert_one(talent)
+            await update_talent_cover_cache(talent["id"])
             await db.applications.update_one(
                 {"id": aid}, {"$set": {"talent_id": talent["id"], "merged": False}}
             )

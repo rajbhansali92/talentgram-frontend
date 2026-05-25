@@ -236,6 +236,7 @@ def cloudinary_upload(
     public_id: str,
     resource_type: str = "auto",
     content_type: Optional[str] = None,
+    keep_original: bool = True,
 ) -> dict:
     """Upload raw bytes to Cloudinary and return the upload result.
 
@@ -244,30 +245,23 @@ def cloudinary_upload(
 
     `resource_type="auto"` lets Cloudinary detect image vs video vs raw
     automatically — appropriate for our mixed audition uploads.
-
-    Video pipeline (v37r): when uploading a video, Cloudinary is asked to
-    eagerly produce a 720p H.264 MP4 derivative with auto quality + format
-    selection. The `eager` URL is the canonical URL we render to viewers,
-    so end-users always download the compressed copy regardless of how
-    large the original was. The original is retained by Cloudinary (we
-    can't avoid that on the free tier) but is **never** served.
     """
     _validate_folder(folder)
     ct = (content_type or "").lower()
-    # PDFs (and any future "raw" documents like .zip/.docx) must be
-    # uploaded with resource_type="raw". Cloudinary's "auto" detection
-    # silently routes PDFs to resource_type="image", which then requires
-    # the account-level "Deliver PDF and ZIP files" toggle to be enabled
-    # — without it, the public URL returns a 401/Not Found. Forcing raw
-    # sidesteps that restriction entirely and the delivery URL becomes
-    # `https://res.cloudinary.com/.../raw/upload/...` (public by default).
+    
     is_pdf = ct == "application/pdf" or ct.startswith("application/pdf")
     if is_pdf and resource_type == "auto":
         resource_type = "raw"
+        
     is_video = resource_type == "video" or (
         resource_type == "auto"
         and ct.startswith("video/")
     )
+    is_image = resource_type == "image" or (
+        resource_type == "auto"
+        and ct.startswith("image/")
+    )
+
     upload_kwargs: Dict[str, Any] = dict(
         folder=folder,
         public_id=public_id,
@@ -275,20 +269,61 @@ def cloudinary_upload(
         overwrite=True,
         unique_filename=False,
     )
+
     if is_video:
-        # Synchronous 720p MP4 derivative ready when upload returns.
-        # `q_auto` lets Cloudinary pick the optimal compression curve;
-        # `vc_auto` selects best codec for the requesting client.
+        # If we do NOT want to keep the original (e.g. keep_original is False) AND video > 300MB,
+        # we apply an INCOMING transformation to make Cloudinary write the 720p H.264 MP4 derivative AS the original asset.
+        # This completely discards the heavy original file immediately on upload, saving massive long-term storage costs.
+        if not keep_original and len(data) > 300_000_000:
+            upload_kwargs["transformation"] = [
+                {"width": 1280, "height": 720, "crop": "limit"},
+                {"quality": "auto", "video_codec": "auto"},
+            ]
+            upload_kwargs["format"] = "mp4"
+            # Eagerly generate only the video poster frame to control transformation generation costs.
+            upload_kwargs["eager"] = [
+                {
+                    "format": "jpg",
+                    "transformation": [
+                        {"width": 600, "height": 338, "crop": "fill", "dpr": "auto"},
+                        {"quality": "auto"},
+                    ],
+                }
+            ]
+            upload_kwargs["eager_async"] = False
+        else:
+            # Synchronous H.264 MP4 720p derivative and poster frame.
+            upload_kwargs["eager"] = [
+                {
+                    "format": "mp4",
+                    "transformation": [
+                        {"width": 1280, "height": 720, "crop": "limit"},
+                        {"quality": "auto", "video_codec": "auto"},
+                    ],
+                },
+                {
+                    "format": "jpg",
+                    "transformation": [
+                        {"width": 600, "height": 338, "crop": "fill", "dpr": "auto"},
+                        {"quality": "auto"},
+                    ],
+                }
+            ]
+            upload_kwargs["eager_async"] = False
+    elif is_image:
+        # Eagerly generate ONLY the roster thumbnail preset to prevent dynamic transform cost explosion.
+        # Larger detail/lightbox views are dynamically generated on-demand.
         upload_kwargs["eager"] = [
             {
-                "format": "mp4",
-                "transformation": [
-                    {"width": 1280, "height": 720, "crop": "limit"},
-                    {"quality": "auto", "video_codec": "auto"},
-                ],
+                "width": 400,
+                "crop": "fill",
+                "dpr": "auto",
+                "fetch_format": "auto",
+                "quality": "auto",
             }
         ]
         upload_kwargs["eager_async"] = False
+
     try:
         result = cloudinary.uploader.upload(data, **upload_kwargs)
     except Exception as e:
@@ -300,7 +335,11 @@ def cloudinary_upload(
     primary_url = result.get("secure_url")
     eager_list = result.get("eager") or []
     if is_video and eager_list:
-        compressed = eager_list[0].get("secure_url")
+        # Filter for mp4 format secure_url
+        compressed = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
+        if not compressed:
+            # Otherwise fall back to the first eager item
+            compressed = eager_list[0].get("secure_url")
         if compressed:
             primary_url = compressed
 
@@ -337,14 +376,36 @@ def cloudinary_url_for(
 ) -> str:
     """Build a transformation URL on the fly.
 
-    Default transformations applied to images: f_auto, q_auto. Pass
+    Default transformations applied to images: f_auto, q_auto, dpr_auto. Pass
     additional via kwargs (e.g. width=1600, crop="limit").
     """
     if resource_type == "image":
         transformations.setdefault("fetch_format", "auto")
         transformations.setdefault("quality", "auto")
+        transformations.setdefault("dpr", "auto")
     url, _opts = cloudinary.utils.cloudinary_url(
         public_id, resource_type=resource_type, secure=True, **transformations
+    )
+    return url
+
+
+def stream_video_url(public_id: Optional[str]) -> Optional[str]:
+    """Build an adaptive streaming URL for a video.
+    Uses: q_auto:good, vc_auto, sp_auto, br_auto, f_auto
+    """
+    if not public_id:
+        return None
+    if public_id.startswith(("http://", "https://")):
+        return public_id
+    url, _ = cloudinary.utils.cloudinary_url(
+        public_id,
+        resource_type="video",
+        secure=True,
+        quality="auto:good",
+        video_codec="auto",
+        streaming_profile="auto",
+        bit_rate="auto",
+        fetch_format="auto"
     )
     return url
 
@@ -360,7 +421,7 @@ def video_poster_url(public_id: Optional[str]) -> Optional[str]:
         resource_type="video",
         format="jpg",
         transformation=[
-            {"width": 600, "height": 338, "crop": "fill"},
+            {"width": 600, "height": 338, "crop": "fill", "dpr": "auto"},
             {"quality": "auto"}
         ],
         secure=True
@@ -439,6 +500,44 @@ def resolve_cover_media(doc: dict) -> Optional[dict]:
         if m.get("url"):
             return m
     return None
+
+
+async def update_talent_cover_cache(tid: str) -> None:
+    """Fetch the full talent doc, resolve the best cover media, and update denormalized cover fields in DB."""
+    talent = await db.talents.find_one({"id": tid})
+    if not talent:
+        return
+    media_item = resolve_cover_media(talent)
+    if media_item:
+        mid = media_item.get("id")
+        url = media_item.get("url")
+        pid = media_item.get("public_id")
+        rt = media_item.get("resource_type") or "image"
+        thumb_url = media_url(pid, preset="roster", resource_type=rt) if pid else url
+
+        await db.talents.update_one(
+            {"id": tid},
+            {
+                "$set": {
+                    "cover_media_id": mid,
+                    "cover_url": url,
+                    "cover_thumbnail_url": thumb_url,
+                    "media_count": len(talent.get("media") or [])
+                }
+            }
+        )
+    else:
+        await db.talents.update_one(
+            {"id": tid},
+            {
+                "$set": {
+                    "cover_media_id": None,
+                    "cover_url": None,
+                    "cover_thumbnail_url": None,
+                    "media_count": len(talent.get("media") or [])
+                }
+            }
+        )
 
 
 def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
@@ -1007,11 +1106,20 @@ def generate_invite_token() -> str:
 # Visibility / client payload filters
 # --------------------------------------------------------------------------
 def _public_media(m: dict) -> dict:
-    """Strip internal scope metadata (project_id / submission_id / talent_id / scope) before sending to client."""
+    """Strip internal scope metadata (project_id / submission_id / talent_id / scope) before sending to client.
+    Automatically maps video URLs to the adaptive streaming preset, and adds poster frame URLs.
+    """
+    resource_type = m.get("resource_type")
+    url = m.get("url")
+    is_video = resource_type == "video" or m.get("category") == "video" or (m.get("content_type") or "").startswith("video/")
+    
+    if is_video and m.get("public_id"):
+        url = stream_video_url(m["public_id"]) or url
+
     out = {
         "id": m.get("id"),
         "category": m.get("category"),
-        "url": m.get("url"),
+        "url": url,
         "public_id": m.get("public_id"),
         "resource_type": m.get("resource_type"),
         "content_type": m.get("content_type"),
@@ -1021,6 +1129,8 @@ def _public_media(m: dict) -> dict:
     }
     if m.get("label"):
         out["label"] = m["label"]
+    if is_video and m.get("public_id"):
+        out["poster_url"] = m.get("poster_url") or video_poster_url(m["public_id"])
     return out
 
 
@@ -1250,7 +1360,7 @@ def _submission_to_client_shape(sub: dict) -> dict:
         "availability": (fd.get("availability") if fv.get("availability") else None),
         "budget": (fd.get("budget") if fv.get("budget") else None),
         "cover_media_id": cover_mid,
-        "media": media,
+        "media": [_public_media(m) for m in media],
     }
     # Top-level cover URL for clients that prefer a single field over
     # walking media[]. Always either a non-empty Cloudinary URL or None.
@@ -1424,6 +1534,9 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
         },
         {"$push": {"media": mirror}},
     )
+    talent = await db.talents.find_one({"email": email}, {"id": 1})
+    if talent:
+        await update_talent_cover_cache(talent["id"])
 
 
 async def remove_synced_media_from_global_talent(submission: dict, source_media_id: str) -> None:
@@ -1439,4 +1552,7 @@ async def remove_synced_media_from_global_talent(submission: dict, source_media_
         {"email": email},
         {"$pull": {"media": {"source_submission_media_id": source_media_id}}},
     )
+    talent = await db.talents.find_one({"email": email}, {"id": 1})
+    if talent:
+        await update_talent_cover_cache(talent["id"])
 

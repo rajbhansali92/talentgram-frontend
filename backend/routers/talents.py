@@ -25,6 +25,7 @@ from core import (
     media_url,
     video_poster_url,
     resolve_cover_media,
+    update_talent_cover_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,22 +125,13 @@ _LIST_PROJECTION = {
 def _enrich_list(doc: dict) -> dict:
     """Lightweight enrichment for list responses.
 
-    Reads the denormalized cover_url scalar (set by set_cover / add_media).
-    Falls back gracefully if the field is absent (talents created before the
-    cover_url backfill). Sets media_count from the stored field if present.
+    Reads the denormalized cover_thumbnail_url (set by update_talent_cover_cache).
+    Falls back to cover_url if absent. Sets media_count from the stored field if present.
     Computes age from dob. Returns doc in-place.
     """
-    cover_url = doc.get("cover_url")
     cover_thumb = doc.get("cover_thumbnail_url")
-    if not cover_thumb and cover_url:
-        cover_mid = doc.get("cover_media_id")
-        tid = doc.get("id")
-        if cover_mid and tid:
-            public_id = f"{APP_NAME}/talents/{tid}/{cover_mid}"
-            cover_thumb = media_url(public_id, preset="roster", resource_type="image")
-        else:
-            cover_thumb = cover_url
-
+    cover_url = doc.get("cover_url")
+    
     doc["image_url"] = cover_thumb or cover_url or None
 
     # media_count: optional stored field (set when cover is written).
@@ -315,6 +307,7 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
         raise HTTPException(409, "Another talent already has this email")
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")
+    await update_talent_cover_cache(tid)
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     return enrich_talent(t)
 
@@ -449,40 +442,3 @@ async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_ad
     updated_talent = await db.talents.find_one({"id": tid}, {"cover_url": 1})
     return {"ok": True, "cover_url": updated_talent.get("cover_url")}
 
-
-async def update_talent_cover_cache(tid: str) -> None:
-    """Fetch the full talent doc, resolve the best cover media, and update denormalized cover fields in DB."""
-    talent = await db.talents.find_one({"id": tid})
-    if not talent:
-        return
-    media_item = resolve_cover_media(talent)
-    if media_item:
-        mid = media_item.get("id")
-        url = media_item.get("url")
-        pid = media_item.get("public_id")
-        rt = media_item.get("resource_type") or "image"
-        thumb_url = media_url(pid, preset="roster", resource_type=rt) if pid else url
-
-        await db.talents.update_one(
-            {"id": tid},
-            {
-                "$set": {
-                    "cover_media_id": mid,
-                    "cover_url": url,
-                    "cover_thumbnail_url": thumb_url,
-                    "media_count": len(talent.get("media") or [])
-                }
-            }
-        )
-    else:
-        await db.talents.update_one(
-            {"id": tid},
-            {
-                "$set": {
-                    "cover_media_id": None,
-                    "cover_url": None,
-                    "cover_thumbnail_url": None,
-                    "media_count": len(talent.get("media") or [])
-                }
-            }
-        )

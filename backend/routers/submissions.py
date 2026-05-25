@@ -38,6 +38,7 @@ from core import (
     sync_media_to_global_talent,
     media_url,
     video_poster_url,
+    update_talent_cover_cache,
 )
 from drive_backup import (
     drive_enabled,
@@ -340,6 +341,7 @@ async def submission_upload(
         public_id=media_id,
         resource_type=rt,
         content_type=file.content_type,
+        keep_original=False,
     )
     is_video = rt == "video"
     is_image = rt == "image"
@@ -579,6 +581,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 await db.talents.update_one(
                     {"id": talent_doc["id"]}, {"$set": update}
                 )
+                await update_talent_cover_cache(talent_doc["id"])
         if not talent_doc:
             # Build a minimal talent record from the submission's form_data.
             full_name = (
@@ -622,6 +625,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             }
             try:
                 await db.talents.insert_one(new_talent)
+                await update_talent_cover_cache(new_talent["id"])
                 new_talent.pop("_id", None)
                 talent_doc = new_talent
             except DuplicateKeyError:

@@ -1110,15 +1110,15 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
             data-testid={`client-talent-${talent.id}`}
             data-seen={seen ? "true" : "false"}
             data-new={isNew ? "true" : "false"}
-            className="group relative text-left"
+            className="group relative text-left transition-all duration-300 ease-out hover:-translate-y-0.5"
         >
-            <div className="aspect-[3/4] bg-white overflow-hidden rounded-2xl group-hover:shadow-md transition-shadow duration-300 relative shadow-sm">
+            <div className="aspect-[3/4] bg-white overflow-hidden rounded-2xl group-hover:shadow-[0_8px_30px_rgb(0,0,0,0.04)] transition-all duration-300 relative shadow-sm">
                 {cover ? (
                     <img
                         src={thumbnailUrl(cover)}
                         alt={privatizeName(talent.name)}
                         loading="lazy"
-                        className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-700"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-all duration-500 ease-out"
                     />
                 ) : (
                     <div className="w-full h-full flex items-center justify-center text-[#8A8A8A]">

@@ -2,7 +2,6 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "
 import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award } from "lucide-react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
-import { useVirtualizer } from "@tanstack/react-virtual";
 
 /* ---------------------------------------------------------------------
  * TalentBrowserModal — Elite Enterprise ATS-Grade Talent Browser
@@ -374,6 +373,11 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             setFilter("search", value);
         }, 200);
     }, []);
+
+    // AUD-E1: Force refresh candidates by resetting cached state
+    const handleForceRefresh = useCallback(() => {
+        setTalents([]);
+    }, []);
     
     // Filtered and sorted talents
     const filteredTalents = useMemo(() => {
@@ -524,7 +528,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         const count = selected.size;
         
         try {
-            await adminApi.post("/pipeline/add", {
+            await adminApi.post(`/projects/${projectId}/pipeline/add`, {
                 project_id: projectId,
                 talent_ids: Array.from(selected),
             });
@@ -545,22 +549,54 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     // KEYBOARD NAVIGATION
     // ========================================================================
     const columns = getColumns();
+
+    // AUD-P1: Caching refs to stabilize event binding
+    const latestFilteredTalents = useRef(filteredTalents);
+    const latestFocusedIndex = useRef(focusedIndex);
+    const latestExistingTalentIds = useRef(existingTalentIds);
+    const latestColumns = useRef(columns);
+    const latestToggleSelect = useRef(toggleSelect);
+    const latestSelectAllVisible = useRef(selectAllVisible);
+
+    useEffect(() => {
+        latestFilteredTalents.current = filteredTalents;
+        latestFocusedIndex.current = focusedIndex;
+        latestExistingTalentIds.current = existingTalentIds;
+        latestColumns.current = columns;
+        latestToggleSelect.current = toggleSelect;
+        latestSelectAllVisible.current = selectAllVisible;
+    }, [filteredTalents, focusedIndex, existingTalentIds, columns, toggleSelect, selectAllVisible]);
     
     useEffect(() => {
         if (!open) return;
         
         const handleKeyDown = (e) => {
-            const totalItems = filteredTalents.length;
+            // AUD-C1: Guard against user input boxes to avoid intercepting typing
+            const isInput = e.target.tagName === "INPUT" || 
+                            e.target.tagName === "TEXTAREA" || 
+                            e.target.isContentEditable;
+            
+            if (isInput) {
+                if (e.key === "Escape") {
+                    onClose();
+                }
+                return;
+            }
+
+            const totalItems = latestFilteredTalents.current.length;
             if (totalItems === 0) return;
+            
+            const cols = latestColumns.current;
+            const focusedIdx = latestFocusedIndex.current;
             
             switch(e.key) {
                 case "ArrowDown":
                     e.preventDefault();
-                    setFocusedIndex(prev => Math.min(prev + columns, totalItems - 1));
+                    setFocusedIndex(prev => Math.min(prev + cols, totalItems - 1));
                     break;
                 case "ArrowUp":
                     e.preventDefault();
-                    setFocusedIndex(prev => Math.max(prev - columns, -1));
+                    setFocusedIndex(prev => Math.max(prev - cols, -1));
                     break;
                 case "ArrowRight":
                     e.preventDefault();
@@ -572,18 +608,18 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     break;
                 case "Enter":
                     e.preventDefault();
-                    if (focusedIndex >= 0 && focusedIndex < totalItems) {
-                        const talent = filteredTalents[focusedIndex];
-                        const alreadyInPipeline = existingTalentIds.has(talent.id);
+                    if (focusedIdx >= 0 && focusedIdx < totalItems) {
+                        const talent = latestFilteredTalents.current[focusedIdx];
+                        const alreadyInPipeline = latestExistingTalentIds.current.has(talent.id);
                         if (!alreadyInPipeline) {
-                            toggleSelect(talent.id, alreadyInPipeline);
+                            latestToggleSelect.current(talent.id, alreadyInPipeline);
                         }
                     }
                     break;
                 case "a":
                     if (e.ctrlKey || e.metaKey) {
                         e.preventDefault();
-                        selectAllVisible();
+                        latestSelectAllVisible.current();
                     }
                     break;
                 default:
@@ -593,7 +629,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [open, filteredTalents, focusedIndex, columns, toggleSelect, selectAllVisible, existingTalentIds]);
+    }, [open, onClose]);
     
     // Scroll focused card into view
     useEffect(() => {
@@ -605,21 +641,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         }
     }, [focusedIndex]);
     
-    // ========================================================================
-    // VIRTUALIZATION (Stable height version)
-    // ========================================================================
     const config = DENSITY_CONFIG[densityMode];
-    const rows = Math.ceil(filteredTalents.length / columns);
-    const estimatedRowHeight = config.cardHeight + config.gap;
-    
-    const rowVirtualizer = useVirtualizer({
-        count: rows,
-        getScrollElement: () => gridScrollRef.current,
-        estimateSize: () => estimatedRowHeight,
-        overscan: 2,
-    });
-    
-    const virtualRows = rowVirtualizer.getVirtualItems();
     
     if (!open) return null;
     
@@ -640,8 +662,19 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     {/* Header */}
                     <div className="flex items-center justify-between px-4 sm:px-6 py-4 sm:py-5 border-b border-gray-200 shrink-0 bg-white">
                         <div>
-                            <p className="text-[10px] sm:text-xs font-medium tracking-wide text-gray-400 uppercase mb-1">
+                            <p className="text-[10px] sm:text-xs font-medium tracking-wide text-gray-400 uppercase mb-1 inline-flex items-center gap-1.5">
                                 Global Roster · {filterOptions.totalCount.toLocaleString()} talents
+                                <button
+                                    type="button"
+                                    onClick={handleForceRefresh}
+                                    data-testid="talent-browser-refresh"
+                                    title="Refresh talent roster"
+                                    className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors inline-flex items-center"
+                                >
+                                    <svg className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                                    </svg>
+                                </button>
                             </p>
                             <h2
                                 id="talent-browser-title"
@@ -817,57 +850,35 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             <div className="px-4 sm:px-6 py-4 sm:py-5">
                                 <div
                                     style={{
-                                        height: `${rowVirtualizer.getTotalSize()}px`,
-                                        position: "relative",
+                                        display: "grid",
+                                        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+                                        gap: `${config.gap}px`,
                                     }}
                                 >
-                                    {virtualRows.map((virtualRow) => {
-                                        const startIndex = virtualRow.index * columns;
-                                        const rowTalents = filteredTalents.slice(startIndex, startIndex + columns);
+                                    {filteredTalents.map((talent, globalIndex) => {
+                                        const alreadyInPipeline = existingTalentIds.has(talent.id);
+                                        const isSelected = selected.has(talent.id);
+                                        const isFocused = globalIndex === focusedIndex;
                                         
                                         return (
-                                            <div
-                                                key={virtualRow.index}
-                                                style={{
-                                                    position: "absolute",
-                                                    top: 0,
-                                                    left: 0,
-                                                    transform: `translateY(${virtualRow.start}px)`,
-                                                    width: "100%",
-                                                    display: "grid",
-                                                    gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-                                                    gap: `${config.gap}px`,
-                                                    marginBottom: `${config.gap}px`,
+                                            <TalentCard
+                                                key={talent.id}
+                                                talent={talent}
+                                                selected={isSelected}
+                                                alreadyInPipeline={alreadyInPipeline}
+                                                onToggle={() => toggleSelect(talent.id, alreadyInPipeline)}
+                                                densityMode={densityMode}
+                                                isFocused={isFocused}
+                                                showIntelligence={filters.showIntelligence}
+                                                isMobile={isMobile}
+                                                cardRef={(el) => {
+                                                    if (el) {
+                                                        cardRefsMap.current.set(globalIndex, el);
+                                                    } else {
+                                                        cardRefsMap.current.delete(globalIndex);
+                                                    }
                                                 }}
-                                            >
-                                                {rowTalents.map((talent, colIndex) => {
-                                                    const globalIndex = startIndex + colIndex;
-                                                    const alreadyInPipeline = existingTalentIds.has(talent.id);
-                                                    const isSelected = selected.has(talent.id);
-                                                    const isFocused = globalIndex === focusedIndex;
-                                                    
-                                                    return (
-                                                        <TalentCard
-                                                            key={talent.id}
-                                                            talent={talent}
-                                                            selected={isSelected}
-                                                            alreadyInPipeline={alreadyInPipeline}
-                                                            onToggle={() => toggleSelect(talent.id, alreadyInPipeline)}
-                                                            densityMode={densityMode}
-                                                            isFocused={isFocused}
-                                                            showIntelligence={filters.showIntelligence}
-                                                            isMobile={isMobile}
-                                                            cardRef={(el) => {
-                                                                if (el) {
-                                                                    cardRefsMap.current.set(globalIndex, el);
-                                                                } else {
-                                                                    cardRefsMap.current.delete(globalIndex);
-                                                                }
-                                                            }}
-                                                        />
-                                                    );
-                                                })}
-                                            </div>
+                                            />
                                         );
                                     })}
                                 </div>

@@ -56,6 +56,7 @@ export default function ApplicationPage() {
         email: "",
         phone: "",
     });
+    const [form, setForm] = useState({
         dob: "",
         age: "",
         overrideAge: false,
@@ -68,6 +69,7 @@ export default function ApplicationPage() {
         instagram_followers: "",
         bio: "",
         work_links: [],
+    });
     const [media, setMedia] = useState([]);
     const [uploading, setUploading] = useState(null);
     const [saving, setSaving] = useState(false);

@@ -214,6 +214,21 @@ export default function TalentList() {
         return () => clearTimeout(t);
     }, [q, load]);
 
+    // Re-fetch when navigating back from detail page.
+    // Cover changes made on TalentEdit are written to the DB immediately;
+    // this ensures the roster card reflects the updated cover_url without
+    // requiring a hard refresh. visibilitychange fires when the browser tab
+    // or page regains focus after being hidden (e.g. back navigation in SPA).
+    useEffect(() => {
+        const onVisible = () => {
+            if (document.visibilityState === "visible") {
+                load(q);
+            }
+        };
+        document.addEventListener("visibilitychange", onVisible);
+        return () => document.removeEventListener("visibilitychange", onVisible);
+    }, [load, q]);
+
     // ── Selection ────────────────────────────────────────────────────────────
     const toggle = useCallback((id) => {
         setSelected((prev) => {

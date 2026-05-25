@@ -251,12 +251,14 @@ export default function TalentEdit() {
         
         try {
             await adminApi.delete(`/talents/${id}/media/${mediaToRemove}`);
-            
+            const wasCover = talent.cover_media_id === mediaToRemove;
             updateTalent({
                 media: (talent.media || []).filter(m => m.id !== mediaToRemove),
-                cover_media_id: talent.cover_media_id === mediaToRemove ? null : talent.cover_media_id
+                // If the deleted item was the cover, clear both cover fields
+                // to stay in sync with the backend $unset operation.
+                cover_media_id: wasCover ? null : talent.cover_media_id,
+                cover_url: wasCover ? null : talent.cover_url,
             });
-            
             toast.success("Media removed");
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Remove failed");
@@ -268,8 +270,14 @@ export default function TalentEdit() {
 
     const setCover = async (mid) => {
         try {
-            await adminApi.post(`/talents/${id}/cover/${mid}`);
-            updateTalent({ cover_media_id: mid });
+            const { data } = await adminApi.post(`/talents/${id}/cover/${mid}`);
+            // Sync both cover_media_id and the denormalized cover_url returned
+            // by the updated set_cover endpoint. This keeps local state aligned
+            // with the roster list without requiring a full re-fetch.
+            updateTalent({
+                cover_media_id: mid,
+                cover_url: data?.cover_url ?? null,
+            });
             toast.success("Cover updated");
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to set cover");

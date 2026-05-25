@@ -97,74 +97,44 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
 # ---------------------------------------------------------------------------
 # Projections
 # ---------------------------------------------------------------------------
-# List projection: strips heavy fields while retaining the minimum data
-# needed to resolve a thumbnail URL and render the roster card.
+# List projection: fetches only the scalar fields the roster card renders.
 #
-# P2-B FIX: The original optimization excluded media[] entirely, which meant
-# _enrich_list had no data to resolve a cover URL from and was forced to
-# hardcode image_url=None. The fix fetches only the first 3 media items
-# (via $slice) — enough to find a cover image — then strips media[] from
-# the final response after resolving image_url. Net result:
-#   - image_url: resolved Cloudinary URL string (or null)
-#   - media_count: number of assets (stored at top level, not derived)
-#   - media[]: NOT in response — stripped after URL resolution
+# COVER IMAGE ARCHITECTURE:
+# cover_url is a denormalized scalar field written by set_cover, add_media
+# (auto-cover), and delete_media (when cover item is deleted). It mirrors
+# the URL that _resolve_cover_url(media[]) would return, but is stored
+# directly so the list endpoint never needs to fetch or walk media[].
 #
-# Payload per talent: ~300 bytes (was ~5-30 KB with full media array).
+# This guarantees: roster cover == detail cover, regardless of array
+# insertion order, array size, or $slice position.
+#
+# Payload per talent: ~250 bytes (single URL string, zero array data).
 _LIST_PROJECTION = {
     "_id": 0,
     "created_by": 0,
-    # Fetch up to 3 media items for cover URL resolution only.
-    # We strip this array before returning — it never reaches the client.
-    # 3 items is enough: cover_media_id match + 2 fallbacks.
-    "media": {"$slice": 3},
-    "source": 0,       # internal provenance — not rendered in list UI
-    "notes": 0,        # long-form text — not needed by list cards
+    "media": 0,         # Never needed — cover_url is the resolved scalar
+    "source": 0,        # Internal provenance — not rendered in list UI
+    "notes": 0,         # Long-form text — not needed by list cards
 }
-
-
-def _resolve_cover_url_from_slice(doc: dict) -> Optional[str]:
-    """Resolve cover URL from a small media slice (up to 3 items).
-
-    Uses the same priority as _resolve_cover_url in core.py:
-      1. Item whose id == cover_media_id
-      2. First image-category item (portfolio, indian, western, image)
-      3. First item with any non-empty url
-    Returns None if no URL found.
-    """
-    media = doc.get("media") or []
-    if not media:
-        return None
-    cover_id = doc.get("cover_media_id")
-    if cover_id:
-        for m in media:
-            if m.get("id") == cover_id and m.get("url"):
-                return m["url"]
-    image_cats = {"portfolio", "indian", "western", "image"}
-    for m in media:
-        if m.get("category") in image_cats and m.get("url"):
-            return m["url"]
-    for m in media:
-        if m.get("url"):
-            return m["url"]
-    return None
 
 
 def _enrich_list(doc: dict) -> dict:
     """Lightweight enrichment for list responses.
 
-    Resolves image_url from the 3-item media slice, sets media_count from
-    the slice length, then strips media[] so the client never receives the
-    raw array. Computes age from dob. Returns doc in-place.
+    Reads the denormalized cover_url scalar (set by set_cover / add_media).
+    Falls back gracefully if the field is absent (talents created before the
+    cover_url backfill). Sets media_count from the stored field if present.
+    Computes age from dob. Returns doc in-place.
     """
-    media_slice = doc.get("media") or []
-    # Resolve cover URL BEFORE stripping media[]
-    doc["image_url"] = _resolve_cover_url_from_slice(doc) or None
-    # Capture slice length as an asset-presence signal for the roster card.
-    # $slice:3 gives at most 3 items; the badge shows "N" (1-3) or is hidden.
-    # Exact counts are shown on the detail page.
-    doc["media_count"] = len(media_slice)
-    # Strip media array — resolved URL + count is all the roster card needs
-    doc.pop("media", None)
+    # cover_url is the denormalized scalar written on set_cover / add_media.
+    # Use it directly — no array walk required.
+    doc["image_url"] = doc.get("cover_url") or None
+    # media_count: optional stored field (set when cover is written).
+    # Falls back to 0 if absent; exact counts shown on detail page.
+    if "media_count" not in doc:
+        doc["media_count"] = 0
+    # Remove internal scalar from the public payload
+    doc.pop("cover_url", None)
     # Age derivation
     dob = doc.get("dob")
     if dob:
@@ -185,10 +155,9 @@ async def list_talents(
     query: Dict[str, Any] = {}
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
-    # P2-B/P2-F: Use lightweight list projection.
-    # media[] is fetched as a 3-item slice for cover URL resolution only,
-    # then stripped by _enrich_list before the response is serialized.
-    # Final payload per talent: ~300 bytes vs ~5-30 KB with full media array.
+    # List projection: scalar fields only — no media[] fetch.
+    # cover_url is the denormalized cover scalar maintained by set_cover /
+    # add_media / delete_media. Zero array walk per roster row.
     cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
     if page is None and limit is None:
         talents = await cursor.to_list(2000)
@@ -197,6 +166,8 @@ async def list_talents(
     total = await db.talents.count_documents(query)
     talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated([_enrich_list(t) for t in talents], total, p, s)
+
+
 
 
 
@@ -410,16 +381,20 @@ async def add_media(
         "talent_id": tid,
     }
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
-    # set cover if none
+    # Auto-assign cover on first image upload: write both cover_media_id AND
+    # the denormalized cover_url scalar used by the roster list endpoint.
     if not talent.get("cover_media_id") and category in {"indian", "western", "portfolio"}:
-        await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": media["id"]}})
+        await db.talents.update_one(
+            {"id": tid},
+            {"$set": {"cover_media_id": media["id"], "cover_url": media["url"]}},
+        )
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     return enrich_talent(t)
 
 
 @router.delete("/talents/{tid}/media/{mid}")
 async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin)):
-    talent = await db.talents.find_one({"id": tid}, {"_id": 0, "media": 1})
+    talent = await db.talents.find_one({"id": tid}, {"_id": 0, "media": 1, "cover_media_id": 1})
     if not talent:
         raise HTTPException(404, "Talent not found")
     target = next((m for m in (talent.get("media") or []) if m.get("id") == mid), None)
@@ -432,12 +407,45 @@ async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin))
     if pid:
         rt = target.get("resource_type") or ("video" if target.get("category") == "video" else "image")
         cloudinary_destroy(pid, resource_type=rt)
+    # If the deleted item was the current cover, clear both cover fields.
+    # The roster card will fall back to the initials monogram until a new
+    # cover is explicitly set (or the talent is re-enriched on detail load).
+    if talent.get("cover_media_id") == mid:
+        await db.talents.update_one(
+            {"id": tid},
+            {"$unset": {"cover_media_id": "", "cover_url": ""}},
+        )
     return {"ok": True}
 
 
 @router.post("/talents/{tid}/cover/{mid}")
 async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_admin)):
-    res = await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": mid}})
+    """Set the cover image for a talent.
+
+    Writes cover_media_id (the item id reference) AND cover_url (the
+    denormalized Cloudinary URL scalar). The roster list endpoint reads
+    cover_url directly — no media[] fetch or array walk needed.
+    """
+    # Fetch the target media item's URL so we can denormalize it.
+    talent = await db.talents.find_one(
+        {"id": tid},
+        {"_id": 0, "media": {"$elemMatch": {"id": mid}}},
+    )
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+    media_item = (talent.get("media") or [{}])[0] if talent.get("media") else None
+    cover_url = media_item.get("url") if media_item and media_item.get("id") == mid else None
+
+    update: dict = {"cover_media_id": mid}
+    if cover_url:
+        update["cover_url"] = cover_url
+    else:
+        # Item not found in media[] — still set the id, clear stale cover_url.
+        # Detail page will resolve correctly from full media[]; roster will
+        # show initials until the URL is resolvable.
+        update["cover_url"] = None
+
+    res = await db.talents.update_one({"id": tid}, {"$set": update})
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")
-    return {"ok": True}
+    return {"ok": True, "cover_url": cover_url}

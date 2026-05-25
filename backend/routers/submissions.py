@@ -618,11 +618,27 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     if not is_retest:
         resolved_talent_id = patch.get("talent_id") or sub.get("talent_id")
         if resolved_talent_id:
-            from routers.casting_pipeline import ensure_pipeline_from_finalized_submission
+            from routers.casting_pipeline import (
+                ensure_pipeline_from_finalized_submission,
+                sync_pipeline_from_submission,
+            )
             await ensure_pipeline_from_finalized_submission(
                 project_id=sub["project_id"],
                 talent_id=resolved_talent_id,
             )
+            # Bug fix: if the admin had already set a non-pending decision on
+            # this submission BEFORE the talent finalized, the entry above was
+            # created at ask_to_test (the default). Immediately apply the
+            # existing decision so the card lands in the correct lane.
+            # `patch["decision"]` reflects the re-approval reset; use the
+            # CURRENT DB decision (from the fresh patch write) instead.
+            current_decision = patch.get("decision") or sub.get("decision")
+            if current_decision and current_decision != "pending":
+                await sync_pipeline_from_submission(
+                    project_id=sub["project_id"],
+                    talent_id=resolved_talent_id,
+                    decision=current_decision,
+                )
 
     # Fan out an admin notification — first-time finalize vs retest variant.
     project = await db.projects.find_one(
@@ -805,6 +821,15 @@ async def set_decision(
         raise HTTPException(404, "Submission not found")
     # Fanout — only when the decision actually changes (avoid noise on idempotent calls)
     if prev != payload.decision:
+        # Re-fetch the submission AFTER the update so we have the freshest
+        # talent_id. The pre-update snapshot (sub) may reflect a state where
+        # talent_id was not yet written — e.g. if the admin made the decision
+        # before the talent finalized their submission. Using the stale snapshot
+        # caused sync_pipeline_from_submission to see talent_id=None and
+        # silently skip the stage update, leaving cards in the wrong lane.
+        fresh_sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+        resolved_talent_id = (fresh_sub or sub).get("talent_id")
+
         # Auto-sync casting pipeline: bump the matching pipeline row to the
         # decision's canonical stage. Best-effort — never blocks the response.
         # See `casting_pipeline.sync_pipeline_from_submission` for the
@@ -813,7 +838,7 @@ async def set_decision(
         from routers.casting_pipeline import sync_pipeline_from_submission
         await sync_pipeline_from_submission(
             project_id=pid,
-            talent_id=sub.get("talent_id"),
+            talent_id=resolved_talent_id,
             decision=payload.decision,
         )
 

@@ -215,7 +215,12 @@ async def sync_pipeline_from_submission(
     try:
         if not project_id or not talent_id:
             return
-        target_stage = SUBMISSION_DECISION_TO_STAGE.get(decision)
+        # Normalize input: strip whitespace and lowercase so "Rejected" /
+        # "REJECTED" / "rejected" all resolve correctly. The SUBMISSION_DECISIONS
+        # validation on the router already enforces lowercase, but this guard
+        # protects any future direct callers or admin tooling.
+        decision_key = (decision or "").strip().lower()
+        target_stage = SUBMISSION_DECISION_TO_STAGE.get(decision_key)
         if not target_stage:
             return
 
@@ -237,7 +242,7 @@ async def sync_pipeline_from_submission(
         if res.modified_count:
             logger.info(
                 "pipeline.auto-sync.update project=%s talent=%s decision=%s → stage=%s",
-                project_id, talent_id, decision, target_stage,
+                project_id, talent_id, decision_key, target_stage,
             )
             return
 
@@ -274,7 +279,7 @@ async def sync_pipeline_from_submission(
             await db.casting_pipeline.insert_one(new_entry)
             logger.info(
                 "pipeline.auto-sync.create project=%s talent=%s decision=%s → stage=%s",
-                project_id, talent_id, decision, target_stage,
+                project_id, talent_id, decision_key, target_stage,
             )
         except Exception as insert_exc:
             # DuplicateKeyError: concurrent request won the race — harmless.
@@ -286,7 +291,7 @@ async def sync_pipeline_from_submission(
         # Pipeline sync is an enrichment — never break the submission flow.
         logger.exception(
             "pipeline.auto-sync failed project=%s talent=%s decision=%s",
-            project_id, talent_id, decision,
+            project_id, talent_id, decision_key,
         )
 
 

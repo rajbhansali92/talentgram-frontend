@@ -2,7 +2,6 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "
 import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award } from "lucide-react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
-import { useVirtualizer } from "@tanstack/react-virtual";
 
 /* ---------------------------------------------------------------------
  * TalentBrowserModal — Elite Enterprise ATS-Grade Talent Browser
@@ -169,9 +168,9 @@ const sortTalents = (talents, sortBy, filters) => {
     
     switch(sortBy) {
         case "followers_high":
-            return sorted.sort((a, b) => (b.instagram_followers_count || parseFollowers(b.instagram_followers)) - (a.instagram_followers_count || parseFollowers(a.instagram_followers)));
+            return sorted.sort((a, b) => (b.instagram_followers_count || 0) - (a.instagram_followers_count || 0));
         case "followers_low":
-            return sorted.sort((a, b) => (a.instagram_followers_count || parseFollowers(a.instagram_followers)) - (b.instagram_followers_count || parseFollowers(b.instagram_followers)));
+            return sorted.sort((a, b) => (a.instagram_followers_count || 0) - (b.instagram_followers_count || 0));
         case "age_young":
             return sorted.sort((a, b) => (a.age || 99) - (b.age || 99));
         case "age_old":
@@ -184,11 +183,7 @@ const sortTalents = (talents, sortBy, filters) => {
             return sorted.sort((a, b) => (b.conversion_rate || 0) - (a.conversion_rate || 0));
         case "relevance":
         default:
-            return sorted.sort((a, b) => {
-                const scoreA = calculateMatchScore(a, filters);
-                const scoreB = calculateMatchScore(b, filters);
-                return scoreB - scoreA;
-            });
+            return sorted.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
     }
 };
 
@@ -248,6 +243,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     const searchDebounceRef = useRef(null);
     const cardRefsMap = useRef(new Map());
     const abortControllerRef = useRef(null);
+    const isFetchingRef = useRef(false);
+    const isSubmittingRef = useRef(false);
     
     // Get current columns based on screen size
     const getColumns = useCallback(() => {
@@ -257,11 +254,24 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return config.columns.desktop;
     }, [densityMode, isMobile, isTablet]);
     
+    // Filter setters
+    const setFilter = useCallback((key, value) => {
+        setFilters(prev => ({ ...prev, [key]: value }));
+        setFocusedIndex(-1);
+    }, []);
+    
+    const resetFilters = useCallback(() => {
+        setFilters(FILTER_DEFAULTS);
+        setFocusedIndex(-1);
+        setShowAdvancedFilters(false);
+    }, []);
+    
     // Fetch talents with proper abort controller
     useEffect(() => {
-        if (!open || talents.length > 0 || loading) return;
+        if (!open || talents.length > 0 || isFetchingRef.current) return;
         
         let isMounted = true;
+        isFetchingRef.current = true;
         
         // Create abort controller for this request
         abortControllerRef.current = new AbortController();
@@ -300,7 +310,10 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     setError("Failed to load talent roster");
                 }
             } finally {
-                if (isMounted) setLoading(false);
+                if (isMounted) {
+                    isFetchingRef.current = false;
+                    setLoading(false);
+                }
             }
         };
         
@@ -308,22 +321,37 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         
         return () => {
             isMounted = false;
+            isFetchingRef.current = false;
             // Abort in-flight request on cleanup
             if (abortControllerRef.current) {
                 abortControllerRef.current.abort();
                 abortControllerRef.current = null;
             }
         };
-    }, [open, talents.length, loading]);
+    }, [open, talents.length, setLoading, setError, setTalents]);
     
-    // Reset state when modal opens
+    // Reset state when modal opens, and abort in-flight requests when closed
     useEffect(() => {
         if (open) {
-            setSelected(new Set());
             setFocusedIndex(-1);
             setTimeout(() => searchInputRef.current?.focus(), 100);
+        } else {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+                abortControllerRef.current = null;
+            }
+            isFetchingRef.current = false;
         }
     }, [open]);
+    
+    // Clear selection, reset scroll, and reset filters when project changes to prevent cross-contamination
+    useEffect(() => {
+        setSelected(new Set());
+        resetFilters();
+        if (gridScrollRef.current) {
+            gridScrollRef.current.scrollTop = 0;
+        }
+    }, [projectId, resetFilters]);
     
     // Body scroll lock
     useEffect(() => {
@@ -373,6 +401,16 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         searchDebounceRef.current = setTimeout(() => {
             setFilter("search", value);
         }, 200);
+    }, [setFilter]);
+
+    // AUD-E1: Force refresh candidates by resetting cached state
+    const handleForceRefresh = useCallback(() => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            abortControllerRef.current = null;
+        }
+        isFetchingRef.current = false;
+        setTalents([]);
     }, []);
     
     // Filtered and sorted talents
@@ -420,12 +458,12 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             return true;
         });
         
-        filtered = sortTalents(filtered, sortBy, filters);
-        
-        return filtered.map(t => ({
+        const precomputed = filtered.map(t => ({
             ...t,
             matchScore: calculateMatchScore(t, filters),
         }));
+        
+        return sortTalents(precomputed, sortBy, filters);
     }, [talents, filters]);
     
     const filtersActive = useMemo(() => {
@@ -471,6 +509,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         setSelected(new Set());
     }, []);
     
+    const registerCardRef = useCallback((index, el) => {
+        if (el) {
+            cardRefsMap.current.set(index, el);
+        } else {
+            cardRefsMap.current.delete(index);
+        }
+    }, []);
+    
     const removeSelected = useCallback((id) => {
         setSelected((prev) => {
             const next = new Set(prev);
@@ -489,18 +535,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return talents.filter(t => selected.has(t.id));
     }, [talents, selected]);
     
-    // Filter setters
-    const setFilter = useCallback((key, value) => {
-        setFilters(prev => ({ ...prev, [key]: value }));
-        setFocusedIndex(-1);
-    }, []);
-    
-    const resetFilters = useCallback(() => {
-        setFilters(FILTER_DEFAULTS);
-        setFocusedIndex(-1);
-        setShowAdvancedFilters(false);
-    }, []);
-    
+
     // Apply saved search
     const applySavedSearch = useCallback((preset) => {
         setFilters(prev => ({ ...prev, ...preset.filters }));
@@ -518,13 +553,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     
     // Add to pipeline
     const handleSubmit = async () => {
-        if (selected.size === 0 || submitting) return;
+        if (selected.size === 0 || submitting || isSubmittingRef.current) return;
         
+        isSubmittingRef.current = true;
         setSubmitting(true);
         const count = selected.size;
         
         try {
-            await adminApi.post("/pipeline/add", {
+            await adminApi.post(`/projects/${projectId}/pipeline/add`, {
                 project_id: projectId,
                 talent_ids: Array.from(selected),
             });
@@ -537,6 +573,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             console.error("Add to pipeline failed:", err);
             toast.error(err?.response?.data?.detail || "Failed to add talents");
         } finally {
+            isSubmittingRef.current = false;
             setSubmitting(false);
         }
     };
@@ -545,22 +582,54 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     // KEYBOARD NAVIGATION
     // ========================================================================
     const columns = getColumns();
+
+    // AUD-P1: Caching refs to stabilize event binding
+    const latestFilteredTalents = useRef(filteredTalents);
+    const latestFocusedIndex = useRef(focusedIndex);
+    const latestExistingTalentIds = useRef(existingTalentIds);
+    const latestColumns = useRef(columns);
+    const latestToggleSelect = useRef(toggleSelect);
+    const latestSelectAllVisible = useRef(selectAllVisible);
+
+    useEffect(() => {
+        latestFilteredTalents.current = filteredTalents;
+        latestFocusedIndex.current = focusedIndex;
+        latestExistingTalentIds.current = existingTalentIds;
+        latestColumns.current = columns;
+        latestToggleSelect.current = toggleSelect;
+        latestSelectAllVisible.current = selectAllVisible;
+    }, [filteredTalents, focusedIndex, existingTalentIds, columns, toggleSelect, selectAllVisible]);
     
     useEffect(() => {
         if (!open) return;
         
         const handleKeyDown = (e) => {
-            const totalItems = filteredTalents.length;
+            // AUD-C1: Guard against user input boxes to avoid intercepting typing
+            const isInput = e.target.tagName === "INPUT" || 
+                            e.target.tagName === "TEXTAREA" || 
+                            e.target.isContentEditable;
+            
+            if (isInput) {
+                if (e.key === "Escape") {
+                    onClose();
+                }
+                return;
+            }
+
+            const totalItems = latestFilteredTalents.current.length;
             if (totalItems === 0) return;
+            
+            const cols = latestColumns.current;
+            const focusedIdx = latestFocusedIndex.current;
             
             switch(e.key) {
                 case "ArrowDown":
                     e.preventDefault();
-                    setFocusedIndex(prev => Math.min(prev + columns, totalItems - 1));
+                    setFocusedIndex(prev => Math.min(prev + cols, totalItems - 1));
                     break;
                 case "ArrowUp":
                     e.preventDefault();
-                    setFocusedIndex(prev => Math.max(prev - columns, -1));
+                    setFocusedIndex(prev => Math.max(prev - cols, -1));
                     break;
                 case "ArrowRight":
                     e.preventDefault();
@@ -572,18 +641,18 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     break;
                 case "Enter":
                     e.preventDefault();
-                    if (focusedIndex >= 0 && focusedIndex < totalItems) {
-                        const talent = filteredTalents[focusedIndex];
-                        const alreadyInPipeline = existingTalentIds.has(talent.id);
+                    if (focusedIdx >= 0 && focusedIdx < totalItems) {
+                        const talent = latestFilteredTalents.current[focusedIdx];
+                        const alreadyInPipeline = latestExistingTalentIds.current.has(talent.id);
                         if (!alreadyInPipeline) {
-                            toggleSelect(talent.id, alreadyInPipeline);
+                            latestToggleSelect.current(talent.id, alreadyInPipeline);
                         }
                     }
                     break;
                 case "a":
                     if (e.ctrlKey || e.metaKey) {
                         e.preventDefault();
-                        selectAllVisible();
+                        latestSelectAllVisible.current();
                     }
                     break;
                 default:
@@ -593,7 +662,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [open, filteredTalents, focusedIndex, columns, toggleSelect, selectAllVisible, existingTalentIds]);
+    }, [open, onClose]);
     
     // Scroll focused card into view
     useEffect(() => {
@@ -605,23 +674,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         }
     }, [focusedIndex]);
     
-    // ========================================================================
-    // VIRTUALIZATION (Stable height version)
-    // ========================================================================
     const config = DENSITY_CONFIG[densityMode];
-    const rows = Math.ceil(filteredTalents.length / columns);
-    const estimatedRowHeight = config.cardHeight + config.gap;
-    
-    const rowVirtualizer = useVirtualizer({
-        count: rows,
-        getScrollElement: () => gridScrollRef.current,
-        estimateSize: () => estimatedRowHeight,
-        overscan: 2,
-    });
-    
-    const virtualRows = rowVirtualizer.getVirtualItems();
-    
-    if (!open) return null;
     
     return (
         <ErrorBoundary>
@@ -630,18 +683,31 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 aria-modal="true"
                 aria-labelledby="talent-browser-title"
                 data-testid="talent-browser-modal"
-                className="fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-6"
+                className={`fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-6 transition-all duration-200 ${
+                    open ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+                }`}
                 onMouseDown={(e) => {
                     if (e.target === e.currentTarget) onClose();
                 }}
             >
-                <div className="relative w-full sm:max-w-7xl h-full sm:h-[90vh] flex flex-col bg-white rounded-2xl shadow-2xl overflow-hidden">
+                <div className="relative w-full sm:max-w-7xl h-[100dvh] sm:h-[90dvh] flex flex-col bg-white rounded-2xl shadow-2xl overflow-hidden">
                     
                     {/* Header */}
                     <div className="flex items-center justify-between px-4 sm:px-6 py-4 sm:py-5 border-b border-gray-200 shrink-0 bg-white">
                         <div>
-                            <p className="text-[10px] sm:text-xs font-medium tracking-wide text-gray-400 uppercase mb-1">
+                            <p className="text-[10px] sm:text-xs font-medium tracking-wide text-gray-400 uppercase mb-1 inline-flex items-center gap-1.5">
                                 Global Roster · {filterOptions.totalCount.toLocaleString()} talents
+                                <button
+                                    type="button"
+                                    onClick={handleForceRefresh}
+                                    data-testid="talent-browser-refresh"
+                                    title="Refresh talent roster"
+                                    className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors inline-flex items-center"
+                                >
+                                    <svg className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                                    </svg>
+                                </button>
                             </p>
                             <h2
                                 id="talent-browser-title"
@@ -798,6 +864,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     <div
                         ref={gridScrollRef}
                         className="flex-1 overflow-auto"
+                        style={{ WebkitOverflowScrolling: "touch" }}
                         data-testid="talent-browser-grid"
                     >
                         {loading && talents.length === 0 ? (
@@ -806,8 +873,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             <div className="flex items-center justify-center h-full">
                                 <div className="text-center">
                                     <p className="text-red-600 text-sm">{error}</p>
-                                    <button onClick={() => window.location.reload()} className="mt-4 text-sm text-gray-600 underline">
-                                        Retry
+                                    <button onClick={handleForceRefresh} className="mt-4 px-4 py-2 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 transition-colors">
+                                        Retry Load
                                     </button>
                                 </div>
                             </div>
@@ -817,57 +884,30 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             <div className="px-4 sm:px-6 py-4 sm:py-5">
                                 <div
                                     style={{
-                                        height: `${rowVirtualizer.getTotalSize()}px`,
-                                        position: "relative",
+                                        display: "grid",
+                                        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+                                        gap: `${config.gap}px`,
                                     }}
                                 >
-                                    {virtualRows.map((virtualRow) => {
-                                        const startIndex = virtualRow.index * columns;
-                                        const rowTalents = filteredTalents.slice(startIndex, startIndex + columns);
+                                    {filteredTalents.map((talent, globalIndex) => {
+                                        const alreadyInPipeline = existingTalentIds.has(talent.id);
+                                        const isSelected = selected.has(talent.id);
+                                        const isFocused = globalIndex === focusedIndex;
                                         
                                         return (
-                                            <div
-                                                key={virtualRow.index}
-                                                style={{
-                                                    position: "absolute",
-                                                    top: 0,
-                                                    left: 0,
-                                                    transform: `translateY(${virtualRow.start}px)`,
-                                                    width: "100%",
-                                                    display: "grid",
-                                                    gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-                                                    gap: `${config.gap}px`,
-                                                    marginBottom: `${config.gap}px`,
-                                                }}
-                                            >
-                                                {rowTalents.map((talent, colIndex) => {
-                                                    const globalIndex = startIndex + colIndex;
-                                                    const alreadyInPipeline = existingTalentIds.has(talent.id);
-                                                    const isSelected = selected.has(talent.id);
-                                                    const isFocused = globalIndex === focusedIndex;
-                                                    
-                                                    return (
-                                                        <TalentCard
-                                                            key={talent.id}
-                                                            talent={talent}
-                                                            selected={isSelected}
-                                                            alreadyInPipeline={alreadyInPipeline}
-                                                            onToggle={() => toggleSelect(talent.id, alreadyInPipeline)}
-                                                            densityMode={densityMode}
-                                                            isFocused={isFocused}
-                                                            showIntelligence={filters.showIntelligence}
-                                                            isMobile={isMobile}
-                                                            cardRef={(el) => {
-                                                                if (el) {
-                                                                    cardRefsMap.current.set(globalIndex, el);
-                                                                } else {
-                                                                    cardRefsMap.current.delete(globalIndex);
-                                                                }
-                                                            }}
-                                                        />
-                                                    );
-                                                })}
-                                            </div>
+                                            <TalentCard
+                                                key={talent.id}
+                                                talent={talent}
+                                                selected={isSelected}
+                                                alreadyInPipeline={alreadyInPipeline}
+                                                onToggle={toggleSelect}
+                                                densityMode={densityMode}
+                                                isFocused={isFocused}
+                                                showIntelligence={filters.showIntelligence}
+                                                isMobile={isMobile}
+                                                globalIndex={globalIndex}
+                                                registerRef={registerCardRef}
+                                            />
                                         );
                                     })}
                                 </div>
@@ -884,6 +924,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             onSubmit={handleSubmit}
                             submitting={submitting}
                             isMobile={isMobile}
+                            onClear={clearSelection}
                         />
                     )}
                 </div>
@@ -1152,29 +1193,49 @@ const FilterChip = ({ label, onRemove }) => (
 // TALENT CARD
 // ============================================================================
 
-const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densityMode, isFocused, showIntelligence, isMobile, cardRef }) => {
+const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densityMode, isFocused, showIntelligence, isMobile, globalIndex, registerRef }) => {
     const imageUrl = pickImage(talent);
     const config = DENSITY_CONFIG[densityMode];
+    const [imageLoaded, setImageLoaded] = useState(false);
+    
+    const handleToggle = useCallback(() => {
+        onToggle(talent.id, alreadyInPipeline);
+    }, [onToggle, talent.id, alreadyInPipeline]);
     
     return (
         <button
-            ref={cardRef}
+            ref={(el) => registerRef(globalIndex, el)}
             type="button"
-            onClick={onToggle}
+            onClick={handleToggle}
             disabled={alreadyInPipeline}
+            role="checkbox"
+            aria-checked={selected}
+            aria-label={`Select ${talent.name || "Unnamed Talent"}`}
             data-testid={`talent-browser-card-${talent.id}`}
+            style={{
+                contentVisibility: "auto",
+                containIntrinsicSize: densityMode === "compact" ? "280px" : densityMode === "comfortable" ? "320px" : "380px",
+            }}
             className={`
                 relative text-left rounded-xl overflow-hidden transition-all duration-200
                 ${alreadyInPipeline ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:shadow-lg hover:-translate-y-0.5"}
-                ${selected ? "ring-2 ring-gray-900 shadow-md" : "ring-1 ring-gray-200"}
-                ${isFocused && !alreadyInPipeline ? "ring-2 ring-blue-500 shadow-lg" : ""}
+                ${selected ? "ring-[3px] ring-gray-900 shadow-md bg-gray-100/60" : "ring-1 ring-gray-200"}
+                ${isFocused && !alreadyInPipeline ? "ring-[3px] ring-blue-500 shadow-lg" : ""}
                 bg-white
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2
             `}
         >
             {/* Image */}
             <div className={`${config.imageAspect} bg-gray-50 overflow-hidden relative`}>
                 {imageUrl ? (
-                    <img src={imageUrl} alt={talent.name || ""} loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                    <img
+                        src={imageUrl}
+                        alt={talent.name || ""}
+                        loading="lazy"
+                        decoding="async"
+                        onLoad={() => setImageLoaded(true)}
+                        className={`w-full h-full object-cover transition-opacity duration-300 ${imageLoaded ? "opacity-100" : "opacity-0"}`}
+                    />
                 ) : (
                     <div className="w-full h-full flex items-center justify-center bg-gray-100">
                         <ImageIcon className="w-8 h-8 text-gray-300" />
@@ -1253,21 +1314,48 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
 // SELECTION TRAY
 // ============================================================================
 
-const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit, submitting, isMobile }) => {
+const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit, submitting, isMobile, onClear }) => {
     return (
-        <div className="sticky bottom-0 z-20 border-t border-gray-200 bg-white/95 backdrop-blur-sm shadow-lg shrink-0">
-            <div className="px-4 sm:px-6 py-2 sm:py-3">
+        <div
+            className="sticky bottom-0 z-20 border-t border-gray-200 bg-white/95 backdrop-blur-sm shadow-lg shrink-0"
+            style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+        >
+            <div className="px-4 sm:px-6 py-3 sm:py-4">
                 <div className="flex items-center justify-between gap-2 sm:gap-4">
                     <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
-                        <span className="text-xs sm:text-sm font-medium text-gray-700 whitespace-nowrap">{selectedCount} selected</span>
+                        <span className="text-xs sm:text-sm font-medium text-gray-700 whitespace-nowrap flex items-center">
+                            {selectedCount} selected
+                            <button
+                                type="button"
+                                onClick={onClear}
+                                aria-label="Clear all selections"
+                                className="text-xs text-gray-400 hover:text-gray-600 underline ml-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 rounded px-1 shrink-0"
+                            >
+                                Clear all
+                            </button>
+                        </span>
                         
                         <div className="hidden sm:flex items-center gap-2 overflow-x-auto flex-1">
                             {selectedTalents.slice(0, 8).map(talent => (
                                 <div key={talent.id} className="relative group shrink-0">
                                     <div className="w-8 h-8 rounded-full overflow-hidden bg-gray-100 ring-2 ring-white shadow-sm">
-                                        {pickImage(talent) ? <img src={pickImage(talent)} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-[10px]">?</div>}
+                                        {pickImage(talent) ? (
+                                            <img
+                                                src={pickImage(talent)}
+                                                alt=""
+                                                loading="lazy"
+                                                decoding="async"
+                                                className="w-full h-full object-cover"
+                                            />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-[10px]">?</div>
+                                        )}
                                     </div>
-                                    <button onClick={() => onRemove(talent.id)} className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white border border-gray-200 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm">
+                                    <button
+                                        onClick={() => onRemove(talent.id)}
+                                        aria-label={`Remove ${talent.name || "Unnamed Talent"} from selection`}
+                                        className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white border border-gray-200 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 transition-opacity shadow-sm"
+                                    >
                                         <X size={8} className="text-gray-500" />
                                     </button>
                                 </div>
@@ -1278,7 +1366,13 @@ const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit
                         {isMobile && selectedTalents.length > 0 && <div className="px-2 py-1 rounded-full bg-gray-100 text-xs text-gray-600">{selectedTalents.length}</div>}
                     </div>
                     
-                    <button onClick={onSubmit} disabled={submitting} data-testid="talent-browser-add-selected" className="px-4 sm:px-6 py-1.5 sm:py-2 rounded-lg bg-gray-900 text-white text-xs sm:text-sm font-medium hover:bg-gray-800 transition-colors shadow-sm shrink-0 disabled:bg-gray-300 disabled:cursor-not-allowed">
+                    <button
+                        onClick={onSubmit}
+                        disabled={submitting}
+                        aria-label={`Add ${selectedCount} selected talents to pipeline`}
+                        data-testid="talent-browser-add-selected"
+                        className="px-4 sm:px-6 py-1.5 sm:py-2 rounded-lg bg-gray-900 text-white text-xs sm:text-sm font-medium hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 transition-colors shadow-sm shrink-0 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
                         {submitting ? "Adding..." : `Add${!isMobile ? ` ${selectedCount}` : ""}`}
                     </button>
                 </div>

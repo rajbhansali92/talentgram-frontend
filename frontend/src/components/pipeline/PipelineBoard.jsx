@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useState } from "react";
+import React, { memo, useCallback, useState, useMemo } from "react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 
@@ -17,6 +17,7 @@ import FollowUpLane from "./FollowUpLane";
 import { FilterEmptyState } from "./PipelineEmptyState";
 import QuickAddTalents from "./QuickAddTalents";
 import BulkAddModal from "./BulkAddModal";
+import TalentBrowserModal from "./TalentBrowserModal";
 
 import {
     INDEPENDENT_STAGES,
@@ -80,6 +81,10 @@ function PipelineBoard({ projectId, projectName }) {
     const [showBulkAdd, setShowBulkAdd] = useState(false);
     const [bulkTalentsInput, setBulkTalentsInput] = useState("");
     const [bulkAdding, setBulkAdding] = useState(false);
+
+    // Roster browser and existing talent tracking
+    const [showTalentBrowser, setShowTalentBrowser] = useState(false);
+    const existingTalentIds = useMemo(() => new Set(data.map((item) => item.talent_id)), [data]);
 
     const handleToggleBulkMode = useCallback(() => {
         if (bulkMode) {
@@ -258,6 +263,7 @@ function PipelineBoard({ projectId, projectName }) {
                                 bulkMode={bulkMode}
                                 onToggleBulkMode={handleToggleBulkMode}
                                 onOpenBulkAdd={() => setShowBulkAdd(true)}
+                                onOpenTalentBrowser={() => setShowTalentBrowser(true)}
                             />
                         </div>
                         <div className="border-t border-black/[0.04] px-4 py-3">
@@ -361,6 +367,14 @@ function PipelineBoard({ projectId, projectName }) {
                     count={bulkIds.size}
                     onClear={handleClearBulk}
                     onMove={handleBulkMove}
+                />
+
+                <TalentBrowserModal
+                    open={showTalentBrowser}
+                    onClose={() => setShowTalentBrowser(false)}
+                    projectId={projectId}
+                    existingTalentIds={existingTalentIds}
+                    onAdded={fetchPipeline}
                 />
             </div>
         </div>

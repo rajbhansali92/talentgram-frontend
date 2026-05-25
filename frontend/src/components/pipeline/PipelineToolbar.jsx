@@ -19,6 +19,7 @@ const PipelineToolbar = memo(function PipelineToolbar({
     bulkMode,
     onToggleBulkMode,
     onOpenBulkAdd,
+    onOpenTalentBrowser,
 }) {
     const [copyFeedback, setCopyFeedback] = useState(false);
     const [copyError, setCopyError] = useState(false);
@@ -145,7 +146,7 @@ const PipelineToolbar = memo(function PipelineToolbar({
             </div>
 
             {/* Right section: Action buttons */}
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
                 <button
                     type="button"
                     onClick={onToggleBulkMode}
@@ -180,6 +181,21 @@ const PipelineToolbar = memo(function PipelineToolbar({
                     "
                 >
                     + Bulk Import
+                </button>
+
+                <button
+                    type="button"
+                    onClick={onOpenTalentBrowser}
+                    data-testid="pipeline-talent-browser-open"
+                    aria-label="Open global talent browser"
+                    className="
+                        px-3.5 py-1.5 text-[10px] tracking-wide uppercase font-semibold
+                        bg-black text-white hover:bg-black/90
+                        rounded-md transition-all duration-200
+                        focus:outline-none focus:ring-1 focus:ring-black/20
+                    "
+                >
+                    + Browse Roster
                 </button>
             </div>
         </div>

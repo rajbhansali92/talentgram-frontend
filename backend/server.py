@@ -100,6 +100,19 @@ async def on_startup():
     await db.feedback.create_index([("project_id", 1), ("status", 1)])
     await db.feedback.create_index([("created_at", -1)])
 
+    # Casting pipeline: enforce one card per (project, talent).
+    # Backs up the application-level duplicate guard in `add_to_pipeline` and
+    # the auto-create paths in `sync_pipeline_from_submission` /
+    # `ensure_pipeline_from_finalized_submission`. Idempotent on re-boot.
+    try:
+        await db.casting_pipeline.create_index(
+            [("project_id", 1), ("talent_id", 1)],
+            unique=True,
+            name="pipeline_project_talent_unique",
+        )
+    except Exception as _e:
+        logger.warning("casting_pipeline unique index: %s", _e)
+
     if drive_enabled():
         logger.info("Google Drive backup ENABLED — starting retry worker")
         attach_db(db)

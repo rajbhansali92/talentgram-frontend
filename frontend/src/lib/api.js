@@ -24,6 +24,10 @@ export const IMAGE_URL = (media) => {
     return media.url || "";
 };
 
+// ================= PUBLIC CLIENT API =================
+
+export const api = axios.create({ baseURL: API });
+
 // ================= ADMIN API =================
 
 export const adminApi = axios.create({ baseURL: API });

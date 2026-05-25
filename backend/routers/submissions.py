@@ -611,6 +611,19 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             for m in finalized_sub.get("media") or []:
                 await sync_media_to_global_talent(finalized_sub, m)
 
+    # Auto-create pipeline entry on first-time finalize.
+    # Ensures every submitted talent automatically appears in the casting
+    # pipeline at ask_to_test. Best-effort — never blocks the finalize
+    # response. Retest finalizes skip this block (row already exists).
+    if not is_retest:
+        resolved_talent_id = patch.get("talent_id") or sub.get("talent_id")
+        if resolved_talent_id:
+            from routers.casting_pipeline import ensure_pipeline_from_finalized_submission
+            await ensure_pipeline_from_finalized_submission(
+                project_id=sub["project_id"],
+                talent_id=resolved_talent_id,
+            )
+
     # Fan out an admin notification — first-time finalize vs retest variant.
     project = await db.projects.find_one(
         {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}

@@ -1,32 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
-const applyTheme = (theme) => {
+const applyTheme = () => {
     const html = document.documentElement;
-    html.classList.toggle("light", theme === "light");
-    html.classList.toggle("dark", theme !== "light");
+    html.classList.add("light");
+    html.classList.remove("dark");
 };
 
 export function useTheme() {
-    const [theme, setTheme] = useState(() => {
-        try {
-            return localStorage.getItem("tg_theme") === "light"
-                ? "light"
-                : "dark";
-        } catch {
-            return "dark";
-        }
-    });
-
-    useEffect(() => {
-        applyTheme(theme);
-        try {
-            localStorage.setItem("tg_theme", theme);
-        } catch (e) { console.error(e); }
-    }, [theme]);
+    // Permanently locked to light mode as per ATS operational design guidelines
+    applyTheme();
 
     const toggle = useCallback(() => {
-        setTheme((t) => (t === "light" ? "dark" : "light"));
+        // No-op to prevent theme switching
     }, []);
 
-    return { theme, toggle, isLight: theme === "light" };
+    return { theme: "light", toggle, isLight: true };
 }

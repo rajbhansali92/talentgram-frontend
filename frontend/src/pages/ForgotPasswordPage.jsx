@@ -50,7 +50,7 @@ export default function ForgotPasswordPage() {
     };
 
     return (
-        <div className="min-h-screen bg-[#050505] text-[var(--tg-text)] tg-grain flex items-center justify-center px-4">
+        <div className="min-h-screen bg-[#050505] text-white tg-grain flex items-center justify-center px-4">
             <div className="w-full max-w-md">
                 <div className="mb-8">
                     <Logo size="md" />

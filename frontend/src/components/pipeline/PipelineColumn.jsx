@@ -16,6 +16,19 @@ const isStale = (lastActivityTimestamp) => {
     return Date.now() - lastActivityTimestamp > fiveDaysInMs;
 };
 
+const STAGE_HEADER_TINTS = {
+    ask_to_test: "bg-slate-50/60",
+    approved: "bg-emerald-50/40",
+    hold: "bg-amber-50/45",
+    shortlisted: "bg-violet-50/40",
+    already_tested: "bg-fuchsia-50/35",
+    locked: "bg-amber-50/30",
+    rejected: "bg-rose-50/25",
+    not_available: "bg-zinc-50/30",
+    not_interested: "bg-zinc-50/30",
+    pitch: "bg-teal-50/40",
+};
+
 const calculateStaleCount = (items) => {
     return items.filter(item => {
         const timestamp = item.lastActivityTimestamp || item.updatedAtTimestamp;
@@ -276,10 +289,10 @@ const PipelineColumn = memo(function PipelineColumn({
                 aria-hidden="true"
             />
 
-            {/* Sticky header with intelligence metrics */}
-            <div className="sticky top-[52px] z-10 px-4 py-2.5 bg-white/96 backdrop-blur-sm border-b border-black/[0.06] rounded-t-lg transition-all duration-150">
+            {/* Sticky header with intelligence metrics (with premium soft header tint) */}
+            <div className={`sticky top-[52px] z-10 px-4 py-3 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white/96"} backdrop-blur-sm`}>
                 {/* Primary header row */}
-                <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="min-w-0 flex items-center gap-2">
                         <button
                             onClick={() => onToggleCollapse?.(stage)}
@@ -290,7 +303,7 @@ const PipelineColumn = memo(function PipelineColumn({
                                 className={`w-3.5 h-3.5 transform transition-transform duration-150 ${isCollapsed ? "-rotate-90" : ""}`}
                             />
                         </button>
-                        <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-medium truncate">
+                        <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-semibold truncate">
                             {getStageLabel(stage)}
                         </span>
                         {readOnly && (
@@ -325,23 +338,23 @@ const PipelineColumn = memo(function PipelineColumn({
                 </div>
 
                 {/* Intelligence metrics row */}
-                <div className="flex flex-wrap items-center gap-2 text-[9px] font-mono text-black/45">
+                <div className="flex flex-wrap items-center gap-2.5 text-[9px] font-mono text-black/45">
                     {displayMetrics.conversion && (
                         <span className="flex items-center gap-1" title="Conversion from previous stage">
-                            <TrendingUp className="w-2.5 h-2.5" />
-                            {displayMetrics.conversion}%
+                            <TrendingUp className="w-2.5 h-2.5 text-black/40" />
+                            <span>{displayMetrics.conversion}%</span>
                         </span>
                     )}
                     {displayMetrics.avgResponse && (
                         <span className="flex items-center gap-1" title="Average response time (days)">
-                            <Clock className="w-2.5 h-2.5" />
-                            {displayMetrics.avgResponse}d
+                            <Clock className="w-2.5 h-2.5 text-black/40" />
+                            <span>{displayMetrics.avgResponse}d</span>
                         </span>
                     )}
                     {displayMetrics.stale > 0 && (
-                        <span className="flex items-center gap-1 text-amber-600" title="Candidates with no activity for 5+ days">
-                            <AlertCircle className="w-2.5 h-2.5" />
-                            {displayMetrics.stale}
+                        <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 border border-amber-200/50 px-1.5 py-0.5 rounded-md font-medium" title="Candidates with no activity for 5+ days">
+                            <AlertCircle className="w-2.5 h-2.5 text-amber-600" />
+                            <span>{displayMetrics.stale} stale</span>
                         </span>
                     )}
                 </div>
@@ -377,7 +390,7 @@ const PipelineColumn = memo(function PipelineColumn({
                             overflow-y-auto overflow-x-visible
                             bg-[#fafafa]
                             tg-pipeline-scroll
-                            ${compact ? "min-h-[180px]" : "min-h-[180px]"}
+                            ${compact ? "min-h-[220px]" : "min-h-[220px]"}
                         `}
                         style={{
                             maxHeight: compact ? "240px" : "min(64vh, 800px)", // Cap at 800px for Safari

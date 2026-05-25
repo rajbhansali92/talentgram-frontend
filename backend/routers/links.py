@@ -283,18 +283,63 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
     link = await db.links.find_one({"id": lid}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
-    viewers = await db.link_views.find({"link_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(5000)
-    actions = await db.link_actions.find({"link_id": lid}, {"_id": 0}).sort("updated_at", -1).to_list(10000)
-    downloads = await db.link_downloads.find({"link_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(10000)
 
     t_ids = link.get("talent_ids", []) or []
     s_ids = link.get("submission_ids", []) or []
+    ordered_ids = t_ids + s_ids
+
+    # P2-F: Run viewers, actions summary, and downloads concurrently.
+    # Action SUMMARY is computed in MongoDB via $group — eliminates loading
+    # up to 10 000 rows into Python for in-memory counting.
+    # Raw actions list is capped at 500 (frontend only shows viewer comments).
+    import asyncio
+
+    async def _fetch_viewers():
+        return await db.link_views.find(
+            {"link_id": lid}, {"_id": 0}
+        ).sort("created_at", -1).to_list(5000)
+
+    async def _fetch_actions_raw():
+        # Cap raw actions returned in response to 500 most-recent rows.
+        # Frontend uses this only for comments display, not aggregate counts.
+        return await db.link_actions.find(
+            {"link_id": lid}, {"_id": 0}
+        ).sort("updated_at", -1).to_list(500)
+
+    async def _fetch_summary_agg():
+        # Compute per-talent counts entirely in MongoDB using $group.
+        # O(1) Python allocation regardless of action volume.
+        pipeline = [
+            {"$match": {"link_id": lid}},
+            {"$group": {
+                "_id": "$talent_id",
+                "shortlist":    {"$sum": {"$cond": [{"$eq": ["$action", "shortlist"]}, 1, 0]}},
+                "interested":   {"$sum": {"$cond": [{"$eq": ["$action", "interested"]}, 1, 0]}},
+                "not_for_this": {"$sum": {"$cond": [{"$eq": ["$action", "not_for_this"]}, 1, 0]}},
+                "not_sure":     {"$sum": {"$cond": [{"$eq": ["$action", "not_sure"]}, 1, 0]}},
+            }},
+        ]
+        rows = await db.link_actions.aggregate(pipeline).to_list(10000)
+        return {r["_id"]: r for r in rows}
+
+    async def _fetch_downloads():
+        return await db.link_downloads.find(
+            {"link_id": lid}, {"_id": 0}
+        ).sort("created_at", -1).to_list(1000)
+
+    viewers, actions_raw, agg_by_tid, downloads = await asyncio.gather(
+        _fetch_viewers(),
+        _fetch_actions_raw(),
+        _fetch_summary_agg(),
+        _fetch_downloads(),
+    )
+
     subjects: Dict[str, Dict[str, Any]] = {}
     if t_ids:
         for t in await db.talents.find(
             {"id": {"$in": t_ids}},
             {"_id": 0, "id": 1, "name": 1, "cover_media_id": 1, "media": 1},
-        ).to_list(5000):
+        ).to_list(len(t_ids)):
             subjects[t["id"]] = {
                 "id": t["id"],
                 "name": t.get("name"),
@@ -303,7 +348,11 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
                 "media": t.get("media", []),
             }
     if s_ids:
-        for s in await db.submissions.find({"id": {"$in": s_ids}}, {"_id": 0}).to_list(5000):
+        for s in await db.submissions.find(
+            {"id": {"$in": s_ids}},
+            {"_id": 0, "id": 1, "project_id": 1, "talent_name": 1,
+             "talent_email": 1, "cover_media_id": 1, "media": {"$slice": 10}},
+        ).to_list(len(s_ids)):
             shape = _submission_to_client_shape(s)
             subjects[s["id"]] = {
                 "id": s["id"],
@@ -314,34 +363,44 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
                 "media": shape.get("media", []),
             }
 
-    ordered_ids = t_ids + s_ids
+    # Build summary from aggregation result + comments from capped raw list.
     summary: Dict[str, Dict[str, Any]] = {
-        tid: {"talent_id": tid, "shortlist": 0, "interested": 0, "not_for_this": 0, "not_sure": 0, "comments": []}
+        tid: {
+            "talent_id": tid,
+            "shortlist":    agg_by_tid.get(tid, {}).get("shortlist", 0),
+            "interested":   agg_by_tid.get(tid, {}).get("interested", 0),
+            "not_for_this": agg_by_tid.get(tid, {}).get("not_for_this", 0),
+            "not_sure":     agg_by_tid.get(tid, {}).get("not_sure", 0),
+            "comments": [],
+        }
         for tid in ordered_ids
     }
-    for a in actions:
+    # Collect comments from the capped raw actions list.
+    for a in actions_raw:
         tid = a.get("talent_id")
-        if tid not in summary:
-            summary[tid] = {"talent_id": tid, "shortlist": 0, "interested": 0, "not_for_this": 0, "not_sure": 0, "comments": []}
-        act = a.get("action")
-        if act in summary[tid]:
-            summary[tid][act] += 1
-        if a.get("comment"):
+        if tid and a.get("comment"):
+            if tid not in summary:
+                summary[tid] = {
+                    "talent_id": tid,
+                    "shortlist": 0, "interested": 0,
+                    "not_for_this": 0, "not_sure": 0, "comments": [],
+                }
             summary[tid]["comments"].append({
                 "viewer_email": a.get("viewer_email"),
                 "viewer_name": a.get("viewer_name"),
                 "comment": a["comment"],
                 "updated_at": a.get("updated_at"),
             })
+
     return {
         "link": link,
         "viewers": viewers,
-        "actions": actions,
+        "actions": actions_raw,
         "downloads": downloads,
         "summary": list(summary.values()),
         "subjects": subjects,
         "view_count": len(viewers),
-        "unique_viewers": len({v["viewer_email"] for v in viewers}),
+        "unique_viewers": len({v.get("viewer_email") for v in viewers if v.get("viewer_email")}),
     }
 
 

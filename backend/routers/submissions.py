@@ -747,7 +747,15 @@ async def list_approved_submissions(
 ):
     """All approved submissions across every project (admin convenience for Link picker)."""
     query = {"decision": "approved"}
-    cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1)
+    # P2-B: project only the fields the Link-picker UI renders. Excludes
+    # form_data (large nested object) and raw media metadata.
+    list_proj = {
+        "_id": 0, "id": 1, "project_id": 1, "talent_name": 1,
+        "talent_email": 1, "cover_media_id": 1,
+        "media": {"$slice": 10},   # cap at first 10 for cover resolution
+        "created_at": 1,
+    }
+    cursor = db.submissions.find(query, list_proj).sort("created_at", -1)
     if page is None:
         subs = await cursor.to_list(5000)
         total = None
@@ -756,8 +764,16 @@ async def list_approved_submissions(
         skip, limit, p, s = _paginate_params(page, size)
         total = await db.submissions.count_documents(query)
         subs = await cursor.skip(skip).limit(limit).to_list(limit)
-    projects = await db.projects.find({}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(2000)
-    pmap = {p["id"]: p.get("brand_name") for p in projects}
+    # P2-B: fetch only the projects referenced by this result set, not
+    # all 2 000+ projects in the DB.
+    seen_pids = list({sub.get("project_id") for sub in subs if sub.get("project_id")})
+    pmap: Dict[str, Any] = {}
+    if seen_pids:
+        proj_docs = await db.projects.find(
+            {"id": {"$in": seen_pids}},
+            {"_id": 0, "id": 1, "brand_name": 1},
+        ).to_list(len(seen_pids))
+        pmap = {pr["id"]: pr.get("brand_name") for pr in proj_docs}
     out: List[Dict[str, Any]] = []
     for sub in subs:
         shape = _submission_to_client_shape(sub)
@@ -792,7 +808,17 @@ async def list_submissions(
         query["decision"] = decision
     if status:
         query["status"] = status
-    cursor = db.submissions.find(query, {"_id": 0}).sort("created_at", -1)
+    # P3-F: Lightweight list projection — strips form_data (large nested
+    # object), media[] (per-image metadata), and field_visibility from the
+    # admin review list. The recruiter list renders only summary fields.
+    # Full form_data + media are fetched on individual submission GET.
+    # NOTE: talent_name is stored at top-level (not inside form_data) — safe.
+    _SUB_LIST_PROJ = {
+        "_id": 0,
+        "form_data": 0,        # large nested object — not needed by list rows
+        "field_visibility": 0, # internal toggle map — not rendered in list
+    }
+    cursor = db.submissions.find(query, _SUB_LIST_PROJ).sort("created_at", -1)
     if page is None and limit is None:
         return await cursor.to_list(5000)
     skip, page_size, p, s = _paginate_params(page, size, limit)

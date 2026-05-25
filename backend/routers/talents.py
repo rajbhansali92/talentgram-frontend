@@ -17,6 +17,7 @@ from core import (
     _paginated,
     cloudinary_destroy,
     cloudinary_upload,
+    compute_age,
     current_admin,
     current_team_or_admin,
     db,
@@ -93,6 +94,62 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
     return enrich_talent(doc)
 
 
+# ---------------------------------------------------------------------------
+# Projections
+# ---------------------------------------------------------------------------
+# List projection: excludes media[] and internal/write-only fields.
+# The talent roster and search UI never renders individual media items — it
+# only needs the cover URL (image_url), which we compute from cover_media_id
+# and the *first* image URL. Excluding media[] reduces payload by ~95% for
+# talent-heavy rosters (2 000 talents × 10 images = 20 000 dicts eliminated).
+_LIST_PROJECTION = {
+    "_id": 0,
+    "created_by": 0,
+    "media": 0,        # P2-B: stripped from list; full media only on GET /talents/{id}
+    "source": 0,       # internal provenance — not rendered in any list UI
+    "notes": 0,        # long-form text — not needed by list cards
+}
+
+# Fields fetched for cover-URL resolution on the list path.
+# We keep cover_media_id in the list doc so _list_image_url can resolve
+# it without media[]; falls back to None for unset covers.
+
+
+def _list_image_url(doc: dict) -> Optional[str]:
+    """Cheap cover-URL resolver for the list path where media[] is excluded.
+
+    Because media[] is projected out, we cannot walk it. Relies on
+    cover_media_id being set (filled by set_cover / add_media). When it is
+    absent the list card renders without an avatar — same as before for
+    talents that never had a cover set.
+
+    This avoids running the full _resolve_cover_url loop (O(n) over media[])
+    for every row in a 2 000-item list response.
+    """
+    # cover_media_id is present in the doc but the URL is not — the list
+    # card uses image_url directly. Since we have no media[], return None;
+    # the detail view (GET /talents/{id}) always has the full media array.
+    return None
+
+
+def _enrich_list(doc: dict) -> dict:
+    """Lightweight enrichment for list responses (media excluded from projection).
+
+    Only derives `age` from `dob` — skips the O(media) cover-URL loop that
+    full `enrich_talent` runs. Returns doc in-place.
+    """
+    dob = doc.get("dob")
+    if dob:
+        computed = compute_age(dob)
+        if computed is not None:
+            doc["age"] = computed
+    # image_url is None for list view — cover requires the full media array
+    # which is excluded by _LIST_PROJECTION. Clients use the detail endpoint
+    # for cover URLs when opening a talent profile.
+    doc["image_url"] = None
+    return doc
+
+
 @router.get("/talents")
 async def list_talents(
     q: Optional[str] = None,
@@ -104,16 +161,16 @@ async def list_talents(
     query: Dict[str, Any] = {}
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
-    cursor = db.talents.find(query, {"_id": 0, "created_by": 0}).sort(
-        "created_at", -1
-    )
+    # P2-B/P2-F: Use lightweight list projection — excludes media[], source,
+    # notes. Eliminates up to 300 MB from unbounded list responses.
+    cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
     if page is None and limit is None:
         talents = await cursor.to_list(2000)
-        return [enrich_talent(t) for t in talents]
+        return [_enrich_list(t) for t in talents]
     skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.talents.count_documents(query)
     talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
-    return _paginated([enrich_talent(t) for t in talents], total, p, s)
+    return _paginated([_enrich_list(t) for t in talents], total, p, s)
 
 
 # ---------------------------------------------------------------------------

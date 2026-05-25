@@ -481,6 +481,10 @@ async def seed_admin() -> None:
         ("links", [("slug", 1)], {"unique": True, "name": "slug_unique"}),
         ("link_views", [("link_id", 1), ("created_at", -1)], {}),
         ("link_actions", [("link_id", 1), ("viewer_email", 1)], {}),
+        # P2-F indexes
+        ("link_actions", [("link_id", 1)], {"name": "link_actions_link_id"}),
+        ("talents", [("name", 1)], {"name": "talents_name"}),
+        ("casting_pipeline", [("project_id", 1), ("created_at", 1)], {"name": "pipeline_project_created_at"}),
         ("projects", [("slug", 1)], {"unique": True, "name": "proj_slug_unique"}),
     ]
     for coll, keys, opts in p0_indexes:

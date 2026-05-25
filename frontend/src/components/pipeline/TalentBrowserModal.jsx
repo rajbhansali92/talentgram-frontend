@@ -247,6 +247,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     const searchDebounceRef = useRef(null);
     const cardRefsMap = useRef(new Map());
     const abortControllerRef = useRef(null);
+    const isFetchingRef = useRef(false);
     
     // Get current columns based on screen size
     const getColumns = useCallback(() => {
@@ -270,9 +271,10 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     
     // Fetch talents with proper abort controller
     useEffect(() => {
-        if (!open || talents.length > 0 || loading) return;
+        if (!open || talents.length > 0 || isFetchingRef.current) return;
         
         let isMounted = true;
+        isFetchingRef.current = true;
         
         // Create abort controller for this request
         abortControllerRef.current = new AbortController();
@@ -311,7 +313,10 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     setError("Failed to load talent roster");
                 }
             } finally {
-                if (isMounted) setLoading(false);
+                if (isMounted) {
+                    isFetchingRef.current = false;
+                    setLoading(false);
+                }
             }
         };
         
@@ -319,13 +324,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         
         return () => {
             isMounted = false;
+            isFetchingRef.current = false;
             // Abort in-flight request on cleanup
             if (abortControllerRef.current) {
                 abortControllerRef.current.abort();
                 abortControllerRef.current = null;
             }
         };
-    }, [open, talents.length]);
+    }, [open, talents.length, setLoading, setError, setTalents]);
     
     // Reset state when modal opens
     useEffect(() => {

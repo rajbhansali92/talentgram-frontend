@@ -118,6 +118,7 @@ const PipelineCard = memo(function PipelineCard({
     const overflowRef = useRef(null);
     const moreButtonRef = useRef(null);
     const cardRef = useRef(null);
+    const actionRailRef = useRef(null);
     const hoverTimeoutRef = useRef(null);
     const abortControllerRef = useRef(null);
 
@@ -243,23 +244,32 @@ const PipelineCard = memo(function PipelineCard({
     // HOVER HANDLERS WITH CLEANUP (fixes ISSUE 4 - mobile considerations)
     // ============================================================================
     
+    // Touch device detection — evaluated once at mount
+    const isTouchDevice = useMemo(() => {
+        return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    }, []);
+    
     const handleMouseEnter = useCallback(() => {
-        if (readOnly || bulkMode) return;
+        // Touch devices use explicit trigger button — skip hover-based rail
+        if (readOnly || bulkMode || isTouchDevice) return;
         hoverTimeoutRef.current = setTimeout(() => {
             setShowActionRail(true);
         }, 150);
-    }, [readOnly, bulkMode]);
+    }, [readOnly, bulkMode, isTouchDevice]);
     
     const handleMouseLeave = useCallback(() => {
+        // Touch devices manage rail via explicit toggle — skip hover-based close
+        if (isTouchDevice) return;
         if (hoverTimeoutRef.current) {
             clearTimeout(hoverTimeoutRef.current);
         }
         setShowActionRail(false);
-    }, []);
+    }, [isTouchDevice]);
     
-    // Touch device detection for future long-press menu (ISSUE 8)
-    const isTouchDevice = useMemo(() => {
-        return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    // Explicit toggle for touch devices — replaces hover on pointer-less devices
+    const handleTouchTrigger = useCallback((e) => {
+        e.stopPropagation();
+        setShowActionRail(prev => !prev);
     }, []);
     
     // Future: long press handler for mobile devices
@@ -291,6 +301,7 @@ const PipelineCard = memo(function PipelineCard({
         function handleEsc(e) {
             if (e.key === "Escape") {
                 setShowMoreActions(false);
+                setShowActionRail(false);
             }
         }
         
@@ -314,6 +325,23 @@ const PipelineCard = memo(function PipelineCard({
             }
         };
     }, []);
+    
+    // Close touch action rail when tapping outside card (touch devices only)
+    useEffect(() => {
+        if (!isTouchDevice || !showActionRail) return;
+        
+        function handleTouchOutside(e) {
+            if (
+                cardRef.current &&
+                !cardRef.current.contains(e.target)
+            ) {
+                setShowActionRail(false);
+            }
+        }
+        
+        document.addEventListener('touchstart', handleTouchOutside, { passive: true });
+        return () => document.removeEventListener('touchstart', handleTouchOutside);
+    }, [isTouchDevice, showActionRail]);
     
     // ============================================================================
     // DRAG & DROP HANDLERS
@@ -593,12 +621,14 @@ const PipelineCard = memo(function PipelineCard({
                 )}
             </div>
             
-            {/* Hover Action Rail - with responsive positioning (ISSUE 4 - improved) */}
+            {/* Action Rail — hover on desktop, explicit trigger on touch */}
             {!readOnly && !bulkMode && showActionRail && (
-                <div 
+                <div
+                    ref={actionRailRef}
                     className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 bg-white/95 backdrop-blur-sm rounded-lg p-1.5 shadow-sm border border-black/[0.06] z-10"
                     style={{ maxHeight: 'calc(100% - 16px)' }}
                     onMouseEnter={() => {
+                        if (isTouchDevice) return;
                         if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
                         setShowActionRail(true);
                     }}
@@ -652,6 +682,19 @@ const PipelineCard = memo(function PipelineCard({
                         <Star className="w-3.5 h-3.5" />
                     </button>
                 </div>
+            )}
+
+            {/* Touch Action Trigger — always visible on touch devices when rail is closed */}
+            {isTouchDevice && !readOnly && !bulkMode && !showActionRail && (
+                <button
+                    type="button"
+                    onClick={handleTouchTrigger}
+                    aria-label="Quick actions"
+                    title="Quick actions"
+                    className="absolute bottom-2.5 right-2.5 z-10 w-6 h-6 rounded-md flex items-center justify-center text-black/30 bg-white/90 border border-black/[0.06] shadow-sm transition-colors duration-100 active:bg-black/[0.04] active:text-black/55"
+                >
+                    <MoreHorizontal className="w-3 h-3" />
+                </button>
             )}
         </div>
     );

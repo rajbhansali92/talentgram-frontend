@@ -1219,8 +1219,8 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
             className={`
                 relative text-left rounded-xl overflow-hidden transition-all duration-200
                 ${alreadyInPipeline ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:shadow-lg hover:-translate-y-0.5"}
-                ${selected ? "ring-2 ring-gray-900 shadow-md bg-gray-50/35" : "ring-1 ring-gray-200"}
-                ${isFocused && !alreadyInPipeline ? "ring-2 ring-blue-500 shadow-lg" : ""}
+                ${selected ? "ring-[3px] ring-gray-900 shadow-md bg-gray-100/60" : "ring-1 ring-gray-200"}
+                ${isFocused && !alreadyInPipeline ? "ring-[3px] ring-blue-500 shadow-lg" : ""}
                 bg-white
                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2
             `}
@@ -1316,8 +1316,11 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
 
 const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit, submitting, isMobile, onClear }) => {
     return (
-        <div className="sticky bottom-0 z-20 border-t border-gray-200 bg-white/95 backdrop-blur-sm shadow-lg shrink-0">
-            <div className="px-4 sm:px-6 py-2 sm:py-3">
+        <div
+            className="sticky bottom-0 z-20 border-t border-gray-200 bg-white/95 backdrop-blur-sm shadow-lg shrink-0"
+            style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+        >
+            <div className="px-4 sm:px-6 py-3 sm:py-4">
                 <div className="flex items-center justify-between gap-2 sm:gap-4">
                     <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
                         <span className="text-xs sm:text-sm font-medium text-gray-700 whitespace-nowrap flex items-center">

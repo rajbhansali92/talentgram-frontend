@@ -213,7 +213,7 @@ function FilterSegmented({ label, value, onChange, options, testid, compact = fa
                             aria-pressed={active}
                             className={`
                                 shrink-0
-                                px-2.5 py-0.5 rounded-[5px]
+                                px-2.5 py-1 rounded-[5px]
                                 text-[10px] font-medium tracking-wide uppercase
                                 transition-all duration-150
                                 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-black/15

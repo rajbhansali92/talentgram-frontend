@@ -332,11 +332,15 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     // Reset state when modal opens
     useEffect(() => {
         if (open) {
-            setSelected(new Set());
             setFocusedIndex(-1);
             setTimeout(() => searchInputRef.current?.focus(), 100);
         }
     }, [open]);
+    
+    // Clear selection when project changes
+    useEffect(() => {
+        setSelected(new Set());
+    }, [projectId]);
     
     // Body scroll lock
     useEffect(() => {
@@ -668,7 +672,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     if (e.target === e.currentTarget) onClose();
                 }}
             >
-                <div className="relative w-full sm:max-w-7xl h-full sm:h-[90vh] flex flex-col bg-white rounded-2xl shadow-2xl overflow-hidden">
+                <div className="relative w-full sm:max-w-7xl h-[100dvh] sm:h-[90dvh] flex flex-col bg-white rounded-2xl shadow-2xl overflow-hidden">
                     
                     {/* Header */}
                     <div className="flex items-center justify-between px-4 sm:px-6 py-4 sm:py-5 border-b border-gray-200 shrink-0 bg-white">
@@ -850,8 +854,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             <div className="flex items-center justify-center h-full">
                                 <div className="text-center">
                                     <p className="text-red-600 text-sm">{error}</p>
-                                    <button onClick={() => window.location.reload()} className="mt-4 text-sm text-gray-600 underline">
-                                        Retry
+                                    <button onClick={handleForceRefresh} className="mt-4 px-4 py-2 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 transition-colors">
+                                        Retry Load
                                     </button>
                                 </div>
                             </div>
@@ -1172,6 +1176,7 @@ const FilterChip = ({ label, onRemove }) => (
 const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densityMode, isFocused, showIntelligence, isMobile, globalIndex, registerRef }) => {
     const imageUrl = pickImage(talent);
     const config = DENSITY_CONFIG[densityMode];
+    const [imageLoaded, setImageLoaded] = useState(false);
     
     const handleToggle = useCallback(() => {
         onToggle(talent.id, alreadyInPipeline);
@@ -1184,10 +1189,14 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
             onClick={handleToggle}
             disabled={alreadyInPipeline}
             data-testid={`talent-browser-card-${talent.id}`}
+            style={{
+                contentVisibility: "auto",
+                containIntrinsicSize: densityMode === "compact" ? "280px" : densityMode === "comfortable" ? "320px" : "380px",
+            }}
             className={`
                 relative text-left rounded-xl overflow-hidden transition-all duration-200
                 ${alreadyInPipeline ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:shadow-lg hover:-translate-y-0.5"}
-                ${selected ? "ring-2 ring-gray-900 shadow-md" : "ring-1 ring-gray-200"}
+                ${selected ? "ring-2 ring-gray-900 shadow-md bg-gray-50/35" : "ring-1 ring-gray-200"}
                 ${isFocused && !alreadyInPipeline ? "ring-2 ring-blue-500 shadow-lg" : ""}
                 bg-white
             `}
@@ -1195,7 +1204,14 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
             {/* Image */}
             <div className={`${config.imageAspect} bg-gray-50 overflow-hidden relative`}>
                 {imageUrl ? (
-                    <img src={imageUrl} alt={talent.name || ""} loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                    <img
+                        src={imageUrl}
+                        alt={talent.name || ""}
+                        loading="lazy"
+                        decoding="async"
+                        onLoad={() => setImageLoaded(true)}
+                        className={`w-full h-full object-cover transition-opacity duration-300 ${imageLoaded ? "opacity-100" : "opacity-0"}`}
+                    />
                 ) : (
                     <div className="w-full h-full flex items-center justify-center bg-gray-100">
                         <ImageIcon className="w-8 h-8 text-gray-300" />

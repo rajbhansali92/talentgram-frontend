@@ -1223,6 +1223,12 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
 
 // Component to review individual submissions and manage per-asset curation
 function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
+    // Guard must come first — but hooks cannot be called conditionally.
+    // The parent only renders this modal when reviewingSid is set, so submission
+    // should always be non-null. This null check is a safety net rendered AFTER
+    // all hooks so React's rules-of-hooks are respected.
+    // NOTE: early return is intentionally placed AFTER all hooks below.
+
     const normalize = (fd) => ({
         ...fd,
         availability:
@@ -1235,6 +1241,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                 : { status: "", value: fd?.budget || "" },
     });
 
+    // ── All hooks must be declared unconditionally before any early return ──
     const [fullSub, setFullSub] = useState(null);
     const [loading, setLoading] = useState(true);
     const [form, setForm] = useState({});
@@ -1269,6 +1276,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         if (submission?.id) {
             fetchFullSub();
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [submission?.id, projectId]);
 
     // Track unsaved states compared to retrieved DB snapshot
@@ -1283,8 +1291,11 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         const mediaDiff = JSON.stringify(mediaList) !== JSON.stringify(originalMedia);
         
         return formDiff || fvDiff || mediaDiff;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [form, fv, mediaList, fullSub]);
 
+    // Safety null guard — placed after all hooks to satisfy Rules of Hooks.
+    // The parent only renders this component when submission is non-null.
     if (!submission) return null;
 
     const save = async () => {

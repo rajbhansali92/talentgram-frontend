@@ -1217,7 +1217,8 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     </button>
                 )}
             </div>
-        );
+        </div>
+    );
 }
 
 function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {

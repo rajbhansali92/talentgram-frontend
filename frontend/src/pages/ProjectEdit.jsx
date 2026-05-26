@@ -1221,6 +1221,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     );
 }
 
+// Component to review individual submissions and manage per-asset curation
 function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
     const normalize = (fd) => ({
         ...fd,

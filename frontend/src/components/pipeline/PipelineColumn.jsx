@@ -1,5 +1,5 @@
 import React, { memo, useState, useCallback, useMemo } from "react";
-import { ChevronDown, TrendingUp, Clock, AlertCircle, Maximize2 } from "lucide-react";
+import { ChevronDown, TrendingUp, Clock, AlertCircle, Maximize2, Minimize2 } from "lucide-react";
 import PipelineCard from "./PipelineCard";
 import { EmptyLane } from "./PipelineEmptyState";
 import {
@@ -17,16 +17,16 @@ const isStale = (lastActivityTimestamp) => {
 };
 
 const STAGE_HEADER_TINTS = {
-    ask_to_test: "bg-slate-50/60",
-    approved: "bg-emerald-50/40",
-    hold: "bg-amber-50/45",
-    shortlisted: "bg-violet-50/40",
-    already_tested: "bg-fuchsia-50/35",
-    locked: "bg-amber-50/30",
-    rejected: "bg-rose-50/25",
-    not_available: "bg-zinc-50/30",
-    not_interested: "bg-zinc-50/30",
-    pitch: "bg-teal-50/40",
+    ask_to_test: "bg-slate-50/95",
+    approved: "bg-emerald-50/95",
+    hold: "bg-amber-50/95",
+    shortlisted: "bg-violet-50/95",
+    already_tested: "bg-fuchsia-50/95",
+    locked: "bg-amber-50/95",
+    rejected: "bg-rose-50/95",
+    not_available: "bg-zinc-50/95",
+    not_interested: "bg-zinc-50/95",
+    pitch: "bg-teal-50/95",
 };
 
 const calculateStaleCount = (items) => {
@@ -182,11 +182,12 @@ const PipelineColumn = memo(function PipelineColumn({
     }, [items, stage, stageItemsMap, stageMetrics]);
 
     const widthClasses = useMemo(() => {
+        if (isFocused) return "w-full min-w-0 flex-1";
         if (columnWidth === 300) return "w-[300px] min-w-[300px] max-w-[300px]";
         if (columnWidth === 350) return "w-[350px] min-w-[350px] max-w-[350px]";
         if (columnWidth === 400) return "w-[400px] min-w-[400px] max-w-[400px]";
         return "w-[300px] min-w-[300px] max-w-[300px]";
-    }, [columnWidth]);
+    }, [columnWidth, isFocused]);
 
     // 3. Derived variables (non-hook calculations - MUST be before useCallback that depends on them)
     const canSelectAll =
@@ -242,23 +243,6 @@ const PipelineColumn = memo(function PipelineColumn({
     // CONDITIONAL RETURNS (allowed AFTER all hooks)
     // ============================================
     
-    // Focus mode delegated to separate component
-    if (isFocused) {
-        return (
-            <FocusedPipelineView
-                stage={stage}
-                items={items}
-                refresh={refresh}
-                bulkMode={bulkMode}
-                bulkIds={bulkIds}
-                onToggleBulkSelect={handleToggleSelect}
-                readOnly={readOnly}
-                compact={compact}
-                emptyCopy={emptyCopy}
-                onExitFocus={() => onFocus?.(null)}
-            />
-        );
-    }
 
     // ============================================
     // FINAL JSX RENDER
@@ -290,7 +274,7 @@ const PipelineColumn = memo(function PipelineColumn({
             />
 
             {/* Sticky header with intelligence metrics (with premium soft header tint) */}
-            <div className={`sticky top-[52px] z-10 px-4 py-3 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white/96"} backdrop-blur-sm`}>
+            <div className={`sticky top-0 z-20 px-4 py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[68px] flex flex-col justify-center`}>
                 {/* Primary header row */}
                 <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="min-w-0 flex items-center gap-2">
@@ -317,14 +301,14 @@ const PipelineColumn = memo(function PipelineColumn({
                     </div>
                     <div className="flex items-center gap-1.5">
                         {/* Focus mode button */}
-                        {typeof onFocus === "function" && items.length > 0 && (
+                        {typeof onFocus === "function" && (items.length > 0 || isFocused) && (
                             <button
-                                onClick={() => onFocus(stage)}
+                                onClick={() => onFocus(isFocused ? null : stage)}
                                 className="text-black/35 hover:text-black/60 transition-colors p-0.5"
-                                aria-label={`Focus on ${getStageLabel(stage)} column`}
-                                title="Focus mode"
+                                aria-label={isFocused ? `Exit focus on ${getStageLabel(stage)} column` : `Focus on ${getStageLabel(stage)} column`}
+                                title={isFocused ? "Exit focus mode" : "Focus mode"}
                             >
-                                <Maximize2 className="w-3 h-3" />
+                                {isFocused ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
                             </button>
                         )}
                         <span
@@ -386,14 +370,14 @@ const PipelineColumn = memo(function PipelineColumn({
                     {/* Card stream - using dynamic height to avoid viewport issues */}
                     <div
                         className={`
-                            px-2.5 py-2.5 space-y-2.5
+                            px-2.5 pt-3.5 pb-2.5 space-y-3
                             overflow-y-auto overflow-x-visible
                             bg-[#fafafa]
                             tg-pipeline-scroll
-                            ${compact ? "min-h-[220px]" : "min-h-[220px]"}
+                            ${items.length === 0 ? "min-h-[110px]" : (compact ? "min-h-[220px]" : "min-h-[220px]")}
                         `}
                         style={{
-                            maxHeight: compact ? "240px" : "min(64vh, 800px)", // Cap at 800px for Safari
+                            maxHeight: isFocused ? "min(75vh, 1000px)" : (compact ? "240px" : "min(64vh, 800px)"), // Cap at 800px for Safari
                         }}
                         role="list"
                         aria-label={`Cards in ${getStageLabel(stage)} stage`}

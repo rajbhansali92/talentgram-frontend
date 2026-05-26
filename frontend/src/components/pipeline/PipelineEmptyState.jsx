@@ -2,7 +2,7 @@ import React, { memo } from "react";
 
 export const EmptyLane = memo(function EmptyLane({ label }) {
     return (
-        <div className="py-8 flex flex-col items-center justify-center gap-2 text-center">
+        <div className="py-4 flex flex-col items-center justify-center gap-2 text-center animate-fade-in">
             <p className="text-[10px] tracking-[0.14em] uppercase text-black/35">
                 {label}
             </p>

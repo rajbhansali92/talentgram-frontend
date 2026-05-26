@@ -4,7 +4,6 @@ import { adminApi, isAdmin } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
-import ForwardToLinkModal from "@/components/ForwardToLinkModal";
 import BudgetLines from "@/components/BudgetLines";
 import ProjectPipeline from "@/pages/ProjectPipeline";
 import {
@@ -42,7 +41,6 @@ import {
     RefreshCw,
     HelpCircle,
     FolderMinus,
-    Sparkles,
     Cloud,
     PauseCircle,
     Eye,
@@ -114,7 +112,6 @@ export default function ProjectEdit() {
     const [showMaterialModal, setShowMaterialModal] = useState(false);
     const [submissions, setSubmissions] = useState([]);
     const [reviewingSid, setReviewingSid] = useState(null);
-    const [showForwardModal, setShowForwardModal] = useState(false);
     const [submissionFilter, setSubmissionFilter] = useState("all");
     const [deleteSubmissionId, setDeleteSubmissionId] = useState(null);
     const [deleteMaterialId, setDeleteMaterialId] = useState(null);
@@ -915,22 +912,6 @@ export default function ProjectEdit() {
                                 {submissions.length} total · {approvedCount} approved · {rejectedCount} rejected
                             </p>
                         </div>
-                        <button
-                            onClick={() => setShowForwardModal(true)}
-                            disabled={
-                                submissions.filter(
-                                    (s) =>
-                                        s.decision === "approved" &&
-                                        (s.status === "submitted" ||
-                                            s.status === "updated"),
-                                ).length === 0
-                            }
-                            data-testid="create-client-link-btn"
-                            className="inline-flex items-center gap-2 text-xs px-4 py-2.5 bg-black text-white rounded-sm hover:bg-black/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                        >
-                            <Sparkles className="w-3.5 h-3.5" /> Create Client
-                            Link from Approved
-                        </button>
                     </div>
                     {submissions.length === 0 ? (
                         <div className="p-8 text-center text-black/40 text-sm">
@@ -1057,19 +1038,6 @@ export default function ProjectEdit() {
                 />
             )}
 
-            {/* Forward to client link modal */}
-            {showForwardModal && (
-                <ForwardToLinkModal
-                    project={project}
-                    submissions={submissions}
-                    onClose={() => setShowForwardModal(false)}
-                    onDone={(link) => {
-                        setShowForwardModal(false);
-                        nav(`/admin/links/${link.id}/results`);
-                    }}
-                />
-            )}
-            
             <ConfirmDeleteDialog
                 open={confirmDeleteOpen}
                 title={`Delete "${project.brand_name || "this project"}"?`}

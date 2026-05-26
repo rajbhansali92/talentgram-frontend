@@ -43,6 +43,7 @@ export function BoardSection({
 }
 
 export function BoardRow({ children, testid }) {
+    const isSingleChild = React.Children.count(children) === 1;
     return (
         <div
             data-testid={testid}
@@ -62,7 +63,7 @@ export function BoardRow({ children, testid }) {
             }}
         >
             {React.Children.map(children, (child, idx) => (
-                <div key={idx} className="snap-start md:snap-none shrink-0">
+                <div key={idx} className={`snap-start md:snap-none ${isSingleChild ? "w-full flex-1 min-w-0" : "shrink-0"}`}>
                     {child}
                 </div>
             ))}

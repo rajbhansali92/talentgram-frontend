@@ -82,6 +82,9 @@ function PipelineBoard({ projectId, projectName }) {
     const [bulkTalentsInput, setBulkTalentsInput] = useState("");
     const [bulkAdding, setBulkAdding] = useState(false);
 
+    // Stage focus state
+    const [focusedStageId, setFocusedStageId] = useState(null);
+
     // Roster browser and existing talent tracking
     const [showTalentBrowser, setShowTalentBrowser] = useState(false);
     const existingTalentIds = useMemo(() => new Set(data.map((item) => item.talent_id)), [data]);
@@ -201,6 +204,8 @@ function PipelineBoard({ projectId, projectName }) {
         onCardDragStart: handleCardDragStart,
         onCardDragEnd: handleCardDragEnd,
         onCardDrop: handleCardDrop,
+        focusedStageId,
+        onFocus: setFocusedStageId,
     };
 
     const itemsForStage = (stage) =>
@@ -214,6 +219,21 @@ function PipelineBoard({ projectId, projectName }) {
 
     // Display project name if provided, otherwise fallback to a cleaner placeholder
     const displayProjectName = projectName || (projectId && projectId.length > 8 ? `${projectId.slice(0, 8)}...` : projectId) || 'Active campaign';
+
+    const mainStages = useMemo(() => 
+        MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
+        [hiddenStages, focusedStageId]
+    );
+
+    const outcomeStages = useMemo(() => 
+        OUTCOME_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
+        [hiddenStages, focusedStageId]
+    );
+
+    const independentStages = useMemo(() => 
+        INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
+        [hiddenStages, focusedStageId]
+    );
 
     return (
         <div 
@@ -304,17 +324,18 @@ function PipelineBoard({ projectId, projectName }) {
                         </div>
                     )}
 
-                    {!hasZeroAfterFilter && !showOnlyFollowUp && (
+                    {!hasZeroAfterFilter && !showOnlyFollowUp && mainStages.length > 0 && (
                         <BoardSection
                             eyebrow="Pipeline"
                             helper={`${MAIN_FLOW_STAGES.length} stages`}
                         >
                             <BoardRow testid="pipeline-main-flow">
-                                {MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
+                                {mainStages.map((stage) => (
                                     <PipelineColumn
                                         key={stage}
                                         stage={stage}
                                         items={itemsForStage(stage)}
+                                        isFocused={focusedStageId === stage}
                                         {...columnCommons}
                                     />
                                 ))}
@@ -323,7 +344,7 @@ function PipelineBoard({ projectId, projectName }) {
                     )}
 
                     {/* Supportive Follow-up Lane - clean, no opacity hacks */}
-                    {!hasZeroAfterFilter && (
+                    {!hasZeroAfterFilter && !focusedStageId && (
                         <div className="mt-2">
                             <FollowUpLane
                                 items={filteredData.filter((i) => i.is_follow_up === true)}
@@ -332,14 +353,15 @@ function PipelineBoard({ projectId, projectName }) {
                         </div>
                     )}
 
-                    {!hasZeroAfterFilter && !showOnlyFollowUp && (
+                    {!hasZeroAfterFilter && !showOnlyFollowUp && outcomeStages.length > 0 && (
                         <BoardSection eyebrow="Outcomes" muted>
                             <BoardRow testid="pipeline-outcomes">
-                                {OUTCOME_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
+                                {outcomeStages.map((stage) => (
                                     <PipelineColumn
                                         key={stage}
                                         stage={stage}
                                         items={itemsForStage(stage)}
+                                        isFocused={focusedStageId === stage}
                                         {...columnCommons}
                                     />
                                 ))}
@@ -347,14 +369,15 @@ function PipelineBoard({ projectId, projectName }) {
                         </BoardSection>
                     )}
 
-                    {!hasZeroAfterFilter && !showOnlyFollowUp && (
+                    {!hasZeroAfterFilter && !showOnlyFollowUp && independentStages.length > 0 && (
                         <BoardSection eyebrow="Pitch" divider>
                             <BoardRow testid="pipeline-pitch">
-                                {INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s)).map((stage) => (
+                                {independentStages.map((stage) => (
                                     <PipelineColumn
                                         key={stage}
                                         stage={stage}
                                         items={itemsForStage(stage)}
+                                        isFocused={focusedStageId === stage}
                                         {...columnCommons}
                                     />
                                 ))}

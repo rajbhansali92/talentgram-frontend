@@ -31,6 +31,8 @@ from core import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["talents"])
 
+_HAS_LOGGED_VERIFICATION = False
+
 
 @router.post("/talents", response_model=TalentOut)
 async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
@@ -116,7 +118,6 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
 _LIST_PROJECTION = {
     "_id": 0,
     "created_by": 0,
-    "media": 0,         # Never needed — cover_url is the resolved scalar
     "source": 0,        # Internal provenance — not rendered in list UI
     "notes": 0,         # Long-form text — not needed by list cards
 }
@@ -129,24 +130,73 @@ def _enrich_list(doc: dict) -> dict:
     Falls back to cover_url if absent. Sets media_count from the stored field if present.
     Computes age from dob. Returns doc in-place.
     """
-    cover_thumb = doc.get("cover_thumbnail_url")
-    cover_url = doc.get("cover_url")
+    global _HAS_LOGGED_VERIFICATION
     
-    doc["image_url"] = cover_thumb or cover_url or None
-
-    # media_count: optional stored field (set when cover is written).
-    # Falls back to 0 if absent; exact counts shown on detail page.
-    if "media_count" not in doc:
-        doc["media_count"] = 0
-    # Remove internal scalars from the public payload
-    doc.pop("cover_url", None)
-    doc.pop("cover_thumbnail_url", None)
-    # Age derivation
+    # 1. Age derivation
     dob = doc.get("dob")
     if dob:
         computed = compute_age(dob)
         if computed is not None:
             doc["age"] = computed
+
+    # 2. Dynamic media cover resolution if stored fields are missing or empty
+    media_list = doc.get("media") or []
+    media_item = resolve_cover_media(doc)
+    
+    # 3. Retrieve denormalized values, falling back to dynamic media resolution
+    cover_url = doc.get("cover_url") or (media_item.get("url") if media_item else None)
+    
+    cover_thumb = doc.get("cover_thumbnail_url")
+    if not cover_thumb and media_item:
+        pid = media_item.get("public_id")
+        if pid:
+            rt = media_item.get("resource_type") or "image"
+            cover_thumb = media_url(pid, preset="roster", resource_type=rt)
+        else:
+            cover_thumb = media_item.get("url")
+
+    # 4. Set fields (image_url, cover_url, cover_thumbnail_url)
+    doc["cover_url"] = cover_url
+    doc["cover_thumbnail_url"] = cover_thumb
+    doc["image_url"] = cover_thumb or cover_url or None
+
+    # media_count: optional stored field
+    if "media_count" not in doc:
+        doc["media_count"] = len(media_list)
+
+    # 5. Log and print runtime verification exactly once (as required)
+    if not _HAS_LOGGED_VERIFICATION:
+        try:
+            sample_media = media_list[0] if media_list else None
+            
+            logger.info("=== BACKEND PAYLOAD AUDIT RUNTIME VERIFICATION ===")
+            logger.info("ONE FULL SAMPLE TALENT PAYLOAD:")
+            import json
+            def json_default(o):
+                if hasattr(o, "isoformat"):
+                    return o.isoformat()
+                return str(o)
+            logger.info(json.dumps(doc, default=json_default, indent=2))
+            
+            logger.info("ONE FULL MEDIA OBJECT:")
+            logger.info(json.dumps(sample_media, default=json_default, indent=2) if sample_media else "None")
+            
+            logger.info(f"RESOLVED THUMBNAIL SOURCE VALUE: {doc.get('image_url')}")
+            logger.info(f"RESOLVED COVER SOURCE VALUE: {doc.get('cover_url')}")
+            logger.info("==================================================")
+            
+            print("=== BACKEND PAYLOAD AUDIT RUNTIME VERIFICATION ===", flush=True)
+            print("ONE FULL SAMPLE TALENT PAYLOAD:", flush=True)
+            print(json.dumps(doc, default=json_default, indent=2), flush=True)
+            print("ONE FULL MEDIA OBJECT:", flush=True)
+            print(json.dumps(sample_media, default=json_default, indent=2) if sample_media else "None", flush=True)
+            print(f"RESOLVED THUMBNAIL SOURCE VALUE: {doc.get('image_url')}", flush=True)
+            print(f"RESOLVED COVER SOURCE VALUE: {doc.get('cover_url')}", flush=True)
+            print("==================================================", flush=True)
+            
+            _HAS_LOGGED_VERIFICATION = True
+        except Exception as e:
+            logger.error(f"Error logging backend verification audit: {e}")
     return doc
 
 

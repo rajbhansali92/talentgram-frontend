@@ -601,15 +601,18 @@ def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
 
     media_item = resolve_cover_media(doc)
     if media_item:
-        doc["image_url"] = media_item.get("url")
+        url = media_item.get("url")
+        doc["image_url"] = url
+        doc["cover_url"] = doc.get("cover_url") or url
         pid = media_item.get("public_id")
         if pid:
             rt = media_item.get("resource_type") or "image"
             doc["cover_thumbnail_url"] = media_url(pid, preset="roster", resource_type=rt)
         else:
-            doc["cover_thumbnail_url"] = media_item.get("url")
+            doc["cover_thumbnail_url"] = url
     else:
         doc["image_url"] = None
+        doc["cover_url"] = doc.get("cover_url") or None
         doc["cover_thumbnail_url"] = None
 
     return doc

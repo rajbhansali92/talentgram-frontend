@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import {
@@ -19,7 +19,7 @@ import {
 import { 
     Plus, Loader2, Phone, Mail, Users as UsersIcon, MessageSquare, 
     Calendar, Building2, PhoneCall, Clock, TrendingUp, Users, Activity, 
-    ChevronRight, Sparkles, Zap, Target, AlertCircle 
+    ChevronRight, Sparkles, Zap, Target, AlertCircle, Edit2, Share2, DollarSign, X, Check
 } from "lucide-react";
 
 // ============================================================================
@@ -54,31 +54,53 @@ const formatDateTime = (iso) => {
     }
 };
 
+const formatCurrency = (val) => {
+    if (val === undefined || val === null) return "—";
+    try {
+        return new Intl.NumberFormat("en-IN", {
+            style: "currency",
+            currency: "INR",
+            maximumFractionDigits: 0,
+        }).format(val);
+    } catch {
+        return `₹${val}`;
+    }
+};
+
 const getDaysSinceContact = (date) => {
     if (!date) return null;
     const lastContact = new Date(date);
     const now = new Date();
-    // Remove Math.abs - future dates shouldn't happen
     const diffTime = now - lastContact;
     if (diffTime < 0) return 0; // Future date edge case
     return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
-const getRelationshipHealth = (lastContacted) => {
-    const days = getDaysSinceContact(lastContacted);
-    if (days === null) return { status: "inactive", label: "No contact", color: "text-rose-600 bg-rose-50", icon: Zap };
-    if (days <= 7) return { status: "healthy", label: "Active", color: "text-emerald-700 bg-emerald-50", icon: TrendingUp };
-    if (days <= 30) return { status: "warming", label: "Engaged", color: "text-amber-700 bg-amber-50", icon: Clock };
-    return { status: "cold", label: "Needs attention", color: "text-slate-500 bg-slate-50", icon: Target };
+const getRelationshipHealth = (client) => {
+    const stage = client.stage || "lead";
+    if (stage === "key_account") {
+        return { status: "key_account", label: "Key Account", color: "text-[#B89B5E] bg-[#B89B5E]/8 border-[#B89B5E]/20", icon: Sparkles };
+    }
+    const days = getDaysSinceContact(client.last_contacted_date);
+    if (days === null) {
+        return { status: "inactive", label: "New Lead", color: "text-slate-500 bg-slate-50 border-slate-200/60", icon: Zap };
+    }
+    if (days <= 7) {
+        return { status: "healthy", label: "Active", color: "text-[#5A7D5A] bg-[#5A7D5A]/8 border-[#5A7D5A]/20", icon: TrendingUp };
+    }
+    if (days <= 30) {
+        return { status: "warming", label: "Engaged", color: "text-amber-700 bg-amber-50 border-amber-200/50", icon: Clock };
+    }
+    return { status: "cold", label: "Needs attention", color: "text-[#9E4A4A] bg-[#9E4A4A]/8 border-[#9E4A4A]/20", icon: Target };
 };
 
 const getMomentum = (lastContacted) => {
     const days = getDaysSinceContact(lastContacted);
-    if (days === null) return "No activity";
+    if (days === null) return "New relationship record";
     if (days <= 3) return "High momentum";
-    if (days <= 7) return "Active";
-    if (days <= 14) return "Warming";
-    return "Needs follow-up";
+    if (days <= 7) return "Active conversation";
+    if (days <= 14) return "Engaged";
+    return "Needs follow-up outreach";
 };
 
 // ============================================================================
@@ -86,7 +108,7 @@ const getMomentum = (lastContacted) => {
 // ============================================================================
 
 const ClientCardSkeleton = () => (
-    <div className="bg-white border border-slate-200 rounded-2xl p-6 animate-pulse">
+    <div className="bg-white border border-slate-200 rounded-2xl p-6 animate-pulse shadow-sm">
         <div className="flex items-start justify-between gap-6 flex-wrap">
             <div className="flex-1">
                 <div className="flex items-center gap-3 mb-3">
@@ -112,18 +134,18 @@ const ClientCardSkeleton = () => (
 // ============================================================================
 
 const ErrorState = ({ message, onRetry }) => (
-    <div className="border-2 border-rose-200 bg-rose-50 rounded-2xl py-16 sm:py-20 text-center">
-        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-rose-100 mb-4">
-            <AlertCircle className="w-6 h-6 text-rose-500" />
+    <div className="border-2 border-rose-100 bg-rose-50/30 rounded-2xl py-16 sm:py-20 text-center">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-rose-50 border border-rose-200/50 mb-4">
+            <AlertCircle className="w-6 h-6 text-[#9E4A4A]" />
         </div>
-        <div className="text-rose-600 text-sm mb-2">Failed to load clients</div>
-        <p className="text-slate-500 text-sm mb-4">{message || "Please try again."}</p>
+        <div className="text-[#9E4A4A] text-sm font-medium mb-2">Failed to load relationship ecosystem</div>
+        <p className="text-slate-500 text-sm mb-4 max-w-xs mx-auto leading-relaxed">{message || "Please check network or backend credentials."}</p>
         <button
             onClick={onRetry}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 hover:border-slate-300 transition-colors"
+            className="inline-flex items-center gap-2 px-5 py-2 bg-white border border-slate-200 hover:border-slate-300 rounded-xl text-sm text-slate-700 hover:text-slate-900 transition-colors shadow-sm"
         >
             <Loader2 className="w-3.5 h-3.5" />
-            Retry
+            Retry Connection
         </button>
     </div>
 );
@@ -132,26 +154,32 @@ const ErrorState = ({ message, onRetry }) => (
 // Empty State Component
 // ============================================================================
 
-const EmptyState = ({ hasSearch, hasFilters, onClearFilters }) => (
-    <div className="border-2 border-dashed border-slate-200 rounded-2xl py-16 sm:py-20 text-center">
-        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-50 mb-4">
-            <Users className="w-6 h-6 text-slate-300" />
+const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
+    <div className="border-2 border-dashed border-slate-200 rounded-2xl py-16 sm:py-20 text-center bg-slate-50/30">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-100/50 mb-4 border border-slate-200/30">
+            <Users className="w-6 h-6 text-slate-400" />
         </div>
         {hasSearch || hasFilters ? (
             <>
-                <div className="text-slate-400 text-sm mb-2">No matching clients found</div>
-                <p className="text-slate-500 text-sm">Try adjusting your search or filters.</p>
+                <div className="text-slate-800 text-sm font-medium mb-1">No matching clients found</div>
+                <p className="text-slate-500 text-xs max-w-xs mx-auto">Try refining your fuzzy match filter, lifecycle stage selectors, or query terms.</p>
                 <button
                     onClick={onClearFilters}
-                    className="mt-4 text-sm text-slate-500 hover:text-slate-700 underline transition-colors"
+                    className="mt-4 text-xs font-semibold px-4 py-2 border border-slate-200 bg-white hover:border-slate-300 rounded-xl text-slate-600 hover:text-slate-800 shadow-sm transition-colors"
                 >
-                    Clear all filters
+                    Clear Search Filters
                 </button>
             </>
         ) : (
             <>
-                <div className="text-slate-400 text-sm mb-2">No clients yet</div>
-                <p className="text-slate-500 text-sm">Click "Add Client" to create your first relationship record.</p>
+                <div className="text-slate-800 text-sm font-medium mb-1">Ecosystem Empty</div>
+                <p className="text-slate-500 text-xs max-w-xs mx-auto mb-5">Begin scaling your production relationships by cataloging your first corporate lead.</p>
+                <button
+                    onClick={onAddClient}
+                    className="inline-flex items-center gap-1.5 bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-medium hover:bg-slate-800 transition-colors shadow-sm"
+                >
+                    <Plus className="w-3.5 h-3.5" /> Add First Client
+                </button>
             </>
         )}
     </div>
@@ -161,20 +189,21 @@ const EmptyState = ({ hasSearch, hasFilters, onClearFilters }) => (
 // Field Input Component
 // ============================================================================
 
-const FieldInput = ({ label, value, onChange, required, testId, autoFocus }) => (
+const FieldInput = ({ label, value, onChange, required, placeholder, testId, autoFocus }) => (
     <label className="block">
-        <div className="text-xs font-medium text-slate-600 mb-1.5">
-            {label}
-            {required && <span className="text-slate-400 ml-0.5">*</span>}
+        <div className="text-xs font-semibold text-slate-600 mb-1.5 flex justify-between">
+            <span>{label}</span>
+            {required && <span className="text-[#9E4A4A]">* Required</span>}
         </div>
         <input
             type="text"
-            value={value}
+            value={value || ""}
             onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
             required={required}
             autoFocus={autoFocus}
             data-testid={testId}
-            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors"
+            className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors shadow-inner"
         />
     </label>
 );
@@ -191,13 +220,16 @@ export default function MarketingHub() {
     const [addOpen, setAddOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [filterType, setFilterType] = useState("all");
+    const [recentSearches, setRecentSearches] = useState([]);
+    const [focusedIndex, setFocusedIndex] = useState(-1);
+
+    const searchInputRef = useRef(null);
 
     const load = useCallback(async () => {
         setLoading(true);
         setError(null);
         try {
             const { data } = await adminApi.get("/marketing/clients");
-            // Handle both array response and paginated response
             const clientsData = Array.isArray(data) ? data : (data?.items || []);
             setClients(clientsData);
         } catch (e) {
@@ -213,44 +245,118 @@ export default function MarketingHub() {
         load();
     }, [load]);
 
-    // Memoized filtered clients for performance
+    // Load recent searches on mount
+    useEffect(() => {
+        const stored = localStorage.getItem("tg_crm_recent_searches");
+        if (stored) {
+            try { setRecentSearches(JSON.parse(stored)); } catch (e) { console.error(e); }
+        }
+    }, []);
+
+    // Save recent searches when queries match successfully
+    const saveSearchQuery = useCallback((query) => {
+        if (!query || query.trim().length < 2) return;
+        const q = query.trim();
+        setRecentSearches(prev => {
+            const next = [q, ...prev.filter(x => x.toLowerCase() !== q.toLowerCase())].slice(0, 4);
+            localStorage.setItem("tg_crm_recent_searches", JSON.stringify(next));
+            return next;
+        });
+    }, []);
+
+    // Filter logic including multi-field tags fuzzy match
     const filteredClients = useMemo(() => {
         return clients.filter(client => {
-            const matchesSearch = searchQuery === "" || 
-                client.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                client.company_name?.toLowerCase().includes(searchQuery.toLowerCase());
+            const query = searchQuery.trim().toLowerCase();
+            const tagsString = (client.tags || []).join(" ").toLowerCase();
+            const matchesSearch = query === "" || 
+                client.name?.toLowerCase().includes(query) ||
+                client.company_name?.toLowerCase().includes(query) ||
+                client.phone_number?.includes(query) ||
+                client.email?.toLowerCase().includes(query) ||
+                tagsString.includes(query);
             
             if (!matchesSearch) return false;
             
             if (filterType === "recent") {
                 const days = getDaysSinceContact(client.last_contacted_date);
-                return days !== null && days <= 7;
+                return days !== null && days <= 7 && client.stage !== "key_account";
             }
             if (filterType === "dormant") {
                 const days = getDaysSinceContact(client.last_contacted_date);
                 return days === null || days > 30;
+            }
+            if (filterType === "high_value") {
+                return client.stage === "key_account";
+            }
+            if (filterType === "lead") {
+                return client.stage === "lead";
             }
             
             return true;
         });
     }, [clients, searchQuery, filterType]);
 
+    // Derived Statistics Dashboard
     const stats = useMemo(() => {
         const active = clients.filter(c => {
             const days = getDaysSinceContact(c.last_contacted_date);
-            return days !== null && days <= 7;
+            return days !== null && days <= 7 && c.stage !== "key_account";
         }).length;
         const dormant = clients.filter(c => {
             const days = getDaysSinceContact(c.last_contacted_date);
             return days === null || days > 30;
         }).length;
-        return { active, dormant, total: clients.length };
+        const keyAccounts = clients.filter(c => c.stage === "key_account").length;
+        return { active, dormant, keyAccounts, total: clients.length };
     }, [clients]);
+
+    // Handle arrow keys and CMD+K keyboard focus shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+                e.preventDefault();
+                searchInputRef.current?.focus();
+                setFocusedIndex(-1);
+            } else if (e.key === "/") {
+                const activeEl = document.activeElement;
+                if (activeEl && ["INPUT", "TEXTAREA"].includes(activeEl.tagName)) return;
+                e.preventDefault();
+                searchInputRef.current?.focus();
+                setFocusedIndex(-1);
+            } else if (e.key === "ArrowDown" && filteredClients.length > 0) {
+                e.preventDefault();
+                setFocusedIndex(prev => Math.min(prev + 1, filteredClients.length - 1));
+            } else if (e.key === "ArrowUp" && filteredClients.length > 0) {
+                e.preventDefault();
+                setFocusedIndex(prev => Math.max(prev - 1, 0));
+            } else if (e.key === "Enter" && focusedIndex >= 0 && focusedIndex < filteredClients.length) {
+                e.preventDefault();
+                setActiveClient(filteredClients[focusedIndex]);
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [filteredClients, focusedIndex]);
+
+    // Handle search selection callbacks
+    useEffect(() => {
+        if (searchQuery) {
+            const timer = setTimeout(() => saveSearchQuery(searchQuery), 3000);
+            return () => clearTimeout(timer);
+        }
+    }, [searchQuery, saveSearchQuery]);
 
     const handleClientCreated = useCallback((newClient) => {
         setClients(prev => [newClient, ...prev]);
         setAddOpen(false);
-        toast.success(`${newClient.name} added`);
+        toast.success(`Client ${newClient.name} successfully registered.`);
+    }, []);
+
+    const handleClientUpdated = useCallback((updatedClient) => {
+        setClients(prev => prev.map(c => c.id === updatedClient.id ? updatedClient : c));
+        setActiveClient(updatedClient);
     }, []);
 
     const handleInteractionAdded = useCallback((updatedDate) => {
@@ -275,120 +381,127 @@ export default function MarketingHub() {
     const clearFilters = useCallback(() => {
         setFilterType("all");
         setSearchQuery("");
+        setFocusedIndex(-1);
     }, []);
 
     const hasActiveFilters = filterType !== "all" || searchQuery;
 
+    // Premium Editorial UI Header
     return (
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-10 bg-white min-h-screen" data-testid="marketing-hub-page">
-            {/* Optimized atmospheric layer - smaller, lower opacity */}
-            <div className="fixed inset-0 pointer-events-none overflow-hidden">
-                <div className="absolute -top-96 -right-96 w-[420px] h-[420px] bg-slate-100/20 rounded-full blur-3xl" />
-                <div className="absolute -bottom-96 -left-96 w-[420px] h-[420px] bg-emerald-50/15 rounded-full blur-3xl" />
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-10 bg-white min-h-screen relative" data-testid="marketing-hub-page">
+            {/* Ambient executive light layout backdrop */}
+            <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                <div className="absolute top-0 right-1/4 w-[380px] h-[380px] bg-slate-50/50 rounded-full blur-3xl" />
+                <div className="absolute bottom-12 left-10 w-[380px] h-[380px] bg-[#5A7D5A]/3 rounded-full blur-3xl" />
             </div>
 
-            {/* Executive Dashboard Header */}
+            {/* Header Dashboard Surface */}
             <div className="relative mb-8 sm:mb-12">
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8 sm:mb-10">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 mb-8 sm:mb-10">
                     <div>
-                        <h1 className="text-3xl sm:text-4xl font-light tracking-tight text-slate-900">
+                        <h1 className="text-3xl sm:text-4xl font-light tracking-tight text-slate-900 font-display">
                             Client Intelligence
                         </h1>
-                        <p className="text-sm sm:text-base text-slate-500 mt-2 font-light">
-                            Executive relationship operating system
+                        <p className="text-sm text-slate-500 mt-2 font-mono tracking-tight flex items-center gap-1.5">
+                            <Activity className="w-3.5 h-3.5 text-slate-400" />
+                            Executive Relationship Operating System
                         </p>
                     </div>
                     <button
                         type="button"
                         onClick={() => setAddOpen(true)}
                         data-testid="marketing-add-client-btn"
-                        className="shrink-0 inline-flex items-center gap-2 bg-slate-900 text-white px-4 sm:px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-slate-800 transition-colors hover:shadow-lg active:scale-[0.98] whitespace-nowrap"
+                        className="shrink-0 inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-3 rounded-2xl text-xs font-semibold hover:bg-slate-800 transition-all hover:shadow-md hover:scale-[1.01] active:scale-[0.98] whitespace-nowrap"
                     >
-                        <Plus className="w-4 h-4" />
-                        <span className="hidden sm:inline">Add Client</span>
-                        <span className="sm:hidden">Add</span>
+                        <Plus className="w-4 h-4" /> Add Corporate Client
                     </button>
                 </div>
 
-                {/* Executive Dashboard Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5 mb-8 sm:mb-10">
-                    <div className="md:col-span-2 bg-gradient-to-br from-slate-50 to-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow duration-300">
-                        <div className="flex items-center justify-between mb-4">
-                            <div className="flex items-center gap-2">
-                                <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center">
-                                    <Activity className="w-4 h-4 text-emerald-600" />
-                                </div>
-                                <span className="text-xs font-mono text-slate-400">Active Pipeline</span>
+                {/* Dashboard Stats linked filters */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5 mb-8 sm:mb-10 select-none">
+                    {[
+                        { id: "all", count: stats.total, label: "Total Accounts", desc: "Relationships cataloged", color: "hover:border-slate-400", activeBg: "bg-slate-50/50 border-slate-900 shadow-sm" },
+                        { id: "recent", count: stats.active, label: "Active Pipeline", desc: "Contacted this week", color: "hover:border-[#5A7D5A]/40", activeBg: "bg-[#5A7D5A]/3 border-[#5A7D5A] shadow-sm" },
+                        { id: "dormant", count: stats.dormant, label: "Needs Outreach", desc: "Inactive for > 30 days", color: "hover:border-[#9E4A4A]/40", activeBg: "bg-[#9E4A4A]/3 border-[#9E4A4A] shadow-sm" },
+                        { id: "high_value", count: stats.keyAccounts, label: "Key Accounts", desc: "Flagged strategic partners", color: "hover:border-[#B89B5E]/40", activeBg: "bg-[#B89B5E]/3 border-[#B89B5E] shadow-sm" }
+                    ].map((st) => {
+                        const active = filterType === st.id;
+                        return (
+                            <div
+                                key={st.id}
+                                onClick={() => { setFilterType(st.id); setFocusedIndex(-1); }}
+                                className={`cursor-pointer bg-white border ${active ? st.activeBg : `border-slate-200 ${st.color}`} rounded-2xl p-5 transition-all duration-200 hover:shadow-sm`}
+                            >
+                                <div className="text-2xl font-light text-slate-950 mb-1">{st.count}</div>
+                                <div className="text-[11px] font-semibold text-slate-800 tracking-tight">{st.label}</div>
+                                <div className="text-[10px] text-slate-400 font-light mt-0.5">{st.desc}</div>
                             </div>
-                            <Sparkles className="w-4 h-4 text-emerald-400" />
-                        </div>
-                        <div className="text-4xl font-light text-slate-900 mb-1">{stats.active}</div>
-                        <div className="text-sm text-slate-500">Active relationships · Last 7 days</div>
-                        <div className="mt-3 h-px bg-slate-200 rounded-full overflow-hidden">
-                            <div className="h-full bg-slate-300 rounded-full" style={{ width: `${(stats.active / (stats.total || 1)) * 100}%` }} />
-                        </div>
-                    </div>
-                    
-                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow duration-300">
-                        <div className="flex items-center gap-2 mb-3">
-                            <Users className="w-4 h-4 text-slate-400" />
-                            <span className="text-xs font-mono text-slate-400">Total</span>
-                        </div>
-                        <div className="text-2xl font-light text-slate-900 mb-1">{stats.total}</div>
-                        <div className="text-xs text-slate-500">Active clients in ecosystem</div>
-                    </div>
-                    
-                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow duration-300">
-                        <div className="flex items-center gap-2 mb-3">
-                            <Clock className="w-4 h-4 text-amber-500" />
-                            <span className="text-xs font-mono text-slate-400">Needs attention</span>
-                        </div>
-                        <div className="text-2xl font-light text-slate-900 mb-1">{stats.dormant}</div>
-                        <div className="text-xs text-slate-500">Dormant · Requires outreach</div>
-                    </div>
+                        );
+                    })}
                 </div>
 
-                {/* Search and Filter Bar */}
-                <div className="flex flex-col lg:flex-row lg:items-center gap-5 justify-between border-b border-slate-100 pb-6 sm:pb-7">
-                    <div className="relative flex-1 max-w-full lg:max-w-md">
-                        <div className="absolute left-4 top-1/2 -translate-y-1/2">
-                            <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                            </svg>
+                {/* Intelligent Search Input */}
+                <div className="space-y-4 border-b border-slate-100 pb-6 sm:pb-7">
+                    <div className="flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
+                        <div className="relative flex-1 max-w-full lg:max-w-lg">
+                            <div className="absolute left-4 top-1/2 -translate-y-1/2">
+                                <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                </svg>
+                            </div>
+                            <input
+                                ref={searchInputRef}
+                                type="text"
+                                placeholder="Search by name, company, phone, or tags... (CMD+K / /)"
+                                value={searchQuery}
+                                onChange={(e) => { setSearchQuery(e.target.value); setFocusedIndex(-1); }}
+                                className="w-full pl-11 pr-10 py-3.5 bg-slate-50/50 border border-slate-200 rounded-2xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 focus:outline-none transition-all shadow-inner font-sans"
+                            />
+                            {searchQuery && (
+                                <button
+                                    onClick={() => { setSearchQuery(""); searchInputRef.current?.focus(); }}
+                                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            )}
                         </div>
-                        <input
-                            type="text"
-                            placeholder="Search clients or companies..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200/70 rounded-xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors shadow-inner"
-                        />
+                        <div className="flex items-center gap-1.5 text-xs text-slate-400 font-mono">
+                            <span className="bg-slate-50 border border-slate-200 px-2 py-1 rounded">⌘K</span>
+                            <span>to focus search</span>
+                        </div>
                     </div>
-                    <div className="flex gap-2">
-                        {[
-                            { id: "all", label: "All Relationships" },
-                            { id: "recent", label: "Active" },
-                            { id: "dormant", label: "Needs Attention" }
-                        ].map((filter) => (
+
+                    {/* Local searches pills */}
+                    {recentSearches.length > 0 && (
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Recent:</span>
+                            {recentSearches.map((s, idx) => (
+                                <button
+                                    key={`${s}-${idx}`}
+                                    onClick={() => { setSearchQuery(s); setFocusedIndex(-1); }}
+                                    className="inline-flex items-center gap-1 px-3 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs text-slate-600 hover:text-slate-900 rounded-full transition-colors font-medium shadow-sm"
+                                >
+                                    {s}
+                                </button>
+                            ))}
                             <button
-                                key={filter.id}
-                                onClick={() => setFilterType(filter.id)}
-                                className={`px-4 sm:px-5 py-2 text-sm rounded-full transition-colors duration-200 font-medium ${
-                                    filterType === filter.id 
-                                        ? "bg-slate-900 text-white shadow-sm" 
-                                        : "text-slate-500 hover:bg-slate-50"
-                                }`}
+                                onClick={() => {
+                                    localStorage.removeItem("tg_crm_recent_searches");
+                                    setRecentSearches([]);
+                                }}
+                                className="text-[10px] text-[#9E4A4A] hover:underline font-medium font-mono"
                             >
-                                {filter.label}
+                                Clear History
                             </button>
-                        ))}
-                    </div>
+                        </div>
+                    )}
                 </div>
             </div>
 
-            {/* Client Relationship List with Error and Loading States */}
+            {/* List with keyboard index highlights */}
             {loading ? (
-                <div className="space-y-3" data-testid="marketing-loading">
+                <div className="space-y-4" data-testid="marketing-loading">
                     <ClientCardSkeleton />
                     <ClientCardSkeleton />
                     <ClientCardSkeleton />
@@ -400,63 +513,99 @@ export default function MarketingHub() {
                     hasSearch={!!searchQuery} 
                     hasFilters={hasActiveFilters} 
                     onClearFilters={clearFilters}
+                    onAddClient={() => setAddOpen(true)}
                 />
             ) : (
                 <div className="space-y-3" data-testid="marketing-clients-list">
-                    {filteredClients.map((c) => {
-                        const health = getRelationshipHealth(c.last_contacted_date);
+                    {filteredClients.map((c, i) => {
+                        const health = getRelationshipHealth(c);
                         const momentum = getMomentum(c.last_contacted_date);
                         const HealthIcon = health.icon;
+                        const isFocused = focusedIndex === i;
+                        const initial = c.name?.charAt(0) || "C";
+                        
                         return (
                             <div
                                 key={c.id}
-                                onClick={() => setActiveClient(c)}
+                                onClick={() => { setActiveClient(c); setFocusedIndex(i); }}
                                 data-testid={`marketing-client-row-${c.id}`}
-                                className="group bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 cursor-pointer hover:border-slate-300 hover:shadow-lg transition-shadow duration-300"
+                                className={`group bg-white border rounded-2xl p-5 sm:p-6 cursor-pointer transition-all duration-200 hover:shadow-md ${
+                                    isFocused 
+                                        ? "border-slate-900 ring-1 ring-slate-950 bg-slate-50/20" 
+                                        : "border-slate-200 hover:border-slate-300"
+                                }`}
                             >
-                                <div className="flex items-start justify-between gap-6 flex-wrap">
+                                <div className="flex items-start gap-4 sm:gap-6">
+                                    {/* Glassmorphic Initial Avatar */}
+                                    <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center font-display text-lg font-light text-slate-800 shrink-0 shadow-sm">
+                                        {initial}
+                                    </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-3 mb-2 flex-wrap">
-                                            <h3 className="text-xl sm:text-[22px] leading-tight font-medium text-slate-900 group-hover:text-slate-700 transition-colors">
+                                            <h3 className="text-lg sm:text-xl leading-tight font-medium text-slate-900">
                                                 {c.name}
                                             </h3>
-                                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-xs font-medium ${health.color}`}>
+                                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold uppercase tracking-wider border ${health.color}`}>
                                                 <HealthIcon className="w-3 h-3" />
                                                 {health.label}
                                             </span>
+                                            {c.value && (
+                                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-[#B89B5E]/6 border border-[#B89B5E]/15 rounded-lg text-[10px] font-mono font-bold text-[#B89B5E]">
+                                                    {formatCurrency(c.value)}
+                                                </span>
+                                            )}
                                         </div>
-                                        <div className="flex flex-wrap gap-4 sm:gap-5 text-sm mb-3">
+
+                                        <div className="flex flex-wrap gap-4 text-xs mb-3 text-slate-500">
                                             {c.company_name && (
-                                                <div className="flex items-center gap-1.5 text-slate-400">
-                                                    <Building2 className="w-3.5 h-3.5" />
+                                                <div className="flex items-center gap-1">
+                                                    <Building2 className="w-3.5 h-3.5 text-slate-400" />
                                                     <span>{c.company_name}</span>
                                                 </div>
                                             )}
+                                            {c.email && (
+                                                <div className="flex items-center gap-1 font-mono">
+                                                    <Mail className="w-3.5 h-3.5 text-slate-400" />
+                                                    <span>{c.email}</span>
+                                                </div>
+                                            )}
                                             {c.phone_number && (
-                                                <div className="flex items-center gap-1.5 text-slate-400">
-                                                    <PhoneCall className="w-3.5 h-3.5" />
-                                                    <span className="font-mono text-xs">{c.phone_number}</span>
+                                                <div className="flex items-center gap-1 font-mono">
+                                                    <PhoneCall className="w-3.5 h-3.5 text-slate-400" />
+                                                    <span>{c.phone_number}</span>
                                                 </div>
                                             )}
                                         </div>
-                                        <div className="flex flex-wrap gap-4 sm:gap-5 text-xs">
-                                            <div className="flex items-center gap-1.5 text-slate-400">
-                                                <Calendar className="w-3.5 h-3.5" />
-                                                <span>Last contact: {formatDate(c.last_contacted_date)}</span>
+
+                                        {/* Tags rendering */}
+                                        {c.tags && c.tags.length > 0 && (
+                                            <div className="flex gap-1.5 flex-wrap mb-3.5">
+                                                {c.tags.map(t => (
+                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-slate-200/80 rounded-md text-[10px] font-mono text-slate-500">
+                                                        #{t}
+                                                    </span>
+                                                ))}
                                             </div>
-                                            <div className="flex items-center gap-1.5 text-slate-400">
-                                                <TrendingUp className="w-3.5 h-3.5" />
+                                        )}
+
+                                        <div className="flex flex-wrap gap-4 text-[10px] text-slate-400 font-mono">
+                                            <div className="flex items-center gap-1">
+                                                <Calendar className="w-3.5 h-3.5" />
+                                                <span>Contact: {formatDate(c.last_contacted_date)}</span>
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                                <TrendingUp className="w-3.5 h-3.5 text-slate-300" />
                                                 <span>{momentum}</span>
                                             </div>
                                             {c.interaction_count > 0 && (
-                                                <div className="flex items-center gap-1.5 text-slate-400">
+                                                <div className="flex items-center gap-1">
                                                     <MessageSquare className="w-3.5 h-3.5" />
-                                                    <span>{c.interaction_count} touchpoint{c.interaction_count !== 1 ? 's' : ''}</span>
+                                                    <span>{c.interaction_count} log{c.interaction_count !== 1 ? 's' : ''}</span>
                                                 </div>
                                             )}
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-2 text-sm">
+                                    <div className="shrink-0 flex items-center h-12">
                                         <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
                                     </div>
                                 </div>
@@ -475,6 +624,7 @@ export default function MarketingHub() {
             <ClientDrawer
                 client={activeClient}
                 onClose={() => setActiveClient(null)}
+                onClientUpdated={handleClientUpdated}
                 onInteractionAdded={handleInteractionAdded}
             />
         </div>
@@ -482,13 +632,17 @@ export default function MarketingHub() {
 }
 
 // ============================================================================
-// ADD CLIENT DIALOG
+// ADD CLIENT DIALOG (UPGRADED)
 // ============================================================================
 
 function AddClientDialog({ open, onClose, onCreated }) {
     const [name, setName] = useState("");
     const [company, setCompany] = useState("");
     const [phone, setPhone] = useState("");
+    const [email, setEmail] = useState("");
+    const [stage, setStage] = useState("lead");
+    const [value, setValue] = useState("");
+    const [tags, setTags] = useState("");
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
@@ -496,6 +650,10 @@ function AddClientDialog({ open, onClose, onCreated }) {
             setName("");
             setCompany("");
             setPhone("");
+            setEmail("");
+            setStage("lead");
+            setValue("");
+            setTags("");
             setSaving(false);
         }
     }, [open]);
@@ -508,10 +666,16 @@ function AddClientDialog({ open, onClose, onCreated }) {
         }
         setSaving(true);
         try {
+            const tagsList = tags.split(",").map(t => t.trim()).filter(Boolean);
+            const valNum = value.trim() ? parseFloat(value) : null;
             const { data } = await adminApi.post("/marketing/clients", {
                 name: name.trim(),
                 company_name: company.trim() || null,
                 phone_number: phone.trim() || null,
+                email: email.trim() || null,
+                stage: stage,
+                value: valNum,
+                tags: tagsList
             });
             onCreated(data);
         } catch (err) {
@@ -524,45 +688,92 @@ function AddClientDialog({ open, onClose, onCreated }) {
     return (
         <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
             <DialogContent
-                className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl"
+                className="bg-white border-slate-200 text-slate-900 sm:max-w-lg rounded-2xl shadow-xl overflow-hidden p-0"
                 data-testid="marketing-add-client-dialog"
             >
-                <DialogHeader>
-                    <DialogTitle className="text-2xl font-light tracking-tight text-slate-900">
-                        Add Client
-                    </DialogTitle>
-                    <DialogDescription className="text-slate-500">
-                        Create a new CRM record. Only name is required.
-                    </DialogDescription>
-                </DialogHeader>
-                <form onSubmit={submit} className="space-y-5 pt-4">
+                <div className="bg-slate-50 border-b border-slate-100 p-6">
+                    <DialogHeader>
+                        <DialogTitle className="text-2xl font-light tracking-tight text-slate-950 font-display">
+                            Create Client Record
+                        </DialogTitle>
+                        <DialogDescription className="text-slate-500 text-xs">
+                            Establish a new corporate relationship file inside your executive CRM.
+                        </DialogDescription>
+                    </DialogHeader>
+                </div>
+                <form onSubmit={submit} className="p-6 space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <FieldInput
+                            label="Name"
+                            value={name}
+                            onChange={setName}
+                            required
+                            placeholder="E.g. David Selznick"
+                            testId="marketing-input-name"
+                            autoFocus
+                        />
+                        <FieldInput
+                            label="Company Name"
+                            value={company}
+                            onChange={setCompany}
+                            placeholder="E.g. Metro-Goldwyn-Mayer"
+                            testId="marketing-input-company"
+                        />
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <FieldInput
+                            label="Phone Number"
+                            value={phone}
+                            onChange={setPhone}
+                            placeholder="E.g. +91 9999999999"
+                            testId="marketing-input-phone"
+                        />
+                        <FieldInput
+                            label="Email Address"
+                            value={email}
+                            onChange={setEmail}
+                            placeholder="E.g. david@mgm.com"
+                            testId="marketing-input-email"
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <label className="block">
+                            <div className="text-xs font-semibold text-slate-600 mb-1.5">Lifecycle Stage</div>
+                            <select
+                                value={stage}
+                                onChange={(e) => setStage(e.target.value)}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                            >
+                                <option value="lead">New Lead</option>
+                                <option value="active">Active partner</option>
+                                <option value="key_account">Key Account (High Value)</option>
+                            </select>
+                        </label>
+                        <FieldInput
+                            label="Deal/Relationship Value (INR)"
+                            value={value}
+                            onChange={setValue}
+                            placeholder="E.g. 500000"
+                            testId="marketing-input-value"
+                        />
+                    </div>
+
                     <FieldInput
-                        label="Name"
-                        value={name}
-                        onChange={setName}
-                        required
-                        testId="marketing-input-name"
-                        autoFocus
+                        label="Relationship Tags (Comma-separated)"
+                        value={tags}
+                        onChange={setTags}
+                        placeholder="E.g. Producer, Mumbai, Hot Lead"
+                        testId="marketing-input-tags"
                     />
-                    <FieldInput
-                        label="Company"
-                        value={company}
-                        onChange={setCompany}
-                        testId="marketing-input-company"
-                    />
-                    <FieldInput
-                        label="Phone"
-                        value={phone}
-                        onChange={setPhone}
-                        testId="marketing-input-phone"
-                    />
-                    <DialogFooter className="pt-4 gap-3">
+
+                    <DialogFooter className="pt-4 border-t border-slate-100 gap-3">
                         <button
                             type="button"
                             onClick={onClose}
                             disabled={saving}
                             data-testid="marketing-add-cancel-btn"
-                            className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900 transition-colors disabled:opacity-40"
+                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors disabled:opacity-40"
                         >
                             Cancel
                         </button>
@@ -570,10 +781,9 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             type="submit"
                             disabled={saving}
                             data-testid="marketing-add-submit-btn"
-                            className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2 rounded-xl text-sm font-medium hover:bg-slate-800 transition-colors disabled:opacity-50"
+                            className="inline-flex items-center justify-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-slate-800 transition-colors disabled:opacity-50 min-w-36 shadow-sm"
                         >
-                            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                            Save Client
+                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save Client"}
                         </button>
                     </DialogFooter>
                 </form>
@@ -583,7 +793,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
 }
 
 // ============================================================================
-// CLIENT DRAWER
+// CLIENT DRAWER (UPGRADED EXECUTIVE RELATIONSHIP DASHBOARD)
 // ============================================================================
 
 const INTERACTION_TYPES = [
@@ -593,13 +803,24 @@ const INTERACTION_TYPES = [
     { value: "whatsapp", label: "WhatsApp", icon: MessageSquare },
 ];
 
-function ClientDrawer({ client, onClose, onInteractionAdded }) {
+function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) {
     const open = !!client;
     const [interactions, setInteractions] = useState([]);
     const [loadingList, setLoadingList] = useState(false);
     const [type, setType] = useState("call");
     const [notes, setNotes] = useState("");
     const [saving, setSaving] = useState(false);
+
+    // Editing states
+    const [isEditing, setIsEditing] = useState(false);
+    const [editName, setEditName] = useState("");
+    const [editCompany, setEditCompany] = useState("");
+    const [editPhone, setEditPhone] = useState("");
+    const [editEmail, setEditEmail] = useState("");
+    const [editStage, setEditStage] = useState("lead");
+    const [editValue, setEditValue] = useState("");
+    const [editTags, setEditTags] = useState("");
+    const [updating, setUpdating] = useState(false);
 
     const loadInteractions = useCallback(async (cid) => {
         setLoadingList(true);
@@ -619,9 +840,19 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
             setInteractions([]);
             setNotes("");
             setType("call");
+            setIsEditing(false);
             return;
         }
         loadInteractions(client.id);
+
+        // Populate edit values
+        setEditName(client.name || "");
+        setEditCompany(client.company_name || "");
+        setEditPhone(client.phone_number || "");
+        setEditEmail(client.email || "");
+        setEditStage(client.stage || "lead");
+        setEditValue(client.value !== undefined && client.value !== null ? String(client.value) : "");
+        setEditTags((client.tags || []).join(", "));
     }, [client, loadInteractions]);
 
     const submitInteraction = async (e) => {
@@ -637,12 +868,50 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
             setInteractions((prev) => [data, ...prev]);
             setNotes("");
             onInteractionAdded(data.created_at);
-            toast.success("Interaction logged");
+            toast.success("Touchpoint logged successfully.");
         } catch (err) {
             toast.error(err?.response?.data?.detail || "Failed to log interaction");
         } finally {
             setSaving(false);
         }
+    };
+
+    const submitUpdate = async (e) => {
+        e.preventDefault();
+        if (!client) return;
+        if (!editName.trim()) {
+            toast.error("Name is required");
+            return;
+        }
+        setUpdating(true);
+        try {
+            const tagsList = editTags.split(",").map(t => t.trim()).filter(Boolean);
+            const valNum = editValue.trim() ? parseFloat(editValue) : null;
+            const { data } = await adminApi.put(`/marketing/clients/${client.id}`, {
+                name: editName.trim(),
+                company_name: editCompany.trim() || null,
+                phone_number: editPhone.trim() || null,
+                email: editEmail.trim() || null,
+                stage: editStage,
+                value: valNum,
+                tags: tagsList
+            });
+            onClientUpdated(data);
+            setIsEditing(false);
+            toast.success("Client record updated successfully.");
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "Failed to update client");
+        } finally {
+            setUpdating(false);
+        }
+    };
+
+    const handleShare = () => {
+        if (!client) return;
+        // Construct standard WhatsApp outreach text
+        const text = `Hi ${client.name}, hope you are doing well! Just wanted to share our latest premium curation packages. Let me know if anything stands out!`;
+        const url = `https://wa.me/${(client.phone_number || "").replace(/[^0-9]/g, "")}?text=${encodeURIComponent(text)}`;
+        window.open(url, "_blank");
     };
 
     const getInteractionIcon = (type) => {
@@ -651,6 +920,7 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
     };
 
     const daysSince = getDaysSinceContact(client?.last_contacted_date);
+    const health = client ? getRelationshipHealth(client) : null;
 
     return (
         <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
@@ -662,67 +932,169 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                 {client && (
                     <div className="h-full flex flex-col">
                         {/* Drawer Header */}
-                        <div className="bg-gradient-to-b from-slate-50/80 to-white border-b border-slate-100 px-5 sm:px-6 py-6 sm:py-8">
-                            <SheetHeader className="space-y-2">
+                        <div className="bg-gradient-to-b from-slate-50/50 to-white border-b border-slate-100 px-5 sm:px-6 py-6 sm:py-8 relative">
+                            <SheetHeader className="space-y-2 pr-12">
                                 <SheetTitle
-                                    className="text-slate-900 text-2xl sm:text-3xl font-light tracking-tight"
+                                    className="text-slate-950 text-2xl sm:text-3xl font-light tracking-tight font-display"
                                     data-testid="marketing-drawer-title"
                                 >
                                     {client.name}
                                 </SheetTitle>
-                                <SheetDescription className="text-slate-500 text-sm sm:text-base">
-                                    {client.company_name || "Independent relationship"}
+                                <SheetDescription className="text-slate-500 text-sm sm:text-base font-mono">
+                                    {client.company_name || "Independent Account"}
                                 </SheetDescription>
                             </SheetHeader>
+                            <button
+                                onClick={() => setIsEditing(!isEditing)}
+                                className="absolute right-5 top-8 p-2 text-slate-400 hover:text-slate-800 border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-sm bg-white"
+                                title="Edit Profile"
+                            >
+                                {isEditing ? <Check className="w-4 h-4 text-[#5A7D5A]" /> : <Edit2 className="w-4 h-4" />}
+                            </button>
                         </div>
 
                         {/* Scrollable Content */}
-                        <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 sm:py-6 space-y-6 sm:space-y-8">
-                            {/* Client Intelligence Section */}
-                            <div className="space-y-4">
-                                <div className="flex items-center gap-2">
-                                    <Sparkles className="w-4 h-4 text-slate-400" />
-                                    <h3 className="text-xs font-mono text-slate-400">Relationship Intelligence</h3>
-                                </div>
-                                <div className="grid grid-cols-2 gap-3 sm:gap-4">
-                                    <div className="bg-slate-50 rounded-xl p-3 sm:p-4">
-                                        <div className="text-xs text-slate-500 mb-1">Primary Contact</div>
-                                        <div className="flex items-center gap-2">
-                                            <Phone className="w-3.5 h-3.5 text-slate-400" />
-                                            <span className="text-sm font-mono text-slate-700 break-all">
-                                                {client.phone_number || "Not provided"}
+                        <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-6 space-y-6 sm:space-y-8">
+                            
+                            {/* Inline Editing Form Toggle */}
+                            {isEditing ? (
+                                <form onSubmit={submitUpdate} className="bg-slate-50/50 border border-slate-200 rounded-2xl p-5 space-y-4 shadow-sm animate-in fade-in duration-200">
+                                    <h4 className="text-xs font-mono font-semibold text-slate-500 uppercase tracking-wider mb-2">Edit Relationship File</h4>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <FieldInput label="Name" value={editName} onChange={setEditName} required />
+                                        <FieldInput label="Company" value={editCompany} onChange={setEditCompany} />
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <FieldInput label="Phone" value={editPhone} onChange={setEditPhone} />
+                                        <FieldInput label="Email" value={editEmail} onChange={setEditEmail} />
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <label className="block">
+                                            <div className="text-xs font-semibold text-slate-600 mb-1.5">Lifecycle Stage</div>
+                                            <select
+                                                value={editStage}
+                                                onChange={(e) => setEditStage(e.target.value)}
+                                                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none"
+                                            >
+                                                <option value="lead">New Lead</option>
+                                                <option value="active">Active partner</option>
+                                                <option value="key_account">Key Account (High Value)</option>
+                                            </select>
+                                        </label>
+                                        <FieldInput label="Deal Value (INR)" value={editValue} onChange={setEditValue} />
+                                    </div>
+                                    <FieldInput label="Tags (comma-separated)" value={editTags} onChange={setEditTags} />
+                                    
+                                    <div className="flex gap-2.5 justify-end pt-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsEditing(false)}
+                                            className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            disabled={updating}
+                                            className="inline-flex items-center gap-1.5 bg-slate-950 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 shadow-sm"
+                                        >
+                                            {updating && <Loader2 className="w-3 animate-spin" />}
+                                            Save Changes
+                                        </button>
+                                    </div>
+                                </form>
+                            ) : (
+                                /* Client Intelligence Summary */
+                                <div className="space-y-4">
+                                    <div className="flex items-center gap-2">
+                                        <Sparkles className="w-4 h-4 text-slate-400" />
+                                        <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">Relationship Scorecard</h3>
+                                    </div>
+                                    
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                        <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4">
+                                            <div className="text-[10px] font-mono text-slate-400 uppercase mb-1">Status Class</div>
+                                            <div className="flex items-center gap-1.5">
+                                                {health && (
+                                                    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-semibold uppercase tracking-wider border ${health.color}`}>
+                                                        {health.label}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4">
+                                            <div className="text-[10px] font-mono text-slate-400 uppercase mb-1">Total Logs</div>
+                                            <div className="text-sm font-semibold text-slate-800">{client.interaction_count || 0} touchpoints</div>
+                                        </div>
+                                        {client.value && (
+                                            <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4">
+                                                <div className="text-[10px] font-mono text-slate-400 uppercase mb-1">Deal Value</div>
+                                                <div className="text-sm font-mono font-bold text-[#B89B5E]">{formatCurrency(client.value)}</div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Action Deck Bar */}
+                                    <div className="flex gap-2 flex-wrap bg-slate-50 border border-slate-200/50 rounded-2xl p-4">
+                                        {client.phone_number && (
+                                            <a
+                                                href={`tel:${client.phone_number}`}
+                                                className="inline-flex items-center gap-1.5 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 rounded-xl text-xs font-semibold text-slate-700 shadow-sm transition-colors"
+                                            >
+                                                <Phone className="w-3.5 h-3.5" /> Call Client
+                                            </a>
+                                        )}
+                                        {client.email && (
+                                            <a
+                                                href={`mailto:${client.email}`}
+                                                className="inline-flex items-center gap-1.5 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 rounded-xl text-xs font-semibold text-slate-700 shadow-sm transition-colors"
+                                            >
+                                                <Mail className="w-3.5 h-3.5" /> Email Client
+                                            </a>
+                                        )}
+                                        {client.phone_number && (
+                                            <button
+                                                onClick={handleShare}
+                                                className="inline-flex items-center gap-1.5 px-4 py-2 border border-[#B89B5E]/30 bg-white hover:bg-slate-50 rounded-xl text-xs font-semibold text-[#B89B5E] shadow-sm transition-all"
+                                            >
+                                                <Share2 className="w-3.5 h-3.5" /> WhatsApp Outreach
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="bg-slate-50/50 border border-slate-100 rounded-2xl p-4 space-y-2 text-xs">
+                                        <div className="flex justify-between border-b border-slate-100 pb-2">
+                                            <span className="text-slate-400">Email Address</span>
+                                            <span className="font-mono text-slate-700 font-medium">{client.email || "—"}</span>
+                                        </div>
+                                        <div className="flex justify-between border-b border-slate-100 pb-2">
+                                            <span className="text-slate-400">Phone Number</span>
+                                            <span className="font-mono text-slate-700 font-medium">{client.phone_number || "—"}</span>
+                                        </div>
+                                        <div className="flex justify-between border-b border-slate-100 pb-2">
+                                            <span className="text-slate-400">Tags Registered</span>
+                                            <span className="font-mono text-slate-600">
+                                                {client.tags && client.tags.length > 0 ? client.tags.map(t => `#${t}`).join(" ") : "—"}
                                             </span>
                                         </div>
-                                    </div>
-                                    <div className="bg-slate-50 rounded-xl p-3 sm:p-4">
-                                        <div className="text-xs text-slate-500 mb-1">Last Engagement</div>
-                                        <div className="flex items-center gap-2">
-                                            <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                                            <span className="text-sm text-slate-700">
+                                        <div className="flex justify-between">
+                                            <span className="text-slate-400">Last touchpoint date</span>
+                                            <span className="text-slate-700 font-medium">
                                                 {formatDateTime(client.last_contacted_date)}
-                                                {daysSince && (
-                                                    <span className="ml-2 text-xs text-slate-400">({daysSince} days ago)</span>
+                                                {daysSince !== null && (
+                                                    <span className="ml-1 text-slate-400 text-[10px]">({daysSince} days ago)</span>
                                                 )}
                                             </span>
                                         </div>
                                     </div>
                                 </div>
-                                <div className="bg-slate-50 rounded-xl p-3 sm:p-4">
-                                    <div className="text-xs text-slate-500 mb-2">Engagement Frequency</div>
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-sm text-slate-700">{client.interaction_count || 0} total interactions</span>
-                                        <div className="h-px flex-1 max-w-32 bg-slate-200 rounded-full overflow-hidden ml-3">
-                                            <div className="h-full bg-slate-400 rounded-full" style={{ width: `${Math.min((client.interaction_count || 0) * 20, 100)}%` }} />
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
+                            )}
 
                             {/* Log interaction form */}
                             <div className="space-y-4">
                                 <div className="flex items-center gap-2">
                                     <MessageSquare className="w-4 h-4 text-slate-400" />
-                                    <h3 className="text-xs font-mono text-slate-400">Quick Action</h3>
+                                    <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">Log Communication</h3>
                                 </div>
                                 <form
                                     onSubmit={submitInteraction}
@@ -739,7 +1111,7 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                                     type="button"
                                                     onClick={() => setType(t.value)}
                                                     data-testid={`marketing-type-${t.value}`}
-                                                    className={`inline-flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 text-sm rounded-xl border transition-colors duration-200 ${
+                                                    className={`inline-flex items-center gap-2 px-4 py-2 text-xs rounded-xl border transition-colors duration-150 font-medium ${
                                                         active
                                                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
                                                             : "bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50"
@@ -751,22 +1123,27 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                             );
                                         })}
                                     </div>
-                                    <textarea
-                                        value={notes}
-                                        onChange={(e) => setNotes(e.target.value)}
-                                        placeholder="Add notes about this interaction..."
-                                        rows={3}
-                                        data-testid="marketing-interaction-notes"
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none"
-                                    />
+                                    <div className="relative">
+                                        <textarea
+                                            value={notes}
+                                            onChange={(e) => setNotes(e.target.value)}
+                                            placeholder="Input exact touchpoint comments or action items... (Maximum 4000 chars)"
+                                            rows={3}
+                                            maxLength={4000}
+                                            data-testid="marketing-interaction-notes"
+                                            className="w-full bg-slate-50/50 border border-slate-200 rounded-2xl px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none shadow-inner"
+                                        />
+                                        <div className="absolute right-3.5 bottom-3 text-[10px] font-mono text-slate-400">
+                                            {notes.length}/4000
+                                        </div>
+                                    </div>
                                     <button
                                         type="submit"
-                                        disabled={saving}
+                                        disabled={saving || !notes.trim()}
                                         data-testid="marketing-interaction-submit-btn"
-                                        className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-800 transition-colors disabled:opacity-50 shadow-sm"
+                                        className="inline-flex items-center justify-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors disabled:opacity-50 shadow-sm min-w-36"
                                     >
-                                        {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                                        Log Touchpoint
+                                        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Log Touchpoint"}
                                     </button>
                                 </form>
                             </div>
@@ -775,8 +1152,8 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                             <div className="space-y-4 pb-6">
                                 <div className="flex items-center gap-2">
                                     <Clock className="w-4 h-4 text-slate-400" />
-                                    <h3 className="text-xs font-mono text-slate-400">
-                                        Communication Timeline ({interactions.length})
+                                    <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">
+                                        Timeline Records ({interactions.length})
                                     </h3>
                                 </div>
                                 {loadingList ? (
@@ -785,11 +1162,11 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                     </div>
                                 ) : interactions.length === 0 ? (
                                     <div
-                                        className="text-sm text-slate-400 py-8 text-center border-2 border-dashed border-slate-200 rounded-xl"
+                                        className="text-xs text-slate-400 py-10 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/20"
                                         data-testid="marketing-history-empty"
                                     >
-                                        <MessageSquare className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                                        No touchpoints logged yet.
+                                        <MessageSquare className="w-7 h-7 mx-auto mb-2 text-slate-300" />
+                                        No interactions logged under this account.
                                     </div>
                                 ) : (
                                     <div className="space-y-3" data-testid="marketing-history-list">
@@ -804,22 +1181,22 @@ function ClientDrawer({ client, onClose, onInteractionAdded }) {
                                                     {idx < interactions.length - 1 && (
                                                         <div className="absolute left-2 top-5 bottom-0 w-px bg-slate-200" />
                                                     )}
-                                                    <div className="absolute left-0 top-1 w-4 h-4 rounded-full bg-slate-700 border-2 border-white shadow-sm" />
+                                                    <div className="absolute left-0 top-1.5 w-4 h-4 rounded-full bg-slate-900 border-2 border-white shadow-sm flex items-center justify-center" />
                                                     
-                                                    <div className="bg-white border border-slate-200 rounded-xl p-3 sm:p-4 ml-2 shadow-[0_2px_12px_rgba(15,23,42,0.03)] hover:shadow-md transition-shadow duration-200">
-                                                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                                                            <div className="flex items-center gap-2">
+                                                    <div className="bg-white border border-slate-200 rounded-2xl p-4 ml-2 shadow-[0_2px_10px_rgba(15,23,42,0.02)] hover:shadow-md transition-shadow duration-200">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b border-slate-50 pb-2">
+                                                            <div className="flex items-center gap-1.5">
                                                                 <Icon className="w-3.5 h-3.5 text-slate-500" />
-                                                                <span className="text-xs font-medium text-slate-600 capitalize">
+                                                                <span className="text-xs font-semibold text-slate-700 capitalize">
                                                                     {it.type}
                                                                 </span>
                                                             </div>
-                                                            <span className="font-mono text-[10px] text-slate-400">
+                                                            <span className="font-mono text-[9px] text-slate-400">
                                                                 {formatDateTime(it.created_at)}
                                                             </span>
                                                         </div>
                                                         {it.notes && (
-                                                            <div className="text-sm text-slate-700 mt-2 whitespace-pre-wrap break-words">
+                                                            <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
                                                                 {it.notes}
                                                             </div>
                                                         )}

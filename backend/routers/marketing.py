@@ -46,6 +46,20 @@ class ClientCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     company_name: Optional[str] = Field(default=None, max_length=200)
     phone_number: Optional[str] = Field(default=None, max_length=40)
+    email: Optional[str] = Field(default=None, max_length=200)
+    tags: Optional[List[str]] = Field(default=None)
+    stage: Optional[str] = Field(default="lead", max_length=40)
+    value: Optional[float] = Field(default=None)
+
+
+class ClientUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    company_name: Optional[str] = Field(default=None, max_length=200)
+    phone_number: Optional[str] = Field(default=None, max_length=40)
+    email: Optional[str] = Field(default=None, max_length=200)
+    tags: Optional[List[str]] = Field(default=None)
+    stage: Optional[str] = Field(default=None, max_length=40)
+    value: Optional[float] = Field(default=None)
 
 
 class InteractionCreate(BaseModel):
@@ -84,6 +98,10 @@ def _serialise_client(doc: dict) -> dict:
         "name": doc.get("name"),
         "company_name": doc.get("company_name"),
         "phone_number": doc.get("phone_number"),
+        "email": doc.get("email"),
+        "tags": doc.get("tags") or [],
+        "stage": doc.get("stage") or "lead",
+        "value": doc.get("value"),
         "created_at": doc.get("created_at"),
         "last_contacted_date": doc.get("last_contacted_date"),
     }
@@ -116,6 +134,10 @@ async def create_client(
         "name": payload.name.strip(),
         "company_name": (payload.company_name or "").strip() or None,
         "phone_number": (payload.phone_number or "").strip() or None,
+        "email": (payload.email or "").strip().lower() or None,
+        "tags": [t.strip() for t in payload.tags if t.strip()] if payload.tags else [],
+        "stage": (payload.stage or "lead").strip(),
+        "value": payload.value,
         "created_at": now,
         "last_contacted_date": now,
     }
@@ -144,6 +166,40 @@ async def get_client(
     doc = await db.clients.find_one({"_id": oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Client not found")
+    return _serialise_client(doc)
+
+
+@router.put("/clients/{client_id}")
+async def update_client(
+    client_id: str,
+    payload: ClientUpdate,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    oid = _to_object_id(client_id, field="client_id")
+    existing = await db.clients.find_one({"_id": oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    upd = {}
+    if payload.name is not None:
+        upd["name"] = payload.name.strip()
+    if payload.company_name is not None:
+        upd["company_name"] = payload.company_name.strip() or None
+    if payload.phone_number is not None:
+        upd["phone_number"] = payload.phone_number.strip() or None
+    if payload.email is not None:
+        upd["email"] = payload.email.strip().lower() or None
+    if payload.tags is not None:
+        upd["tags"] = [t.strip() for t in payload.tags if t.strip()]
+    if payload.stage is not None:
+        upd["stage"] = payload.stage.strip()
+    if payload.value is not None:
+        upd["value"] = payload.value
+
+    if upd:
+        await db.clients.update_one({"_id": oid}, {"$set": upd})
+        
+    doc = await db.clients.find_one({"_id": oid})
     return _serialise_client(doc)
 
 

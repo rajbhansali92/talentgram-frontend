@@ -138,6 +138,13 @@ async def on_startup():
         await db.feedback.create_index([("project_id", 1), ("status", 1)])
         await db.feedback.create_index([("created_at", -1)])
 
+        # Marketing Hub / CRM indexes
+        await db.clients.create_index([("last_contacted_date", -1)])
+        try:
+            await db.clients.create_index([("name", "text"), ("company_name", "text"), ("tags", "text")])
+        except Exception as _e:
+            logger.warning("clients text index: %s", _e)
+
         # Casting pipeline: enforce one card per (project, talent).
         # Backs up the application-level duplicate guard in `add_to_pipeline` and
         # the auto-create paths in `sync_pipeline_from_submission` /

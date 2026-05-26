@@ -1422,7 +1422,9 @@ function TalentDetail({
                                         ))}
                                     </div>
                                 </div>
-                                               {!isSharePreview && (
+                            )}
+
+                            {!isSharePreview && (
                                 <div className="border-t border-black/[0.06] pt-6 mt-6">
                                     <div className="flex items-center justify-between mb-4">
                                         <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Your Decision</p>

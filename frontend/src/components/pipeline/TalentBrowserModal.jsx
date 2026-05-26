@@ -877,9 +877,9 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                         </div>
                     </div>
                     
-                    {/* Sticky Command Deck */}
-                    <div className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur-sm shrink-0">
-                        <div className="px-4 sm:px-6 py-3 sm:py-4">
+                    {/* Fixed Search/Toolbar */}
+                    <div className="border-b border-gray-200 bg-white shrink-0">
+                        <div className="px-4 sm:px-6 py-3 sm:py-4 space-y-2.5">
                             {/* Search + Actions */}
                             <div className="flex items-center gap-2 sm:gap-3">
                                 <div className="relative flex-1">
@@ -932,168 +932,179 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                     </button>
                                 )}
                             </div>
-                            
-                            {/* Active filter chips */}
-                            {filtersActive && (
-                                <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                                    <span className="text-[10px] text-gray-400 hidden sm:inline">Active:</span>
-                                    {filters.gender !== "any" && <FilterChip label={`Gender: ${filters.gender}`} onRemove={() => setFilter("gender", "any")} />}
-                                    {filters.ethnicity !== "any" && <FilterChip label={`Ethnicity: ${filters.ethnicity}`} onRemove={() => setFilter("ethnicity", "any")} />}
-                                    {filters.location !== "any" && <FilterChip label={`Location: ${filters.location}`} onRemove={() => setFilter("location", "any")} />}
-                                    {(filters.ageMin || filters.ageMax) && (
-                                        <FilterChip label={`Age: ${filters.ageMin || "Any"}–${filters.ageMax || "Any"}`} onRemove={() => { setFilter("ageMin", ""); setFilter("ageMax", ""); }} />
-                                    )}
-                                    {(filters.heightMin || filters.heightMax) && (
-                                        <FilterChip 
-                                            label={`Height: ${filters.heightMin ? HEIGHT_OPTIONS.find(o => o.value === Number(filters.heightMin))?.label || "" : "4'0\""}–${filters.heightMax ? HEIGHT_OPTIONS.find(o => o.value === Number(filters.heightMax))?.label || "" : "7'0\""}`} 
-                                            onRemove={() => { setFilter("heightMin", ""); setFilter("heightMax", ""); }} 
-                                        />
-                                    )}
-                                    {filters.minFollowers > 0 && (
-                                        <FilterChip label={`Followers: ${FOLLOWER_BUCKETS.find(b => b.value === filters.minFollowers)?.label}`} onRemove={() => setFilter("minFollowers", 0)} />
-                                    )}
-                                    {filters.interestedIn.map(cat => (
-                                        <FilterChip 
-                                            key={cat} 
-                                            label={`Category: ${cat}`} 
-                                            onRemove={() => setFilter("interestedIn", filters.interestedIn.filter(x => x !== cat))} 
-                                        />
-                                    ))}
-                                    {filters.internalTags.map(tagId => {
-                                        const tagName = globalTags.find(t => t.id === tagId)?.name || "Tag";
-                                        return (
-                                            <FilterChip 
-                                                key={tagId} 
-                                                label={`Tag: ${tagName}`} 
-                                                onRemove={() => setFilter("internalTags", filters.internalTags.filter(x => x !== tagId))} 
-                                            />
-                                        );
-                                    })}
-                                    <button onClick={resetFilters} className="text-[10px] text-gray-400 hover:text-gray-600 underline-offset-2 hover:underline">
-                                        Clear all
-                                    </button>
-                                </div>
-                            )}
-                            
-                            {/* Quick filter presets */}
-                            <div className="flex items-center gap-2 overflow-x-auto pb-1 mt-2">
-                                {SAVED_SEARCHES.map(preset => (
-                                    <button
-                                        key={preset.id}
-                                        type="button"
-                                        onClick={() => applySavedSearch(preset)}
-                                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors whitespace-nowrap"
-                                    >
-                                        <preset.icon size={12} />
-                                        <span className="text-xs">{preset.label}</span>
-                                    </button>
-                                ))}
-                                <button
-                                    onClick={() => setShowSaveSearch(true)}
-                                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-gray-200 hover:bg-gray-50 transition-colors whitespace-nowrap"
-                                >
-                                    <Bookmark size={12} className="text-gray-400" />
-                                    <span className="text-xs text-gray-600">Save search</span>
-                                </button>
-                            </div>
 
-                            {/* Popular Tags Row (dynamic chip filter sync) */}
-                            {frequentTags.length > 0 && (
-                                <div className="flex items-center gap-1.5 flex-wrap mt-2.5 pt-1.5 border-t border-gray-150">
-                                    <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Popular Tags:</span>
-                                    {frequentTags.map(tag => {
-                                        const isSelected = filters.internalTags.includes(tag.id);
-                                        return (
+                            {/* Quick Presets & Active Chips & Popular Tags (Fixed/Sticky) */}
+                            <div className="space-y-2.5 pt-2 border-t border-gray-100">
+                                {/* Active filter chips */}
+                                {filtersActive && (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-[10px] text-gray-400 hidden sm:inline">Active:</span>
+                                        {filters.gender !== "any" && <FilterChip label={`Gender: ${filters.gender}`} onRemove={() => setFilter("gender", "any")} />}
+                                        {filters.ethnicity !== "any" && <FilterChip label={`Ethnicity: ${filters.ethnicity}`} onRemove={() => setFilter("ethnicity", "any")} />}
+                                        {filters.location !== "any" && <FilterChip label={`Location: ${filters.location}`} onRemove={() => setFilter("location", "any")} />}
+                                        {(filters.ageMin || filters.ageMax) && (
+                                            <FilterChip label={`Age: ${filters.ageMin || "Any"}–${filters.ageMax || "Any"}`} onRemove={() => { setFilter("ageMin", ""); setFilter("ageMax", ""); }} />
+                                        )}
+                                        {(filters.heightMin || filters.heightMax) && (
+                                            <FilterChip 
+                                                label={`Height: ${filters.heightMin ? HEIGHT_OPTIONS.find(o => o.value === Number(filters.heightMin))?.label || "" : "4'0\""}–${filters.heightMax ? HEIGHT_OPTIONS.find(o => o.value === Number(filters.heightMax))?.label || "" : "7'0\""}`} 
+                                                onRemove={() => { setFilter("heightMin", ""); setFilter("heightMax", ""); }} 
+                                            />
+                                        )}
+                                        {filters.minFollowers > 0 && (
+                                            <FilterChip label={`Followers: ${FOLLOWER_BUCKETS.find(b => b.value === filters.minFollowers)?.label}`} onRemove={() => setFilter("minFollowers", 0)} />
+                                        )}
+                                        {filters.interestedIn.map(cat => (
+                                            <FilterChip 
+                                                key={cat} 
+                                                label={`Category: ${cat}`} 
+                                                onRemove={() => setFilter("interestedIn", filters.interestedIn.filter(x => x !== cat))} 
+                                            />
+                                        ))}
+                                        {filters.internalTags.map(tagId => {
+                                            const tagName = globalTags.find(t => t.id === tagId)?.name || "Tag";
+                                            return (
+                                                <FilterChip 
+                                                    key={tagId} 
+                                                    label={`Tag: ${tagName}`} 
+                                                    onRemove={() => setFilter("internalTags", filters.internalTags.filter(x => x !== tagId))} 
+                                                />
+                                            );
+                                        })}
+                                        <button onClick={resetFilters} className="text-[10px] text-gray-400 hover:text-gray-600 underline-offset-2 hover:underline">
+                                            Clear all
+                                        </button>
+                                    </div>
+                                )}
+                                
+                                <div className="space-y-2">
+                                    {/* Quick filter presets */}
+                                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                                        {SAVED_SEARCHES.map(preset => (
                                             <button
-                                                key={tag.id}
+                                                key={preset.id}
                                                 type="button"
-                                                onClick={() => {
-                                                    if (isSelected) {
-                                                        setFilter("internalTags", filters.internalTags.filter(id => id !== tag.id));
-                                                    } else {
-                                                        setFilter("internalTags", [...filters.internalTags, tag.id]);
-                                                    }
-                                                }}
-                                                className={`px-2 py-0.5 rounded-full text-[10px] font-medium tracking-tight transition-all border ${
-                                                    isSelected
-                                                        ? "bg-gray-900 border-gray-900 text-white"
-                                                        : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300"
-                                                }`}
+                                                onClick={() => applySavedSearch(preset)}
+                                                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors whitespace-nowrap"
                                             >
-                                                {tag.name} <span className="text-[8px] opacity-60">({tag.count})</span>
+                                                <preset.icon size={12} />
+                                                <span className="text-xs">{preset.label}</span>
                                             </button>
-                                        );
-                                    })}
+                                        ))}
+                                        <button
+                                            onClick={() => setShowSaveSearch(true)}
+                                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-gray-200 hover:bg-gray-50 transition-colors whitespace-nowrap"
+                                        >
+                                            <Bookmark size={12} className="text-gray-400" />
+                                            <span className="text-xs text-gray-600">Save search</span>
+                                        </button>
+                                    </div>
+
+                                    {/* Popular Tags Row (dynamic chip filter sync) */}
+                                    {frequentTags.length > 0 && (
+                                        <div className="flex items-center gap-1.5 flex-wrap pt-1.5 border-t border-gray-150">
+                                            <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Popular Tags:</span>
+                                            {frequentTags.map(tag => {
+                                                const isSelected = filters.internalTags.includes(tag.id);
+                                                return (
+                                                    <button
+                                                        key={tag.id}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            if (isSelected) {
+                                                                setFilter("internalTags", filters.internalTags.filter(id => id !== tag.id));
+                                                            } else {
+                                                                setFilter("internalTags", [...filters.internalTags, tag.id]);
+                                                            }
+                                                        }}
+                                                        className={`px-2 py-0.5 rounded-full text-[10px] font-medium tracking-tight transition-all border ${
+                                                            isSelected
+                                                                ? "bg-gray-900 border-gray-900 text-white"
+                                                                : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300"
+                                                        }`}
+                                                    >
+                                                        {tag.name} <span className="text-[8px] opacity-60">({tag.count})</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    {/* Scrollable Content Area */}
+                    <div
+                        ref={gridScrollRef}
+                        className="flex-1 overflow-y-auto min-h-0 flex flex-col bg-gray-50/10"
+                        style={{ WebkitOverflowScrolling: "touch" }}
+                        data-testid="talent-browser-scroll-container"
+                    >
+                        {/* Advanced Filters Panel (Filters) */}
+                        {showAdvancedFilters && (
+                            <div className="bg-white border-b border-gray-100 shrink-0">
+                                <AdvancedFiltersPanel
+                                    filters={filters}
+                                    setFilter={setFilter}
+                                    filterOptions={filterOptions}
+                                    globalTags={globalTags}
+                                    onClose={() => setShowAdvancedFilters(false)}
+                                    resetFilters={resetFilters}
+                                />
+                            </div>
+                        )}
+
+
+                        {/* Talent Grid Area */}
+                        <div className="flex-1">
+                            {loading && talents.length === 0 ? (
+                                <LoadingSkeleton densityMode={densityMode} isMobile={isMobile} />
+                            ) : error ? (
+                                <div className="flex items-center justify-center h-full">
+                                    <div className="text-center">
+                                        <p className="text-red-600 text-sm">{error}</p>
+                                        <button onClick={handleForceRefresh} className="mt-4 px-4 py-2 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 transition-colors">
+                                            Retry Load
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : filteredTalents.length === 0 ? (
+                                <EmptyResults onReset={resetFilters} hasFilters={filtersActive} />
+                            ) : (
+                                <div className="px-4 sm:px-6 py-4 sm:py-5">
+                                    <div
+                                        style={{
+                                            display: "grid",
+                                            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+                                            gap: `${config.gap}px`,
+                                        }}
+                                    >
+                                        {filteredTalents.map((talent, globalIndex) => {
+                                            const alreadyInPipeline = existingTalentIds.has(talent.id);
+                                            const isSelected = selected.has(talent.id);
+                                            const isFocused = globalIndex === focusedIndex;
+                                            
+                                            return (
+                                                <TalentCard
+                                                    key={talent.id}
+                                                    talent={talent}
+                                                    selected={isSelected}
+                                                    alreadyInPipeline={alreadyInPipeline}
+                                                    onToggle={toggleSelect}
+                                                    densityMode={densityMode}
+                                                    isFocused={isFocused}
+                                                    showIntelligence={filters.showIntelligence}
+                                                    isMobile={isMobile}
+                                                    globalIndex={globalIndex}
+                                                    registerRef={registerCardRef}
+                                                />
+                                            );
+                                        })}
+                                    </div>
                                 </div>
                             )}
                         </div>
-                        
-                        {/* Advanced Filters Panel */}
-                        {showAdvancedFilters && (
-                            <AdvancedFiltersPanel
-                                filters={filters}
-                                setFilter={setFilter}
-                                filterOptions={filterOptions}
-                                globalTags={globalTags}
-                                onClose={() => setShowAdvancedFilters(false)}
-                                resetFilters={resetFilters}
-                            />
-                        )}
-                    </div>
-                    
-                    {/* Virtualized Talent Grid */}
-                    <div
-                        ref={gridScrollRef}
-                        className="flex-1 overflow-auto"
-                        style={{ WebkitOverflowScrolling: "touch" }}
-                        data-testid="talent-browser-grid"
-                    >
-                        {loading && talents.length === 0 ? (
-                            <LoadingSkeleton densityMode={densityMode} isMobile={isMobile} />
-                        ) : error ? (
-                            <div className="flex items-center justify-center h-full">
-                                <div className="text-center">
-                                    <p className="text-red-600 text-sm">{error}</p>
-                                    <button onClick={handleForceRefresh} className="mt-4 px-4 py-2 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 transition-colors">
-                                        Retry Load
-                                    </button>
-                                </div>
-                            </div>
-                        ) : filteredTalents.length === 0 ? (
-                            <EmptyResults onReset={resetFilters} hasFilters={filtersActive} />
-                        ) : (
-                            <div className="px-4 sm:px-6 py-4 sm:py-5">
-                                <div
-                                    style={{
-                                        display: "grid",
-                                        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-                                        gap: `${config.gap}px`,
-                                    }}
-                                >
-                                    {filteredTalents.map((talent, globalIndex) => {
-                                        const alreadyInPipeline = existingTalentIds.has(talent.id);
-                                        const isSelected = selected.has(talent.id);
-                                        const isFocused = globalIndex === focusedIndex;
-                                        
-                                        return (
-                                            <TalentCard
-                                                key={talent.id}
-                                                talent={talent}
-                                                selected={isSelected}
-                                                alreadyInPipeline={alreadyInPipeline}
-                                                onToggle={toggleSelect}
-                                                densityMode={densityMode}
-                                                isFocused={isFocused}
-                                                showIntelligence={filters.showIntelligence}
-                                                isMobile={isMobile}
-                                                globalIndex={globalIndex}
-                                                registerRef={registerCardRef}
-                                            />
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        )}
                     </div>
                     
                     {/* Selection Tray */}

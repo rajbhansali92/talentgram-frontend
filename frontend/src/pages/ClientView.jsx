@@ -1088,7 +1088,7 @@ function TalentDetail({
             document.body.style.overflow = "";
             document.removeEventListener("keydown", handleKeyDown);
         };
-    }, [onClose, prev, next, setAction, talent.id, viewerAction?.action]);
+    }, [onClose, prev, next, setAction, talent.id, viewerAction?.action, isSharePreview]);
 
     const list = useMemo(() => (
         Array.isArray(talents) ? talents : []
@@ -1173,7 +1173,7 @@ function TalentDetail({
             node.removeEventListener("touchmove", onTouchMove);
             node.removeEventListener("touchend", onTouchEnd);
         };
-    }, [goNextTalent, goPrevTalent, onClose]);
+    }, [goNextTalent, goPrevTalent, onClose, isSharePreview]);
 
     const quickAction = useCallback(async (key) => {
         if (busyAction) return;

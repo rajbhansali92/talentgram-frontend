@@ -4,6 +4,14 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
+
+class LinkTrackIn(BaseModel):
+    event_type: str  # "open" | "view_talent" | "view_media" | "watch_video"
+    session_id: str
+    talent_id: Optional[str] = None
+    media_id: Optional[str] = None
+    watch_time: Optional[float] = None
 
 from core import (
     ActionIn,
@@ -702,4 +710,61 @@ async def log_download(
         "media_id": payload.media_id,
         "created_at": _now(),
     })
+    return {"ok": True}
+
+
+@router.post("/public/links/{slug}/track")
+async def track_link_event(
+    slug: str,
+    payload: LinkTrackIn,
+):
+    """Securely tracks opened/viewed/watched client analytics inside link document."""
+    link = await db.links.find_one({"slug": slug})
+    if not link:
+        raise HTTPException(404, "Link not found")
+        
+    now = _now()
+    analytics = link.get("analytics") or {}
+    
+    if not analytics:
+        analytics = {
+            "opened_at": now,
+            "last_viewed_at": now,
+            "total_views": 0,
+            "unique_views": [],  # session_ids
+            "viewed_talents": {},  # talent_id -> count
+            "viewed_media": {},  # media_id -> count
+            "viewed_primary_take": {},  # media_id -> count
+            "watch_durations": {},  # media_id -> total seconds
+        }
+        
+    analytics["last_viewed_at"] = now
+    if not analytics.get("opened_at"):
+        analytics["opened_at"] = now
+        
+    # Increment view count
+    if payload.event_type == "open":
+        analytics["total_views"] = analytics.get("total_views", 0) + 1
+        uniq = analytics.get("unique_views") or []
+        if payload.session_id not in uniq:
+            uniq.append(payload.session_id)
+            analytics["unique_views"] = uniq
+            
+    elif payload.event_type == "view_talent" and payload.talent_id:
+        vt = analytics.get("viewed_talents") or {}
+        vt[payload.talent_id] = vt.get(payload.talent_id, 0) + 1
+        analytics["viewed_talents"] = vt
+        
+    elif payload.event_type == "view_media" and payload.media_id:
+        vm = analytics.get("viewed_media") or {}
+        vm[payload.media_id] = vm.get(payload.media_id, 0) + 1
+        analytics["viewed_media"] = vm
+        
+    elif payload.event_type == "watch_video" and payload.media_id:
+        wd = analytics.get("watch_durations") or {}
+        prev_dur = wd.get(payload.media_id, 0.0)
+        wd[payload.media_id] = prev_dur + (payload.watch_time or 0.0)
+        analytics["watch_durations"] = wd
+        
+    await db.links.update_one({"slug": slug}, {"$set": {"analytics": analytics}})
     return {"ok": True}

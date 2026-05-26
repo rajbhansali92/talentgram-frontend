@@ -1,4 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
+
+const API =
+    process.env.REACT_APP_BACKEND_URL
+        ? `${process.env.REACT_APP_BACKEND_URL}/api`
+        : "http://localhost:8000/api";
 
 /**
  * Premium Lazy Video Player component.
@@ -6,8 +11,38 @@ import React, { useState } from "react";
  * Replaces the poster with an interactive video player only upon user interaction (click),
  * preventing unnecessary heavy video preloads or bandwidth waste.
  */
-export default function LazyVideoPlayer({ src, poster, label, className = "" }) {
+export default function LazyVideoPlayer({ src, poster, label, className = "", mediaId, slug }) {
     const [isPlaying, setIsPlaying] = useState(false);
+    const videoRef = useRef(null);
+    const lastTrackedTimeRef = useRef(0);
+
+    useEffect(() => {
+        if (!isPlaying || !videoRef.current || !slug || !mediaId) return;
+
+        lastTrackedTimeRef.current = videoRef.current.currentTime;
+
+        const intervalId = setInterval(() => {
+            if (!videoRef.current) return;
+            const current = videoRef.current.currentTime;
+            const delta = current - lastTrackedTimeRef.current;
+            if (delta > 0 && !videoRef.current.paused) {
+                let sid = sessionStorage.getItem("client_session_id") || "guest-session";
+                fetch(`${API}/public/links/${slug}/track`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        event_type: "watch_video",
+                        session_id: sid,
+                        media_id: mediaId,
+                        watch_time: delta
+                    })
+                }).catch(() => {});
+            }
+            lastTrackedTimeRef.current = current;
+        }, 3000);
+
+        return () => clearInterval(intervalId);
+    }, [isPlaying, slug, mediaId]);
 
     if (!src) return null;
 
@@ -15,6 +50,7 @@ export default function LazyVideoPlayer({ src, poster, label, className = "" }) 
         return (
             <div className={`relative w-full h-full aspect-video rounded-xl overflow-hidden bg-black ${className}`}>
                 <video
+                    ref={videoRef}
                     src={src}
                     controls
                     autoPlay

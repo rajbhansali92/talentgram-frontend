@@ -162,6 +162,14 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
 
 export default function ClientView() {
     const { slug } = useParams();
+    const getSessionId = () => {
+        let sid = sessionStorage.getItem("client_session_id");
+        if (!sid) {
+            sid = Math.random().toString(36).substring(2) + Date.now().toString(36);
+            sessionStorage.setItem("client_session_id", sid);
+        }
+        return sid;
+    };
     const [identified, setIdentified] = useState(!!getViewerToken(slug));
     const [name, setName] = useState("");
     const [email, setEmail] = useState("");
@@ -208,6 +216,10 @@ export default function ClientView() {
             });
             setData(data);
             setSeenIds(new Set(data?.client_state?.seen_talent_ids || []));
+            axios.post(`${API}/public/links/${slug}/track`, {
+                event_type: "open",
+                session_id: getSessionId(),
+            }).catch(() => {});
         } catch (e) {
             if (e?.response?.status === 401) {
                 setIdentified(false);
@@ -332,6 +344,11 @@ export default function ClientView() {
                 n.add(talentId);
                 return n;
             });
+            axios.post(`${API}/public/links/${slug}/track`, {
+                event_type: "view_talent",
+                session_id: getSessionId(),
+                talent_id: talentId,
+            }).catch(() => {});
             try {
                 await axios.post(
                     `${API}/public/links/${slug}/seen`,
@@ -839,14 +856,21 @@ function TalentDetail({
                                     <div className="grid grid-cols-2 gap-4">
                                         {takes.map((t, i) => (
                                             <div key={t.id} data-testid={`client-take-${i}`}>
-                                                <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate">
-                                                    {t.label || `Take ${i + 1}`}
+                                                <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate flex items-center justify-between">
+                                                    <span>{t.label || `Take ${i + 1}`}</span>
+                                                    {t.primary_take && (
+                                                        <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">
+                                                            ★ Primary
+                                                        </span>
+                                                    )}
                                                 </p>
                                                 <LazyVideoPlayer
                                                     src={t.url}
                                                     poster={posterUrl(t)}
                                                     label={t.label || `Take ${i + 1}`}
                                                     className="w-full"
+                                                    mediaId={t.id}
+                                                    slug={slug}
                                                 />
                                             </div>
                                         ))}
@@ -862,6 +886,8 @@ function TalentDetail({
                                          poster={posterUrl(intro)}
                                          label="Introduction Video"
                                          className="w-full"
+                                         mediaId={intro.id}
+                                         slug={slug}
                                      />
                                  </div>
                              )}

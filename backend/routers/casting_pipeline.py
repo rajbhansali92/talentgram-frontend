@@ -172,6 +172,9 @@ SUBMISSION_DECISION_TO_STAGE = {
     "approved": "approved",
     "hold": "hold",
     "rejected": "rejected",
+    "ask_to_test": "ask_to_test",
+    "shortlisted": "shortlisted",
+    "does_not_work_for_this": "not_available",
 }
 
 # Only these stages may be auto-overwritten by a submission decision.
@@ -183,6 +186,8 @@ AUTO_SYNC_OVERWRITABLE_STAGES = {
     "approved",
     "hold",
     "rejected",
+    "shortlisted",
+    "not_available",
     "follow_up",  # not yet implemented; safe to list pre-emptively
 }
 

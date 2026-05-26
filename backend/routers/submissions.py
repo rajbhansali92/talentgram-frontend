@@ -904,6 +904,9 @@ async def submissions_stats(
             "approved": [{"$match": {"decision": "approved"}}, {"$count": "n"}],
             "hold":     [{"$match": {"decision": "hold"}},     {"$count": "n"}],
             "rejected": [{"$match": {"decision": "rejected"}}, {"$count": "n"}],
+            "ask_to_test": [{"$match": {"decision": "ask_to_test"}}, {"$count": "n"}],
+            "shortlisted": [{"$match": {"decision": "shortlisted"}}, {"$count": "n"}],
+            "does_not_work_for_this": [{"$match": {"decision": "does_not_work_for_this"}}, {"$count": "n"}],
             "updated":  [{"$match": {"status": "updated"}},   {"$count": "n"}],
         }},
     ]
@@ -918,6 +921,9 @@ async def submissions_stats(
         "approved": _n("approved"),
         "hold":     _n("hold"),
         "rejected": _n("rejected"),
+        "ask_to_test": _n("ask_to_test"),
+        "shortlisted": _n("shortlisted"),
+        "does_not_work_for_this": _n("does_not_work_for_this"),
         "updated":  _n("updated"),
     }
 
@@ -935,28 +941,53 @@ async def set_decision(
     if not sub:
         raise HTTPException(404, "Submission not found")
     prev = sub.get("decision")
+    
+    # Status History Log transition
+    transition = {
+        "from_status": prev or "pending",
+        "to_status": payload.decision,
+        "timestamp": _now(),
+        "admin_email": admin.get("email") or "admin@example.com",
+        "note": payload.note or ""
+    }
+    
     res = await db.submissions.update_one(
         {"id": sid, "project_id": pid},
-        {"$set": {"decision": payload.decision, "decided_at": _now()}},
+        {
+            "$set": {"decision": payload.decision, "decided_at": _now()},
+            "$push": {"status_history": transition}
+        },
     )
     if not res.matched_count:
         raise HTTPException(404, "Submission not found")
+        
+    # Auto-generate Immutable Package snapshot on Approve (or when decision matches approved/shortlisted/ask_to_test)
+    # The spec specifies "When Approve & Forward is clicked: generate immutable snapshot: client_package_snapshot"
+    if payload.decision == "approved":
+        from core import generate_submission_snapshot
+        fresh_sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com")
+        
+        old_snapshots = fresh_sub.get("client_package_snapshots") or []
+        if fresh_sub.get("client_package_snapshot"):
+            old_snapshots = [fresh_sub["client_package_snapshot"]] + old_snapshots
+            
+        await db.submissions.update_one(
+            {"id": sid, "project_id": pid},
+            {"$set": {
+                "client_package_snapshot": new_snapshot,
+                "client_package_snapshots": old_snapshots
+            }}
+        )
+
     # Fanout — only when the decision actually changes (avoid noise on idempotent calls)
     if prev != payload.decision:
         # Re-fetch the submission AFTER the update so we have the freshest
-        # talent_id. The pre-update snapshot (sub) may reflect a state where
-        # talent_id was not yet written — e.g. if the admin made the decision
-        # before the talent finalized their submission. Using the stale snapshot
-        # caused sync_pipeline_from_submission to see talent_id=None and
-        # silently skip the stage update, leaving cards in the wrong lane.
+        # talent_id.
         fresh_sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
         resolved_talent_id = (fresh_sub or sub).get("talent_id")
 
-        # Auto-sync casting pipeline: bump the matching pipeline row to the
-        # decision's canonical stage. Best-effort — never blocks the response.
-        # See `casting_pipeline.sync_pipeline_from_submission` for the
-        # exact overwrite-protection rules (locked / shortlisted /
-        # already_tested / pitch are protected).
+        # Auto-sync casting pipeline: bump the matching pipeline row to the decision's canonical stage.
         from routers.casting_pipeline import sync_pipeline_from_submission
         await sync_pipeline_from_submission(
             project_id=pid,
@@ -978,6 +1009,19 @@ async def set_decision(
     return {"ok": True}
 
 
+@router.get("/projects/{pid}/submissions/{sid}")
+async def get_admin_submission(
+    pid: str,
+    sid: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Retrieve full, individual submission details (admin only)."""
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    return sub
+
+
 @router.put("/projects/{pid}/submissions/{sid}")
 async def admin_edit_submission(
     pid: str,
@@ -985,11 +1029,19 @@ async def admin_edit_submission(
     payload: AdminSubmissionEditIn,
     admin: dict = Depends(current_team_or_admin),
 ):
-    """Admin can edit form_data and toggle per-field visibility for the client view."""
+    """Admin can edit form_data, toggle per-field visibility, and curate/reorder media for the client view."""
     sub = await db.submissions.find_one({"id": sid, "project_id": pid})
     if not sub:
         raise HTTPException(404, "Submission not found")
+    
     update: Dict[str, Any] = {}
+
+    # Phase 4 Data Safety: Back up original submitted values to original_form_data and original_media on first override.
+    if "original_form_data" not in sub:
+        update["original_form_data"] = sub.get("form_data") or {}
+    if "original_media" not in sub:
+        update["original_media"] = sub.get("media") or []
+
     if payload.form_data is not None:
         merged_fd = {**(sub.get("form_data") or {}), **payload.form_data}
         update["form_data"] = merged_fd
@@ -1015,13 +1067,75 @@ async def admin_edit_submission(
 
         update["submitted_age_override"] = submitted_age_override_val
         update["effective_age"] = compute_effective_age(merged_fd, talent_age)
+
     if payload.field_visibility is not None:
         current_fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
         update["field_visibility"] = {**current_fv, **payload.field_visibility}
+
+    # Curation History Revision Restore OR Curation Save
+    if payload.restore_revision_id:
+        revisions = sub.get("media_revision_history") or []
+        rev = next((r for r in revisions if r.get("id") == payload.restore_revision_id), None)
+        if not rev:
+            raise HTTPException(400, "Curation revision not found")
+        update["media"] = rev.get("media") or []
+    elif payload.media is not None:
+        current_media = sub.get("media") or []
+        media_by_id = {m.get("id"): m for m in current_media if m.get("id")}
+        
+        updated_media = []
+        for m in payload.media:
+            mid = m.get("id")
+            if mid and mid in media_by_id:
+                # Merge incoming curated properties to preserve old system fields (public_id, content_type, size, url, etc.)
+                existing = media_by_id[mid]
+                merged = {**existing}
+                for k in ["client_visible", "internal_only", "featured_for_client", "primary_take", "featured", "client_cover", "label", "category"]:
+                    if k in m:
+                        merged[k] = m[k]
+                updated_media.append(merged)
+            else:
+                # Fallback for new/unmatched items
+                updated_media.append(m)
+        update["media"] = updated_media
+
+    # Auto-create curation history revision
+    if payload.form_data is not None or payload.field_visibility is not None or payload.media is not None or payload.restore_revision_id:
+        final_media = update.get("media") if ("media" in update) else (sub.get("media") or [])
+        rev_id = str(uuid.uuid4())[:8]
+        revision = {
+            "id": rev_id,
+            "timestamp": _now(),
+            "admin_email": admin.get("email") or "admin@example.com",
+            "media": final_media,
+            "note": f"Restored revision {payload.restore_revision_id}" if payload.restore_revision_id else "Saved curations",
+        }
+        current_history = sub.get("media_revision_history") or []
+        update["media_revision_history"] = [revision] + current_history
+
     if update:
         await db.submissions.update_one({"id": sid}, {"$set": update})
-    out = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    return out
+        
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    
+    # Optional dynamic snapshot regeneration inside PUT
+    if payload.regenerate_snapshot:
+        from core import generate_submission_snapshot
+        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com")
+        old_snapshots = fresh_sub.get("client_package_snapshots") or []
+        if fresh_sub.get("client_package_snapshot"):
+            old_snapshots = [fresh_sub["client_package_snapshot"]] + old_snapshots
+            
+        await db.submissions.update_one(
+            {"id": sid},
+            {"$set": {
+                "client_package_snapshot": new_snapshot,
+                "client_package_snapshots": old_snapshots
+            }}
+        )
+        fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+        
+    return fresh_sub
 
 
 @router.delete("/projects/{pid}/submissions/{sid}")
@@ -1032,3 +1146,46 @@ async def delete_submission(
     if not res.deleted_count:
         raise HTTPException(404, "Submission not found")
     return {"ok": True}
+
+
+@router.post("/projects/{pid}/submissions/{sid}/snapshot")
+async def regenerate_submission_snapshot_endpoint(
+    pid: str,
+    sid: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Explicitly regenerate the immutable client package snapshot for a submission."""
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+        
+    from core import generate_submission_snapshot
+    new_snapshot = generate_submission_snapshot(sub, admin.get("email") or "admin@example.com")
+    
+    old_snapshots = sub.get("client_package_snapshots") or []
+    if sub.get("client_package_snapshot"):
+        old_snapshots = [sub["client_package_snapshot"]] + old_snapshots
+        
+    await db.submissions.update_one(
+        {"id": sid, "project_id": pid},
+        {"$set": {
+            "client_package_snapshot": new_snapshot,
+            "client_package_snapshots": old_snapshots
+        }}
+    )
+    
+    # Auto-create history revision for the snapshot regeneration
+    rev_id = str(uuid.uuid4())[:8]
+    revision = {
+        "id": rev_id,
+        "timestamp": _now(),
+        "admin_email": admin.get("email") or "admin@example.com",
+        "media": sub.get("media") or [],
+        "note": "Regenerated Client Package Snapshot",
+    }
+    await db.submissions.update_one(
+        {"id": sid, "project_id": pid},
+        {"$push": {"media_revision_history": {"$each": [revision], "$position": 0}}}
+    )
+    
+    return {"ok": True, "snapshot": new_snapshot}

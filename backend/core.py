@@ -824,7 +824,7 @@ MAX_IMAGES_PER_CATEGORY = 10
 # Enforced server-side to protect against accidental/malicious bloat.
 MAX_SUBMISSION_VIDEO_BYTES = 200 * 1024 * 1024
 MAX_SUBMISSION_IMAGE_BYTES = 20 * 1024 * 1024
-SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold"}
+SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold", "ask_to_test", "shortlisted", "does_not_work_for_this"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 
 # Moderated client→talent feedback relay
@@ -1025,10 +1025,14 @@ class AdminSubmissionEditIn(BaseModel):
     # Value is `bool` for most fields, OR a `{question_label: bool}` dict for
     # `custom_answers` to support per-question visibility.
     field_visibility: Optional[Dict[str, Any]] = None
+    media: Optional[List[Dict[str, Any]]] = None # Custom media curated settings & ordering
+    restore_revision_id: Optional[str] = None
+    regenerate_snapshot: Optional[bool] = None
 
 
 class SubmissionDecisionIn(BaseModel):
     decision: str
+    note: Optional[str] = None
 
 
 class ForwardToLinkIn(BaseModel):
@@ -1173,6 +1177,11 @@ def _public_media(m: dict) -> dict:
         out["label"] = m["label"]
     if is_video and m.get("public_id"):
         out["poster_url"] = m.get("poster_url") or video_poster_url(m["public_id"])
+    
+    # Curated media visibility and metadata flags
+    for k in ["client_visible", "internal_only", "featured_for_client", "primary_take", "featured", "client_cover"]:
+        if k in m:
+            out[k] = m[k]
     return out
 
 
@@ -1191,6 +1200,9 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
     filtered_media: List[dict] = []
     cover_mid: Optional[str] = None
     for m in talent.get("media") or []:
+        # Filter out hidden/internal assets from client links
+        if m.get("client_visible") is False or m.get("internal_only") is True:
+            continue
         cat = m.get("category")
         if cat in ("indian", "western", "portfolio") and v.get("portfolio"):
             filtered_media.append(_public_media(m))
@@ -1295,6 +1307,9 @@ def _submission_to_client_shape(sub: dict) -> dict:
       - `custom_answers` visibility can be a bool (all-or-nothing) OR a dict
         `{question_label: bool}` for per-question control.
     """
+    if sub.get("client_package_snapshot"):
+        return sub["client_package_snapshot"]
+
     fd = sub.get("form_data") or {}
     # Merge defaults with stored visibility so newly added keys (e.g.
     # competitive_brand, custom_answers) inherit safe defaults for
@@ -1321,6 +1336,7 @@ def _submission_to_client_shape(sub: dict) -> dict:
 
     age = effective_age if fv.get("age") else None
 
+    raw_media = sub.get("media") or []
     # Media buckets
     media: List[dict] = []
     cover_mid: Optional[str] = None
@@ -1341,9 +1357,18 @@ def _submission_to_client_shape(sub: dict) -> dict:
             return "Take 3"
         return "Take"
 
-    # Sort legacy takes by category (take_1→take_2→take_3); new `take` items by created_at
-    raw_media = sub.get("media") or []
+    # 1. Look for explicit client_cover first
     for m in raw_media:
+        if m.get("client_cover") and m.get("client_visible") is not False and not m.get("internal_only"):
+            cover_mid = m.get("id")
+            break
+
+    # Sort legacy takes by category (take_1→take_2→take_3); new `take` items by created_at
+    for m in raw_media:
+        # Check per-asset client visibility
+        if m.get("client_visible") is False or m.get("internal_only") is True:
+            continue
+
         cat = m.get("category")
         if cat == "image":
             mapped = {**m, "category": "portfolio"}
@@ -1369,22 +1394,31 @@ def _submission_to_client_shape(sub: dict) -> dict:
                 **m,
                 "category": "take",
                 "label": _take_label(m),
+                "_orig_cat": cat,
             })
 
-    # Deterministic order inside takes: legacy first (take_1/2/3), then new takes by created_at
+    # Deterministic order inside takes: respect legacy ordering (take_1 -> take_2 -> take_3) first,
+    # then new takes sorted by custom database order (index in raw_media)
+    raw_media_ids = [rm.get("id") for rm in raw_media if rm.get("id")]
     def _take_sort_key(m: dict):
-        # Pull original legacy ordering hint
-        raw_cat = next(
-            (rm.get("category") for rm in raw_media if rm.get("id") == m.get("id")),
-            "take",
-        )
-        legacy_order = {"take_1": 0, "take_2": 1, "take_3": 2}
-        return (
-            legacy_order.get(raw_cat, 10),
-            m.get("created_at") or "",
-        )
+        orig = m.get("_orig_cat")
+        if orig == "take_1":
+            return (0, 1)
+        elif orig == "take_2":
+            return (0, 2)
+        elif orig == "take_3":
+            return (0, 3)
+        else:
+            mid = m.get("id")
+            try:
+                idx = raw_media_ids.index(mid)
+            except ValueError:
+                idx = 999
+            return (1, idx)
 
     take_items.sort(key=_take_sort_key)
+    for t in take_items:
+        t.pop("_orig_cat", None)
 
     # ORDER: takes → intro → images
     media.extend(take_items)
@@ -1443,6 +1477,21 @@ def _submission_to_client_shape(sub: dict) -> dict:
                 out["custom_answers"] = filtered
 
     return out
+
+
+def generate_submission_snapshot(sub: dict, admin_email: str) -> dict:
+    """Compile an immutable copy of the client-facing shape along with recruiter metadata."""
+    # We temporarily remove the client_package_snapshot field on sub to prevent circular loading
+    sub_copy = {k: v for k, v in sub.items() if k != "client_package_snapshot"}
+    client_shape = _submission_to_client_shape(sub_copy)
+    
+    # Attach snapshot metadata
+    client_shape["snapshot_meta"] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "author_email": admin_email,
+        "project_id": sub.get("project_id"),
+    }
+    return client_shape
 
 
 def _paginate_params(page, size, limit=None):

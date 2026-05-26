@@ -134,6 +134,13 @@ export default function LinkResults() {
     const downloads = data?.downloads || [];
     const actions = data?.actions || [];
 
+    const analytics = data?.link?.analytics || {};
+    const trackingViews = analytics.total_views !== undefined ? analytics.total_views : (data?.view_count || data?.link?.view_count || 0);
+    const trackingUniq = analytics.unique_views !== undefined ? (analytics.unique_views.length || 0) : (data?.unique_viewers || data?.link?.unique_viewers || 0);
+    const viewedTalentsCount = Object.keys(analytics.viewed_talents || {}).length;
+    const totalWatchSeconds = Object.values(analytics.watch_durations || {}).reduce((a, b) => a + b, 0);
+    const watchMinutes = Math.round(totalWatchSeconds / 60);
+
     const copyLink = async () => {
         const success = await copyToClipboard(url);
         if (success) {
@@ -231,13 +238,20 @@ export default function LinkResults() {
                             </Link>
                         </div>
                     </div>
-
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-10">
                         {[
-                            { label: "Total Views", value: data.view_count },
+                            { label: "Total Views", value: trackingViews },
                             {
                                 label: "Unique Viewers",
-                                value: data.unique_viewers,
+                                value: trackingUniq,
+                            },
+                            {
+                                label: "Profiles Viewed",
+                                value: viewedTalentsCount,
+                            },
+                            {
+                                label: "Video Watched",
+                                value: `${watchMinutes} min`,
                             },
                             {
                                 label: "Total Actions",
@@ -247,12 +261,12 @@ export default function LinkResults() {
                         ].map((s) => (
                             <div
                                 key={s.label}
-                                className="bg-white border border-black/[0.08] rounded-xl p-5 transition-colors duration-150 hover:border-black/[0.12]"
+                                className="bg-white border border-black/[0.08] rounded-xl p-4 transition-colors duration-150 hover:border-black/[0.12]"
                             >
-                                <div className="font-display text-3xl md:text-4xl tracking-tight text-black/85">
+                                <div className="font-display text-2xl md:text-3xl tracking-tight text-black/85">
                                     {s.value}
                                 </div>
-                                <div className="text-[11px] text-black/45 tracking-widest uppercase mt-2">
+                                <div className="text-[10px] text-black/45 tracking-widest uppercase mt-2">
                                     {s.label}
                                 </div>
                             </div>

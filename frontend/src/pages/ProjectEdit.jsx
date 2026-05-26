@@ -38,9 +38,19 @@ import {
     XCircle,
     Clock,
     ExternalLink,
+    RotateCcw,
+    RefreshCw,
+    HelpCircle,
+    FolderMinus,
     Sparkles,
     Cloud,
     PauseCircle,
+    Eye,
+    EyeOff,
+    Star,
+    Shield,
+    ArrowRight,
+    Lock,
 } from "lucide-react";
 
 const COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"];
@@ -154,11 +164,12 @@ export default function ProjectEdit() {
         })();
     }, [id, isEdit, loadSubmissions]);
 
-    const setDecision = async (sid, decision) => {
+    const setDecision = async (sid, decision, note = "") => {
         await adminApi.post(`/projects/${id}/submissions/${sid}/decision`, {
             decision,
+            note,
         });
-        toast.success(`Marked ${decision}`);
+        toast.success(`Marked as ${decision}`);
         loadSubmissions(id);
     };
 
@@ -1206,11 +1217,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     </button>
                 )}
             </div>
-        </div>
-    );
-}
-
-function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
+  function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
     const normalize = (fd) => ({
         ...fd,
         availability:
@@ -1222,27 +1229,72 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                 ? fd.budget
                 : { status: "", value: fd?.budget || "" },
     });
-    const [form, setForm] = useState(normalize(submission?.form_data));
-    const [fv, setFv] = useState(submission?.field_visibility || {});
+
+    const [fullSub, setFullSub] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [form, setForm] = useState({});
+    const [fv, setFv] = useState({});
+    const [mediaList, setMediaList] = useState([]);
+    const [isPreviewMode, setIsPreviewMode] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [decisionNote, setDecisionNote] = useState("");
+    const [showHistory, setShowHistory] = useState(false);
+
+    // Fetch full detailed submission on open (avoiding large objects in project lists)
+    useEffect(() => {
+        const fetchFullSub = async () => {
+            setLoading(true);
+            try {
+                const { data } = await adminApi.get(`/projects/${projectId}/submissions/${submission.id}`);
+                setFullSub(data);
+                setForm(normalize(data?.form_data));
+                setFv(data?.field_visibility || {});
+                setMediaList(data?.media || []);
+            } catch (e) {
+                toast.error("Failed to fetch full submission details");
+                // fallback to prop
+                setFullSub(submission);
+                setForm(normalize(submission?.form_data));
+                setFv(submission?.field_visibility || {});
+                setMediaList(submission?.media || []);
+            } finally {
+                setLoading(false);
+            }
+        };
+        if (submission?.id) {
+            fetchFullSub();
+        }
+    }, [submission?.id, projectId]);
+
+    // Track unsaved states compared to retrieved DB snapshot
+    const hasUnsavedChanges = React.useMemo(() => {
+        if (!fullSub) return false;
+        const originalForm = normalize(fullSub.form_data);
+        const originalFv = fullSub.field_visibility || {};
+        const originalMedia = fullSub.media || [];
+        
+        const formDiff = JSON.stringify(form) !== JSON.stringify(originalForm);
+        const fvDiff = JSON.stringify(fv) !== JSON.stringify(originalFv);
+        const mediaDiff = JSON.stringify(mediaList) !== JSON.stringify(originalMedia);
+        
+        return formDiff || fvDiff || mediaDiff;
+    }, [form, fv, mediaList, fullSub]);
+
     if (!submission) return null;
-    const media = submission.media || [];
-    const intro = media.find((m) => m.category === "intro_video");
-    // Phase 3 v37j — split portfolio media into 3 buckets so admins can
-    // see the Indian/Western/Portfolio sections separately during review.
-    // Reuses existing media.category — no schema change.
-    const portfolioImages = media.filter((m) => m.category === "image");
-    const indianImages = media.filter((m) => m.category === "indian");
-    const westernImages = media.filter((m) => m.category === "western");
 
     const save = async () => {
         setSaving(true);
         try {
             await adminApi.put(
                 `/projects/${projectId}/submissions/${submission.id}`,
-                { form_data: form, field_visibility: fv },
+                { form_data: form, field_visibility: fv, media: mediaList },
             );
-            toast.success("Updated");
+            toast.success("Changes saved successfully");
+            const { data } = await adminApi.get(`/projects/${projectId}/submissions/${submission.id}`);
+            setFullSub(data);
+            setForm(normalize(data?.form_data));
+            setFv(data?.field_visibility || {});
+            setMediaList(data?.media || []);
             onChanged?.();
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Save failed");
@@ -1261,6 +1313,108 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         }
     };
 
+    const restoreRevision = async (revId) => {
+        setSaving(true);
+        try {
+            await adminApi.put(
+                `/projects/${projectId}/submissions/${submission.id}`,
+                { restore_revision_id: revId }
+            );
+            toast.success("Curation state restored");
+            const { data } = await adminApi.get(`/projects/${projectId}/submissions/${submission.id}`);
+            setFullSub(data);
+            setForm(normalize(data?.form_data));
+            setFv(data?.field_visibility || {});
+            setMediaList(data?.media || []);
+            onChanged?.();
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Restore failed");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const regenerateSnapshot = async () => {
+        setSaving(true);
+        try {
+            await adminApi.post(`/projects/${projectId}/submissions/${submission.id}/snapshot`);
+            toast.success("Client package frozen successfully");
+            const { data } = await adminApi.get(`/projects/${projectId}/submissions/${submission.id}`);
+            setFullSub(data);
+            onChanged?.();
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Snapshot generation failed");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // Swap media ordering within its specific bucket (preserving structure order in DB)
+    const shiftMediaBucketItem = (mid, direction) => {
+        setMediaList((prev) => {
+            const itemIndex = prev.findIndex((m) => m.id === mid);
+            if (itemIndex === -1) return prev;
+            
+            const item = prev[itemIndex];
+            const sameBucketIndices = prev
+                .map((m, idx) => ({ m, idx }))
+                .filter(({ m }) => {
+                    if (["intro_video", "video"].includes(item.category)) {
+                        return ["intro_video", "video"].includes(m.category);
+                    }
+                    if (["take", "take_1", "take_2", "take_3"].includes(item.category)) {
+                        return ["take", "take_1", "take_2", "take_3"].includes(m.category);
+                    }
+                    const isItemImg = ["image", "portfolio", "indian", "western"].includes(item.category);
+                    const isMImg = ["image", "portfolio", "indian", "western"].includes(m.category);
+                    if (isItemImg && isMImg) {
+                        return m.category === item.category;
+                    }
+                    return m.category === item.category;
+                })
+                .map(({ idx }) => idx);
+                
+            const bucketPos = sameBucketIndices.indexOf(itemIndex);
+            const targetBucketPos = bucketPos + direction;
+            
+            if (targetBucketPos >= 0 && targetBucketPos < sameBucketIndices.length) {
+                const targetItemIndex = sameBucketIndices[targetBucketPos];
+                const nextList = [...prev];
+                nextList[itemIndex] = prev[targetItemIndex];
+                nextList[targetItemIndex] = prev[itemIndex];
+                return nextList;
+            }
+            return prev;
+        });
+    };
+
+    // Toggle specific attributes with mutual exclusivity enforcement
+    const toggleMediaProperty = (mid, property) => {
+        setMediaList((prev) => {
+            return prev.map((m) => {
+                if (m.id === mid) {
+                    let currentVal = m[property];
+                    if (currentVal === undefined) {
+                        if (property === "client_visible") currentVal = true;
+                        else currentVal = false;
+                    }
+                    const nextVal = !currentVal;
+                    return { ...m, [property]: nextVal };
+                }
+                
+                // Exclusivity: Only one Client Cover Image
+                if (property === "client_cover" && ["image", "portfolio", "indian", "western"].includes(m.category)) {
+                    return { ...m, client_cover: false };
+                }
+                // Exclusivity: Only one Primary Take
+                if (property === "primary_take" && ["take", "take_1", "take_2", "take_3"].includes(m.category)) {
+                    return { ...m, primary_take: false };
+                }
+                return m;
+            });
+        });
+    };
+
     const FIELDS = [
         { key: "first_name", label: "First Name" },
         { key: "last_name", label: "Last Name" },
@@ -1270,468 +1424,1048 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         { key: "competitive_brand", label: "Competitive Brand" },
     ];
 
+    // Filter media arrays based on active curated list and preview criteria
+    const getCuratedMedia = (categoryGroup) => {
+        return mediaList
+            .filter((m) => {
+                const matchesGroup = categoryGroup === "video"
+                    ? m.category === "intro_video" || m.category === "video"
+                    : categoryGroup === "takes"
+                    ? ["take", "take_1", "take_2", "take_3"].includes(m.category)
+                    : m.category === categoryGroup;
+                
+                if (!matchesGroup) return false;
+                
+                // In preview mode, completely strip non-client-visible or internal items
+                if (isPreviewMode) {
+                    return m.client_visible !== false && !m.internal_only;
+                }
+                return true;
+            });
+    };
+
+    const intro = getCuratedMedia("video")[0];
+    const takes = getCuratedMedia("takes");
+    const portfolioImages = getCuratedMedia("image");
+    const indianImages = getCuratedMedia("indian");
+    const westernImages = getCuratedMedia("western");
+
     return (
         <div
-            className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm overflow-y-auto"
+            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-md overflow-y-auto"
             data-testid="submission-review-modal"
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-black/[0.08] hover:border-black/[0.20] rounded-sm flex items-center justify-center bg-white/80 text-black/70 hover:text-black transition-colors"
+                className="fixed top-5 right-5 z-50 w-10 h-10 border border-black/[0.08] hover:border-black/[0.20] rounded-full flex items-center justify-center bg-white/90 shadow-sm text-black/70 hover:text-black transition-colors"
             >
                 <X className="w-4 h-4" />
             </button>
-            <div className="max-w-6xl mx-auto px-5 md:px-12 py-10 md:py-14 text-black/85">
-                <p className="eyebrow mb-3">Submission</p>
-                <h2 className="font-display text-3xl md:text-5xl tracking-tight mb-2 text-black/90">
-                    {submission.talent_name}
-                </h2>
-                <p className="text-sm text-black/45 tg-mono mb-6">
-                    {submission.talent_email}
-                    {submission.talent_phone
-                        ? ` · ${submission.talent_phone}`
-                        : ""}
-                </p>
 
-                <div className="flex flex-wrap gap-2 mb-10">
-                    <button
-                        type="button"
-                        onClick={openInDrive}
-                        data-testid="open-in-drive-btn"
-                        className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm text-black/70 hover:text-black transition-colors"
-                        title="Opens the Google Drive backup folder for this submission"
-                    >
-                        <Cloud className="w-3.5 h-3.5" />
-                        Open in Drive
-                    </button>
+            {loading ? (
+                <div className="h-screen w-full flex flex-col items-center justify-center text-black/40 gap-3">
+                    <Loader2 className="w-8 h-8 animate-spin text-black/80" />
+                    <p className="tg-mono text-xs uppercase tracking-widest text-black/60">Loading curation profile...</p>
                 </div>
-
-                {/* Editable form data with per-field visibility toggles */}
-                <section
-                    className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6"
-                    data-testid="review-form-data-section"
-                >
-                    <div className="flex items-center justify-between mb-5">
-                        <p className="eyebrow">Talent Details</p>
-                        <span className="text-[10px] tg-mono text-black/45">
-                            Toggle per-field to control client visibility
-                        </span>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6">
-                        {FIELDS.map((f) => (
-                            <div
-                                key={f.key}
-                                className="flex items-start gap-3"
+            ) : (
+                <div className="max-w-6xl mx-auto px-5 md:px-12 py-10 md:py-16 text-black/85">
+                    
+                    {/* Header Curation Toggle bar */}
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-10 pb-6 border-b border-black/[0.06]">
+                        <div>
+                            <p className="eyebrow mb-1">Casting Review</p>
+                            <h2 className="font-display text-3xl md:text-5xl tracking-tight text-black/90">
+                                {submission.talent_name}
+                            </h2>
+                            <p className="text-xs text-black/45 tg-mono mt-1">
+                                {submission.talent_email} {submission.talent_phone ? `· ${submission.talent_phone}` : ""}
+                            </p>
+                        </div>
+                        
+                        {/* Segmented Mode Selector Switch */}
+                        <div className="flex bg-black/[0.04] p-1 rounded-full border border-black/[0.02] shrink-0 self-start md:self-auto">
+                            <button
+                                type="button"
+                                onClick={() => setIsPreviewMode(false)}
+                                className={`px-4 py-1.5 rounded-full text-xs tg-mono uppercase tracking-wider transition-all duration-300 ${!isPreviewMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
                             >
-                                <div className="flex-1 min-w-0">
-                                    <label className="text-[11px] text-black/45 tracking-widest uppercase">
-                                        {f.label}
-                                    </label>
-                                    <input
-                                        type={f.type || "text"}
-                                        value={form[f.key] ?? ""}
-                                        onChange={(e) =>
-                                            setForm({
-                                                ...form,
-                                                [f.key]: e.target.value,
-                                            })
-                                        }
-                                        data-testid={`review-field-${f.key}`}
-                                        className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
-                                    />
-                                    {f.key === "age" && submission.submitted_age_override !== undefined && submission.submitted_age_override !== null && (
-                                        <p className="text-[10px] text-amber-600 font-mono mt-1">
-                                            Project-Specific Age Override Active ({submission.submitted_age_override})
-                                        </p>
-                                    )}
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setFv({
-                                            ...fv,
-                                            [f.key]: !fv[f.key],
-                                        })
-                                    }
-                                    data-testid={`review-fv-${f.key}`}
-                                    title={
-                                        fv[f.key]
-                                            ? "Visible to client"
-                                            : "Hidden from client"
-                                    }
-                                    className={`mt-5 w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] ? "bg-black" : "bg-black/15"}`}
-                                >
-                                    <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] ? "translate-x-5 bg-white" : "bg-black"}`}
-                                    />
-                                </button>
-                            </div>
-                        ))}
-
-                        {/* Availability (structured) */}
-                        <div className="md:col-span-2 border-t border-black/[0.08] pt-4">
-                            <div className="flex items-center justify-between">
-                                <label className="text-[11px] text-black/45 tracking-widest uppercase">
-                                    Availability
-                                </label>
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setFv({
-                                            ...fv,
-                                            availability: fv.availability === false,
-                                        })
-                                    }
-                                    data-testid="review-fv-availability"
-                                    title={
-                                        fv.availability === false
-                                            ? "Hidden from client"
-                                            : "Visible to client"
-                                    }
-                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
-                                >
-                                    <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.availability !== false ? "translate-x-5 bg-white" : "bg-black"}`}
-                                    />
-                                </button>
-                            </div>
-                            <div className="mt-2 flex items-center gap-3">
-                                <select
-                                    value={form.availability?.status || ""}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            availability: {
-                                                ...form.availability,
-                                                status: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    data-testid="review-avail-status"
-                                    className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
-                                >
-                                    <option value="" className="bg-white text-black/85">
-                                        —
-                                    </option>
-                                    {AVAILABILITY_OPTIONS.map((opt) => (
-                                        <option
-                                            key={opt.key}
-                                            value={opt.key}
-                                            className="bg-white text-black/85"
-                                        >
-                                            {opt.label}
-                                        </option>
-                                    ))}
-                                </select>
-                                <input
-                                    type="text"
-                                    value={form.availability?.note || ""}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            availability: {
-                                                ...form.availability,
-                                                note: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    placeholder="Note / reason"
-                                    data-testid="review-avail-note"
-                                    className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                                />
-                            </div>
-                        </div>
-
-                        {/* Budget (structured) */}
-                        <div className="md:col-span-2">
-                            <div className="flex items-center justify-between">
-                                <label className="text-[11px] text-black/45 tracking-widest uppercase">
-                                    Budget
-                                </label>
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setFv({
-                                            ...fv,
-                                            budget: !fv.budget,
-                                        })
-                                    }
-                                    data-testid="review-fv-budget"
-                                    title={
-                                        fv.budget
-                                            ? "Visible to client"
-                                            : "Hidden from client"
-                                    }
-                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv.budget ? "bg-black" : "bg-black/15"}`}
-                                >
-                                    <span
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.budget ? "translate-x-5 bg-white" : "bg-black"}`}
-                                    />
-                                </button>
-                            </div>
-                            <div className="mt-2 flex items-center gap-3">
-                                <select
-                                    value={form.budget?.status || ""}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            budget: {
-                                                ...form.budget,
-                                                status: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    data-testid="review-budget-status"
-                                    className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
-                                >
-                                    <option value="" className="bg-white text-black/85">
-                                        —
-                                    </option>
-                                    {BUDGET_OPTIONS.map((opt) => (
-                                        <option
-                                            key={opt.key}
-                                            value={opt.key}
-                                            className="bg-white text-black/85"
-                                        >
-                                            {opt.label}
-                                        </option>
-                                    ))}
-                                </select>
-                                <input
-                                    type="text"
-                                    value={form.budget?.value || ""}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            budget: {
-                                                ...form.budget,
-                                                value: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    placeholder="Expected budget (if not accepting)"
-                                    data-testid="review-budget-value"
-                                    className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                                />
-                            </div>
+                                Admin Review
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setIsPreviewMode(true)}
+                                className={`px-4 py-1.5 rounded-full text-xs tg-mono uppercase tracking-wider transition-all duration-300 ${isPreviewMode ? "bg-amber-500 text-white shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                            >
+                                Client Preview
+                            </button>
                         </div>
                     </div>
 
-                    {Array.isArray(submission.project_custom_questions) &&
-                        submission.project_custom_questions.length > 0 && (
-                            <div className="border-t border-black/[0.08] pt-5">
-                                <p className="eyebrow mb-3">
-                                    Custom Answers
-                                </p>
-                                {submission.project_custom_questions.map(
-                                    (q) => (
-                                        <div
-                                            key={q.id}
-                                            className="mb-3 text-sm"
-                                        >
-                                            <div className="text-black/45 text-xs mb-1">
-                                                {q.question}
-                                            </div>
-                                            <div className="text-black/85">
-                                                {(form.custom_answers || {})[
-                                                    q.id
-                                                ] || "—"}
-                                            </div>
+                    {!isPreviewMode && (
+                        <div className="flex flex-wrap items-center gap-2 mb-8">
+                            <button
+                                type="button"
+                                onClick={openInDrive}
+                                data-testid="open-in-drive-btn"
+                                className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-colors shadow-sm"
+                                title="Opens the Google Drive backup folder for this submission"
+                            >
+                                <Cloud className="w-3.5 h-3.5" />
+                                Open in Drive
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setShowHistory(!showHistory)}
+                                className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-colors shadow-sm"
+                                title="Toggle Curation Revision History sidebar"
+                            >
+                                <Clock className="w-3.5 h-3.5" />
+                                Curation History
+                            </button>
+
+                            {fullSub?.decision === "approved" && (
+                                <button
+                                    type="button"
+                                    onClick={regenerateSnapshot}
+                                    className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-green-600/20 hover:border-green-600/40 rounded-sm bg-green-50 text-green-700 hover:text-green-800 transition-colors shadow-sm font-semibold"
+                                    title="Regenerates and freezes the client package snapshot with the latest visible state and overrides."
+                                >
+                                    <RefreshCw className="w-3.5 h-3.5" />
+                                    Regenerate Client Package
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Talent details section */}
+                    <section
+                        className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm"
+                        data-testid="review-form-data-section"
+                    >
+                        <div className="flex items-center justify-between mb-5 border-b border-black/[0.05] pb-3">
+                            <p className="eyebrow text-black/85">Talent Profile</p>
+                            {!isPreviewMode && (
+                                <span className="text-[10px] tg-mono text-black/45">
+                                    Toggle switch to set client visibility
+                                </span>
+                            )}
+                        </div>
+
+                        {isPreviewMode ? (
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
+                                {FIELDS.filter(f => fv[f.key] !== false).map(f => (
+                                    <div key={f.key} className="min-w-0">
+                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">{f.label}</p>
+                                        <p className="text-sm font-medium text-black/85">{form[f.key] || "—"}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6">
+                                {FIELDS.map((f) => (
+                                    <div
+                                        key={f.key}
+                                        className="flex items-start gap-3 bg-black/[0.01] p-3 rounded-lg border border-black/[0.03]"
+                                    >
+                                        <div className="flex-1 min-w-0">
+                                            <label className="text-[10px] text-black/45 tracking-widest uppercase">
+                                                {f.label}
+                                            </label>
+                                            <input
+                                                type={f.type || "text"}
+                                                value={form[f.key] ?? ""}
+                                                onChange={(e) =>
+                                                    setForm({
+                                                        ...form,
+                                                        [f.key]: e.target.value,
+                                                    })
+                                                }
+                                                data-testid={`review-field-${f.key}`}
+                                                className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
+                                            />
+                                            {f.key === "age" && submission.submitted_age_override !== undefined && submission.submitted_age_override !== null && (
+                                                <p className="text-[10px] text-amber-600 font-mono mt-1">
+                                                    Project-Specific Age Override Active ({submission.submitted_age_override})
+                                                </p>
+                                            )}
                                         </div>
-                                    ),
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setFv({
+                                                    ...fv,
+                                                    [f.key]: !fv[f.key],
+                                                })
+                                            }
+                                            data-testid={`review-fv-${f.key}`}
+                                            title={fv[f.key] ? "Visible to client" : "Hidden from client"}
+                                            className={`mt-4 w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] ? "bg-black" : "bg-black/15"}`}
+                                        >
+                                            <span
+                                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] ? "translate-x-5 bg-white" : "bg-black"}`}
+                                            />
+                                        </button>
+                                    </div>
+                                ))}
+
+                                {/* Availability (structured) */}
+                                <div className="md:col-span-2 border-t border-black/[0.08] pt-4 mt-2">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-[10px] text-black/45 tracking-widest uppercase">
+                                            Availability
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setFv({
+                                                    ...fv,
+                                                    availability: fv.availability === false,
+                                                })
+                                            }
+                                            data-testid="review-fv-availability"
+                                            title={fv.availability === false ? "Hidden from client" : "Visible to client"}
+                                            className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
+                                        >
+                                            <span
+                                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.availability !== false ? "translate-x-5 bg-white" : "bg-black"}`}
+                                            />
+                                        </button>
+                                    </div>
+                                    <div className="mt-2 flex items-center gap-3">
+                                        <select
+                                            value={form.availability?.status || ""}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    availability: {
+                                                        ...form.availability,
+                                                        status: e.target.value,
+                                                    },
+                                                })
+                                            }
+                                            data-testid="review-avail-status"
+                                            className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 font-medium"
+                                        >
+                                            <option value="" className="bg-white text-black/85">—</option>
+                                            {AVAILABILITY_OPTIONS.map((opt) => (
+                                                <option key={opt.key} value={opt.key} className="bg-white text-black/85">
+                                                    {opt.label}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <input
+                                            type="text"
+                                            value={form.availability?.note || ""}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    availability: {
+                                                        ...form.availability,
+                                                        note: e.target.value,
+                                                    },
+                                                })
+                                            }
+                                            placeholder="Note / reason"
+                                            data-testid="review-avail-note"
+                                            className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30 font-medium"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Budget (structured) */}
+                                <div className="md:col-span-2">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-[10px] text-black/45 tracking-widest uppercase">
+                                            Budget
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setFv({
+                                                    ...fv,
+                                                    budget: !fv.budget,
+                                                })
+                                            }
+                                            data-testid="review-fv-budget"
+                                            title={fv.budget ? "Visible to client" : "Hidden from client"}
+                                            className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${fv.budget ? "bg-black" : "bg-black/15"}`}
+                                        >
+                                            <span
+                                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.budget ? "translate-x-5 bg-white" : "bg-black"}`}
+                                            />
+                                        </button>
+                                    </div>
+                                    <div className="mt-2 flex items-center gap-3">
+                                        <select
+                                            value={form.budget?.status || ""}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    budget: {
+                                                        ...form.budget,
+                                                        status: e.target.value,
+                                                    },
+                                                })
+                                            }
+                                            data-testid="review-budget-status"
+                                            className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 font-medium"
+                                        >
+                                            <option value="" className="bg-white text-black/85">—</option>
+                                            {BUDGET_OPTIONS.map((opt) => (
+                                                <option key={opt.key} value={opt.key} className="bg-white text-black/85">
+                                                    {opt.label}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <input
+                                            type="text"
+                                            value={form.budget?.value || ""}
+                                            onChange={(e) =>
+                                                setForm({
+                                                    ...form,
+                                                    budget: {
+                                                        ...form.budget,
+                                                        value: e.target.value,
+                                                    },
+                                                })
+                                            }
+                                            placeholder="Expected budget (if not accepting)"
+                                            data-testid="review-budget-value"
+                                            className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30 font-medium"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Availability and Budget summary inside client preview mode */}
+                        {isPreviewMode && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 border-t border-black/[0.08] pt-4">
+                                {fv.availability !== false && form.availability?.status && (
+                                    <div>
+                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
+                                        <p className="text-sm font-medium text-black/85">
+                                            {form.availability?.status === "available" ? "🟢 Available" : "🔴 Unavailable"} 
+                                            {form.availability?.note ? ` — ${form.availability.note}` : ""}
+                                        </p>
+                                    </div>
+                                )}
+                                {fv.budget && form.budget?.status && (
+                                    <div>
+                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Budget</p>
+                                        <p className="text-sm font-medium text-black/85">
+                                            {form.budget?.status === "accept" ? "🟢 Accepts Day Rate" : "🔴 Expected Day Rate"} 
+                                            {form.budget?.value ? ` — ${form.budget.value}` : ""}
+                                        </p>
+                                    </div>
                                 )}
                             </div>
                         )}
 
-                    <button
-                        onClick={save}
-                        disabled={saving}
-                        data-testid="review-save-btn"
-                        className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-black text-white rounded-sm text-xs font-medium hover:bg-black/90 transition-colors"
-                    >
-                        {saving && (
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                        )}
-                        Save changes
-                    </button>
-                </section>
+                        {Array.isArray(submission.project_custom_questions) &&
+                            submission.project_custom_questions.length > 0 && (
+                                <div className="border-t border-black/[0.08] pt-5 mt-4">
+                                    <p className="eyebrow mb-3">Custom Answers</p>
+                                    {submission.project_custom_questions.map((q) => (
+                                        <div key={q.id} className="mb-3 text-sm">
+                                            <div className="text-black/45 text-[11px] mb-1 font-medium">{q.question}</div>
+                                            <div className="text-black/85 font-medium">
+                                                {(form.custom_answers || {})[q.id] || "—"}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
 
-                {intro ? (
-                    <section className="mb-10">
-                        <p className="eyebrow mb-3">Introduction Video</p>
-                        <video
-                            src={intro.url}
-                            controls
-                            className="w-full max-w-3xl border border-black/[0.08] bg-[#fafaf8] rounded-lg"
-                            data-testid="review-intro-video"
-                        />
+                        {!isPreviewMode && (
+                            <button
+                                onClick={save}
+                                disabled={saving}
+                                data-testid="review-save-btn"
+                                className="mt-4 inline-flex items-center gap-2 px-4 py-2.5 bg-black text-white rounded-sm text-xs font-semibold hover:bg-black/90 transition-colors shadow-sm"
+                            >
+                                {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                                Save changes
+                            </button>
+                        )}
                     </section>
-                ) : (
-                    <section className="mb-10">
-                        <p className="eyebrow mb-3">Introduction Video</p>
-                        <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
-                            Not submitted
-                        </div>
-                    </section>
-                )}
-                <section className="mb-10" data-testid="review-takes-section">
-                    <p className="eyebrow mb-3">Audition Takes</p>
-                    {(() => {
-                        // Merge new `take` media with legacy `take_1/2/3`;
-                        // legacy entries get auto-labelled "Take N".
-                        const takes = media
-                            .filter(
-                                (m) =>
-                                    m.category === "take" ||
-                                    m.category === "take_1" ||
-                                    m.category === "take_2" ||
-                                    m.category === "take_3",
-                            )
-                            .map((m) => {
-                                if (m.category === "take") return m;
-                                const n = m.category.replace("take_", "");
-                                return { ...m, label: m.label || `Take ${n}` };
-                            });
-                        if (takes.length === 0) {
-                            return (
+
+                    {/* Section 1: Introduction Video */}
+                    {(!isPreviewMode || intro) && (
+                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+                            <div className="flex items-center justify-between mb-4 border-b border-black/[0.05] pb-3">
+                                <p className="eyebrow">Introduction Video</p>
+                                {!isPreviewMode && intro && (
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleMediaProperty(intro.id, "client_visible")}
+                                            className={`p-1.5 rounded-full border ${intro.client_visible !== false ? "bg-black text-white border-black" : "bg-white text-black/40 border-black/10 hover:border-black/30"} transition-all`}
+                                            title="Toggle Client Visibility"
+                                        >
+                                            {intro.client_visible !== false ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleMediaProperty(intro.id, "internal_only")}
+                                            className={`p-1.5 rounded-full border ${intro.internal_only ? "bg-amber-600 text-white border-amber-600" : "bg-white text-black/40 border-black/10 hover:border-black/30"} transition-all`}
+                                            title="Mark Internal Only"
+                                        >
+                                            <Shield className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                            {intro ? (
+                                <div className="max-w-3xl">
+                                    <PremiumVideoPlayer
+                                        src={intro.url}
+                                        poster={intro.poster_url}
+                                        label="Introduction Tape"
+                                    />
+                                </div>
+                            ) : (
                                 <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     Not submitted
                                 </div>
-                            );
-                        }
-                        return (
-                            <div className="grid md:grid-cols-2 gap-4">
-                                {takes.map((t, i) => (
-                                    <div
-                                        key={t.id}
-                                        data-testid={`review-take-${i}`}
-                                    >
-                                        <p className="text-xs text-black/45 mb-2 tg-mono truncate">
-                                            {t.label || `Take ${i + 1}`}
-                                        </p>
-                                        <video
-                                            src={t.url}
-                                            controls
-                                            preload="metadata"
-                                            className="w-full border border-black/[0.08] bg-[#fafaf8] rounded-lg"
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        );
-                    })()}
-                </section>
-                {/* Phase 3 v37j — Indian / Western / Portfolio image sections.
-                    Each is independent and hidden when empty. Same grid UI
-                    across all three. */}
-                {indianImages.length > 0 && (
-                    <section className="mb-10" data-testid="review-indian-images-section">
-                        <p className="eyebrow mb-3">
-                            Indian Look Images ({indianImages.length})
-                        </p>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                            {indianImages.map((m) => (
-                                <a
-                                    key={m.id}
-                                    href={m.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="aspect-square bg-[#fafaf8] overflow-hidden border border-black/[0.08]"
-                                >
-                                    <img
-                                        src={m.url}
-                                        alt=""
-                                        loading="lazy"
-                                        className="w-full h-full object-cover"
-                                    />
-                                </a>
-                            ))}
-                        </div>
-                    </section>
-                )}
-                {westernImages.length > 0 && (
-                    <section className="mb-10" data-testid="review-western-images-section">
-                        <p className="eyebrow mb-3">
-                            Western Look Images ({westernImages.length})
-                        </p>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                            {westernImages.map((m) => (
-                                <a
-                                    key={m.id}
-                                    href={m.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="aspect-square bg-[#fafaf8] overflow-hidden border border-black/[0.08]"
-                                >
-                                    <img
-                                        src={m.url}
-                                        alt=""
-                                        loading="lazy"
-                                        className="w-full h-full object-cover"
-                                    />
-                                </a>
-                            ))}
-                        </div>
-                    </section>
-                )}
-                {portfolioImages.length > 0 && (
-                    <section className="mb-10" data-testid="review-portfolio-images-section">
-                        <p className="eyebrow mb-3">
-                            Portfolio Images ({portfolioImages.length})
-                        </p>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                            {portfolioImages.map((m) => (
-                                <a
-                                    key={m.id}
-                                    href={m.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="aspect-square bg-[#fafaf8] overflow-hidden border border-black/[0.08]"
-                                >
-                                    <img
-                                        src={m.url}
-                                        alt=""
-                                        loading="lazy"
-                                        className="w-full h-full object-cover"
-                                    />
-                                </a>
-                            ))}
-                        </div>
-                    </section>
-                )}
+                            )}
+                        </section>
+                    )}
 
-                <div className="sticky bottom-4 flex gap-2 justify-end flex-wrap bg-white/90 backdrop-blur-sm border border-black/[0.08] rounded-xl px-4 py-3 shadow-sm">
-                    <button
-                        onClick={() => {
-                            onDecision("approved");
-                            onClose();
-                        }}
-                        data-testid="review-approve-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-sm text-xs font-medium hover:bg-green-700 transition-colors"
-                    >
-                        <Check className="w-3.5 h-3.5" /> Approve — Forward
-                    </button>
-                    <button
-                        onClick={() => {
-                            onDecision("hold");
-                            onClose();
-                        }}
-                        data-testid="review-hold-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-sm text-xs font-medium transition-colors"
-                    >
-                        <PauseCircle className="w-3.5 h-3.5" /> Hold
-                    </button>
-                    <button
-                        onClick={() => {
-                            onDecision("rejected");
-                            onClose();
-                        }}
-                        data-testid="review-reject-btn"
-                        className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-sm text-xs transition-colors"
-                    >
-                        <XCircle className="w-3.5 h-3.5" /> Reject
-                    </button>
+                    {/* Section 2: Audition Takes */}
+                    {(!isPreviewMode || takes.length > 0) && (
+                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-takes-section">
+                            <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Audition Takes ({takes.length})</p>
+                            {takes.length === 0 ? (
+                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                    Not submitted
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    {takes.map((t, idx) => (
+                                        <div
+                                            key={t.id}
+                                            data-testid={`review-take-${idx}`}
+                                            className={`relative group bg-[#fafaf8] p-3 border rounded-xl transition-all duration-200 ${!isPreviewMode ? "hover:shadow-md" : ""} ${t.client_visible === false ? "opacity-60 border-dashed" : "border-black/[0.06]"}`}
+                                        >
+                                            {/* Curated badging overlay for edit */}
+                                            {!isPreviewMode && (
+                                                <div className="absolute top-5 right-5 z-20 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-sm border border-black/10">
+                                                    {/* Arrow Shift Controls */}
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === 0}
+                                                        onClick={() => shiftMediaBucketItem(t.id, -1)}
+                                                        className="p-1 text-black/60 hover:text-black disabled:opacity-30 transition-colors"
+                                                        title="Move Left"
+                                                    >
+                                                        <ArrowLeft className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === takes.length - 1}
+                                                        onClick={() => shiftMediaBucketItem(t.id, 1)}
+                                                        className="p-1 text-black/60 hover:text-black disabled:opacity-30 transition-colors"
+                                                        title="Move Right"
+                                                    >
+                                                        <ArrowRight className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    <span className="w-[1px] h-3.5 bg-black/10 shrink-0 mx-0.5" />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(t.id, "client_visible")}
+                                                        className={`p-1 rounded-full ${t.client_visible !== false ? "text-black font-semibold" : "text-black/30"}`}
+                                                        title="Toggle Client Visibility"
+                                                    >
+                                                        {t.client_visible !== false ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(t.id, "internal_only")}
+                                                        className={`p-1 rounded-full ${t.internal_only ? "text-amber-600" : "text-black/30"}`}
+                                                        title="Mark Internal Only"
+                                                    >
+                                                        <Shield className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(t.id, "primary_take")}
+                                                        className={`p-1 rounded-full ${t.primary_take ? "text-amber-500 font-semibold" : "text-black/30"}`}
+                                                        title="Set as Primary Take"
+                                                    >
+                                                        <Star className={`w-3.5 h-3.5 ${t.primary_take ? "fill-amber-500" : ""}`} />
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            <div className="mb-2.5 flex items-center justify-between">
+                                                <input
+                                                    type="text"
+                                                    disabled={isPreviewMode}
+                                                    value={t.label || ""}
+                                                    onChange={(e) => {
+                                                        const labelVal = e.target.value;
+                                                        setMediaList((prev) => prev.map(m => m.id === t.id ? { ...m, label: labelVal } : m));
+                                                    }}
+                                                    className={`bg-transparent text-xs font-semibold tg-mono uppercase tracking-wider text-black/70 outline-none border-b border-transparent ${!isPreviewMode ? "focus:border-black/30 focus:text-black" : ""}`}
+                                                />
+                                                {/* Mini indicators */}
+                                                <div className="flex gap-1.5">
+                                                    {t.client_visible === false && (
+                                                        <span className="text-[9px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">Hidden</span>
+                                                    )}
+                                                    {t.internal_only && (
+                                                        <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider flex items-center gap-0.5">
+                                                            <Lock className="w-2.5 h-2.5" /> Internal
+                                                        </span>
+                                                    )}
+                                                    {t.primary_take && (
+                                                        <span className="text-[9px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Primary Take</span>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <PremiumVideoPlayer
+                                                src={t.url}
+                                                poster={t.poster_url}
+                                                isPrimary={t.primary_take}
+                                                label={t.label || `Take ${idx + 1}`}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+                    )}
+
+                    {/* Section 3: Indian Look Images */}
+                    {(!isPreviewMode || indianImages.length > 0) && (
+                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-indian-images-section">
+                            <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Indian Look Images ({indianImages.length})</p>
+                            {indianImages.length === 0 ? (
+                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                    No Indian look images uploaded
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    {indianImages.map((m, idx) => (
+                                        <div
+                                            key={m.id}
+                                            className={`relative group aspect-square bg-[#fafaf8] overflow-hidden border rounded-lg transition-all duration-200 ${!isPreviewMode ? "hover:shadow-md" : ""} ${m.client_visible === false ? "opacity-60 border-dashed" : "border-black/[0.06]"}`}
+                                        >
+                                            <img
+                                                src={m.url}
+                                                alt=""
+                                                loading="lazy"
+                                                className="w-full h-full object-cover"
+                                            />
+
+                                            {/* Curated controls overlay on image */}
+                                            {!isPreviewMode && (
+                                                <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-sm border border-black/10">
+                                                    {/* Shifting Arrows */}
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === 0}
+                                                        onClick={() => shiftMediaBucketItem(m.id, -1)}
+                                                        className="p-0.5 text-black/60 hover:text-black disabled:opacity-30"
+                                                        title="Move Left"
+                                                    >
+                                                        <ArrowLeft className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === indianImages.length - 1}
+                                                        onClick={() => shiftMediaBucketItem(m.id, 1)}
+                                                        className="p-0.5 text-black/60 hover:text-black disabled:opacity-30"
+                                                        title="Move Right"
+                                                    >
+                                                        <ArrowRight className="w-3 h-3" />
+                                                    </button>
+                                                    <span className="w-[1px] h-3 bg-black/10 shrink-0 mx-0.5" />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "client_visible")}
+                                                        className={`p-0.5 rounded-full ${m.client_visible !== false ? "text-black font-semibold" : "text-black/30"}`}
+                                                        title="Toggle Client Visibility"
+                                                    >
+                                                        {m.client_visible !== false ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "internal_only")}
+                                                        className={`p-0.5 rounded-full ${m.internal_only ? "text-amber-600" : "text-black/30"}`}
+                                                        title="Mark Internal Only"
+                                                    >
+                                                        <Shield className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "client_cover")}
+                                                        className={`p-0.5 rounded-full ${m.client_cover ? "text-amber-500 font-semibold" : "text-black/30"}`}
+                                                        title="Set as Client Cover photo"
+                                                    >
+                                                        <Star className={`w-3 h-3 ${m.client_cover ? "fill-amber-500" : ""}`} />
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            {/* Badging indicator flags */}
+                                            <div className="absolute bottom-2 left-2 flex flex-col gap-1 pointer-events-none">
+                                                {m.client_visible === false && (
+                                                    <span className="text-[8px] bg-red-600/80 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold">Hidden</span>
+                                                )}
+                                                {m.internal_only && (
+                                                    <span className="text-[8px] bg-amber-600/80 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold">Internal</span>
+                                                )}
+                                                {m.client_cover && (
+                                                    <span className="text-[8px] bg-amber-500 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-bold">Client Cover</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+                    )}
+
+                    {/* Section 4: Western Look Images */}
+                    {(!isPreviewMode || westernImages.length > 0) && (
+                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-western-images-section">
+                            <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Western Look Images ({westernImages.length})</p>
+                            {westernImages.length === 0 ? (
+                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                    No Western look images uploaded
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    {westernImages.map((m, idx) => (
+                                        <div
+                                            key={m.id}
+                                            className={`relative group aspect-square bg-[#fafaf8] overflow-hidden border rounded-lg transition-all duration-200 ${!isPreviewMode ? "hover:shadow-md" : ""} ${m.client_visible === false ? "opacity-60 border-dashed" : "border-black/[0.06]"}`}
+                                        >
+                                            <img
+                                                src={m.url}
+                                                alt=""
+                                                loading="lazy"
+                                                className="w-full h-full object-cover"
+                                            />
+
+                                            {/* Curated controls overlay on Western image */}
+                                            {!isPreviewMode && (
+                                                <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-sm border border-black/10">
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === 0}
+                                                        onClick={() => shiftMediaBucketItem(m.id, -1)}
+                                                        className="p-0.5 text-black/60 hover:text-black disabled:opacity-30"
+                                                        title="Move Left"
+                                                    >
+                                                        <ArrowLeft className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === westernImages.length - 1}
+                                                        onClick={() => shiftMediaBucketItem(m.id, 1)}
+                                                        className="p-0.5 text-black/60 hover:text-black disabled:opacity-30"
+                                                        title="Move Right"
+                                                    >
+                                                        <ArrowRight className="w-3 h-3" />
+                                                    </button>
+                                                    <span className="w-[1px] h-3 bg-black/10 shrink-0 mx-0.5" />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "client_visible")}
+                                                        className={`p-0.5 rounded-full ${m.client_visible !== false ? "text-black font-semibold" : "text-black/30"}`}
+                                                        title="Toggle Client Visibility"
+                                                    >
+                                                        {m.client_visible !== false ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "internal_only")}
+                                                        className={`p-0.5 rounded-full ${m.internal_only ? "text-amber-600" : "text-black/30"}`}
+                                                        title="Mark Internal Only"
+                                                    >
+                                                        <Shield className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "client_cover")}
+                                                        className={`p-0.5 rounded-full ${m.client_cover ? "text-amber-500 font-semibold" : "text-black/30"}`}
+                                                        title="Set as Client Cover photo"
+                                                    >
+                                                        <Star className={`w-3 h-3 ${m.client_cover ? "fill-amber-500" : ""}`} />
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            <div className="absolute bottom-2 left-2 flex flex-col gap-1 pointer-events-none">
+                                                {m.client_visible === false && (
+                                                    <span className="text-[8px] bg-red-600/80 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold">Hidden</span>
+                                                )}
+                                                {m.internal_only && (
+                                                    <span className="text-[8px] bg-amber-600/80 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold">Internal</span>
+                                                )}
+                                                {m.client_cover && (
+                                                    <span className="text-[8px] bg-amber-500 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-bold">Client Cover</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+                    )}
+
+                    {/* Section 5: Portfolio Images */}
+                    {(!isPreviewMode || portfolioImages.length > 0) && (
+                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-portfolio-images-section">
+                            <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Portfolio Images ({portfolioImages.length})</p>
+                            {portfolioImages.length === 0 ? (
+                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                    No Portfolio images uploaded
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    {portfolioImages.map((m, idx) => (
+                                        <div
+                                            key={m.id}
+                                            className={`relative group aspect-square bg-[#fafaf8] overflow-hidden border rounded-lg transition-all duration-200 ${!isPreviewMode ? "hover:shadow-md" : ""} ${m.client_visible === false ? "opacity-60 border-dashed" : "border-black/[0.06]"}`}
+                                        >
+                                            <img
+                                                src={m.url}
+                                                alt=""
+                                                loading="lazy"
+                                                className="w-full h-full object-cover"
+                                            />
+
+                                            {/* Curated controls overlay on Portfolio image */}
+                                            {!isPreviewMode && (
+                                                <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 backdrop-blur-sm p-1 rounded-full shadow-sm border border-black/10">
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === 0}
+                                                        onClick={() => shiftMediaBucketItem(m.id, -1)}
+                                                        className="p-0.5 text-black/60 hover:text-black disabled:opacity-30"
+                                                        title="Move Left"
+                                                    >
+                                                        <ArrowLeft className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={idx === portfolioImages.length - 1}
+                                                        onClick={() => shiftMediaBucketItem(m.id, 1)}
+                                                        className="p-0.5 text-black/60 hover:text-black disabled:opacity-30"
+                                                        title="Move Right"
+                                                    >
+                                                        <ArrowRight className="w-3 h-3" />
+                                                    </button>
+                                                    <span className="w-[1px] h-3 bg-black/10 shrink-0 mx-0.5" />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "client_visible")}
+                                                        className={`p-0.5 rounded-full ${m.client_visible !== false ? "text-black font-semibold" : "text-black/30"}`}
+                                                        title="Toggle Client Visibility"
+                                                    >
+                                                        {m.client_visible !== false ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "internal_only")}
+                                                        className={`p-0.5 rounded-full ${m.internal_only ? "text-amber-600" : "text-black/30"}`}
+                                                        title="Mark Internal Only"
+                                                    >
+                                                        <Shield className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleMediaProperty(m.id, "client_cover")}
+                                                        className={`p-0.5 rounded-full ${m.client_cover ? "text-amber-500 font-semibold" : "text-black/30"}`}
+                                                        title="Set as Client Cover photo"
+                                                    >
+                                                        <Star className={`w-3 h-3 ${m.client_cover ? "fill-amber-500" : ""}`} />
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            <div className="absolute bottom-2 left-2 flex flex-col gap-1 pointer-events-none">
+                                                {m.client_visible === false && (
+                                                    <span className="text-[8px] bg-red-600/80 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold">Hidden</span>
+                                                )}
+                                                {m.internal_only && (
+                                                    <span className="text-[8px] bg-amber-600/80 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold">Internal</span>
+                                                )}
+                                                {m.client_cover && (
+                                                    <span className="text-[8px] bg-amber-500 backdrop-blur-sm text-white px-1.5 py-0.5 rounded uppercase tracking-wider font-bold">Client Cover</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+                    )}
+
+                    {/* Premium Sticky review toolbar */}
+                    <div className="sticky bottom-4 flex flex-col gap-3 bg-white/95 backdrop-blur-md border border-black/[0.08] rounded-xl px-4 md:px-6 py-4 shadow-lg z-40 transition-all duration-300 mobile-sticky-bar">
+                        
+                        {/* Status Note input - visible in Admin mode only */}
+                        {!isPreviewMode && (
+                            <div className="w-full">
+                                <input
+                                    type="text"
+                                    value={decisionNote}
+                                    onChange={(e) => setDecisionNote(e.target.value)}
+                                    placeholder="Add a decision note or internal recruiter comment (optional)..."
+                                    className="w-full text-xs px-3.5 py-2 border border-black/[0.08] focus:border-black/45 rounded-lg outline-none bg-black/[0.02] focus:bg-white transition-all text-black/85 shadow-inner"
+                                />
+                            </div>
+                        )}
+
+                        <div className="flex items-center justify-between gap-4 flex-wrap w-full">
+                            <div className="flex items-center gap-3">
+                                {hasUnsavedChanges ? (
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                                        <span className="text-xs text-amber-700 font-semibold tg-mono uppercase tracking-wider">Unsaved Curations</span>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
+                                        <span className="text-xs text-green-700 font-semibold tg-mono uppercase tracking-wider">Synced to Client Link</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-2 flex-wrap items-center justify-end">
+                                {/* Save Button */}
+                                {hasUnsavedChanges && !isPreviewMode && (
+                                    <button
+                                        onClick={save}
+                                        disabled={saving}
+                                        data-testid="sticky-save-btn"
+                                        className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold shadow-sm transition-all"
+                                    >
+                                        {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                        Save Curations
+                                    </button>
+                                )}
+
+                                {isPreviewMode && (
+                                    <button
+                                        onClick={() => setIsPreviewMode(false)}
+                                        className="inline-flex items-center gap-1.5 px-4 py-2 border border-black/10 hover:border-black/35 rounded-md text-xs text-black/75 hover:text-black font-semibold transition-all bg-white shadow-sm"
+                                    >
+                                        Back to Editor
+                                    </button>
+                                )}
+
+                                {!isPreviewMode && (
+                                    <>
+                                        <span className="w-[1px] h-6 bg-black/10 shrink-0 mx-1 hidden md:inline" />
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("approved", decisionNote);
+                                                onClose();
+                                            }}
+                                            data-testid="review-approve-btn"
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-md text-xs font-bold transition-all shadow-sm"
+                                        >
+                                            <Check className="w-3.5 h-3.5" /> Approve
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("shortlisted", decisionNote);
+                                                onClose();
+                                            }}
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-bold transition-all shadow-sm"
+                                        >
+                                            <Star className="w-3.5 h-3.5 fill-white" /> Shortlist
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("ask_to_test", decisionNote);
+                                                onClose();
+                                            }}
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-indigo-600/40 text-indigo-600 hover:bg-indigo-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
+                                        >
+                                            <HelpCircle className="w-3.5 h-3.5" /> Ask To Test
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("hold", decisionNote);
+                                                onClose();
+                                            }}
+                                            data-testid="review-hold-btn"
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-md text-xs font-bold transition-all bg-white shadow-sm"
+                                        >
+                                            <PauseCircle className="w-3.5 h-3.5" /> Hold
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("does_not_work_for_this", decisionNote);
+                                                onClose();
+                                            }}
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-slate-400/40 text-slate-600 hover:bg-slate-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
+                                            title="Valuable talent, but not suitable for this specific project role."
+                                        >
+                                            <FolderMinus className="w-3.5 h-3.5" /> Not For Project
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("rejected", decisionNote);
+                                                onClose();
+                                            }}
+                                            data-testid="review-reject-btn"
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
+                                        >
+                                            <XCircle className="w-3.5 h-3.5" /> Reject
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Curation History Sidebar Drawer */}
+                    {showHistory && (
+                        <div className="fixed inset-y-0 right-0 z-50 w-full max-w-sm bg-white shadow-2xl border-l border-black/[0.08] flex flex-col p-6 overflow-y-auto transition-all duration-300 transform translate-x-0">
+                            <div className="flex items-center justify-between border-b border-black/[0.06] pb-4 mb-4">
+                                <h3 className="font-display text-lg font-bold text-black/90 flex items-center gap-2">
+                                    <Clock className="w-5 h-5 text-black/70" />
+                                    Curation History
+                                </h3>
+                                <button
+                                    onClick={() => setShowHistory(false)}
+                                    className="p-1 hover:bg-black/[0.04] rounded-full text-black/60 hover:text-black transition-colors"
+                                >
+                                    <X className="w-5 h-5" />
+                                </button>
+                            </div>
+                            
+                            <div className="flex-1 space-y-4">
+                                {(!fullSub?.media_revision_history || fullSub.media_revision_history.length === 0) ? (
+                                    <div className="text-center py-10 text-black/40">
+                                        <Clock className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                                        <p className="text-xs tg-mono">No history recorded yet.</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {fullSub.media_revision_history.map((rev) => (
+                                            <div key={rev.id} className="border border-black/[0.05] bg-[#fafaf8] p-3.5 rounded-lg flex flex-col gap-2 shadow-sm hover:border-black/20 transition-all">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[10px] tg-mono bg-black/[0.05] text-black/75 px-2 py-0.5 rounded font-bold">
+                                                        Rev #{rev.id}
+                                                    </span>
+                                                    <span className="text-[10px] text-black/45 tg-mono">
+                                                        {new Date(rev.timestamp).toLocaleDateString()} {new Date(rev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    </span>
+                                                </div>
+                                                <p className="text-xs font-semibold text-black/85">{rev.note || "Curations updated"}</p>
+                                                <p className="text-[10px] text-black/45 tg-mono">Recruiter: {rev.admin_email}</p>
+                                                <p className="text-[10px] text-black/50 tg-mono">{rev.media?.length || 0} items curated</p>
+                                                
+                                                <button
+                                                    onClick={() => restoreRevision(rev.id)}
+                                                    className="mt-1 text-left inline-flex items-center gap-1.5 text-xs text-amber-600 hover:text-amber-700 font-bold transition-all bg-amber-50 hover:bg-amber-100/50 px-2.5 py-1.5 rounded-md border border-amber-600/10"
+                                                >
+                                                    <RotateCcw className="w-3.5 h-3.5 animate-hover-spin" />
+                                                    Restore State
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Embedded Mobile / Tablet Custom Responsive Styles */}
+                    <style>{`
+                        @media (max-width: 1024px) {
+                            .group-hover\\:opacity-100, .group .opacity-0 {
+                                opacity: 100 !important;
+                            }
+                            .mobile-sticky-bar {
+                                position: fixed !important;
+                                bottom: 0 !important;
+                                left: 0 !important;
+                                right: 0 !important;
+                                border-radius: 0 !important;
+                                margin: 0 !important;
+                                border-left: 0 !important;
+                                border-right: 0 !important;
+                                border-bottom: 0 !important;
+                                z-index: 100 !important;
+                                background-color: rgba(255, 255, 255, 0.98) !important;
+                                box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12) !important;
+                            }
+                        }
+                    `}</style>
                 </div>
+            )}
+        </div>
+    );
+}
+
+function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
+    const videoRef = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+
+    const togglePlay = () => {
+        if (!videoRef.current) return;
+        if (isPlaying) {
+            videoRef.current.pause();
+            setIsPlaying(false);
+        } else {
+            videoRef.current.play().then(() => {
+                setIsPlaying(true);
+            }).catch(() => {});
+        }
+    };
+
+    return (
+        <div className="relative border border-black/[0.08] bg-black rounded-lg overflow-hidden aspect-video group shadow-sm">
+            <video
+                ref={videoRef}
+                src={src}
+                poster={poster}
+                preload="metadata"
+                className="w-full h-full object-cover cursor-pointer"
+                onEnded={() => setIsPlaying(false)}
+                onClick={togglePlay}
+            />
+            
+            {/* Custom Premium Play Overlay */}
+            {!isPlaying && (
+                <button
+                    onClick={togglePlay}
+                    className="absolute inset-0 flex items-center justify-center bg-black/25 hover:bg-black/35 transition-colors group-hover:scale-105 duration-200"
+                >
+                    <div className="w-12 h-12 rounded-full bg-white/95 shadow-md flex items-center justify-center text-black">
+                        <PlayCircle className="w-7 h-7 fill-black/10" />
+                    </div>
+                </button>
+            )}
+            
+            {/* Metadata overlay labels */}
+            <div className="absolute bottom-2.5 left-2.5 right-2.5 flex items-center justify-between pointer-events-none">
+                <span className="text-[9px] bg-black/60 backdrop-blur-sm text-white px-2 py-0.5 rounded font-mono uppercase tracking-wider">
+                    {label}
+                </span>
+                {isPrimary && (
+                    <span className="text-[9px] bg-amber-500 backdrop-blur-sm text-white px-2 py-0.5 rounded font-bold uppercase tracking-wider flex items-center gap-0.5">
+                        <Star className="w-2.5 h-2.5 fill-white" /> Primary Take
+                    </span>
+                )}
             </div>
         </div>
     );

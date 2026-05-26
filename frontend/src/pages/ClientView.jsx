@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState, useMemo, useRef } from "react"
 import { useParams } from "react-router-dom";
 import { IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
-import { thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
+import { thumbnailUrl, posterUrl, resolveTalentCover } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
@@ -1535,11 +1535,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
     const ref = useRef(null);
     const timerRef = useRef(null);
 
-    const cover =
-        (talent.media || []).find((m) => m.id === talent.cover_media_id) ||
-        (talent.media || []).find((m) =>
-            m.content_type?.startsWith("image/"),
-        );
+    const cover = resolveTalentCover(talent);
     const isShortlisted = action === "shortlist";
 
     useEffect(() => {

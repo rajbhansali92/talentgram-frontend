@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import BudgetLines from "@/components/BudgetLines";
+import { thumbnailUrl, resolveTalentCover } from "@/lib/mediaUtils";
 import {
     ArrowLeft,
     Search,
@@ -533,16 +534,7 @@ export default function LinkGenerator() {
                                 data-testid="talent-select-grid"
                             >
                                 {filteredTalents.map((t) => {
-                                    const cover =
-                                        (t.media || []).find(
-                                            (m) =>
-                                                m.id === t.cover_media_id,
-                                        ) ||
-                                        (t.media || []).find((m) =>
-                                            m.content_type?.startsWith(
-                                                "image/",
-                                            ),
-                                        );
+                                    const cover = resolveTalentCover(t);
                                     const active = selectedTalents.has(t.id);
                                     const hasOverride =
                                         active &&
@@ -565,7 +557,7 @@ export default function LinkGenerator() {
                                                 <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-lg overflow-hidden">
                                                     {cover ? (
                                                         <img
-                                                            src={cover.url}
+                                                            src={thumbnailUrl(cover)}
                                                             alt={t.name}
                                                             className="w-full h-full object-cover"
                                                         />

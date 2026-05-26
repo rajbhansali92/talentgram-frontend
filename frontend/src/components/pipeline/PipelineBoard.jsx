@@ -85,6 +85,21 @@ function PipelineBoard({ projectId, projectName }) {
     // Stage focus state
     const [focusedStageId, setFocusedStageId] = useState(null);
 
+    const mainStages = useMemo(() => 
+        MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
+        [hiddenStages, focusedStageId]
+    );
+
+    const outcomeStages = useMemo(() => 
+        OUTCOME_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
+        [hiddenStages, focusedStageId]
+    );
+
+    const independentStages = useMemo(() => 
+        INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
+        [hiddenStages, focusedStageId]
+    );
+
     // Roster browser and existing talent tracking
     const [showTalentBrowser, setShowTalentBrowser] = useState(false);
     const existingTalentIds = useMemo(() => new Set(data.map((item) => item.talent_id)), [data]);
@@ -219,21 +234,6 @@ function PipelineBoard({ projectId, projectName }) {
 
     // Display project name if provided, otherwise fallback to a cleaner placeholder
     const displayProjectName = projectName || (projectId && projectId.length > 8 ? `${projectId.slice(0, 8)}...` : projectId) || 'Active campaign';
-
-    const mainStages = useMemo(() => 
-        MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
-        [hiddenStages, focusedStageId]
-    );
-
-    const outcomeStages = useMemo(() => 
-        OUTCOME_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
-        [hiddenStages, focusedStageId]
-    );
-
-    const independentStages = useMemo(() => 
-        INDEPENDENT_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
-        [hiddenStages, focusedStageId]
-    );
 
     return (
         <div 

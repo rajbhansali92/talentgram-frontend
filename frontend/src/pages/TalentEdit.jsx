@@ -317,11 +317,18 @@ export default function TalentEdit() {
 
     // Tag management handlers
     const assignTag = useCallback(async (tag) => {
-        if (!isEdit) return;
+        if (!isEdit || !id) {
+            toast.error("Please save the talent record first.");
+            return;
+        }
+        if (!tag || !tag.id) {
+            toast.error("Invalid tag selection.");
+            return;
+        }
         const already = (talent.tags || []).some(t => t.id === tag.id);
         if (already) return;
         try {
-            await adminApi.post(`/talents/${tag.id}/tag/${id}`);
+            await adminApi.post(`/talents/${id}/tag/${tag.id}`);
             updateTalent({ tags: [...(talent.tags || []), { id: tag.id, name: tag.name }] });
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to assign tag");
@@ -330,7 +337,11 @@ export default function TalentEdit() {
 
     const createAndAssignTag = useCallback(async () => {
         const name = tagInput.trim();
-        if (!name || !isEdit) return;
+        if (!name) return;
+        if (!isEdit || !id) {
+            toast.error("Please save the talent record first.");
+            return;
+        }
         setTagSaving(true);
         try {
             const { data } = await adminApi.post("/tags", { name });
@@ -342,7 +353,7 @@ export default function TalentEdit() {
             // Assign to current talent
             const already = (talent.tags || []).some(t => t.id === tag.id);
             if (!already) {
-                await adminApi.post(`/talents/${tag.id}/tag/${id}`);
+                await adminApi.post(`/talents/${id}/tag/${tag.id}`);
                 updateTalent({ tags: [...(talent.tags || []), { id: tag.id, name: tag.name }] });
             }
             setTagInput("");
@@ -355,7 +366,14 @@ export default function TalentEdit() {
     }, [id, isEdit, tagInput, talent.tags, updateTalent]);
 
     const removeTagFromTalent = useCallback(async (tagId) => {
-        if (!isEdit) return;
+        if (!isEdit || !id) {
+            toast.error("Invalid state: Talent not saved.");
+            return;
+        }
+        if (!tagId) {
+            toast.error("Invalid tag selection.");
+            return;
+        }
         try {
             await adminApi.delete(`/talents/${id}/tag/${tagId}`);
             updateTalent({ tags: (talent.tags || []).filter(t => t.id !== tagId) });
@@ -718,35 +736,37 @@ export default function TalentEdit() {
                         Public: talent-selected work categories (visible to casting team).
                     </p>
                     <div className="flex flex-wrap gap-2" data-testid="edit-interested-in">
-                        {[
-                            "Acting", "Modeling", "Print Campaigns", "TV Commercials",
-                            "Digital Ads", "Instagram Collaborations", "Influencer Campaigns",
-                            "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
-                            "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
-                        ].map((cat) => {
-                            const active = (talent.interested_in || []).includes(cat);
-                            return (
-                                <button
-                                    key={cat}
-                                    type="button"
-                                    onClick={() => {
-                                        const set = new Set(talent.interested_in || []);
-                                        if (active) set.delete(cat); else set.add(cat);
-                                        updateTalent({ interested_in: [...set] });
-                                    }}
-                                    data-testid={`edit-interest-${cat.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-                                    aria-pressed={active}
-                                    className={[
-                                        "px-3 py-1.5 rounded-full border text-[11px] tracking-[0.06em] transition-all duration-150",
-                                        active
-                                            ? "border-black bg-black text-white"
-                                            : "border-black/[0.12] text-black/60 hover:border-black/30 hover:text-black",
-                                    ].join(" ")}
-                                >
-                                    {cat}
-                                </button>
-                            );
-                        })}
+                        {(() => {
+                            const activeOptions = ["Acting", "Modeling", "Influencer Campaigns"];
+                            const renderedCategories = Array.from(new Set([
+                                ...activeOptions,
+                                ...(talent.interested_in || []).filter(Boolean)
+                            ]));
+                            return renderedCategories.map((cat) => {
+                                const active = (talent.interested_in || []).includes(cat);
+                                return (
+                                    <button
+                                        key={cat}
+                                        type="button"
+                                        onClick={() => {
+                                            const set = new Set(talent.interested_in || []);
+                                            if (active) set.delete(cat); else set.add(cat);
+                                            updateTalent({ interested_in: [...set] });
+                                        }}
+                                        data-testid={`edit-interest-${cat.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+                                        aria-pressed={active}
+                                        className={[
+                                            "px-3 py-1.5 rounded-full border text-[11px] tracking-[0.06em] transition-all duration-150",
+                                            active
+                                                ? "border-black bg-black text-white"
+                                                : "border-black/[0.12] text-black/60 hover:border-black/30 hover:text-black",
+                                        ].join(" ")}
+                                    >
+                                        {cat}
+                                    </button>
+                                );
+                            });
+                        })()}
                     </div>
                 </div>
 

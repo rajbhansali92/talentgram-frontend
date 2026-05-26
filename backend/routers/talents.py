@@ -554,28 +554,54 @@ async def delete_tag(
     return {"ok": True, "stripped_from": update_res.modified_count}
 
 
-@router.post("/talents/{tag_id}/tag/{tid_tag}")
+from bson import ObjectId
+from bson.errors import InvalidId
+
+def get_talent_query(tid: str) -> dict:
+    if not tid:
+        return {"id": ""}
+    try:
+        if len(tid) == 24:
+            return {"$or": [{"id": tid}, {"_id": ObjectId(tid)}]}
+    except (InvalidId, TypeError, ValueError):
+        pass
+    return {"id": tid}
+
+
+@router.post("/talents/{tid}/tag/{tag_id}")
 async def assign_tag_to_talent(
+    tid: str,
     tag_id: str,
-    tid_tag: str,
     admin: dict = Depends(current_team_or_admin),
 ):
     """Assign an existing admin tag to a specific talent.
     Idempotent — repeated assignment is silently skipped.
     """
-    # tid_tag is talent id (path param named to avoid conflict with tag_id)
+    logger.info("assign_tag_to_talent: tid=%r, tag_id=%r", tid, tag_id)
+    if not tid or tid in ("null", "undefined"):
+        logger.warning("assign_tag_to_talent: Invalid/empty talent ID %r", tid)
+        raise HTTPException(400, "Invalid talent ID")
+    if not tag_id or tag_id in ("null", "undefined"):
+        logger.warning("assign_tag_to_talent: Invalid/empty tag ID %r", tag_id)
+        raise HTTPException(400, "Invalid tag ID")
+
     tag = await db.tags.find_one({"id": tag_id}, {"_id": 0})
     if not tag:
         raise HTTPException(404, "Tag not found")
-    talent = await db.talents.find_one({"id": tid_tag}, {"_id": 0, "tags": 1})
+        
+    query = get_talent_query(tid)
+    talent = await db.talents.find_one(query, {"_id": 0, "tags": 1, "id": 1})
     if not talent:
+        logger.warning("assign_tag_to_talent: Talent not found for query %r", query)
         raise HTTPException(404, "Talent not found")
+        
     # Idempotency check
     existing_ids = [t.get("id") for t in (talent.get("tags") or [])]
     if tag_id in existing_ids:
         return {"ok": True, "skipped": True}
+        
     tag_obj = {"id": tag["id"], "name": tag["name"]}
-    await db.talents.update_one({"id": tid_tag}, {"$push": {"tags": tag_obj}})
+    await db.talents.update_one(query, {"$push": {"tags": tag_obj}})
     return {"ok": True, "tag": tag_obj}
 
 
@@ -586,11 +612,21 @@ async def remove_tag_from_talent(
     admin: dict = Depends(current_team_or_admin),
 ):
     """Remove a tag from a specific talent (does NOT delete the global tag)."""
+    logger.info("remove_tag_from_talent: tid=%r, tag_id=%r", tid, tag_id)
+    if not tid or tid in ("null", "undefined"):
+        logger.warning("remove_tag_from_talent: Invalid/empty talent ID %r", tid)
+        raise HTTPException(400, "Invalid talent ID")
+    if not tag_id or tag_id in ("null", "undefined"):
+        logger.warning("remove_tag_from_talent: Invalid/empty tag ID %r", tag_id)
+        raise HTTPException(400, "Invalid tag ID")
+
+    query = get_talent_query(tid)
     res = await db.talents.update_one(
-        {"id": tid},
+        query,
         {"$pull": {"tags": {"id": tag_id}}},
     )
     if not res.matched_count:
+        logger.warning("remove_tag_from_talent: Talent not found for query %r", query)
         raise HTTPException(404, "Talent not found")
     return {"ok": True}
 

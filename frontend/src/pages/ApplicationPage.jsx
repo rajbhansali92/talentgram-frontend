@@ -481,7 +481,7 @@ export default function ApplicationPage() {
                                     testid="apply-last-name"
                                 />
                                 <Row
-                                    label="Phone (optional)"
+                                    label="Phone"
                                     value={basics.phone}
                                     onChange={(v) => setBasics({ ...basics, phone: v })}
                                     testid="apply-phone"
@@ -1118,18 +1118,7 @@ function ApplyWorkLinksEditor({ links, onChange }) {
 const INTERESTED_IN_CATEGORIES = [
     "Acting",
     "Modeling",
-    "Print Campaigns",
-    "TV Commercials",
-    "Digital Ads",
-    "Instagram Collaborations",
     "Influencer Campaigns",
-    "Social Media Collaborations",
-    "Fashion Campaigns",
-    "Brand Shoots",
-    "Music Videos",
-    "OTT / Film Projects",
-    "Event Appearances",
-    "Hosting / Anchoring",
 ];
 
 function InterestedInSelector({ selected, onChange }) {

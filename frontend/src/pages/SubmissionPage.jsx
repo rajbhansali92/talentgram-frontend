@@ -1166,7 +1166,7 @@ export default function SubmissionPage() {
                                 required
                             />
                             <PremiumFormField
-                                label="Phone (optional)"
+                                label="Phone"
                                 type="tel"
                                 value={form.phone}
                                 onChange={(v) =>

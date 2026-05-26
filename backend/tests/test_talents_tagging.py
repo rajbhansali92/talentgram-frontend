@@ -421,3 +421,21 @@ async def test_async_mock_global_delete_cascade():
         {"$pull": {"tags": {"id": "tag-danger"}}},
     )
     assert pull_result.modified_count == 3
+
+
+def test_get_talent_query_uuid():
+    from bson import ObjectId
+    tid = "t1-uuid"
+    query = {"id": tid}
+    if len(tid) == 24:
+        query = {"$or": [{"id": tid}, {"_id": ObjectId(tid)}]}
+    assert query == {"id": "t1-uuid"}
+
+
+def test_get_talent_query_objectid():
+    from bson import ObjectId
+    tid = "60a1f2e9d5e3c8b4a0f12345"
+    query = {"id": tid}
+    if len(tid) == 24:
+        query = {"$or": [{"id": tid}, {"_id": ObjectId(tid)}]}
+    assert query == {"$or": [{"id": "60a1f2e9d5e3c8b4a0f12345"}, {"_id": ObjectId("60a1f2e9d5e3c8b4a0f12345")}]}

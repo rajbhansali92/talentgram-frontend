@@ -354,6 +354,96 @@ export default function LinkResults() {
                         )}
                     </section>
 
+                    <section className="bg-white border border-black/[0.08] rounded-xl mb-10 overflow-hidden">
+                        <div className="px-6 py-4 border-b border-black/[0.06] flex items-center justify-between">
+                            <p className="eyebrow">Client Activity Timeline</p>
+                            <p className="text-xs text-black/45">
+                                Real-time professional engagement
+                            </p>
+                        </div>
+                        {!data?.events || data.events.length === 0 ? (
+                            <div className="p-8 text-center text-black/45 text-sm">
+                                No client engagement tracked yet.
+                            </div>
+                        ) : (
+                            <div className="p-6 max-h-[500px] overflow-y-auto space-y-6">
+                                {(() => {
+                                    const grouped = {};
+                                    data.events.forEach((ev) => {
+                                        const key = ev.viewer_email || ev.session_id || "Anonymous";
+                                        if (!grouped[key]) {
+                                            grouped[key] = {
+                                                name: ev.viewer_name || "Client",
+                                                email: ev.viewer_email || "Anonymous Session",
+                                                items: [],
+                                            };
+                                        }
+                                        grouped[key].items.push(ev);
+                                    });
+
+                                    return Object.values(grouped).map((viewerGroup) => (
+                                        <div key={viewerGroup.email} className="space-y-3">
+                                            <div className="flex items-center justify-between border-b border-black/[0.03] pb-1.5">
+                                                <h4 className="font-semibold text-sm text-black/80">
+                                                    {viewerGroup.name}
+                                                </h4>
+                                                <span className="text-[10px] font-mono text-black/45">
+                                                    {viewerGroup.email}
+                                                </span>
+                                            </div>
+                                            <div className="space-y-2.5 pl-3 border-l border-black/[0.05]">
+                                                {viewerGroup.items.slice(0, 15).map((item, idx) => {
+                                                    const date = new Date(item.created_at);
+                                                    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                                                    
+                                                    let actionText = "";
+                                                    let details = "";
+                                                    const tName = subjects[item.talent_id]?.name || "Talent";
+                                                    
+                                                    if (item.event_type === "open") {
+                                                        actionText = "Opened Link";
+                                                        details = "Started review session";
+                                                    } else if (item.event_type === "view_talent") {
+                                                        actionText = "Viewed Profile";
+                                                        details = `Opened ${tName}'s profile`;
+                                                    } else if (item.event_type === "view_media") {
+                                                        actionText = "Engaged";
+                                                        details = `Checked portfolio assets of ${tName}`;
+                                                    } else if (item.event_type === "watch_video") {
+                                                        actionText = "Watched Video";
+                                                        details = `Viewed audition takes of ${tName}`;
+                                                    } else if (item.event_type === "review_talent") {
+                                                        actionText = "Reviewed";
+                                                        details = `Completed initial review of ${tName}`;
+                                                    } else {
+                                                        actionText = item.event_type;
+                                                        details = tName;
+                                                    }
+                                                    
+                                                    return (
+                                                        <div key={item.id || idx} className="flex items-start gap-3 text-xs">
+                                                            <span className="font-mono text-black/35 shrink-0 w-10">
+                                                                {timeStr}
+                                                            </span>
+                                                            <div className="flex-1">
+                                                                <span className="font-medium text-black/75 mr-1.5">
+                                                                    {actionText}
+                                                                </span>
+                                                                <span className="text-black/45">
+                                                                    {details}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    ));
+                                })()}
+                            </div>
+                        )}
+                    </section>
+
                     <section className="grid md:grid-cols-2 gap-6">
                         <div className="bg-white border border-black/[0.08] rounded-xl overflow-hidden">
                             <div className="px-6 py-4 border-b border-black/[0.06] flex items-center gap-2">

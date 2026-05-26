@@ -6,6 +6,7 @@ import { thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
+import VoiceRecorder from "@/components/VoiceRecorder";
 import {
     Instagram,
     ExternalLink,
@@ -24,6 +25,8 @@ import {
     Heart,
     Layers,
     Clock,
+    Check,
+    Share2,
 } from "lucide-react";
 
 // Safety fallback to prevent catastrophic failures when env var is missing
@@ -69,11 +72,10 @@ const ACTIONS = [
 ];
 
 const TABS = [
-    { key: "all", label: "All", icon: Layers },
-    { key: "pending", label: "Pending", icon: Clock },
-    { key: "seen", label: "Seen", icon: Eye },
-    { key: "shortlisted", label: "Shortlisted", icon: Heart },
+    { key: "pending_action", label: "Pending Action", icon: Clock },
     { key: "new", label: "New", icon: Sparkles },
+    { key: "viewed", label: "Viewed", icon: Eye },
+    { key: "shortlisted", label: "Shortlisted", icon: Heart },
 ];
 
 // Helper to parse FastAPI/Pydantic validation errors safely
@@ -133,20 +135,80 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
                 <div data-testid="client-budget">
                     <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Budget</p>
                     {(() => {
-                        if (talent.budget?.status === "custom" && (talent.budget?.value || "").trim()) {
-                            return <p className="text-sm text-[#111111]">{talent.budget.value} <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-black/4 text-[#8A8A8A]">Counter-offer</span></p>;
-                        }
                         const lines = (tProjBudget?.lines || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
-                        if (talent.budget?.status === "accept" && lines.length) {
-                            return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln, i) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4" data-testid={`client-budget-line-${i}`}><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
+                        const budgetLine = lines.find(l => (l.label || "").toLowerCase().includes("budget")) || lines[0] || null;
+                        const originalBudgetValue = budgetLine ? budgetLine.value : null;
+
+                        if (talent.budget?.status === "custom" && (talent.budget?.value || "").trim()) {
+                            return (
+                                <div className="space-y-1.5 text-sm text-[#111111]" data-testid="budget-countered">
+                                    {originalBudgetValue && (
+                                        <p className="flex justify-between gap-4">
+                                            <span className="text-[#4A4A4A]">Original Budget</span>
+                                            <span className="text-[#5C5C5C] font-mono">{originalBudgetValue}</span>
+                                        </p>
+                                    )}
+                                    <p className="flex justify-between gap-4 border-t border-black/[0.03] pt-1.5">
+                                        <span className="text-[#4A4A4A] font-medium">Counter Budget</span>
+                                        <span className="font-semibold text-[#B89B5E] font-mono">{talent.budget.value}</span>
+                                    </p>
+                                    <p className="flex justify-between gap-4 mt-2">
+                                        <span className="text-[#4A4A4A]">Status</span>
+                                        <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#B89B5E]/8 text-[#B89B5E] font-medium">Counter-Offer</span>
+                                    </p>
+                                    {lines.filter(l => l !== budgetLine).map((ln) => (
+                                        <p key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4 text-xs text-[#8A8A8A] mt-1">
+                                            <span>{ln.label}</span>
+                                            <span className="font-mono">{ln.value}</span>
+                                        </p>
+                                    ))}
+                                </div>
+                            );
                         }
-                        if (talent.budget?.status === "accept" && !lines.length) {
-                            return <p className="text-sm"><span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A]">Agreed</span></p>;
+
+                        if (talent.budget?.status === "accept") {
+                            return (
+                                <div className="space-y-1.5 text-sm text-[#111111]" data-testid="budget-agreed">
+                                    {originalBudgetValue && (
+                                        <p className="flex justify-between gap-4">
+                                            <span className="text-[#4A4A4A]">Original Budget</span>
+                                            <span className="text-[#5C5C5C] font-mono">{originalBudgetValue}</span>
+                                        </p>
+                                    )}
+                                    <p className="flex justify-between gap-4 border-t border-black/[0.03] pt-1.5">
+                                        <span className="text-[#4A4A4A]">Status</span>
+                                        <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A] font-medium">Agreed</span>
+                                    </p>
+                                    {lines.filter(l => l !== budgetLine).map((ln) => (
+                                        <p key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4 text-xs text-[#8A8A8A] mt-1">
+                                            <span>{ln.label}</span>
+                                            <span className="font-mono">{ln.value}</span>
+                                        </p>
+                                    ))}
+                                </div>
+                            );
                         }
-                        if (lines.length) {
-                            return <ul className="text-sm text-[#111111] space-y-2">{lines.map((ln) => (<li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4"><span className="text-[#4A4A4A]">{ln.label}</span><span>{ln.value}</span></li>))}</ul>;
-                        }
-                        return null;
+
+                        return (
+                            <div className="space-y-1.5">
+                                {lines.length > 0 ? (
+                                    <ul className="text-sm text-[#111111] space-y-2">
+                                        {lines.map((ln) => (
+                                            <li key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4">
+                                                <span className="text-[#4A4A4A]">{ln.label}</span>
+                                                <span className="font-medium font-mono">{ln.value}</span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : null}
+                                {(talent.budget?.status === "negotiable" || !talent.budget?.status) && (
+                                    <p className="flex justify-between gap-4 text-sm text-[#111111] mt-2 border-t border-black/[0.03] pt-1.5">
+                                        <span className="text-[#4A4A4A]">Status</span>
+                                        <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-black/4 text-[#8A8A8A] font-medium">Negotiable</span>
+                                    </p>
+                                )}
+                            </div>
+                        );
                     })()}
                 </div>
             )}
@@ -170,7 +232,15 @@ export default function ClientView() {
         }
         return sid;
     };
-    const [identified, setIdentified] = useState(!!getViewerToken(slug));
+    const queryParams = new URLSearchParams(window.location.search);
+    const shareId = queryParams.get("share");
+
+    const [shareData, setShareData] = useState(null);
+    const [loadingShare, setLoadingShare] = useState(!!shareId);
+    const [shareError, setShareError] = useState(null);
+    const [sendingVoice, setSendingVoice] = useState(false);
+
+    const [identified, setIdentified] = useState(!!getViewerToken(slug) || !!shareId);
     const [name, setName] = useState("");
     const [email, setEmail] = useState("");
     const [loading, setLoading] = useState(false);
@@ -179,7 +249,34 @@ export default function ClientView() {
     const [activeTalent, setActiveTalent] = useState(null);
     const [commentDrafts, setCommentDrafts] = useState({});
     const [seenIds, setSeenIds] = useState(new Set());
-    const [activeTab, setActiveTab] = useState("all");
+    const [reviewedIds, setReviewedIds] = useState(new Set());
+    const [activeTab, setActiveTab] = useState("pending_action");
+    const [showResumeBanner, setShowResumeBanner] = useState(false);
+
+    useEffect(() => {
+        if (!shareId) return;
+        const fetchShare = async () => {
+            try {
+                setLoadingShare(true);
+                const { data } = await axios.get(`${API}/public/shares/${shareId}`);
+                setShareData(data);
+                setActiveTalent(data.talent);
+                setData({
+                    link: data.link,
+                    talents: [data.talent],
+                    actions: [],
+                    project_budget: [],
+                    project_shoot_dates: [],
+                    viewer: { email: "share@talentgram", name: "Shared Preview" },
+                });
+            } catch (e) {
+                setShareError(e?.response?.data?.detail || "Failed to load shared preview. It may have expired.");
+            } finally {
+                setLoadingShare(false);
+            }
+        };
+        fetchShare();
+    }, [shareId]);
 
     const updateLocalAction = useCallback((talentId, action, comment) => {
         setData(prev => {
@@ -216,6 +313,7 @@ export default function ClientView() {
             });
             setData(data);
             setSeenIds(new Set(data?.client_state?.seen_talent_ids || []));
+            setReviewedIds(new Set(data?.client_state?.reviewed_talent_ids || []));
             axios.post(`${API}/public/links/${slug}/track`, {
                 event_type: "open",
                 session_id: getSessionId(),
@@ -232,6 +330,55 @@ export default function ClientView() {
     useEffect(() => {
         if (identified) loadData();
     }, [identified, loadData]);
+
+    const markReviewed = useCallback(
+        async (talentId) => {
+            if (!talentId) return;
+            setReviewedIds((prev) => {
+                if (prev.has(talentId)) return prev;
+                const n = new Set(prev);
+                n.add(talentId);
+                return n;
+            });
+            axios.post(`${API}/public/links/${slug}/track`, {
+                event_type: "review_talent",
+                session_id: getSessionId(),
+                talent_id: talentId,
+            }).catch(() => {});
+            try {
+                await axios.post(
+                    `${API}/public/links/${slug}/reviewed`,
+                    { talent_id: talentId },
+                    {
+                        headers: {
+                            Authorization: `Bearer ${getViewerToken(slug)}`,
+                        },
+                    },
+                );
+            } catch (e) {
+                console.error(e);
+            }
+        },
+        [slug],
+    );
+
+    useEffect(() => {
+        if (!data || !data.talents || data.talents.length === 0) return;
+        try {
+            const lastId = localStorage.getItem(`tg_last_viewed_${slug}`);
+            if (lastId) {
+                const found = data.talents.find(t => t.id === lastId);
+                const isReviewed = reviewedIds.has(lastId) || !!viewerActions[lastId]?.action;
+                const resumed = !sessionStorage.getItem(`tg_session_active_${slug}`);
+                if (found && !isReviewed && resumed) {
+                    setShowResumeBanner(true);
+                    sessionStorage.setItem(`tg_session_active_${slug}`, "true");
+                }
+            } else {
+                sessionStorage.setItem(`tg_session_active_${slug}`, "true");
+            }
+        } catch (e) { console.error(e); }
+    }, [data, slug, reviewedIds, viewerActions]);
 
     useEffect(() => {
         const prev = document.title;
@@ -279,6 +426,7 @@ export default function ClientView() {
 
     const setAction = useCallback(async (talentId, action) => {
         updateLocalAction(talentId, action);
+        markReviewed(talentId);
         try {
             await axios.post(
                 `${API}/public/links/${slug}/action`,
@@ -293,13 +441,14 @@ export default function ClientView() {
             updateLocalAction(talentId, viewerActions[talentId]?.action);
             toast.error("Action failed");
         }
-    }, [slug, updateLocalAction, viewerActions]);
+    }, [slug, updateLocalAction, viewerActions, markReviewed]);
 
     const saveComment = useCallback(async (talentId) => {
         const text = commentDrafts[talentId];
         if (text === undefined) return;
         const existing = viewerActions[talentId];
         updateLocalAction(talentId, existing?.action || null, text);
+        markReviewed(talentId);
         try {
             await axios.post(
                 `${API}/public/links/${slug}/action`,
@@ -319,7 +468,7 @@ export default function ClientView() {
             updateLocalAction(talentId, existing?.action, existing?.comment);
             toast.error("Failed to save");
         }
-    }, [commentDrafts, viewerActions, slug, updateLocalAction]);
+    }, [commentDrafts, viewerActions, slug, updateLocalAction, markReviewed]);
 
     const logDownload = useCallback(async (talentId, mediaId) => {
         try {
@@ -334,6 +483,83 @@ export default function ClientView() {
             );
         } catch (e) { console.error(e); }
     }, [slug]);
+
+    const handleShare = useCallback(async (talentId, mediaId = null) => {
+        try {
+            const { data } = await axios.post(
+                `${API}/public/links/${slug}/share`,
+                {
+                    talent_id: talentId,
+                    media_id: mediaId,
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${getViewerToken(slug)}`,
+                    },
+                },
+            );
+            
+            const shareUrl = `${window.location.origin}/l/${slug}?share=${data.share_id}`;
+            
+            if (navigator.share) {
+                try {
+                    await navigator.share({
+                        title: `Talentgram | Shared Audition`,
+                        text: `Check out this audition showcase on Talentgram!`,
+                        url: shareUrl,
+                    });
+                    toast.success("Shared successfully");
+                } catch (e) {
+                    if (e.name !== "AbortError") {
+                        await navigator.clipboard.writeText(shareUrl);
+                        toast.success("Link copied to clipboard");
+                    }
+                }
+            } else {
+                await navigator.clipboard.writeText(shareUrl);
+                toast.success("Link copied to clipboard");
+            }
+        } catch (e) {
+            toast.error("Failed to generate share link");
+            console.error(e);
+        }
+    }, [slug]);
+
+    const saveVoiceNote = useCallback(async (talentId, blob) => {
+        const talents = data?.talents || [];
+        const t = talents.find(x => x.id === talentId);
+        if (!t || !t.submission_id || !t.project_id) {
+            toast.error("Voice feedback is not supported for this card");
+            return;
+        }
+
+        setSendingVoice(true);
+        const formData = new FormData();
+        formData.append("talent_id", t.id);
+        formData.append("submission_id", t.submission_id);
+        formData.append("project_id", t.project_id);
+        formData.append("file", blob, "voice_feedback.webm");
+
+        try {
+            await axios.post(
+                `${API}/public/links/${slug}/feedback/voice`,
+                formData,
+                {
+                    headers: {
+                        "Content-Type": "multipart/form-data",
+                        Authorization: `Bearer ${getViewerToken(slug)}`,
+                    },
+                },
+            );
+            toast.success("Voice feedback sent for moderation");
+            markReviewed(talentId);
+        } catch (e) {
+            toast.error("Failed to upload voice feedback");
+            console.error(e);
+        } finally {
+            setSendingVoice(false);
+        }
+    }, [data, slug, markReviewed]);
 
     const markSeen = useCallback(
         async (talentId) => {
@@ -365,6 +591,53 @@ export default function ClientView() {
         },
         [slug],
     );
+
+    if (shareId) {
+        if (loadingShare) {
+            return (
+                <div className="min-h-screen bg-[#FCFBF8] flex items-center justify-center">
+                    <Loader2 className="w-8 h-8 animate-spin text-[#B89B5E]" />
+                </div>
+            );
+        }
+        if (shareError) {
+            return (
+                <div className="min-h-screen bg-[#FCFBF8] flex flex-col items-center justify-center p-6 text-center">
+                    <XCircle className="w-12 h-12 text-[#9E4A4A] mb-4" />
+                    <h2 className="text-xl font-display text-[#111111] mb-2 font-semibold">Shared Preview Expired</h2>
+                    <p className="text-sm text-gray-500 max-w-sm leading-relaxed">{shareError}</p>
+                </div>
+            );
+        }
+        if (activeTalent) {
+            return (
+                <TalentDetail
+                    talent={activeTalent}
+                    talents={[activeTalent]}
+                    link={data?.link || {}}
+                    slug={slug}
+                    projectBudget={[]}
+                    projectShootDates={[]}
+                    viewerAction={null}
+                    viewerActions={{}}
+                    reviewedIds={new Set()}
+                    isReviewed={true}
+                    onMarkReviewed={() => {}}
+                    onClose={() => {}}
+                    onNavigate={() => {}}
+                    setAction={() => {}}
+                    commentDraft=""
+                    setCommentDraft={() => {}}
+                    saveComment={() => {}}
+                    logDownload={() => {}}
+                    onShare={() => {}}
+                    saveVoiceNote={() => {}}
+                    sendingVoice={false}
+                    isSharePreview={true}
+                />
+            );
+        }
+    }
 
     if (!identified) {
         return (
@@ -468,16 +741,16 @@ export default function ClientView() {
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
     };
     const buckets = {
-        all: talents,
-        pending: talents.filter((t) => !seenIds.has(t.id)),
-        seen: talents.filter((t) => seenIds.has(t.id)),
-        shortlisted: talents.filter((t) => isShortlisted(t.id)),
+        pending_action: talents.filter((t) => !reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
         new: talents.filter((t) => isNew(t.id)),
+        viewed: talents.filter((t) => reviewedIds.has(t.id)),
+        shortlisted: talents.filter((t) => isShortlisted(t.id)),
     };
-    const filteredTalents = buckets[activeTab] || talents;
-    const seenCount = buckets.seen.length;
+    const filteredTalents = buckets[activeTab] || buckets.pending_action || talents;
+    const reviewedCount = talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action).length;
+    const seenCount = reviewedCount;
     const totalCount = talents.length;
-    const reviewedPct = totalCount === 0 ? 0 : Math.round((seenCount / totalCount) * 100);
+    const reviewedPct = totalCount === 0 ? 0 : Math.round((reviewedCount / totalCount) * 100);
 
     return (
         <div className="min-h-screen bg-white text-[#111111]" data-testid="client-view-page">
@@ -509,6 +782,44 @@ export default function ClientView() {
             </header>
 
             <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-6 md:py-16">
+                {showResumeBanner && (() => {
+                    const lastId = localStorage.getItem(`tg_last_viewed_${slug}`);
+                    const lastTalent = talents.find(t => t.id === lastId);
+                    if (!lastTalent) return null;
+                    return (
+                        <div className="mb-8 animate-fade-in" data-testid="resume-review-banner">
+                            <div className="bg-[#B89B5E]/5 border border-[#B89B5E]/15 rounded-xl p-4 flex items-center justify-between gap-4 backdrop-blur-sm shadow-[0_4px_12px_-6px_rgba(184,155,94,0.06)]">
+                                <div className="flex items-center gap-3">
+                                    <Clock className="w-4 h-4 text-[#B89B5E]" />
+                                    <span className="text-sm text-[#111111] font-medium">
+                                        Continue reviewing <span className="underline font-semibold">{privatizeName(lastTalent.name)}</span> where you left off?
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setActiveTalent(lastTalent);
+                                            markSeen(lastTalent.id);
+                                            setShowResumeBanner(false);
+                                        }}
+                                        className="px-3.5 py-1.5 bg-[#1A1A1A] hover:bg-[#111111] text-white text-xs font-semibold rounded-full transition-colors active:scale-[0.97]"
+                                    >
+                                        Resume
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowResumeBanner(false)}
+                                        className="p-1 hover:bg-black/5 rounded-full text-[#8A8A8A] hover:text-[#111111]"
+                                        aria-label="Dismiss banner"
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                })()}
                 <div className="hidden md:flex mb-10 items-center justify-between flex-wrap gap-4">
                     <div>
                         <p className="eyebrow tracking-[0.12em] mb-2 text-[#8A8A8A]">{talents.length} Talents</p>
@@ -622,11 +933,10 @@ export default function ClientView() {
                         >
                             {activeTab === "new" && "Nothing new since your last visit."}
                             {activeTab === "shortlisted" &&
-                                "No shortlists yet — open a card and tap Shortlist to add one."}
-                            {activeTab === "seen" && "You haven't reviewed any talents yet."}
-                            {activeTab === "pending" &&
+                                "No shortlists yet — open a card and click Shortlist to add one."}
+                            {activeTab === "viewed" && "You haven't reviewed any talents yet."}
+                            {activeTab === "pending_action" &&
                                 "You've reviewed everyone — nice work."}
-                            {activeTab === "all" && "No talents on this link."}
                         </div>
                     ) : (
                         filteredTalents.map((t) => (
@@ -640,6 +950,9 @@ export default function ClientView() {
                                 onOpen={() => {
                                     setActiveTalent(t);
                                     markSeen(t.id);
+                                    try {
+                                        localStorage.setItem(`tg_last_viewed_${slug}`, t.id);
+                                    } catch (e) { console.error(e); }
                                 }}
                                 onSeen={() => markSeen(t.id)}
                             />
@@ -657,10 +970,17 @@ export default function ClientView() {
                     projectBudget={projectBudget}
                     projectShootDates={projectShootDates}
                     viewerAction={viewerActions[activeTalent.id]}
+                    viewerActions={viewerActions}
+                    reviewedIds={reviewedIds}
+                    isReviewed={reviewedIds.has(activeTalent.id) || !!viewerActions[activeTalent.id]?.action}
+                    onMarkReviewed={markReviewed}
                     onClose={() => setActiveTalent(null)}
                     onNavigate={(t) => {
                         setActiveTalent(t);
                         markSeen(t.id);
+                        try {
+                            localStorage.setItem(`tg_last_viewed_${slug}`, t.id);
+                        } catch (e) { console.error(e); }
                     }}
                     setAction={setAction}
                     commentDraft={
@@ -676,6 +996,9 @@ export default function ClientView() {
                     }
                     saveComment={() => saveComment(activeTalent.id)}
                     logDownload={logDownload}
+                    onShare={handleShare}
+                    saveVoiceNote={saveVoiceNote}
+                    sendingVoice={sendingVoice}
                 />
             )}
         </div>
@@ -690,6 +1013,10 @@ function TalentDetail({
     projectBudget = [],
     projectShootDates = [],
     viewerAction,
+    viewerActions,
+    reviewedIds,
+    isReviewed,
+    onMarkReviewed,
     onClose,
     onNavigate,
     setAction,
@@ -697,6 +1024,10 @@ function TalentDetail({
     setCommentDraft,
     saveComment,
     logDownload,
+    onShare,
+    saveVoiceNote,
+    sendingVoice,
+    isSharePreview = false,
 }) {
     const vis = link.visibility || {};
     const mediaAll = talent.media || [];
@@ -722,28 +1053,62 @@ function TalentDetail({
     const [isModalOpen, setIsModalOpen] = useState(false);
 
     useEffect(() => {
-        document.body.style.overflow = "hidden";
-        setIsModalOpen(true);
-        
-        const handleEscape = (e) => {
-            if (e.key === "Escape") {
-                onClose();
-            }
-        };
-        document.addEventListener("keydown", handleEscape);
-        
-        return () => {
-            document.body.style.overflow = "";
-            document.removeEventListener("keydown", handleEscape);
-        };
-    }, [onClose]);
+        if (!talent?.id || isReviewed) return;
+        const timer = setTimeout(() => {
+            onMarkReviewed(talent.id);
+        }, 15000);
+        return () => clearTimeout(timer);
+    }, [talent?.id, isReviewed, onMarkReviewed]);
 
     const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
     const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
 
+    useEffect(() => {
+        document.body.style.overflow = "hidden";
+        setIsModalOpen(true);
+        
+        const handleKeyDown = (e) => {
+            if (e.key === "Escape" && !isSharePreview) {
+                onClose();
+            } else if (e.key === "ArrowLeft") {
+                prev();
+            } else if (e.key === "ArrowRight") {
+                next();
+            } else if (e.key === "1" && !isSharePreview) {
+                setAction(talent.id, viewerAction?.action === "shortlist" ? null : "shortlist");
+            } else if (e.key === "2" && !isSharePreview) {
+                setAction(talent.id, viewerAction?.action === "not_sure" ? null : "not_sure");
+            } else if (e.key === "3" && !isSharePreview) {
+                setAction(talent.id, viewerAction?.action === "not_for_this" ? null : "not_for_this");
+            }
+        };
+        document.addEventListener("keydown", handleKeyDown);
+        
+        return () => {
+            document.body.style.overflow = "";
+            document.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [onClose, prev, next, setAction, talent.id, viewerAction?.action]);
+
     const list = useMemo(() => (
         Array.isArray(talents) ? talents : []
     ), [talents]);
+
+    const nextUnreviewed = useMemo(() => {
+        const idx = list.findIndex((t) => t.id === talent.id);
+        if (idx === -1) return null;
+        for (let i = idx + 1; i < list.length; i++) {
+            const t = list[i];
+            const isRev = (reviewedIds && reviewedIds.has(t.id)) || (viewerActions && !!viewerActions[t.id]?.action);
+            if (!isRev) return t;
+        }
+        for (let i = 0; i < idx; i++) {
+            const t = list[i];
+            const isRev = (reviewedIds && reviewedIds.has(t.id)) || (viewerActions && !!viewerActions[t.id]?.action);
+            if (!isRev) return t;
+        }
+        return null;
+    }, [talent.id, list, reviewedIds, viewerActions]);
 
     const currentTalentIdx = list.findIndex((t) => t.id === talent.id);
     const hasPrevTalent = currentTalentIdx > 0;
@@ -796,7 +1161,7 @@ function TalentDetail({
                 else goPrevTalent();
                 return;
             }
-            if (movedY > 110 && ay > ax * 1.4 && startY < 200) {
+            if (movedY > 110 && ay > ax * 1.4 && startY < 200 && !isSharePreview) {
                 onClose();
             }
         };
@@ -857,9 +1222,20 @@ function TalentDetail({
                                         {takes.map((t, i) => (
                                             <div key={t.id} data-testid={`client-take-${i}`}>
                                                 <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate flex items-center justify-between">
-                                                    <span>{t.label || `Take ${i + 1}`}</span>
+                                                    <span className="flex items-center gap-1.5 min-w-0">
+                                                        <span className="truncate">{t.label || `Take ${i + 1}`}</span>
+                                                        {!isSharePreview && (
+                                                            <button
+                                                                onClick={() => onShare(talent.id, t.id)}
+                                                                className="p-1 hover:bg-black/5 rounded text-gray-400 hover:text-gray-700 transition-colors shrink-0"
+                                                                title="Share this take only"
+                                                            >
+                                                                <Share2 className="w-3 h-3" />
+                                                            </button>
+                                                        )}
+                                                    </span>
                                                     {t.primary_take && (
-                                                        <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">
+                                                        <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider shrink-0">
                                                             ★ Primary
                                                         </span>
                                                     )}
@@ -962,13 +1338,27 @@ function TalentDetail({
                     {/* Right Column - Details (scrollable with soft shadow) */}
                     <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)]">
                         <div className="p-6 md:p-8">
-                            <button
-                                onClick={onClose}
-                                className="hidden md:flex absolute top-5 right-5 z-50 w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full items-center justify-center bg-white/90 transition-colors duration-150 shadow-sm"
-                                data-testid="detail-close-btn"
-                            >
-                                <X className="w-4 h-4" />
-                            </button>
+                            <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
+                                {!isSharePreview && (
+                                    <button
+                                        onClick={() => onShare(talent.id)}
+                                        className="w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center justify-center bg-white/90 transition-colors duration-150 shadow-sm"
+                                        title="Share Portfolio"
+                                        data-testid="detail-share-btn"
+                                    >
+                                        <Share2 className="w-4 h-4 text-[#8A8A8A]" />
+                                    </button>
+                                )}
+                                {!isSharePreview && (
+                                    <button
+                                        onClick={onClose}
+                                        className="w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center justify-center bg-white/90 transition-colors duration-150 shadow-sm"
+                                        data-testid="detail-close-btn"
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                )}
+                            </div>
 
                             <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Talent</p>
                             <h2 className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-[#111111]">
@@ -1032,60 +1422,109 @@ function TalentDetail({
                                         ))}
                                     </div>
                                 </div>
+                                               {!isSharePreview && (
+                                <div className="border-t border-black/[0.06] pt-6 mt-6">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Your Decision</p>
+                                        <button
+                                            onClick={() => onMarkReviewed(talent.id)}
+                                            disabled={isReviewed}
+                                            className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-full text-xs font-medium transition-colors duration-150 ${
+                                                isReviewed
+                                                    ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
+                                                    : "border-black/[0.08] hover:border-black/20 text-[#4A4A4A]"
+                                            }`}
+                                            data-testid="mark-reviewed-btn"
+                                        >
+                                            <Check className="w-3.5 h-3.5" />
+                                            {isReviewed ? "Reviewed" : "Mark Reviewed"}
+                                        </button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2 mb-6">
+                                        {ACTIONS.map((a) => {
+                                            const active = viewerAction?.action === a.key;
+                                            return (
+                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm transition-colors duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"}`}>
+                                                    <a.icon className="w-4 h-4" style={{ color: active ? "#fff" : a.color }} />
+                                                    {a.label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
+                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
+                                        </div>
+                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
+                                        <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                    </div>
+
+                                    {talent.submission_id && talent.project_id && (
+                                        <div className="mt-6 pt-6 border-t border-black/[0.06]">
+                                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Voice Note Feedback</p>
+                                            <VoiceRecorder
+                                                onSend={(blob) => saveVoiceNote(talent.id, blob)}
+                                                sending={sendingVoice}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
                             )}
 
-                            <div className="border-t border-black/[0.06] pt-6 mt-6">
-                                <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Your Decision</p>
-                                <div className="grid grid-cols-2 gap-2 mb-6">
-                                    {ACTIONS.map((a) => {
-                                        const active = viewerAction?.action === a.key;
-                                        return (
-                                            <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm transition-colors duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"}`}>
-                                                <a.icon className="w-4 h-4" style={{ color: active ? "#fff" : a.color }} />
-                                                {a.label}
-                                            </button>
-                                        );
-                                    })}
+                            {isSharePreview && (
+                                <div className="mt-8 p-5 bg-[#FCFBF8] border border-black/[0.04] rounded-2xl flex flex-col items-center text-center">
+                                    <span className="inline-block px-2.5 py-1 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#B89B5E]/8 text-[#B89B5E] font-medium mb-3">
+                                        Shared Audition Showcase
+                                    </span>
+                                    <p className="text-xs text-gray-500 max-w-xs leading-relaxed">
+                                        This portfolio link was shared securely via WhatsApp and will expire in 48 hours.
+                                    </p>
                                 </div>
+                            )}
 
-                                <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
-                                        <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
-                                    </div>
-                                    <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
-                                    <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                            {nextUnreviewed && !isSharePreview && (
+                                <div className="mt-8 pt-6 border-t border-black/[0.06]">
+                                    <button
+                                        onClick={() => onNavigate(nextUnreviewed)}
+                                        className="w-full flex items-center justify-center gap-2 px-4 py-3.5 bg-[#1A1A1A] hover:bg-[#2A2A2A] text-white rounded-xl text-sm font-medium transition-colors duration-150 shadow-sm"
+                                        data-testid="next-unreviewed-btn"
+                                    >
+                                        Next Unreviewed Talent →
+                                    </button>
                                 </div>
-                            </div>
+                            )}       </div>
                         </div>
                     </div>
                 </div>
-            </div>
 
             {/* Mobile bottom bar */}
-            <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 border-t border-black/[0.04] px-4 py-3" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
-                <div className="grid grid-cols-3 gap-2">
-                    <button type="button" onClick={() => quickAction("shortlist")} disabled={Boolean(busyAction)} data-testid="quick-shortlist-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}>
-                        {busyAction === "shortlist" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />}
-                        Shortlist
-                    </button>
-                    <button type="button" onClick={() => quickAction("not_sure")} disabled={Boolean(busyAction)} data-testid="quick-hold-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#4A4A4A] hover:border-black/20"}`}>
-                        {busyAction === "not_sure" ? <Loader2 className="w-4 h-4 animate-spin" /> : <HelpCircle className="w-4 h-4" />}
-                        Hold
-                    </button>
-                    <button type="button" onClick={() => quickAction("not_for_this")} disabled={Boolean(busyAction)} data-testid="quick-reject-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#4A4A4A] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}>
-                        {busyAction === "not_for_this" ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
-                        Reject
-                    </button>
-                </div>
-                {list.length > 1 && (
-                    <div className="flex items-center justify-between mt-2 text-[10px] font-mono tracking-[0.08em] text-[#8A8A8A]">
-                        <button type="button" onClick={goPrevTalent} disabled={!hasPrevTalent} data-testid="quick-prev-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Previous talent">← swipe right · prev</button>
-                        <span>{currentTalentIdx + 1} of {list.length}</span>
-                        <button type="button" onClick={goNextTalent} disabled={!hasNextTalent} data-testid="quick-next-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Next talent">next · swipe left →</button>
+            {!isSharePreview && (
+                <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 border-t border-black/[0.04] px-4 py-3" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
+                    <div className="grid grid-cols-3 gap-2">
+                        <button type="button" onClick={() => quickAction("shortlist")} disabled={Boolean(busyAction)} data-testid="quick-shortlist-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}>
+                            {busyAction === "shortlist" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />}
+                            Shortlist
+                        </button>
+                        <button type="button" onClick={() => quickAction("not_sure")} disabled={Boolean(busyAction)} data-testid="quick-hold-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#4A4A4A] hover:border-black/20"}`}>
+                            {busyAction === "not_sure" ? <Loader2 className="w-4 h-4 animate-spin" /> : <HelpCircle className="w-4 h-4" />}
+                            Hold
+                        </button>
+                        <button type="button" onClick={() => quickAction("not_for_this")} disabled={Boolean(busyAction)} data-testid="quick-reject-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#4A4A4A] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}>
+                            {busyAction === "not_for_this" ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
+                            Reject
+                        </button>
                     </div>
-                )}
-            </div>
+                    {list.length > 1 && (
+                        <div className="flex items-center justify-between mt-2 text-[10px] font-mono tracking-[0.08em] text-[#8A8A8A]">
+                            <button type="button" onClick={goPrevTalent} disabled={!hasPrevTalent} data-testid="quick-prev-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Previous talent">← swipe right · prev</button>
+                            <span>{currentTalentIdx + 1} of {list.length}</span>
+                            <button type="button" onClick={goNextTalent} disabled={!hasNextTalent} data-testid="quick-next-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Next talent">next · swipe left →</button>
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 }

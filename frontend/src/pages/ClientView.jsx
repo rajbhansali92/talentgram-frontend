@@ -253,6 +253,12 @@ export default function ClientView() {
     const [activeTab, setActiveTab] = useState("pending_action");
     const [showResumeBanner, setShowResumeBanner] = useState(false);
 
+    const viewerActions = useMemo(() => {
+        const m = {};
+        (data?.actions || []).forEach((a) => (m[a.talent_id] = a));
+        return m;
+    }, [data]);
+
     useEffect(() => {
         if (!shareId) return;
         const fetchShare = async () => {
@@ -417,12 +423,6 @@ export default function ClientView() {
             setLoading(false);
         }
     };
-
-    const viewerActions = useMemo(() => {
-        const m = {};
-        (data?.actions || []).forEach((a) => (m[a.talent_id] = a));
-        return m;
-    }, [data]);
 
     const setAction = useCallback(async (talentId, action) => {
         updateLocalAction(talentId, action);

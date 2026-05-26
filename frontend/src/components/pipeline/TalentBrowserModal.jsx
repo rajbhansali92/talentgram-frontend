@@ -64,6 +64,65 @@ const DENSITY_CONFIG = {
     }
 };
 
+const parseHeightToInches = (hStr) => {
+    if (!hStr) return null;
+    const s = String(hStr).trim().toLowerCase();
+    
+    // cm match
+    const cmMatch = s.match(/^(\d+(?:\.\d+)?)\s*(?:cm)?$/);
+    if (cmMatch) {
+        const val = parseFloat(cmMatch[1]);
+        if (val > 100) return Math.round(val / 2.54);
+    }
+    
+    // feet and inches match, e.g. 5'8", 5ft 8in, 5' 8
+    const feetInchesMatch = s.match(/(\d+)\s*(?:'|’|ft|feet)\s*(\d+)?/);
+    if (feetInchesMatch) {
+        const feet = parseInt(feetInchesMatch[1], 10);
+        const inches = feetInchesMatch[2] ? parseInt(feetInchesMatch[2], 10) : 0;
+        return feet * 12 + inches;
+    }
+    
+    // feet only match, e.g. 5', 5ft
+    const feetOnlyMatch = s.match(/^(\d+)\s*(?:'|’|ft|feet)$/);
+    if (feetOnlyMatch) {
+        const feet = parseInt(feetOnlyMatch[1], 10);
+        return feet * 12;
+    }
+    
+    // Raw number fallback
+    const num = parseFloat(s);
+    if (!Number.isNaN(num)) {
+        if (num > 100) return Math.round(num / 2.54); // cm to inches
+        if (num > 3 && num < 8) {
+            const parts = String(num).split('.');
+            if (parts.length === 2) {
+                const feet = parseInt(parts[0], 10);
+                const inches = parseInt(parts[1], 10);
+                return feet * 12 + inches;
+            }
+            return Math.round(num * 12);
+        }
+        return Math.round(num); // assume inches
+    }
+    return null;
+};
+
+const HEIGHT_OPTIONS = (() => {
+    const opts = [];
+    for (let feet = 4; feet <= 7; feet++) {
+        const maxInches = feet === 7 ? 0 : 11;
+        for (let inches = 0; inches <= maxInches; inches++) {
+            const totalInches = feet * 12 + inches;
+            opts.push({
+                value: totalInches,
+                label: `${feet}'${inches}"`
+            });
+        }
+    }
+    return opts;
+})();
+
 const FILTER_DEFAULTS = {
     search: "",
     gender: "any",
@@ -71,11 +130,14 @@ const FILTER_DEFAULTS = {
     location: "any",
     ageMin: "",
     ageMax: "",
-    height: "",
+    heightMin: "",
+    heightMax: "",
     minFollowers: 0,
-    sortBy: "relevance",
+    interestedIn: [],
+    internalTags: [],
+    tagMatchMode: "OR",
+    interestedInMatchMode: "OR",
     availability: "any",
-    minMatchScore: 0,
     showIntelligence: true
 };
 
@@ -156,35 +218,21 @@ const calculateMatchScore = (talent, filters) => {
     maxScore += 15;
     
     // Height (10%)
-    if (filters.height && talent.height && talent.height.includes(filters.height)) score += 10;
+    const heightMin = filters.heightMin ? Number(filters.heightMin) : null;
+    const heightMax = filters.heightMax ? Number(filters.heightMax) : null;
+    const tHeight = talent._heightInches || parseHeightToInches(talent.height);
+    if (tHeight !== null) {
+        if ((!heightMin || tHeight >= heightMin) && (!heightMax || tHeight <= heightMax)) {
+            score += 10;
+        }
+    }
     maxScore += 10;
     
     return maxScore > 0 ? Math.round((score / maxScore) * 100) : 50;
 };
 
-// Sort talents with real metrics
-const sortTalents = (talents, sortBy, filters) => {
-    const sorted = [...talents];
-    
-    switch(sortBy) {
-        case "followers_high":
-            return sorted.sort((a, b) => (b.instagram_followers_count || 0) - (a.instagram_followers_count || 0));
-        case "followers_low":
-            return sorted.sort((a, b) => (a.instagram_followers_count || 0) - (b.instagram_followers_count || 0));
-        case "age_young":
-            return sorted.sort((a, b) => (a.age || 99) - (b.age || 99));
-        case "age_old":
-            return sorted.sort((a, b) => (b.age || 0) - (a.age || 0));
-        case "name_asc":
-            return sorted.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-        case "response_rate":
-            return sorted.sort((a, b) => (b.response_rate || 0) - (a.response_rate || 0));
-        case "conversion_rate":
-            return sorted.sort((a, b) => (b.conversion_rate || 0) - (a.conversion_rate || 0));
-        case "relevance":
-        default:
-            return sorted.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
-    }
+const sortTalents = (talents) => {
+    return talents;
 };
 
 // ============================================================================
@@ -236,6 +284,10 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     
     // Keyboard navigation state
     const [focusedIndex, setFocusedIndex] = useState(-1);
+    
+    // Global & Frequent tags state
+    const [globalTags, setGlobalTags] = useState([]);
+    const [frequentTags, setFrequentTags] = useState([]);
     
     // Refs
     const gridScrollRef = useRef(null);
@@ -290,19 +342,47 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 
                 const list = Array.isArray(response.data) ? response.data : response.data?.data || [];
                 
-                // Transform talents with real metrics from backend
-                const transformedTalents = list.map(talent => ({
-                    ...talent,
-                    instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
-                    response_rate: talent.response_rate || 75, // Default fallback, should come from backend
-                    conversion_rate: talent.conversion_rate || 68, // Default fallback, should come from backend
-                    prior_projects: talent.prior_projects || 3,
-                    booking_history: talent.booking_history || [],
-                    shortlist_ratio: talent.shortlist_ratio || 0.4,
-                    availability_status: talent.availability_status || "available",
-                    last_active: talent.last_active || new Date().toISOString(),
-                }));
+                // Transform talents with real metrics and pre-memoize structures for extreme 5,000+ performance
+                const transformedTalents = list.map(talent => {
+                    const parsedHeight = parseHeightToInches(talent.height);
+                    // Safe tagging parsing - skip null/deleted tags to prevent rendering errors
+                    const validTags = (talent.tags || []).filter(tag => tag && typeof tag === 'object' && tag.id && tag.name);
+                    const tagIdsSet = new Set(validTags.map(tag => tag.id));
+                    const interestedInSet = new Set((talent.interested_in || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
+
+                    return {
+                        ...talent,
+                        tags: validTags, // Overwrite to ensure zero card rendering bugs with legacy/deleted tags
+                        _heightInches: parsedHeight,
+                        _tagIdsSet: tagIdsSet,
+                        _interestedInSet: interestedInSet,
+                        instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
+                        response_rate: talent.response_rate || 75,
+                        conversion_rate: talent.conversion_rate || 68,
+                        prior_projects: talent.prior_projects || 3,
+                        booking_history: talent.booking_history || [],
+                        shortlist_ratio: talent.shortlist_ratio || 0.4,
+                        availability_status: talent.availability_status || "available",
+                        last_active: talent.last_active || new Date().toISOString(),
+                    };
+                });
                 
+                // Dynamically compute the top 10 most frequently used tags
+                const tagCounts = {};
+                const tagNames = {};
+                transformedTalents.forEach(t => {
+                    t.tags.forEach(tag => {
+                        tagCounts[tag.id] = (tagCounts[tag.id] || 0) + 1;
+                        tagNames[tag.id] = tag.name;
+                    });
+                });
+                
+                const topTags = Object.keys(tagCounts)
+                    .map(id => ({ id, name: tagNames[id], count: tagCounts[id] }))
+                    .sort((a, b) => b.count - a.count)
+                    .slice(0, 10);
+                
+                setFrequentTags(topTags);
                 setTalents(transformedTalents);
             } catch (err) {
                 if (isMounted && err.name !== 'CanceledError' && err.code !== 'ERR_CANCELED') {
@@ -329,6 +409,26 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             }
         };
     }, [open, talents.length, setLoading, setError, setTalents]);
+
+    // Fetch global tags when modal opens
+    useEffect(() => {
+        if (!open) return;
+        let isMounted = true;
+        
+        const fetchTags = async () => {
+            try {
+                const { data } = await adminApi.get("/tags");
+                if (isMounted) {
+                    setGlobalTags(data.tags || []);
+                }
+            } catch (err) {
+                console.error("Failed to load global tags:", err);
+            }
+        };
+        
+        fetchTags();
+        return () => { isMounted = false; };
+    }, [open]);
     
     // Reset state when modal opens, and abort in-flight requests when closed
     useEffect(() => {
@@ -413,15 +513,23 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         setTalents([]);
     }, []);
     
-    // Filtered and sorted talents
+    // Filtered and sorted talents (precompiled performance structure for 5,000+ scaling)
     const filteredTalents = useMemo(() => {
-        let { search, gender, ethnicity, location, ageMin, ageMax, height, minFollowers, sortBy, minMatchScore } = filters;
+        let { 
+            search, gender, ethnicity, location, 
+            ageMin, ageMax, heightMin, heightMax, 
+            minFollowers, interestedIn, internalTags, 
+            tagMatchMode, interestedInMatchMode 
+        } = filters;
+        
         const searchLower = search.trim().toLowerCase();
         const ageMinNum = ageMin === "" ? null : Number(ageMin);
         const ageMaxNum = ageMax === "" ? null : Number(ageMax);
-        const heightLower = height.trim().toLowerCase();
+        const heightMinNum = heightMin === "" ? null : Number(heightMin);
+        const heightMaxNum = heightMax === "" ? null : Number(heightMax);
         
-        let filtered = talents.filter((t) => {
+        return talents.filter((t) => {
+            // 1. Text Search
             if (searchLower) {
                 const haystack = [t.name, t.email, t.instagram_handle, t.location]
                     .filter(Boolean)
@@ -430,10 +538,12 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 if (!haystack.includes(searchLower)) return false;
             }
             
+            // 2. Demographics
             if (gender !== "any" && t.gender !== gender) return false;
             if (ethnicity !== "any" && t.ethnicity !== ethnicity) return false;
             if (location !== "any" && t.location !== location) return false;
             
+            // 3. Age Range
             if (ageMinNum !== null && !Number.isNaN(ageMinNum)) {
                 if (!t.age || t.age < ageMinNum) return false;
             }
@@ -441,29 +551,46 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 if (!t.age || t.age > ageMaxNum) return false;
             }
             
-            if (heightLower) {
-                if (!t.height || !String(t.height).toLowerCase().includes(heightLower)) return false;
+            // 4. Height Range (Numerical Comparison using Pre-Parsed Inches)
+            if (heightMinNum !== null || heightMaxNum !== null) {
+                if (t._heightInches === null) return false; // Exclude candidates with missing/unparseable height
+                if (heightMinNum !== null && t._heightInches < heightMinNum) return false;
+                if (heightMaxNum !== null && t._heightInches > heightMaxNum) return false;
             }
             
+            // 5. Followers
             if (minFollowers > 0) {
-                const followerCount = t.instagram_followers_count || parseFollowers(t.instagram_followers);
-                if (followerCount < minFollowers) return false;
+                if (t.instagram_followers_count < minFollowers) return false;
             }
             
-            if (minMatchScore > 0) {
-                const score = calculateMatchScore(t, filters);
-                if (score < minMatchScore) return false;
+            // 6. Interested In Categories (Multi-select AND/OR matching)
+            if (interestedIn.length > 0) {
+                const lowerSelected = interestedIn.map(s => s.toLowerCase());
+                if (interestedInMatchMode === "AND") {
+                    const hasAll = lowerSelected.every(cat => t._interestedInSet.has(cat));
+                    if (!hasAll) return false;
+                } else {
+                    const hasAny = lowerSelected.some(cat => t._interestedInSet.has(cat));
+                    if (!hasAny) return false;
+                }
+            }
+            
+            // 7. Internal Tags (Multi-select AND/OR matching)
+            if (internalTags.length > 0) {
+                if (tagMatchMode === "AND") {
+                    const hasAll = internalTags.every(tagId => t._tagIdsSet.has(tagId));
+                    if (!hasAll) return false;
+                } else {
+                    const hasAny = internalTags.some(tagId => t._tagIdsSet.has(tagId));
+                    if (!hasAny) return false;
+                }
             }
             
             return true;
-        });
-        
-        const precomputed = filtered.map(t => ({
+        }).map(t => ({
             ...t,
-            matchScore: calculateMatchScore(t, filters),
+            matchScore: calculateMatchScore(t, filters), // Precomputed visual match score
         }));
-        
-        return sortTalents(precomputed, sortBy, filters);
     }, [talents, filters]);
     
     const filtersActive = useMemo(() => {
@@ -474,10 +601,11 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             filters.location !== "any" ||
             filters.ageMin !== "" ||
             filters.ageMax !== "" ||
-            filters.height !== "" ||
+            filters.heightMin !== "" ||
+            filters.heightMax !== "" ||
             filters.minFollowers > 0 ||
-            filters.sortBy !== "relevance" ||
-            filters.minMatchScore > 0
+            filters.interestedIn.length > 0 ||
+            filters.internalTags.length > 0
         );
     }, [filters]);
     
@@ -487,10 +615,10 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         if (filters.ethnicity !== "any") count++;
         if (filters.location !== "any") count++;
         if (filters.ageMin || filters.ageMax) count++;
-        if (filters.height) count++;
+        if (filters.heightMin || filters.heightMax) count++;
         if (filters.minFollowers > 0) count++;
-        if (filters.sortBy !== "relevance") count++;
-        if (filters.minMatchScore > 0) count++;
+        if (filters.interestedIn.length > 0) count++;
+        if (filters.internalTags.length > 0) count++;
         return count;
     }, [filters]);
     
@@ -809,18 +937,38 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             {filtersActive && (
                                 <div className="flex items-center gap-1.5 flex-wrap mt-2">
                                     <span className="text-[10px] text-gray-400 hidden sm:inline">Active:</span>
-                                    {filters.gender !== "any" && <FilterChip label={`${filters.gender}`} onRemove={() => setFilter("gender", "any")} />}
-                                    {filters.ethnicity !== "any" && <FilterChip label={filters.ethnicity} onRemove={() => setFilter("ethnicity", "any")} />}
-                                    {filters.location !== "any" && <FilterChip label={filters.location} onRemove={() => setFilter("location", "any")} />}
+                                    {filters.gender !== "any" && <FilterChip label={`Gender: ${filters.gender}`} onRemove={() => setFilter("gender", "any")} />}
+                                    {filters.ethnicity !== "any" && <FilterChip label={`Ethnicity: ${filters.ethnicity}`} onRemove={() => setFilter("ethnicity", "any")} />}
+                                    {filters.location !== "any" && <FilterChip label={`Location: ${filters.location}`} onRemove={() => setFilter("location", "any")} />}
                                     {(filters.ageMin || filters.ageMax) && (
-                                        <FilterChip label={`${filters.ageMin || ""}–${filters.ageMax || ""}`} onRemove={() => { setFilter("ageMin", ""); setFilter("ageMax", ""); }} />
+                                        <FilterChip label={`Age: ${filters.ageMin || "Any"}–${filters.ageMax || "Any"}`} onRemove={() => { setFilter("ageMin", ""); setFilter("ageMax", ""); }} />
+                                    )}
+                                    {(filters.heightMin || filters.heightMax) && (
+                                        <FilterChip 
+                                            label={`Height: ${filters.heightMin ? HEIGHT_OPTIONS.find(o => o.value === Number(filters.heightMin))?.label || "" : "4'0\""}–${filters.heightMax ? HEIGHT_OPTIONS.find(o => o.value === Number(filters.heightMax))?.label || "" : "7'0\""}`} 
+                                            onRemove={() => { setFilter("heightMin", ""); setFilter("heightMax", ""); }} 
+                                        />
                                     )}
                                     {filters.minFollowers > 0 && (
-                                        <FilterChip label={FOLLOWER_BUCKETS.find(b => b.value === filters.minFollowers)?.label} onRemove={() => setFilter("minFollowers", 0)} />
+                                        <FilterChip label={`Followers: ${FOLLOWER_BUCKETS.find(b => b.value === filters.minFollowers)?.label}`} onRemove={() => setFilter("minFollowers", 0)} />
                                     )}
-                                    {filters.sortBy !== "relevance" && (
-                                        <FilterChip label={`Sort: ${filters.sortBy.replace("_", " ")}`} onRemove={() => setFilter("sortBy", "relevance")} />
-                                    )}
+                                    {filters.interestedIn.map(cat => (
+                                        <FilterChip 
+                                            key={cat} 
+                                            label={`Category: ${cat}`} 
+                                            onRemove={() => setFilter("interestedIn", filters.interestedIn.filter(x => x !== cat))} 
+                                        />
+                                    ))}
+                                    {filters.internalTags.map(tagId => {
+                                        const tagName = globalTags.find(t => t.id === tagId)?.name || "Tag";
+                                        return (
+                                            <FilterChip 
+                                                key={tagId} 
+                                                label={`Tag: ${tagName}`} 
+                                                onRemove={() => setFilter("internalTags", filters.internalTags.filter(x => x !== tagId))} 
+                                            />
+                                        );
+                                    })}
                                     <button onClick={resetFilters} className="text-[10px] text-gray-400 hover:text-gray-600 underline-offset-2 hover:underline">
                                         Clear all
                                     </button>
@@ -832,6 +980,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 {SAVED_SEARCHES.map(preset => (
                                     <button
                                         key={preset.id}
+                                        type="button"
                                         onClick={() => applySavedSearch(preset)}
                                         className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors whitespace-nowrap"
                                     >
@@ -847,6 +996,36 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                     <span className="text-xs text-gray-600">Save search</span>
                                 </button>
                             </div>
+
+                            {/* Popular Tags Row (dynamic chip filter sync) */}
+                            {frequentTags.length > 0 && (
+                                <div className="flex items-center gap-1.5 flex-wrap mt-2.5 pt-1.5 border-t border-gray-150">
+                                    <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Popular Tags:</span>
+                                    {frequentTags.map(tag => {
+                                        const isSelected = filters.internalTags.includes(tag.id);
+                                        return (
+                                            <button
+                                                key={tag.id}
+                                                type="button"
+                                                onClick={() => {
+                                                    if (isSelected) {
+                                                        setFilter("internalTags", filters.internalTags.filter(id => id !== tag.id));
+                                                    } else {
+                                                        setFilter("internalTags", [...filters.internalTags, tag.id]);
+                                                    }
+                                                }}
+                                                className={`px-2 py-0.5 rounded-full text-[10px] font-medium tracking-tight transition-all border ${
+                                                    isSelected
+                                                        ? "bg-gray-900 border-gray-900 text-white"
+                                                        : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300"
+                                                }`}
+                                            >
+                                                {tag.name} <span className="text-[8px] opacity-60">({tag.count})</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
                         
                         {/* Advanced Filters Panel */}
@@ -855,7 +1034,9 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 filters={filters}
                                 setFilter={setFilter}
                                 filterOptions={filterOptions}
+                                globalTags={globalTags}
                                 onClose={() => setShowAdvancedFilters(false)}
+                                resetFilters={resetFilters}
                             />
                         )}
                     </div>
@@ -936,6 +1117,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     filters={filters}
                     setFilter={setFilter}
                     filterOptions={filterOptions}
+                    globalTags={globalTags}
                     onClose={() => setShowMobileFilters(false)}
                     onReset={resetFilters}
                 />
@@ -1004,19 +1186,187 @@ class ErrorBoundary extends React.Component {
 }
 
 // ============================================================================
+// TAGS FILTER INPUT
+// ============================================================================
+
+const TagsFilterInput = ({ selectedTagIds, globalTags, onChange }) => {
+    const [query, setQuery] = useState("");
+    const [isOpen, setIsOpen] = useState(false);
+    const [highlightedIndex, setHighlightedIndex] = useState(0);
+    const containerRef = useRef(null);
+    const inputRef = useRef(null);
+
+    // Debounced query filtering (no heavy calculations)
+    const filteredTags = useMemo(() => {
+        const cleaned = query.trim().toLowerCase();
+        return globalTags.filter(tag => {
+            const matchesQuery = cleaned === "" || tag.name.toLowerCase().includes(cleaned);
+            const notSelected = !selectedTagIds.includes(tag.id);
+            return matchesQuery && notSelected;
+        });
+    }, [query, globalTags, selectedTagIds]);
+
+    // Handle outside clicks to close the dropdown
+    useEffect(() => {
+        const handleClickOutside = (e) => {
+            if (containerRef.current && !containerRef.current.contains(e.target)) {
+                setIsOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
+
+    // Keep highlighted index in bounds
+    useEffect(() => {
+        setHighlightedIndex(0);
+    }, [filteredTags]);
+
+    const handleSelectTag = useCallback((tagId) => {
+        onChange([...selectedTagIds, tagId]);
+        setQuery("");
+        inputRef.current?.focus();
+    }, [selectedTagIds, onChange]);
+
+    const handleRemoveTag = useCallback((tagId) => {
+        onChange(selectedTagIds.filter(id => id !== tagId));
+    }, [selectedTagIds, onChange]);
+
+    const handleKeyDown = (e) => {
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setIsOpen(true);
+            setHighlightedIndex(prev => Math.min(prev + 1, filteredTags.length - 1));
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setHighlightedIndex(prev => Math.max(prev - 1, 0));
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            if (isOpen && filteredTags[highlightedIndex]) {
+                handleSelectTag(filteredTags[highlightedIndex].id);
+            } else {
+                setIsOpen(true);
+            }
+        } else if (e.key === "Escape") {
+            setIsOpen(false);
+        } else if (e.key === "Backspace" && query === "" && selectedTagIds.length > 0) {
+            // Remove the last selected tag
+            handleRemoveTag(selectedTagIds[selectedTagIds.length - 1]);
+        }
+    };
+
+    // Get selected tag details for chip rendering
+    const selectedTagsList = useMemo(() => {
+        return selectedTagIds.map(id => globalTags.find(t => t.id === id)).filter(Boolean);
+    }, [selectedTagIds, globalTags]);
+
+    return (
+        <div ref={containerRef} className="relative w-full">
+            {/* Input & Selected Chips Area */}
+            <div 
+                onClick={() => inputRef.current?.focus()}
+                className="w-full flex flex-wrap gap-1.5 p-2 bg-white border border-gray-200 rounded-lg focus-within:border-gray-300 focus-within:ring-1 focus-within:ring-gray-200 cursor-text min-h-[40px] transition-all"
+            >
+                {selectedTagsList.map(tag => (
+                    <span 
+                        key={tag.id}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-gray-900 text-white text-xs font-medium tracking-tight shadow-sm shrink-0"
+                    >
+                        {tag.name}
+                        <button 
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemoveTag(tag.id);
+                            }}
+                            className="hover:text-gray-200 focus:outline-none transition-colors"
+                        >
+                            <X size={10} strokeWidth={2.5} />
+                        </button>
+                    </span>
+                ))}
+                
+                <input
+                    ref={inputRef}
+                    type="text"
+                    value={query}
+                    onChange={(e) => {
+                        setQuery(e.target.value);
+                        setIsOpen(true);
+                    }}
+                    onFocus={() => setIsOpen(true)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={selectedTagIds.length === 0 ? "Search internal tags..." : ""}
+                    className="flex-1 bg-transparent border-none outline-none text-sm text-gray-900 placeholder:text-gray-400 p-0.5 min-w-[120px] focus:ring-0 focus:border-none focus:outline-none"
+                />
+            </div>
+
+            {/* Dropdown Menu */}
+            {isOpen && filteredTags.length > 0 && (
+                <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-60 overflow-y-auto overflow-x-hidden">
+                    {filteredTags.map((tag, idx) => (
+                        <button
+                            key={tag.id}
+                            type="button"
+                            onClick={() => handleSelectTag(tag.id)}
+                            onMouseEnter={() => setHighlightedIndex(idx)}
+                            className={`w-full text-left px-4 py-2 text-sm transition-colors ${
+                                idx === highlightedIndex 
+                                    ? "bg-gray-100 text-gray-900" 
+                                    : "text-gray-700 hover:bg-gray-50"
+                            }`}
+                        >
+                            {tag.name}
+                        </button>
+                    ))}
+                </div>
+            )}
+            
+            {isOpen && query.trim() !== "" && filteredTags.length === 0 && (
+                <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl px-4 py-3 text-sm text-gray-400 text-center">
+                    No matching tags found
+                </div>
+            )}
+        </div>
+    );
+};
+
+// ============================================================================
 // ADVANCED FILTERS PANEL
 // ============================================================================
 
-const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, onClose }) => {
+const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTags, onClose, resetFilters }) => {
     return (
-        <div className="border-t border-gray-100 bg-gray-50/50 p-4">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="border-t border-gray-100 bg-gray-50/50 p-5 space-y-5 animate-slide-down">
+            {/* Header row with Title & Close/Reset buttons */}
+            <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Casting Filter Engine</h3>
+                <div className="flex items-center gap-3">
+                    <button 
+                        type="button"
+                        onClick={resetFilters}
+                        className="text-xs text-gray-500 hover:text-gray-905 font-medium transition-colors"
+                    >
+                        Reset All Filters
+                    </button>
+                    <button 
+                        type="button"
+                        onClick={onClose}
+                        className="text-xs text-gray-500 hover:text-gray-905 font-medium transition-colors"
+                    >
+                        Hide Filters
+                    </button>
+                </div>
+            </div>
+
+            {/* ROW 3 (Demographics) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Gender</label>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Gender</label>
                     <select
                         value={filters.gender}
                         onChange={(e) => setFilter("gender", e.target.value)}
-                        className="w-full mt-1 px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
+                        className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
                     >
                         <option value="any">Any ({filterOptions.totalCount})</option>
                         {filterOptions.genders.map(g => <option key={g} value={g}>{g}</option>)}
@@ -1024,11 +1374,11 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, onClose 
                 </div>
                 
                 <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Ethnicity</label>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Ethnicity</label>
                     <select
                         value={filters.ethnicity}
                         onChange={(e) => setFilter("ethnicity", e.target.value)}
-                        className="w-full mt-1 px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
+                        className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
                     >
                         <option value="any">Any</option>
                         {filterOptions.ethnicities.map(e => <option key={e} value={e}>{e}</option>)}
@@ -1036,72 +1386,166 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, onClose 
                 </div>
                 
                 <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Age Range</label>
-                    <div className="flex gap-2 mt-1">
-                        <input type="number" value={filters.ageMin} onChange={(e) => setFilter("ageMin", e.target.value)} placeholder="Min" className="w-full px-2 py-1.5 text-sm bg-white border border-gray-200 rounded-lg" />
-                        <span className="text-gray-400 self-center">–</span>
-                        <input type="number" value={filters.ageMax} onChange={(e) => setFilter("ageMax", e.target.value)} placeholder="Max" className="w-full px-2 py-1.5 text-sm bg-white border border-gray-200 rounded-lg" />
-                    </div>
-                </div>
-                
-                <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Location</label>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Location</label>
                     <select
                         value={filters.location}
                         onChange={(e) => setFilter("location", e.target.value)}
-                        className="w-full mt-1 px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
+                        className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
                     >
                         <option value="any">Any</option>
                         {filterOptions.locations.map(l => <option key={l} value={l}>{l}</option>)}
                     </select>
                 </div>
-                
+            </div>
+            
+            {/* ROW 4 (Physical & Outreach) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Instagram Followers</label>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Age Range</label>
+                    <div className="flex gap-2 mt-1.5">
+                        <input 
+                            type="number" 
+                            value={filters.ageMin} 
+                            onChange={(e) => setFilter("ageMin", e.target.value)} 
+                            placeholder="Min" 
+                            className="w-full px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300" 
+                        />
+                        <span className="text-gray-400 self-center font-medium">–</span>
+                        <input 
+                            type="number" 
+                            value={filters.ageMax} 
+                            onChange={(e) => setFilter("ageMax", e.target.value)} 
+                            placeholder="Max" 
+                            className="w-full px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300" 
+                        />
+                    </div>
+                </div>
+
+                <div>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Height Range</label>
+                    <div className="flex gap-2 mt-1.5">
+                        <select
+                            value={filters.heightMin}
+                            onChange={(e) => setFilter("heightMin", e.target.value)}
+                            className="w-full px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
+                        >
+                            <option value="">Min</option>
+                            {HEIGHT_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                        <span className="text-gray-400 self-center font-medium">–</span>
+                        <select
+                            value={filters.heightMax}
+                            onChange={(e) => setFilter("heightMax", e.target.value)}
+                            className="w-full px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
+                        >
+                            <option value="">Max</option>
+                            {HEIGHT_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                    </div>
+                </div>
+
+                <div>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Instagram Followers</label>
                     <select
                         value={filters.minFollowers}
                         onChange={(e) => setFilter("minFollowers", Number(e.target.value))}
-                        className="w-full mt-1 px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
+                        className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
                     >
                         {FOLLOWER_BUCKETS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
                     </select>
                 </div>
-                
-                <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Sort By</label>
-                    <select
-                        value={filters.sortBy}
-                        onChange={(e) => setFilter("sortBy", e.target.value)}
-                        className="w-full mt-1 px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
-                    >
-                        <option value="relevance">Match Score</option>
-                        <option value="followers_high">Followers (High to Low)</option>
-                        <option value="followers_low">Followers (Low to High)</option>
-                        <option value="age_young">Age (Youngest First)</option>
-                        <option value="age_old">Age (Oldest First)</option>
-                        <option value="name_asc">Name (A-Z)</option>
-                        <option value="response_rate">Response Rate</option>
-                        <option value="conversion_rate">Conversion Rate</option>
-                    </select>
+            </div>
+
+            {/* ROW 5 (Interested In Categories) */}
+            <div className="pt-2 border-t border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Interested In</label>
+                    <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
+                        <button
+                            type="button"
+                            onClick={() => setFilter("interestedInMatchMode", "OR")}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                filters.interestedInMatchMode === "OR" 
+                                    ? "bg-white text-gray-900 shadow-sm" 
+                                    : "text-gray-500 hover:text-gray-700"
+                            }`}
+                        >
+                            ANY (OR)
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setFilter("interestedInMatchMode", "AND")}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                filters.interestedInMatchMode === "AND" 
+                                    ? "bg-white text-gray-900 shadow-sm" 
+                                    : "text-gray-500 hover:text-gray-700"
+                            }`}
+                        >
+                            ALL (AND)
+                        </button>
+                    </div>
                 </div>
-                
-                <div>
-                    <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Min Match Score</label>
-                    <select
-                        value={filters.minMatchScore}
-                        onChange={(e) => setFilter("minMatchScore", Number(e.target.value))}
-                        className="w-full mt-1 px-3 py-1.5 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
-                    >
-                        <option value="0">Any</option>
-                        <option value="70">70%+</option>
-                        <option value="80">80%+</option>
-                        <option value="90">90%+</option>
-                    </select>
+                <div className="flex flex-wrap gap-2">
+                    {["Acting", "Modeling", "Influencer Campaigns"].map(cat => {
+                        const isSelected = filters.interestedIn.includes(cat);
+                        return (
+                            <button
+                                key={cat}
+                                type="button"
+                                onClick={() => {
+                                    if (isSelected) {
+                                        setFilter("interestedIn", filters.interestedIn.filter(x => x !== cat));
+                                    } else {
+                                        setFilter("interestedIn", [...filters.interestedIn, cat]);
+                                    }
+                                }}
+                                className={`px-4.5 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                                    isSelected 
+                                        ? "bg-gray-900 border-gray-900 text-white shadow-sm" 
+                                        : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300"
+                                }`}
+                            >
+                                {cat}
+                            </button>
+                        );
+                    })}
                 </div>
             </div>
-            
-            <div className="flex justify-end mt-4 pt-2 border-t border-gray-200">
-                <button onClick={onClose} className="text-sm text-gray-600 hover:text-gray-900">Close</button>
+
+            {/* ROW 6 (Internal Tags Autocomplete) */}
+            <div className="pt-2 border-t border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Internal Tags Filter</label>
+                    <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
+                        <button
+                            type="button"
+                            onClick={() => setFilter("tagMatchMode", "OR")}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                filters.tagMatchMode === "OR" 
+                                    ? "bg-white text-gray-900 shadow-sm" 
+                                    : "text-gray-500 hover:text-gray-700"
+                            }`}
+                        >
+                            ANY (OR)
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setFilter("tagMatchMode", "AND")}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                filters.tagMatchMode === "AND" 
+                                    ? "bg-white text-gray-900 shadow-sm" 
+                                    : "text-gray-500 hover:text-gray-700"
+                            }`}
+                        >
+                            ALL (AND)
+                        </button>
+                    </div>
+                </div>
+                <TagsFilterInput
+                    selectedTagIds={filters.internalTags}
+                    globalTags={globalTags}
+                    onChange={(newTagIds) => setFilter("internalTags", newTagIds)}
+                />
             </div>
         </div>
     );
@@ -1111,9 +1555,13 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, onClose 
 // MOBILE FILTERS SHEET
 // ============================================================================
 
-const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, onClose, onReset }) => {
+const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags, onClose, onReset }) => {
     const [localFilters, setLocalFilters] = useState(filters);
     
+    const setLocalFilter = (key, value) => {
+        setLocalFilters(prev => ({ ...prev, [key]: value }));
+    };
+
     const applyFilters = () => {
         Object.entries(localFilters).forEach(([key, value]) => setFilter(key, value));
         onClose();
@@ -1121,57 +1569,203 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, onClose, o
     
     return (
         <div className="fixed inset-0 z-50 flex items-end bg-black/50">
-            <div className="bg-white rounded-t-2xl w-full max-h-[85vh] overflow-y-auto animate-slide-up">
-                <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-3 flex justify-between items-center">
-                    <h3 className="font-semibold text-gray-900">Filters</h3>
-                    <div className="flex gap-2">
-                        <button onClick={onReset} className="text-sm text-gray-500">Reset</button>
-                        <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center text-gray-400"><X size={18} /></button>
+            <div className="bg-white rounded-t-2xl w-full max-h-[85vh] overflow-y-auto animate-slide-up flex flex-col">
+                <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-4 flex justify-between items-center shrink-0">
+                    <h3 className="font-semibold text-gray-900 text-base">Filters</h3>
+                    <div className="flex gap-3">
+                        <button 
+                            type="button"
+                            onClick={() => {
+                                onReset();
+                                setLocalFilters(FILTER_DEFAULTS);
+                            }} 
+                            className="text-xs text-gray-500 hover:text-gray-900 font-medium"
+                        >
+                            Reset
+                        </button>
+                        <button 
+                            type="button"
+                            onClick={onClose} 
+                            className="w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
+                        >
+                            <X size={18} />
+                        </button>
                     </div>
                 </div>
                 
-                <div className="p-4 space-y-4">
+                <div className="p-4 space-y-5 overflow-y-auto flex-1 pb-10">
+                    {/* Gender */}
                     <div>
-                        <label className="text-sm font-medium text-gray-700">Gender</label>
-                        <div className="flex gap-2 mt-1">
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Gender</label>
+                        <div className="flex flex-wrap gap-2 mt-1.5">
                             {["any", ...filterOptions.genders].map(g => (
-                                <button key={g} onClick={() => setLocalFilters(prev => ({ ...prev, gender: g }))} className={`px-3 py-1.5 rounded-full text-sm ${localFilters.gender === g ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700"}`}>{g === "any" ? "Any" : g}</button>
+                                <button 
+                                    key={g} 
+                                    type="button"
+                                    onClick={() => setLocalFilter("gender", g)} 
+                                    className={`px-4 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                                        localFilters.gender === g 
+                                            ? "bg-gray-900 border-gray-900 text-white shadow-sm" 
+                                            : "bg-white border-gray-200 text-gray-600"
+                                    }`}
+                                >
+                                    {g === "any" ? "Any" : g}
+                                </button>
                             ))}
                         </div>
                     </div>
                     
+                    {/* Ethnicity */}
                     <div>
-                        <label className="text-sm font-medium text-gray-700">Age Range</label>
-                        <div className="flex flex-wrap gap-2 mt-1">
-                            {AGE_BUCKETS.map(bucket => (
-                                <button key={bucket.label} onClick={() => setLocalFilters(prev => ({ ...prev, ageMin: bucket.min || "", ageMax: bucket.max || "" }))} className={`px-3 py-1.5 rounded-full text-sm ${localFilters.ageMin === String(bucket.min || "") && localFilters.ageMax === String(bucket.max || "") ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700"}`}>{bucket.label}</button>
-                            ))}
-                        </div>
-                    </div>
-                    
-                    <div>
-                        <label className="text-sm font-medium text-gray-700">Followers</label>
-                        <div className="flex flex-wrap gap-2 mt-1">
-                            {FOLLOWER_BUCKETS.map(b => (
-                                <button key={b.value} onClick={() => setLocalFilters(prev => ({ ...prev, minFollowers: b.value }))} className={`px-3 py-1.5 rounded-full text-sm ${localFilters.minFollowers === b.value ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700"}`}>{b.label}</button>
-                            ))}
-                        </div>
-                    </div>
-                    
-                    <div>
-                        <label className="text-sm font-medium text-gray-700">Sort By</label>
-                        <select value={localFilters.sortBy} onChange={(e) => setLocalFilters(prev => ({ ...prev, sortBy: e.target.value }))} className="w-full mt-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
-                            <option value="relevance">Match Score</option>
-                            <option value="followers_high">Followers (High to Low)</option>
-                            <option value="followers_low">Followers (Low to High)</option>
-                            <option value="age_young">Age (Youngest First)</option>
-                            <option value="age_old">Age (Oldest First)</option>
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Ethnicity</label>
+                        <select 
+                            value={localFilters.ethnicity} 
+                            onChange={(e) => setLocalFilter("ethnicity", e.target.value)} 
+                            className="w-full mt-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                        >
+                            <option value="any">Any</option>
+                            {filterOptions.ethnicities.map(e => <option key={e} value={e}>{e}</option>)}
                         </select>
                     </div>
+
+                    {/* Location */}
+                    <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Location</label>
+                        <select 
+                            value={localFilters.location} 
+                            onChange={(e) => setLocalFilter("location", e.target.value)} 
+                            className="w-full mt-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                        >
+                            <option value="any">Any</option>
+                            {filterOptions.locations.map(l => <option key={l} value={l}>{l}</option>)}
+                        </select>
+                    </div>
+                    
+                    {/* Age Range */}
+                    <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Age Range</label>
+                        <div className="flex gap-2 mt-1.5">
+                            <input 
+                                type="number" 
+                                value={localFilters.ageMin} 
+                                onChange={(e) => setLocalFilter("ageMin", e.target.value)} 
+                                placeholder="Min" 
+                                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm" 
+                            />
+                            <span className="text-gray-400 self-center font-medium">–</span>
+                            <input 
+                                type="number" 
+                                value={localFilters.ageMax} 
+                                onChange={(e) => setLocalFilter("ageMax", e.target.value)} 
+                                placeholder="Max" 
+                                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm" 
+                            />
+                        </div>
+                    </div>
+
+                    {/* Height Range */}
+                    <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Height Range</label>
+                        <div className="flex gap-2 mt-1.5">
+                            <select
+                                value={localFilters.heightMin}
+                                onChange={(e) => setLocalFilter("heightMin", e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                            >
+                                <option value="">Min</option>
+                                {HEIGHT_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                            </select>
+                            <span className="text-gray-400 self-center font-medium">–</span>
+                            <select
+                                value={localFilters.heightMax}
+                                onChange={(e) => setLocalFilter("heightMax", e.target.value)}
+                                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                            >
+                                <option value="">Max</option>
+                                {HEIGHT_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    
+                    {/* Followers */}
+                    <div>
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Instagram Followers</label>
+                        <select 
+                            value={localFilters.minFollowers} 
+                            onChange={(e) => setLocalFilter("minFollowers", Number(e.target.value))} 
+                            className="w-full mt-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                        >
+                            {FOLLOWER_BUCKETS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+                        </select>
+                    </div>
+
+                    {/* Interested In */}
+                    <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Interested In</label>
+                            <button
+                                type="button"
+                                onClick={() => setLocalFilter("interestedInMatchMode", localFilters.interestedInMatchMode === "OR" ? "AND" : "OR")}
+                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-gray-700 font-semibold"
+                            >
+                                Mode: {localFilters.interestedInMatchMode}
+                            </button>
+                        </div>
+                        <div className="flex flex-wrap gap-2 mt-1.5">
+                            {["Acting", "Modeling", "Influencer Campaigns"].map(cat => {
+                                const isSelected = localFilters.interestedIn.includes(cat);
+                                return (
+                                    <button
+                                        key={cat}
+                                        type="button"
+                                        onClick={() => {
+                                            if (isSelected) {
+                                                setLocalFilter("interestedIn", localFilters.interestedIn.filter(x => x !== cat));
+                                            } else {
+                                                setLocalFilter("interestedIn", [...localFilters.interestedIn, cat]);
+                                            }
+                                        }}
+                                        className={`px-4 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                                            isSelected 
+                                                ? "bg-gray-900 border-gray-900 text-white shadow-sm" 
+                                                : "bg-white border-gray-200 text-gray-600"
+                                        }`}
+                                    >
+                                        {cat}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* Internal Tags */}
+                    <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Internal Tags</label>
+                            <button
+                                type="button"
+                                onClick={() => setLocalFilter("tagMatchMode", localFilters.tagMatchMode === "OR" ? "AND" : "OR")}
+                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-gray-700 font-semibold"
+                            >
+                                Mode: {localFilters.tagMatchMode}
+                            </button>
+                        </div>
+                        <TagsFilterInput
+                            selectedTagIds={localFilters.internalTags}
+                            globalTags={globalTags}
+                            onChange={(newTagIds) => setLocalFilter("internalTags", newTagIds)}
+                        />
+                    </div>
                 </div>
                 
-                <div className="sticky bottom-0 bg-white border-t border-gray-200 p-4">
-                    <button onClick={applyFilters} className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 transition-colors">Apply Filters</button>
+                <div className="sticky bottom-0 bg-white border-t border-gray-200 p-4 shrink-0">
+                    <button 
+                        type="button"
+                        onClick={applyFilters} 
+                        className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 transition-colors shadow-sm"
+                    >
+                        Apply Filters
+                    </button>
                 </div>
             </div>
         </div>
@@ -1418,9 +2012,23 @@ function EmptyResults({ onReset, hasFilters }) {
     return (
         <div className="flex flex-col items-center justify-center text-center h-full min-h-[400px]">
             <div className="w-12 h-px bg-gradient-to-r from-transparent via-gray-300 to-transparent mb-4" />
-            <p className="text-xs tracking-[0.22em] uppercase text-gray-400 mb-2">{hasFilters ? "No matches found" : "No talents available"}</p>
-            <p className="text-sm text-gray-500 max-w-sm px-4">{hasFilters ? "Try adjusting your filters or search term" : "Add talents from the global roster page first"}</p>
-            {hasFilters && <button onClick={onReset} className="mt-5 px-4 py-2 rounded-lg text-xs font-medium text-white bg-gray-900 hover:bg-gray-800 transition-colors">Clear all filters</button>}
+            <p className="text-xs tracking-[0.22em] uppercase text-gray-400 mb-2">
+                {hasFilters ? "No matches found" : "No talents available"}
+            </p>
+            <p className="text-sm text-gray-500 max-w-sm px-6 mb-5">
+                {hasFilters 
+                    ? "No talents match the current casting filters." 
+                    : "Add talents from the global roster page first to populate this campaign."}
+            </p>
+            {hasFilters && (
+                <button 
+                    type="button"
+                    onClick={onReset} 
+                    className="px-4 py-2 border border-gray-900 rounded-lg text-xs font-semibold text-gray-900 hover:bg-gray-50 transition-all shadow-sm"
+                >
+                    Reset Filters
+                </button>
+            )}
         </div>
     );
 }

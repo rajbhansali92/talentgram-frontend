@@ -1217,7 +1217,10 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
                     </button>
                 )}
             </div>
-  function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
+        );
+}
+
+function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {
     const normalize = (fd) => ({
         ...fd,
         availability:

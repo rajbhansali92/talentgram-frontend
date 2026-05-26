@@ -122,9 +122,29 @@ const TalentCard = React.memo(function TalentCard({
                 <div className="text-[11px] text-neutral-400 mt-0.5 truncate">
                     {[t.location, t.category].filter(Boolean).join(" · ") || "\u00a0"}
                 </div>
+                {/* Compact tag pills — max 2 visible + overflow badge */}
+                {(t.tags || []).length > 0 && (
+                    <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                        {(t.tags || []).slice(0, 2).map((tag) => (
+                            <span
+                                key={tag.id}
+                                className="px-1.5 py-0.5 rounded text-[9px] tracking-[0.05em] bg-black/[0.05] text-black/50 border border-black/[0.06] truncate max-w-[72px]"
+                                title={tag.name}
+                            >
+                                {tag.name}
+                            </span>
+                        ))}
+                        {(t.tags || []).length > 2 && (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] bg-black/[0.03] text-black/35 border border-black/[0.05]">
+                                +{(t.tags || []).length - 2}
+                            </span>
+                        )}
+                    </div>
+                )}
             </div>
         </>
     );
+
 
     return (
         <div

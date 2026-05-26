@@ -158,23 +158,23 @@ async def update_application(
         if fn or ln:
             update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or app_doc.get("talent_name")
 
-        talent_age = None
-        email = app_doc.get("talent_email")
-        if email:
-            talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
-            if talent_doc:
-                talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
-
-        submitted_age_override_val = None
-        override_active = merged.get("overrideAge") or merged.get("override_age")
-        if override_active and merged.get("submitted_age_override") not in (None, ""):
-            try:
-                submitted_age_override_val = int(merged.get("submitted_age_override"))
-            except Exception:
-                pass
-
-        update["submitted_age_override"] = submitted_age_override_val
-        update["effective_age"] = compute_effective_age(merged, talent_age)
+        # Effective age resolves strictly from DOB — no override fields.
+        dob = merged.get("dob")
+        effective_age_val = compute_age(dob) if dob else None
+        # Fallback: check existing talent record for a stored age
+        if effective_age_val is None:
+            email = app_doc.get("talent_email")
+            if email:
+                talent_doc = await db.talents.find_one(
+                    {"$or": [{"email": email}, {"source.talent_email": email}]},
+                    {"age": 1, "dob": 1},
+                )
+                if talent_doc:
+                    effective_age_val = (
+                        compute_age(talent_doc["dob"]) if talent_doc.get("dob")
+                        else talent_doc.get("age")
+                    )
+        update["effective_age"] = effective_age_val
     if update:
         await db.applications.update_one({"id": aid}, {"$set": update})
     return await db.applications.find_one({"id": aid}, {"_id": 0})
@@ -465,6 +465,12 @@ async def set_application_decision(
                 update["work_links"] = talent["work_links"]
             if not existing.get("cover_media_id") and talent.get("cover_media_id"):
                 update["cover_media_id"] = talent["cover_media_id"]
+            # interested_in: merge unique categories from application into existing profile.
+            existing_interests = set(existing.get("interested_in") or [])
+            incoming_interests = set(talent.get("interested_in") or [])
+            merged_interests = sorted(existing_interests | incoming_interests)
+            if merged_interests:
+                update["interested_in"] = merged_interests
             await db.talents.update_one({"id": existing["id"]}, {"$set": update})
             await update_talent_cover_cache(existing["id"])
             await db.applications.update_one(
@@ -516,6 +522,16 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
             cover_mid = mid
     dob = (fd.get("dob") or "").strip() or None
     age = compute_age(dob) if dob else None
+    # interested_in: self-selected public work categories from the onboarding form.
+    # Validate against a safe allow-list to prevent arbitrary string injection.
+    VALID_INTERESTS = {
+        "Acting", "Modeling", "Print Campaigns", "TV Commercials",
+        "Digital Ads", "Instagram Collaborations", "Influencer Campaigns",
+        "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
+        "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
+    }
+    raw_interests = fd.get("interested_in") or []
+    interested_in = [i for i in raw_interests if isinstance(i, str) and i.strip() in VALID_INTERESTS]
     return {
         "id": tid,
         "name": f"{fd.get('first_name','')} {fd.get('last_name','')}".strip() or app_doc.get("talent_name"),
@@ -532,6 +548,8 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         "bio": fd.get("bio") or None,
         "work_links": [w for w in (fd.get("work_links") or []) if isinstance(w, str) and w.strip()],
         "cover_media_id": cover_mid,
+        "interested_in": interested_in,
+        "tags": [],
         "media": new_media,
         "source": {
             "type": "self_onboard",

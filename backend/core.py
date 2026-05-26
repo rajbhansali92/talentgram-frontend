@@ -708,6 +708,29 @@ async def seed_admin() -> None:
         except Exception as e:
             logger.warning(f"{coll} index {keys}: {e}")
 
+    # Tagging system indexes — idempotent, safe on existing DBs.
+    # tags collection: unique normalized_name prevents case-insensitive duplicates.
+    try:
+        await db.tags.create_index(
+            "normalized_name", unique=True, name="tags_normalized_unique"
+        )
+    except Exception as e:
+        logger.warning(f"tags normalized_name index: {e}")
+    # talents.tags.id: enables fast tag-based filtering queries.
+    try:
+        await db.talents.create_index(
+            "tags.id", name="talents_tags_id"
+        )
+    except Exception as e:
+        logger.warning(f"talents tags.id index: {e}")
+    # talents.interested_in: enables future faceted category search.
+    try:
+        await db.talents.create_index(
+            "interested_in", name="talents_interested_in"
+        )
+    except Exception as e:
+        logger.warning(f"talents interested_in index: {e}")
+
     # Password reset tokens — lookup by hashed token, TTL auto-prune on expiry.
     try:
         await db.password_reset_tokens.create_index("token_hash", unique=True)
@@ -909,6 +932,10 @@ class TalentIn(BaseModel):
     bio: Optional[str] = None
     work_links: List[str] = Field(default_factory=list)
     cover_media_id: Optional[str] = None
+    # Public: self-selected work categories (set during onboarding /apply)
+    interested_in: List[str] = Field(default_factory=list)
+    # Internal: admin-assigned structured tags [{"id": uuid, "name": label}]
+    tags: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class TalentOut(TalentIn):

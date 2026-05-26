@@ -58,9 +58,6 @@ export default function ApplicationPage() {
     });
     const [form, setForm] = useState({
         dob: "",
-        age: "",
-        overrideAge: false,
-        submitted_age_override: "",
         height: "",
         gender: "",
         ethnicity: "",
@@ -69,6 +66,7 @@ export default function ApplicationPage() {
         instagram_followers: "",
         bio: "",
         work_links: [],
+        interested_in: [],
     });
     const [media, setMedia] = useState([]);
     const [uploading, setUploading] = useState(null);
@@ -139,11 +137,8 @@ export default function ApplicationPage() {
     };
 
     const computedAge = useMemo(() => {
-        if (form.overrideAge && form.submitted_age_override) {
-            return parseInt(form.submitted_age_override, 10) || null;
-        }
-        return calcAge(form.dob) ?? (form.age ? parseInt(form.age, 10) : null);
-    }, [form.dob, form.age, form.overrideAge, form.submitted_age_override]);
+        return calcAge(form.dob) ?? null;
+    }, [form.dob]);
 
     // Email-first prefill on blur. Calls EXISTING /api/public/prefill — no
     // backend changes. Decision tree:
@@ -583,57 +578,8 @@ export default function ApplicationPage() {
                                 Age {form.dob ? "(auto calculated)" : ""}
                             </Label>
                             <div className="mt-2 h-11 flex items-center px-4 bg-slate-50 rounded-lg border border-[#e8e6df] text-[15px] text-slate-500 font-mono">
-                                {form.dob ? (calcAge(form.dob) ?? "—") : (form.age || "—")}
+                                {form.dob ? (calcAge(form.dob) ?? "—") : "—"}
                             </div>
-                        </div>
-
-                        {/* Project-specific age override checkbox and input */}
-                        <div className="col-span-1 md:col-span-2 p-4 rounded-xl bg-slate-50/50 border border-[#e8e6df] focus-within:border-[#b0aea6] transition-all duration-200">
-                            <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
-                                <input
-                                    type="checkbox"
-                                    checked={form.overrideAge || false}
-                                    onChange={(e) => {
-                                        const active = e.target.checked;
-                                        setForm({
-                                            ...form,
-                                            overrideAge: active,
-                                            submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
-                                        });
-                                    }}
-                                    data-testid="form-override-age-checkbox"
-                                    className="w-4 h-4 rounded border-[#e8e6df] text-amber-600 focus:ring-[#b0aea6] cursor-pointer transition duration-150 ease-in-out"
-                                />
-                                <span className="text-sm font-medium text-neutral-700 select-none">
-                                    Use different age for this application?
-                                </span>
-                            </label>
-                            
-                            {form.overrideAge && (
-                                <div className="mt-3 animate-fadeIn transition-all duration-300">
-                                    <Label>Application-Specific Age Override *</Label>
-                                    <input
-                                        type="number"
-                                        inputMode="numeric"
-                                        pattern="[0-9]*"
-                                        value={form.submitted_age_override || ""}
-                                        onChange={(e) =>
-                                            setForm({
-                                                ...form,
-                                                submitted_age_override: e.target.value,
-                                            })
-                                        }
-                                        min={10}
-                                        max={80}
-                                        placeholder="e.g. 25"
-                                        data-testid="form-override-age-input"
-                                        className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
-                                    />
-                                    <p className="text-[10px] text-slate-400 font-mono mt-1">
-                                        This age override is isolated to this application only and will not affect your global profile record.
-                                    </p>
-                                </div>
-                            )}
                         </div>
 
                         <div>
@@ -800,8 +746,19 @@ export default function ApplicationPage() {
                     </div>
                 </Section>
 
+                {/* Section 3b — Interested In */}
+                <Section title="What are you interested in?" index="03">
+                    <p className="text-xs text-[#6b6b6b] mb-5 leading-relaxed">
+                        Select all categories that apply. This helps us match you to the right campaigns.
+                    </p>
+                    <InterestedInSelector
+                        selected={form.interested_in || []}
+                        onChange={(v) => setForm({ ...form, interested_in: v })}
+                    />
+                </Section>
+
                 {/* Section 4 — Media */}
-                <Section title="Media" index="03">
+                <Section title="Media" index="04">
                     <div className="space-y-8">
                         <div>
                             <div className="flex items-center justify-between mb-1">
@@ -1151,6 +1108,80 @@ function ApplyWorkLinksEditor({ links, onChange }) {
                     Add
                 </button>
             </div>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Interested In Chip Selector
+// ---------------------------------------------------------------------------
+const INTERESTED_IN_CATEGORIES = [
+    "Acting",
+    "Modeling",
+    "Print Campaigns",
+    "TV Commercials",
+    "Digital Ads",
+    "Instagram Collaborations",
+    "Influencer Campaigns",
+    "Social Media Collaborations",
+    "Fashion Campaigns",
+    "Brand Shoots",
+    "Music Videos",
+    "OTT / Film Projects",
+    "Event Appearances",
+    "Hosting / Anchoring",
+];
+
+function InterestedInSelector({ selected, onChange }) {
+    const toggle = (cat) => {
+        const set = new Set(selected);
+        if (set.has(cat)) {
+            set.delete(cat);
+        } else {
+            set.add(cat);
+        }
+        onChange([...set]);
+    };
+
+    return (
+        <div
+            className="flex flex-wrap gap-2.5"
+            data-testid="interested-in-selector"
+            role="group"
+            aria-label="Work categories"
+        >
+            {INTERESTED_IN_CATEGORIES.map((cat) => {
+                const active = selected.includes(cat);
+                return (
+                    <button
+                        key={cat}
+                        type="button"
+                        onClick={() => toggle(cat)}
+                        data-testid={`interested-in-${cat.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+                        aria-pressed={active}
+                        className={[
+                            "px-4 py-2 rounded-full border text-xs tracking-[0.06em] transition-all duration-150 select-none",
+                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#b0aea6]",
+                            "active:scale-95",
+                            active
+                                ? "border-[#1a1a1a] bg-[#1a1a1a] text-white shadow-sm"
+                                : "border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#9a9890] hover:bg-[#f5f4f0]",
+                        ].join(" ")}
+                    >
+                        {cat}
+                    </button>
+                );
+            })}
+            {selected.length > 0 && (
+                <button
+                    type="button"
+                    onClick={() => onChange([])}
+                    className="px-3 py-2 rounded-full border border-transparent text-[10px] text-[#8b8b8b] hover:text-[#d03a2a] transition-colors duration-150 font-mono"
+                    data-testid="interested-in-clear"
+                >
+                    Clear all
+                </button>
+            )}
         </div>
     );
 }

@@ -428,6 +428,173 @@ async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin))
     return {"ok": True}
 
 
+
+# ---------------------------------------------------------------------------
+# Tag Management — centralized admin label system
+# ---------------------------------------------------------------------------
+
+class TagCreateIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+class TagRenameIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+def _normalize_tag_name(raw: str) -> str:
+    """Lowercase + strip whitespace. Used for unique-index dedup."""
+    return raw.strip().lower()
+
+
+def _tag_doc(tag_id: str, name: str) -> dict:
+    from core import _now
+    normalized = _normalize_tag_name(name)
+    return {
+        "id": tag_id,
+        "name": name.strip(),
+        "normalized_name": normalized,
+        "created_at": _now(),
+    }
+
+
+@router.get("/tags")
+async def list_tags(admin: dict = Depends(current_team_or_admin)):
+    """Return all admin tags sorted alphabetically."""
+    docs = await db.tags.find({}, {"_id": 0}).sort("name", 1).to_list(5000)
+    return {"ok": True, "tags": docs}
+
+
+@router.post("/tags")
+async def create_tag(payload: TagCreateIn, admin: dict = Depends(current_team_or_admin)):
+    """Create a new unique admin tag (normalized, case-insensitive dedup).
+    Both team members and admins may create tags.
+    """
+    from pymongo.errors import DuplicateKeyError as DKE
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Tag name cannot be empty")
+    normalized = _normalize_tag_name(name)
+    # Check if already exists (idempotent — return existing)
+    existing = await db.tags.find_one({"normalized_name": normalized}, {"_id": 0})
+    if existing:
+        return {"ok": True, "tag": existing, "created": False}
+    tag_id = str(uuid.uuid4())
+    doc = _tag_doc(tag_id, name)
+    try:
+        await db.tags.insert_one(doc)
+    except DKE:
+        # Race — fetch and return the winner
+        existing = await db.tags.find_one({"normalized_name": normalized}, {"_id": 0})
+        if existing:
+            return {"ok": True, "tag": existing, "created": False}
+        raise HTTPException(409, "Tag already exists")
+    doc.pop("_id", None)
+    logger.info("Tag created id=%s name=%r by %s", tag_id, name, admin.get("email"))
+    return {"ok": True, "tag": doc, "created": True}
+
+
+@router.put("/tags/{tag_id}")
+async def rename_tag(
+    tag_id: str,
+    payload: TagRenameIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Rename a tag and cascade the new display name to all talent documents.
+    Uses MongoDB array positional filter to update only the matching embedded object.
+    """
+    from pymongo.errors import DuplicateKeyError as DKE
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Tag name cannot be empty")
+    normalized = _normalize_tag_name(name)
+    # Block if normalized name collides with a different tag
+    clash = await db.tags.find_one({"normalized_name": normalized, "id": {"$ne": tag_id}})
+    if clash:
+        raise HTTPException(409, "Another tag with this name already exists")
+    try:
+        res = await db.tags.update_one(
+            {"id": tag_id},
+            {"$set": {"name": name, "normalized_name": normalized}},
+        )
+    except DKE:
+        raise HTTPException(409, "Another tag with this name already exists")
+    if not res.matched_count:
+        raise HTTPException(404, "Tag not found")
+    # Cascade: update denormalized `name` in every talent that holds this tag.
+    await db.talents.update_many(
+        {"tags.id": tag_id},
+        {"$set": {"tags.$[elem].name": name}},
+        array_filters=[{"elem.id": tag_id}],
+    )
+    tag = await db.tags.find_one({"id": tag_id}, {"_id": 0})
+    logger.info("Tag renamed id=%s new_name=%r by %s", tag_id, name, admin.get("email"))
+    return {"ok": True, "tag": tag}
+
+
+@router.delete("/tags/{tag_id}")
+async def delete_tag(
+    tag_id: str,
+    admin: dict = Depends(current_admin),  # Admin-only: deletion is destructive
+):
+    """Globally delete a tag and strip it from every talent document.
+    Restricted to admin role only. Uses atomic $pull to maintain consistency.
+    """
+    res = await db.tags.delete_one({"id": tag_id})
+    if not res.deleted_count:
+        raise HTTPException(404, "Tag not found")
+    # Cascade: remove the embedded tag object from all talent records atomically.
+    update_res = await db.talents.update_many(
+        {"tags.id": tag_id},
+        {"$pull": {"tags": {"id": tag_id}}},
+    )
+    logger.info(
+        "Tag deleted id=%s — stripped from %d talents by admin=%s",
+        tag_id, update_res.modified_count, admin.get("email"),
+    )
+    return {"ok": True, "stripped_from": update_res.modified_count}
+
+
+@router.post("/talents/{tag_id}/tag/{tid_tag}")
+async def assign_tag_to_talent(
+    tag_id: str,
+    tid_tag: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Assign an existing admin tag to a specific talent.
+    Idempotent — repeated assignment is silently skipped.
+    """
+    # tid_tag is talent id (path param named to avoid conflict with tag_id)
+    tag = await db.tags.find_one({"id": tag_id}, {"_id": 0})
+    if not tag:
+        raise HTTPException(404, "Tag not found")
+    talent = await db.talents.find_one({"id": tid_tag}, {"_id": 0, "tags": 1})
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+    # Idempotency check
+    existing_ids = [t.get("id") for t in (talent.get("tags") or [])]
+    if tag_id in existing_ids:
+        return {"ok": True, "skipped": True}
+    tag_obj = {"id": tag["id"], "name": tag["name"]}
+    await db.talents.update_one({"id": tid_tag}, {"$push": {"tags": tag_obj}})
+    return {"ok": True, "tag": tag_obj}
+
+
+@router.delete("/talents/{tid}/tag/{tag_id}")
+async def remove_tag_from_talent(
+    tid: str,
+    tag_id: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Remove a tag from a specific talent (does NOT delete the global tag)."""
+    res = await db.talents.update_one(
+        {"id": tid},
+        {"$pull": {"tags": {"id": tag_id}}},
+    )
+    if not res.matched_count:
+        raise HTTPException(404, "Talent not found")
+    return {"ok": True}
+
+
 @router.post("/talents/{tid}/cover/{mid}")
 async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_admin)):
     """Set the cover image for a talent.

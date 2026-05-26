@@ -21,6 +21,9 @@ import {
     Loader2,
     X,
     Play,
+    Tag,
+    Plus,
+    AlertTriangle,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -43,6 +46,8 @@ const emptyTalent = {
     instagram_followers: "",
     bio: "",
     work_links: [],
+    interested_in: [],
+    tags: [],
 };
 
 // ISSUE 2: File validation constants
@@ -92,6 +97,12 @@ export default function TalentEdit() {
     const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
     const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
     const [mediaToRemove, setMediaToRemove] = useState(null);
+    // Tag management state
+    const [allTags, setAllTags] = useState([]);
+    const [tagInput, setTagInput] = useState("");
+    const [tagSaving, setTagSaving] = useState(false);
+    const [globalTagDeleteTarget, setGlobalTagDeleteTarget] = useState(null); // {id, name}
+    const [globalTagDeleteConfirmText, setGlobalTagDeleteConfirmText] = useState("");
     
     // File refs
     const fileRefs = useRef({
@@ -122,6 +133,18 @@ export default function TalentEdit() {
             }
         })();
     }, [id, isEdit]);
+
+    // Load all global tags on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                const { data } = await adminApi.get("/tags");
+                setAllTags(data.tags || []);
+            } catch {
+                // silently ignore — tags are an enhancement
+            }
+        })();
+    }, []);
 
     const save = async () => {
         setSaving(true);
@@ -291,6 +314,70 @@ export default function TalentEdit() {
         });
         setWorkInput("");
     };
+
+    // Tag management handlers
+    const assignTag = useCallback(async (tag) => {
+        if (!isEdit) return;
+        const already = (talent.tags || []).some(t => t.id === tag.id);
+        if (already) return;
+        try {
+            await adminApi.post(`/talents/${tag.id}/tag/${id}`);
+            updateTalent({ tags: [...(talent.tags || []), { id: tag.id, name: tag.name }] });
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to assign tag");
+        }
+    }, [id, isEdit, talent.tags, updateTalent]);
+
+    const createAndAssignTag = useCallback(async () => {
+        const name = tagInput.trim();
+        if (!name || !isEdit) return;
+        setTagSaving(true);
+        try {
+            const { data } = await adminApi.post("/tags", { name });
+            const tag = data.tag;
+            // Update global list if new
+            if (data.created) {
+                setAllTags(prev => [...prev, tag].sort((a, b) => a.name.localeCompare(b.name)));
+            }
+            // Assign to current talent
+            const already = (talent.tags || []).some(t => t.id === tag.id);
+            if (!already) {
+                await adminApi.post(`/talents/${tag.id}/tag/${id}`);
+                updateTalent({ tags: [...(talent.tags || []), { id: tag.id, name: tag.name }] });
+            }
+            setTagInput("");
+            toast.success(data.created ? `Tag "${name}" created` : `Tag "${name}" assigned`);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to create tag");
+        } finally {
+            setTagSaving(false);
+        }
+    }, [id, isEdit, tagInput, talent.tags, updateTalent]);
+
+    const removeTagFromTalent = useCallback(async (tagId) => {
+        if (!isEdit) return;
+        try {
+            await adminApi.delete(`/talents/${id}/tag/${tagId}`);
+            updateTalent({ tags: (talent.tags || []).filter(t => t.id !== tagId) });
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to remove tag");
+        }
+    }, [id, isEdit, talent.tags, updateTalent]);
+
+    const confirmDeleteGlobalTag = useCallback(async () => {
+        if (!globalTagDeleteTarget || globalTagDeleteConfirmText !== "DELETE") return;
+        try {
+            await adminApi.delete(`/tags/${globalTagDeleteTarget.id}`);
+            setAllTags(prev => prev.filter(t => t.id !== globalTagDeleteTarget.id));
+            updateTalent({ tags: (talent.tags || []).filter(t => t.id !== globalTagDeleteTarget.id) });
+            toast.success(`Tag "${globalTagDeleteTarget.name}" deleted globally`);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to delete tag");
+        } finally {
+            setGlobalTagDeleteTarget(null);
+            setGlobalTagDeleteConfirmText("");
+        }
+    }, [globalTagDeleteTarget, globalTagDeleteConfirmText, talent.tags, updateTalent]);
 
     const mediaBy = (cat) =>
         (talent.media || []).filter((m) => m.category === cat);
@@ -622,9 +709,200 @@ export default function TalentEdit() {
                         </div>
                     </div>
                 </div>
+                {/* ── Interested In ────────────────────────────────────── */}
+                <div className="mt-8 pt-6 border-t border-black/[0.06]">
+                    <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        Interested In
+                    </span>
+                    <p className="text-xs text-black/40 mt-1 mb-4">
+                        Public: talent-selected work categories (visible to casting team).
+                    </p>
+                    <div className="flex flex-wrap gap-2" data-testid="edit-interested-in">
+                        {[
+                            "Acting", "Modeling", "Print Campaigns", "TV Commercials",
+                            "Digital Ads", "Instagram Collaborations", "Influencer Campaigns",
+                            "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
+                            "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
+                        ].map((cat) => {
+                            const active = (talent.interested_in || []).includes(cat);
+                            return (
+                                <button
+                                    key={cat}
+                                    type="button"
+                                    onClick={() => {
+                                        const set = new Set(talent.interested_in || []);
+                                        if (active) set.delete(cat); else set.add(cat);
+                                        updateTalent({ interested_in: [...set] });
+                                    }}
+                                    data-testid={`edit-interest-${cat.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+                                    aria-pressed={active}
+                                    className={[
+                                        "px-3 py-1.5 rounded-full border text-[11px] tracking-[0.06em] transition-all duration-150",
+                                        active
+                                            ? "border-black bg-black text-white"
+                                            : "border-black/[0.12] text-black/60 hover:border-black/30 hover:text-black",
+                                    ].join(" ")}
+                                >
+                                    {cat}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* ── Internal Tags ─────────────────────────────────────── */}
+                <div className="mt-8 pt-6 border-t border-black/[0.06]">
+                    <div className="flex items-center gap-2 mb-1">
+                        <Tag className="w-3.5 h-3.5 text-black/40" strokeWidth={1.5} />
+                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                            Internal Tags
+                        </span>
+                    </div>
+                    <p className="text-xs text-black/40 mb-4">
+                        Private casting labels. Only visible to the team.
+                    </p>
+
+                    {/* Current tags on this talent */}
+                    <div className="flex flex-wrap gap-2 mb-4" data-testid="talent-current-tags">
+                        {(talent.tags || []).map((tag) => (
+                            <span
+                                key={tag.id}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/[0.06] border border-black/[0.08] text-[11px] text-black/70 group"
+                                data-testid={`talent-tag-${tag.id}`}
+                            >
+                                {tag.name}
+                                <button
+                                    type="button"
+                                    onClick={() => removeTagFromTalent(tag.id)}
+                                    className="text-black/30 hover:text-red-500 transition-colors"
+                                    title="Remove from this talent"
+                                    data-testid={`remove-tag-${tag.id}`}
+                                >
+                                    <X className="w-3 h-3" />
+                                </button>
+                                {isAdminRole && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setGlobalTagDeleteTarget(tag);
+                                            setGlobalTagDeleteConfirmText("");
+                                        }}
+                                        className="text-black/20 hover:text-red-600 transition-colors ml-0.5"
+                                        title="Delete globally (admin only)"
+                                        data-testid={`delete-tag-global-${tag.id}`}
+                                    >
+                                        <AlertTriangle className="w-3 h-3" />
+                                    </button>
+                                )}
+                            </span>
+                        ))}
+                        {(talent.tags || []).length === 0 && (
+                            <p className="text-xs text-black/30 italic">No tags assigned yet.</p>
+                        )}
+                    </div>
+
+                    {/* Assign existing tags */}
+                    {allTags.filter(t => !(talent.tags || []).some(tt => tt.id === t.id)).length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-4">
+                            {allTags
+                                .filter(t => !(talent.tags || []).some(tt => tt.id === t.id))
+                                .map(tag => (
+                                    <button
+                                        key={tag.id}
+                                        type="button"
+                                        onClick={() => assignTag(tag)}
+                                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full border border-dashed border-black/[0.15] text-[11px] text-black/45 hover:border-black/40 hover:text-black/75 transition-colors"
+                                        data-testid={`add-existing-tag-${tag.id}`}
+                                    >
+                                        <Plus className="w-3 h-3" strokeWidth={1.5} />
+                                        {tag.name}
+                                    </button>
+                                ))}
+                        </div>
+                    )}
+
+                    {/* Create + assign new tag */}
+                    {isEdit && (
+                        <div className="flex gap-2 items-center">
+                            <input
+                                type="text"
+                                value={tagInput}
+                                onChange={(e) => setTagInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") { e.preventDefault(); createAndAssignTag(); }
+                                }}
+                                placeholder="New tag name…"
+                                maxLength={80}
+                                data-testid="tag-input"
+                                className="flex-1 bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                            />
+                            <button
+                                type="button"
+                                onClick={createAndAssignTag}
+                                disabled={!tagInput.trim() || tagSaving}
+                                data-testid="tag-create-btn"
+                                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors disabled:opacity-40"
+                            >
+                                {tagSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                                Create &amp; assign
+                            </button>
+                        </div>
+                    )}
+                </div>
             </section>
 
+            {/* Global tag delete confirmation modal */}
+            {globalTagDeleteTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" data-testid="global-tag-delete-modal">
+                    <div className="bg-white rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl border border-black/[0.08]">
+                        <div className="flex items-start gap-3 mb-4">
+                            <div className="w-9 h-9 rounded-full bg-red-50 flex items-center justify-center shrink-0">
+                                <AlertTriangle className="w-4 h-4 text-red-600" />
+                            </div>
+                            <div>
+                                <p className="font-semibold text-black/90 text-sm">Delete tag globally?</p>
+                                <p className="text-xs text-black/55 mt-1 leading-relaxed">
+                                    This will permanently delete <strong>"{globalTagDeleteTarget.name}"</strong> from the global tag library and remove it from <em>every talent profile</em>. This cannot be undone.
+                                </p>
+                            </div>
+                        </div>
+                        <div className="mb-4">
+                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                Type DELETE to confirm
+                            </label>
+                            <input
+                                type="text"
+                                value={globalTagDeleteConfirmText}
+                                onChange={(e) => setGlobalTagDeleteConfirmText(e.target.value)}
+                                placeholder="DELETE"
+                                data-testid="global-tag-delete-confirm-input"
+                                className="w-full border border-black/[0.12] rounded-lg px-4 py-2.5 text-sm text-black/85 focus:border-red-400 outline-none transition-colors"
+                            />
+                        </div>
+                        <div className="flex gap-2 justify-end">
+                            <button
+                                type="button"
+                                onClick={() => { setGlobalTagDeleteTarget(null); setGlobalTagDeleteConfirmText(""); }}
+                                className="px-4 py-2 text-xs border border-black/[0.08] rounded-lg text-black/60 hover:text-black transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={confirmDeleteGlobalTag}
+                                disabled={globalTagDeleteConfirmText !== "DELETE"}
+                                data-testid="global-tag-delete-confirm-btn"
+                                className="px-4 py-2 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-40"
+                            >
+                                Delete globally
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Media */}
+
             {isEdit && (
                 <>
                     {[

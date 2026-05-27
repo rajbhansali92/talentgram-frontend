@@ -221,15 +221,15 @@ NavItem.displayName = "NavItem";
 const SidebarHeader = React.memo(({ isCollapsed, onToggle }) => {
   return (
     <div className="relative px-4 py-6 border-b border-black/[0.06] bg-white">
-      <div className="flex items-center justify-between gap-2">
+      <div className={cn("flex items-center justify-between gap-2", isCollapsed ? "flex-col" : "")}>
         {!isCollapsed && <Logo size="md" />}
         {isCollapsed && (
           <div className="mx-auto">
             <Logo size="sm" />
           </div>
         )}
-        <div className={cn("flex items-center gap-1", isCollapsed ? "mx-auto mt-2" : "")}>
-          {!isCollapsed && <NotificationBell />}
+        <div className={cn("flex items-center gap-1", isCollapsed ? "flex flex-col items-center gap-2 mx-auto mt-3" : "")}>
+          <NotificationBell />
           <button
             onClick={onToggle}
             className="p-1.5 rounded-sm text-black/40 hover:text-black/70 hover:bg-black/[0.03] transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-black/20"

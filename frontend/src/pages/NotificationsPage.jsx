@@ -58,21 +58,23 @@ export default function NotificationsPage() {
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
     return (
-        <div className="space-y-6 max-w-3xl">
+        <div className="space-y-4 max-w-3xl">
             <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div>
                     <p className="eyebrow mb-1">Activity</p>
-                    <h1 className="font-display text-3xl md:text-4xl tracking-tight inline-flex items-center gap-3 text-black/90">
+                    <h1 className="font-display text-2xl md:text-3xl tracking-tight inline-flex items-center gap-3 text-black/90">
                         <Bell className="w-5 h-5 text-black/40" strokeWidth={1.4} />
                         Notifications
                     </h1>
-                    <p className="text-xs text-black/45 mt-2 tg-mono">
-                        {total} total · live across all team members
+                    <p className="text-xs text-black/45 mt-1.5 tg-mono">
+                        {filter === "unread" 
+                            ? (total === 0 ? "No unread activity" : `${total} unread notification${total > 1 ? "s" : ""}`) 
+                            : `${total} total notification${total > 1 ? "s" : ""}`}
                     </p>
                 </div>
                 <button
                     onClick={() => nav(-1)}
-                    className="text-xs text-black/60 hover:text-black inline-flex items-center gap-1"
+                    className="text-xs text-black/60 hover:text-black inline-flex items-center gap-1 focus:outline-none"
                 >
                     <ChevronLeft className="w-3.5 h-3.5" />
                     Back
@@ -80,11 +82,11 @@ export default function NotificationsPage() {
             </div>
 
             <div className="flex items-center gap-3 flex-wrap">
-                <div className="inline-flex border border-black/[0.08] bg-[#fafaf8] rounded-md overflow-hidden">
+                <div className="inline-flex border border-black/[0.06] bg-[#fafaf8] rounded-sm overflow-hidden">
                     <button
                         onClick={() => setFilter("all")}
                         data-testid="filter-all"
-                        className={`px-4 py-2 text-xs tg-mono transition-colors ${
+                        className={`px-3 py-1.5 text-xs tg-mono transition-colors focus:outline-none ${
                             filter === "all" ? "bg-black text-white" : "text-black/60 hover:text-black"
                         }`}
                     >
@@ -93,7 +95,7 @@ export default function NotificationsPage() {
                     <button
                         onClick={() => setFilter("unread")}
                         data-testid="filter-unread"
-                        className={`px-4 py-2 text-xs tg-mono border-l border-black/[0.08] transition-colors ${
+                        className={`px-3 py-1.5 text-xs tg-mono border-l border-black/[0.06] transition-colors focus:outline-none ${
                             filter === "unread" ? "bg-black text-white" : "text-black/60 hover:text-black"
                         }`}
                     >
@@ -103,22 +105,23 @@ export default function NotificationsPage() {
                 <button
                     onClick={markAll}
                     data-testid="page-mark-all-read"
-                    className="px-3.5 py-2 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-[11px] tg-mono inline-flex items-center gap-1.5 transition-all text-black/70"
+                    className="px-3 py-1.5 border border-black/[0.06] hover:border-black/[0.12] hover:bg-black/[0.02] rounded-sm text-[11px] tg-mono inline-flex items-center gap-1.5 transition-all text-black/70 focus:outline-none"
                 >
                     <Check className="w-3 h-3" />
                     Mark all as read
                 </button>
             </div>
 
-            <div className="border border-black/[0.08] bg-white rounded-xl divide-y divide-black/[0.06] shadow-sm overflow-hidden">
+            <div className="border border-black/[0.06] bg-white rounded-md divide-y divide-black/[0.04] shadow-sm overflow-hidden">
                 {loading ? (
-                    <div className="p-10 text-center text-black/45 text-xs">
+                    <div className="py-8 text-center text-black/45 text-xs">
                         <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
                         Loading…
                     </div>
                 ) : items.length === 0 ? (
-                    <div className="p-10 text-center text-black/45 text-xs">
-                        Nothing here yet.
+                    <div className="py-8 px-4 text-center">
+                        <p className="text-xs font-medium text-black/70">Nothing here yet.</p>
+                        <p className="text-[11px] text-black/40 mt-1">New submissions and applications will appear here.</p>
                     </div>
                 ) : (
                     items.map((n) => (
@@ -126,22 +129,22 @@ export default function NotificationsPage() {
                             key={n.id}
                             onClick={() => open(n)}
                             data-testid={`notif-row-${n.id}`}
-                            className={`w-full text-left p-5 flex gap-3 hover:bg-black/[0.01] transition-all ${
-                                !n.read_at ? "bg-emerald-50/15" : ""
+                            className={`w-full text-left px-4 py-3.5 border-b border-black/[0.04] flex gap-3 hover:bg-black/[0.015] transition-all focus:outline-none ${
+                                !n.read_at ? "bg-black/[0.015]" : "bg-white"
                             }`}
                         >
                             <span
-                                className={`mt-2 w-1.5 h-1.5 rounded-full shrink-0 ${
-                                    !n.read_at ? "bg-emerald-500" : "bg-black/10"
+                                className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${
+                                    !n.read_at ? "bg-black" : "bg-black/5"
                                 }`}
                             />
                             <div className="flex-1 min-w-0">
-                                <p className="text-sm text-black/95 font-medium">{n.title}</p>
+                                <p className="text-xs font-semibold text-black/85 leading-snug">{n.title}</p>
                                 {n.body && (
-                                    <p className="text-xs text-black/60 mt-1">{n.body}</p>
+                                    <p className="text-[11px] text-black/50 mt-0.5 leading-relaxed">{n.body}</p>
                                 )}
-                                <p className="text-[10px] text-black/40 mt-1.5 tg-mono uppercase tracking-wider">
-                                    {n.type?.replace("_", " ")} · {new Date(n.created_at).toLocaleString()}
+                                <p className="text-[9px] text-black/35 mt-1 font-mono uppercase tracking-wider">
+                                    {n.type?.replace("_", " ")} · {new Date(n.created_at).toLocaleDateString()} {new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                 </p>
                             </div>
                         </button>
@@ -154,7 +157,7 @@ export default function NotificationsPage() {
                     <button
                         disabled={page === 0}
                         onClick={() => fetchPage(page - 1)}
-                        className="px-3.5 py-2 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md disabled:opacity-30 transition-all text-black/75"
+                        className="px-3 py-1.5 border border-black/[0.06] hover:border-black/[0.12] hover:bg-black/[0.02] rounded-sm disabled:opacity-30 transition-all text-black/75 focus:outline-none"
                     >
                         Prev
                     </button>
@@ -164,7 +167,7 @@ export default function NotificationsPage() {
                     <button
                         disabled={(page + 1) * PAGE_SIZE >= total}
                         onClick={() => fetchPage(page + 1)}
-                        className="px-3.5 py-2 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md disabled:opacity-30 transition-all text-black/75"
+                        className="px-3 py-1.5 border border-black/[0.06] hover:border-black/[0.12] hover:bg-black/[0.02] rounded-sm disabled:opacity-30 transition-all text-black/75 focus:outline-none"
                     >
                         Next
                     </button>

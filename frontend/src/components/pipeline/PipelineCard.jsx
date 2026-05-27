@@ -22,11 +22,8 @@ import {
     User,
     Clock,
     ArrowRight,
-    FileText,
     MessageCircle,
-    Mail,
     Phone,
-    Star,
     MoreHorizontal,
     Check,
 } from "lucide-react";
@@ -34,6 +31,19 @@ import {
 // ============================================================================
 // CONSTANTS (will move to pipelineCard.constants.js eventually)
 // ============================================================================
+
+const ALL_PIPELINE_STAGES = [
+    "ask_to_test",
+    "follow_up",
+    "approved",
+    "shortlisted",
+    "hold",
+    "locked",
+    "already_tested",
+    "rejected",
+    "not_available",
+    "not_interested",
+];
 
 const PRIORITY_BADGES = {
     high_fit: { label: 'High Fit', variant: 'emerald' },
@@ -115,7 +125,9 @@ const PipelineCard = memo(function PipelineCard({
     const [moving, setMoving] = useState(false);
     const [showMoreActions, setShowMoreActions] = useState(false);
     const [showActionRail, setShowActionRail] = useState(false);
+    const [showQuickMoveMenu, setShowQuickMoveMenu] = useState(false);
     const overflowRef = useRef(null);
+    const quickMoveButtonRef = useRef(null);
     const moreButtonRef = useRef(null);
     const cardRef = useRef(null);
     const actionRailRef = useRef(null);
@@ -209,13 +221,6 @@ const PipelineCard = memo(function PipelineCard({
                 toast.error('No phone number available');
             }
         },
-        email: () => {
-            if (displayEmail) {
-                window.location.href = `mailto:${displayEmail}`;
-            } else {
-                toast.error('No email address available');
-            }
-        },
         call: () => {
             if (displayPhone) {
                 window.location.href = `tel:${displayPhone}`;
@@ -223,9 +228,7 @@ const PipelineCard = memo(function PipelineCard({
                 toast.error('No phone number available');
             }
         },
-        notes: () => toast.info(`Notes for ${displayName} - Feature coming soon`),
-        shortlist: () => move('shortlist', { silent: true }),
-    }), [displayPhone, displayEmail, displayName, move]);
+    }), [displayPhone]);
     
     const closeMoreMenu = useCallback(() => {
         setShowMoreActions(false);
@@ -313,6 +316,34 @@ const PipelineCard = memo(function PipelineCard({
             document.removeEventListener("keydown", handleEsc);
         };
     }, [showMoreActions]);
+
+    // Click outside handler for quick move menu
+    useEffect(() => {
+        if (!showQuickMoveMenu) return;
+        
+        function handleClickOutside(e) {
+            if (
+                quickMoveButtonRef.current &&
+                !quickMoveButtonRef.current.contains(e.target)
+            ) {
+                setShowQuickMoveMenu(false);
+            }
+        }
+        
+        function handleEsc(e) {
+            if (e.key === "Escape") {
+                setShowQuickMoveMenu(false);
+            }
+        }
+        
+        document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener("keydown", handleEsc);
+        
+        return () => {
+            document.removeEventListener("mousedown", handleClickOutside);
+            document.removeEventListener("keydown", handleEsc);
+        };
+    }, [showQuickMoveMenu]);
     
     // Cleanup on unmount
     useEffect(() => {
@@ -631,20 +662,45 @@ const PipelineCard = memo(function PipelineCard({
                         setShowActionRail(true);
                     }}
                 >
-                    <button
-                        onClick={() => move(nextStages[0])}
-                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors"
-                        title="Quick move"
-                    >
-                        <ArrowRight className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                        onClick={quickActions.notes}
-                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors"
-                        title="Quick notes"
-                    >
-                        <FileText className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="relative" ref={quickMoveButtonRef}>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setShowQuickMoveMenu((prev) => !prev);
+                            }}
+                            className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors ${
+                                showQuickMoveMenu
+                                    ? "bg-black/10 text-black/80"
+                                    : "text-black/50 hover:text-black/80 hover:bg-black/[0.04]"
+                            }`}
+                            title="Quick move"
+                        >
+                            <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+                        {showQuickMoveMenu && (
+                            <div
+                                className="absolute right-full mr-2 top-0 bg-white border border-black/[0.08] shadow-md rounded-lg py-1 px-1 z-30 min-w-[130px] flex flex-col gap-0.5"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <div className="px-2 py-1 text-[9px] font-semibold text-black/45 tracking-wider uppercase border-b border-black/[0.04] mb-1">
+                                    Move to
+                                </div>
+                                {ALL_PIPELINE_STAGES.filter((s) => s !== canonicalStage).map((stage) => (
+                                    <button
+                                        key={stage}
+                                        onClick={async (e) => {
+                                            e.stopPropagation();
+                                            setShowQuickMoveMenu(false);
+                                            await move(stage);
+                                        }}
+                                        className="w-full text-left px-2 py-1 text-[10px] text-black/75 hover:bg-black/[0.04] hover:text-black/90 rounded transition-colors"
+                                    >
+                                        {STAGE_LABELS[stage] || getStageLabel(stage)}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                     {displayPhone && (
                         <button
                             onClick={quickActions.whatsapp}
@@ -652,15 +708,6 @@ const PipelineCard = memo(function PipelineCard({
                             title="WhatsApp"
                         >
                             <MessageCircle className="w-3.5 h-3.5" />
-                        </button>
-                    )}
-                    {displayEmail && (
-                        <button
-                            onClick={quickActions.email}
-                            className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors"
-                            title="Email"
-                        >
-                            <Mail className="w-3.5 h-3.5" />
                         </button>
                     )}
                     {displayPhone && (
@@ -672,13 +719,6 @@ const PipelineCard = memo(function PipelineCard({
                             <Phone className="w-3.5 h-3.5" />
                         </button>
                     )}
-                    <button
-                        onClick={quickActions.shortlist}
-                        className="w-7 h-7 rounded-md flex items-center justify-center text-amber-600/60 hover:text-amber-600 hover:bg-amber-50 transition-colors"
-                        title="Shortlist"
-                    >
-                        <Star className="w-3.5 h-3.5" />
-                    </button>
                 </div>
             )}
 

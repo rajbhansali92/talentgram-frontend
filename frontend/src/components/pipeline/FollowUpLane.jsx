@@ -2,8 +2,10 @@ import React from "react";
 import PipelineColumn from "./PipelineColumn";
 import { EMPTY_BULK_SET, NOOP } from "./constants";
 
-function FollowUpLane({ items, refresh }) {
+function FollowUpLane({ items, refresh, focusedStageId, onFocus }) {
     if (items.length === 0) return null;
+
+    const isFocused = focusedStageId === "follow_up";
 
     return (
         <div className="mt-4 px-2 sm:px-4">
@@ -35,7 +37,7 @@ function FollowUpLane({ items, refresh }) {
 
                 {/* Column container - width matched to main pipeline */}
                 <div className="pb-3 px-4">
-                    <div className="w-[340px]">
+                    <div className={isFocused ? "w-full" : "w-[340px]"}>
                         <PipelineColumn
                             stage="follow_up"
                             items={items}
@@ -45,6 +47,8 @@ function FollowUpLane({ items, refresh }) {
                             onToggleBulkSelect={NOOP}
                             readOnly
                             compact
+                            isFocused={isFocused}
+                            onFocus={onFocus}
                         />
                     </div>
                 </div>

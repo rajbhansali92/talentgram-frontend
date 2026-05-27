@@ -301,7 +301,7 @@ const PipelineColumn = memo(function PipelineColumn({
                     </div>
                     <div className="flex items-center gap-1.5">
                         {/* Focus mode button */}
-                        {typeof onFocus === "function" && (items.length > 0 || isFocused) && (
+                        {typeof onFocus === "function" && (
                             <button
                                 onClick={() => onFocus(isFocused ? null : stage)}
                                 className="text-black/35 hover:text-black/60 transition-colors p-0.5"

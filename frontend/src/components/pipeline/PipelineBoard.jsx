@@ -344,11 +344,13 @@ function PipelineBoard({ projectId, projectName }) {
                     )}
 
                     {/* Supportive Follow-up Lane - clean, no opacity hacks */}
-                    {!hasZeroAfterFilter && !focusedStageId && (
+                    {!hasZeroAfterFilter && (!focusedStageId || focusedStageId === 'follow_up') && (
                         <div className="mt-2">
                             <FollowUpLane
                                 items={filteredData.filter((i) => i.is_follow_up === true)}
                                 refresh={fetchPipeline}
+                                focusedStageId={focusedStageId}
+                                onFocus={setFocusedStageId}
                             />
                         </div>
                     )}

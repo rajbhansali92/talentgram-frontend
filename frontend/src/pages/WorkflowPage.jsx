@@ -26,6 +26,31 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+// Predefined Operational Subtask Checklist Templates Library
+const SUBTASK_TEMPLATES = {
+    "Talent Coordination": [
+        "Confirmation Requested",
+        "Confirmation Received",
+        "Reminder Sent",
+        "Retake Requested",
+        "Retake Received",
+        "Shoot Timing Shared"
+    ],
+    "Finance": [
+        "Invoice Sent",
+        "GST Component Received",
+        "Payment Received",
+        "Payment Released",
+        "Kickback Released"
+    ],
+    "Production": [
+        "Travel Confirmed",
+        "Stay Confirmed",
+        "Call Sheet Shared",
+        "Shoot Completed"
+    ]
+};
+
 export default function WorkflowPage() {
     const admin = getAdmin();
     const isAdmin = admin?.role === "admin";
@@ -55,7 +80,12 @@ export default function WorkflowPage() {
         category: "general",
         assignee_id: "",
         project_id: "",
+        project_name: "",
     });
+
+    // Subtask Templates State
+    const [selectedTemplates, setSelectedTemplates] = useState([]); // List of strings
+    const [activeTemplateGroup, setActiveTemplateGroup] = useState("Talent Coordination");
 
     // Subtask input states (mapped by taskId)
     const [subtaskInputs, setSubtaskInputs] = useState({});
@@ -147,6 +177,14 @@ export default function WorkflowPage() {
         e.preventDefault();
         if (!newTask.title.trim()) return;
 
+        // Auto-compile templates checklist if any are selected
+        const compiledSubtasks = selectedTemplates.map((text) => ({
+            id: Math.random().toString(36).substr(2, 9),
+            text,
+            completed: false,
+            completed_at: null,
+        }));
+
         try {
             const payload = {
                 title: newTask.title.trim(),
@@ -154,7 +192,8 @@ export default function WorkflowPage() {
                 category: newTask.category,
                 assignee_id: newTask.assignee_id || null,
                 project_id: newTask.project_id || null,
-                subtasks: [],
+                project_name: newTask.project_name || "",
+                subtasks: compiledSubtasks,
                 attachments: [],
             };
             const { data } = await adminApi.post("/workflow/tasks", payload);
@@ -165,7 +204,9 @@ export default function WorkflowPage() {
                 category: "general",
                 assignee_id: "",
                 project_id: "",
+                project_name: "",
             });
+            setSelectedTemplates([]);
             setShowNewTaskForm(false);
             toast.success("Task logged successfully");
         } catch (e) {
@@ -329,8 +370,8 @@ export default function WorkflowPage() {
             const { data } = await adminApi.post("/workflow/scouting", {
                 instagram_link: newScout.instagram_link.trim(),
                 phone: newScout.phone.trim(),
-                name: newScout.name.trim() || null,
-                notes: newScout.notes.trim() || null,
+                name: newScout.name.trim() || "",
+                notes: newScout.notes.trim() || "",
                 assigned_id: newScout.assigned_id || null,
                 status: "not_contacted",
             });
@@ -401,17 +442,41 @@ export default function WorkflowPage() {
         return found ? found.name : "Team Member";
     };
 
-    const getAssigneeInitials = (uid) => {
-        if (!uid) return "?";
-        const found = users.find((u) => u.id === uid);
-        if (!found) return "T";
-        return found.name.split(" ").map((n) => n[0]).join("").toUpperCase().substring(0, 2);
-    };
-
     const getProjectName = (pid) => {
         if (!pid) return "";
         const found = projects.find((p) => p.id === pid);
-        return found ? found.title : "Ref Project";
+        return found ? found.title : "";
+    };
+
+    const handleProjectSelect = (pid) => {
+        if (!pid) {
+            setNewTask({ ...newTask, project_id: "", project_name: "" });
+            return;
+        }
+        const proj = projects.find((p) => p.id === pid);
+        setNewTask({
+            ...newTask,
+            project_id: pid,
+            project_name: proj ? proj.title : "",
+        });
+    };
+
+    const toggleTemplateSelection = (item) => {
+        if (selectedTemplates.includes(item)) {
+            setSelectedTemplates(selectedTemplates.filter((x) => x !== item));
+        } else {
+            setSelectedTemplates([...selectedTemplates, item]);
+        }
+    };
+
+    const selectAllTemplatesInGroup = (group) => {
+        const items = SUBTASK_TEMPLATES[group] || [];
+        const uniqueTemplates = Array.from(new Set([...selectedTemplates, ...items]));
+        setSelectedTemplates(uniqueTemplates);
+    };
+
+    const clearAllSelectedTemplates = () => {
+        setSelectedTemplates([]);
     };
 
     const filteredTasks = tasks.filter((t) => {
@@ -478,96 +543,193 @@ export default function WorkflowPage() {
                 </button>
             </div>
 
-            {/* New Task Inline Form */}
+            {/* New Task Inline Form Card (Operational Quick-Actions Look) */}
             {showNewTaskForm && (
                 <form
                     onSubmit={handleCreateTask}
-                    className="border border-black/[0.08] bg-white rounded-md p-4 space-y-3"
+                    className="border border-black/[0.08] bg-white rounded-md p-4 space-y-4 shadow-sm"
                 >
-                    <p className="text-xs font-semibold uppercase tracking-wider text-black/85">Create New Task</p>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                            <label className="text-[10px] uppercase font-bold text-black/55">Task Title</label>
-                            <input
-                                type="text"
-                                value={newTask.title}
-                                onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
-                                placeholder="Enter operational task title..."
-                                className="w-full text-xs px-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
-                                required
-                            />
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
+                    <div className="flex items-center justify-between border-b border-black/[0.04] pb-2">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-black/85">Create Operational Task</p>
+                        <button
+                            type="button"
+                            onClick={() => setShowNewTaskForm(false)}
+                            className="p-1 rounded-full text-black/40 hover:text-black hover:bg-black/[0.04]"
+                        >
+                            <X className="w-4 h-4" />
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-start">
+                        {/* Title and Settings Inputs */}
+                        <div className="md:col-span-8 space-y-3">
                             <div className="space-y-1">
-                                <label className="text-[10px] uppercase font-bold text-black/55">Category</label>
-                                <select
-                                    value={newTask.category}
-                                    onChange={(e) => setNewTask({ ...newTask, category: e.target.value })}
-                                    className="w-full text-xs px-2 py-1.5 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
-                                >
-                                    <option value="general">General</option>
-                                    <option value="project">Project</option>
-                                    <option value="scouting">Scouting</option>
-                                    <option value="finance">Finance</option>
-                                </select>
+                                <label className="text-[10px] uppercase font-bold text-black/55">Task Title</label>
+                                <input
+                                    type="text"
+                                    value={newTask.title}
+                                    onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
+                                    placeholder="Enter operational task title..."
+                                    className="w-full text-xs px-2.5 py-2 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
+                                    required
+                                />
                             </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                    <label className="text-[10px] uppercase font-bold text-black/55">Category</label>
+                                    <select
+                                        value={newTask.category}
+                                        onChange={(e) => setNewTask({ ...newTask, category: e.target.value })}
+                                        className="w-full text-xs px-2 py-2 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
+                                    >
+                                        <option value="general">General</option>
+                                        <option value="project">Project Work</option>
+                                        <option value="scouting">Scouting Queue</option>
+                                        <option value="finance">Finance Track</option>
+                                    </select>
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] uppercase font-bold text-black/55">Assignee</label>
+                                    <select
+                                        value={newTask.assignee_id}
+                                        onChange={(e) => setNewTask({ ...newTask, assignee_id: e.target.value })}
+                                        className="w-full text-xs px-2 py-2 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
+                                    >
+                                        <option value="">Unassigned</option>
+                                        {users.map((u) => (
+                                            <option key={u.id} value={u.id}>
+                                                {u.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
                             <div className="space-y-1">
-                                <label className="text-[10px] uppercase font-bold text-black/55">Assignee</label>
+                                <label className="text-[10px] uppercase font-bold text-black/55">Project Reference</label>
                                 <select
-                                    value={newTask.assignee_id}
-                                    onChange={(e) => setNewTask({ ...newTask, assignee_id: e.target.value })}
-                                    className="w-full text-xs px-2 py-1.5 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
+                                    value={newTask.project_id}
+                                    onChange={(e) => handleProjectSelect(e.target.value)}
+                                    className="w-full text-xs px-2 py-2 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
                                 >
-                                    <option value="">Select Assignee...</option>
-                                    {users.map((u) => (
-                                        <option key={u.id} value={u.id}>
-                                            {u.name}
+                                    <option value="">Select Project Reference...</option>
+                                    {projects.map((p) => (
+                                        <option key={p.id} value={p.id}>
+                                            {p.title}
                                         </option>
                                     ))}
                                 </select>
                             </div>
+
+                            <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-bold text-black/55">Notes / Description (Optional)</label>
+                                <textarea
+                                    value={newTask.description}
+                                    onChange={(e) => setNewTask({ ...newTask, description: e.target.value })}
+                                    placeholder="Operational notes / links / context..."
+                                    rows={2}
+                                    className="w-full text-xs px-2.5 py-2 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30 animate-none"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Right: Predefined Tap Templates Selector (Project task ONLY) */}
+                        <div className="md:col-span-4 border border-black/[0.06] bg-black/[0.01] rounded-sm p-3 space-y-2.5 h-full min-h-[220px]">
+                            <div className="flex items-center justify-between border-b border-black/[0.06] pb-1.5">
+                                <span className="text-[10px] uppercase font-bold text-black/60">CHECKLIST PRESETS</span>
+                                {selectedTemplates.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={clearAllSelectedTemplates}
+                                        className="text-[9px] uppercase font-bold text-black/45 hover:text-black"
+                                    >
+                                        Clear ({selectedTemplates.length})
+                                    </button>
+                                )}
+                            </div>
+
+                            {newTask.category === "project" && newTask.project_id ? (
+                                <div className="space-y-3">
+                                    {/* Tab Headers */}
+                                    <div className="flex items-center border border-black/[0.08] rounded-sm overflow-hidden bg-white shrink-0">
+                                        {Object.keys(SUBTASK_TEMPLATES).map((grp) => (
+                                            <button
+                                                key={grp}
+                                                type="button"
+                                                onClick={() => setActiveTemplateGroup(grp)}
+                                                className={`flex-1 text-[10px] uppercase font-bold py-1 text-center border-r last:border-0 transition-colors focus:outline-none ${
+                                                    activeTemplateGroup === grp
+                                                        ? "bg-black text-white"
+                                                        : "text-black/50 hover:text-black"
+                                                }`}
+                                            >
+                                                {grp.split(" ")[0]}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {/* Tap subtasks stack pills */}
+                                    <div className="space-y-1 max-h-[140px] overflow-y-auto pr-1">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <span className="text-[9px] font-mono text-black/40">Tap items to append:</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => selectAllTemplatesInGroup(activeTemplateGroup)}
+                                                className="text-[9px] text-blue-600 hover:underline"
+                                            >
+                                                Select All
+                                            </button>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1">
+                                            {SUBTASK_TEMPLATES[activeTemplateGroup].map((item) => {
+                                                const isSelected = selectedTemplates.includes(item);
+                                                return (
+                                                    <button
+                                                        key={item}
+                                                        type="button"
+                                                        onClick={() => toggleTemplateSelection(item)}
+                                                        className={`px-2 py-1 text-[10px] tracking-tight font-medium rounded-sm border uppercase transition-all ${
+                                                            isSelected
+                                                                ? "bg-black text-white border-black"
+                                                                : "bg-white text-black/60 border-black/[0.08] hover:bg-black/[0.02]"
+                                                        }`}
+                                                    >
+                                                        {item}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="h-full flex flex-col items-center justify-center py-6 text-center text-black/40 text-xs px-2 space-y-1">
+                                    <AlertCircle className="w-4 h-4 text-black/25" strokeWidth={1.5} />
+                                    <p className="font-semibold text-[11px] uppercase tracking-wider">Templates Locked</p>
+                                    <p className="text-[10px] text-black/35 leading-normal">
+                                        Select category as **Project** & choose a project to open tap checklist presets.
+                                    </p>
+                                </div>
+                            )}
                         </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                            <label className="text-[10px] uppercase font-bold text-black/55">Description</label>
-                            <textarea
-                                value={newTask.description}
-                                onChange={(e) => setNewTask({ ...newTask, description: e.target.value })}
-                                placeholder="Operational details / target updates..."
-                                rows={2}
-                                className="w-full text-xs px-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
-                            />
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-[10px] uppercase font-bold text-black/55">Project Reference</label>
-                            <select
-                                value={newTask.project_id}
-                                onChange={(e) => setNewTask({ ...newTask, project_id: e.target.value })}
-                                className="w-full text-xs px-2 py-1.5 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
-                            >
-                                <option value="">Select Associated Project...</option>
-                                {projects.map((p) => (
-                                    <option key={p.id} value={p.id}>
-                                        {p.title}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                    </div>
-                    <div className="flex justify-end gap-2 pt-2">
+
+                    <div className="flex justify-end gap-2 border-t border-black/[0.04] pt-3">
                         <button
                             type="button"
-                            onClick={() => setShowNewTaskForm(false)}
+                            onClick={() => {
+                                setShowNewTaskForm(false);
+                                setSelectedTemplates([]);
+                            }}
                             className="px-3 py-1.5 border border-black/[0.08] rounded-sm text-xs font-medium text-black/60 hover:bg-black/[0.02]"
                         >
                             Cancel
                         </button>
                         <button
                             type="submit"
-                            className="px-3.5 py-1.5 bg-black text-white hover:bg-black/95 rounded-sm text-xs font-medium"
+                            className="px-4 py-1.5 bg-black text-white hover:bg-black/95 rounded-sm text-xs font-semibold uppercase tracking-wider"
                         >
-                            Log Task
+                            Create Task ({selectedTemplates.length} Presets)
                         </button>
                     </div>
                 </form>
@@ -601,7 +763,7 @@ export default function WorkflowPage() {
                             <select
                                 value={statusFilter}
                                 onChange={(e) => setStatusFilter(e.target.value)}
-                                className="text-xs border border-black/[0.06] rounded-sm py-1 px-2 focus:outline-none"
+                                className="text-xs border border-black/[0.06] rounded-sm py-1 px-2 focus:outline-none bg-white"
                             >
                                 <option value="active">Active Tasks</option>
                                 <option value="completed">Completed Only</option>
@@ -661,16 +823,16 @@ export default function WorkflowPage() {
                                                     >
                                                         {t.title}
                                                     </p>
-                                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-black/45 tracking-tight flex-wrap">
-                                                        <span className="uppercase font-semibold tracking-wider bg-black/[0.02] border border-black/[0.04] rounded-sm px-1.5 py-0.5 text-black/50">
+                                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-black/45 tracking-tight flex-wrap font-mono uppercase">
+                                                        <span className="font-semibold tracking-wider bg-black/[0.02] border border-black/[0.04] rounded-sm px-1.5 py-0.5 text-black/50">
                                                             {t.category}
                                                         </span>
                                                         <span>•</span>
                                                         <span>Assignee: {getAssigneeName(t.assignee_id)}</span>
-                                                        {t.project_id && (
+                                                        {t.project_name && (
                                                             <>
                                                                 <span>•</span>
-                                                                <span className="font-medium text-black/60">{getProjectName(t.project_id)}</span>
+                                                                <span className="font-semibold text-black/65">{t.project_name}</span>
                                                             </>
                                                         )}
                                                     </div>
@@ -772,35 +934,35 @@ export default function WorkflowPage() {
                                                     {/* Checklist items */}
                                                     {(t.subtasks || []).length > 0 && (
                                                         <div className="space-y-1.5">
-                                                            {t.subtasks.map((st) => (
+                                                            {t.subtasks.map((s) => (
                                                                 <div
-                                                                    key={st.id}
+                                                                    key={s.id}
                                                                     className="flex items-center justify-between gap-3 p-1.5 hover:bg-black/[0.015] rounded-sm"
                                                                 >
                                                                     <div className="flex items-center gap-2 min-w-0">
                                                                         <button
                                                                             type="button"
-                                                                            onClick={() => handleToggleSubtask(t.id, st.id)}
+                                                                            onClick={() => handleToggleSubtask(t.id, s.id)}
                                                                             className={`w-4 h-4 border rounded-sm flex items-center justify-center shrink-0 transition-colors focus:outline-none ${
-                                                                                st.completed
+                                                                                s.completed
                                                                                     ? "bg-black border-black text-white"
                                                                                     : "border-black/[0.15] hover:border-black/40"
                                                                             }`}
                                                                         >
-                                                                            {st.completed && <Check className="w-3 h-3" />}
+                                                                            {s.completed && <Check className="w-3 h-3" />}
                                                                         </button>
                                                                         <span
                                                                             className={`text-xs ${
-                                                                                st.completed
+                                                                                s.completed
                                                                                     ? "line-through text-black/45"
                                                                                     : "text-black/85"
                                                                             }`}
                                                                         >
-                                                                            {st.text}
+                                                                            {s.text}
                                                                         </span>
                                                                     </div>
                                                                     <button
-                                                                        onClick={() => handleRemoveSubtask(t.id, st.id)}
+                                                                        onClick={() => handleRemoveSubtask(t.id, s.id)}
                                                                         className="p-0.5 text-black/35 hover:text-red-500 hover:bg-red-50 rounded-sm focus:outline-none"
                                                                     >
                                                                         <X className="w-3 h-3" />

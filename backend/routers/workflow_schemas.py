@@ -26,7 +26,8 @@ class TaskIn(BaseModel):
     description: Optional[str] = ""
     category: str = "general"  # "general" | "project" | "scouting" | "finance"
     assignee_id: Optional[str] = None
-    project_id: Optional[str] = None  # lightweight flat reference
+    project_id: Optional[str] = None  # lightweight flat reference ID
+    project_name: Optional[str] = ""  # lightweight flat reference Name
     subtasks: Optional[List[SubtaskItem]] = []
     attachments: Optional[List[TaskAttachment]] = []
 
@@ -37,6 +38,7 @@ class TaskUpdateIn(BaseModel):
     status: Optional[str] = None  # "pending" | "in_progress" | "completed" | "archived"
     assignee_id: Optional[str] = None
     project_id: Optional[str] = None
+    project_name: Optional[str] = None
     subtasks: Optional[List[SubtaskItem]] = None
     attachments: Optional[List[TaskAttachment]] = None
 

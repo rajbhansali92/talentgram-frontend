@@ -189,7 +189,7 @@ body {
   }
 
   [data-testid="submission-page"] main,
-  [data-testid="submission-page"]>div:last-of-type {
+  [data-testid="submission-page"] [data-testid="submission-content"] {
     padding-bottom: 96px;
   }
 }

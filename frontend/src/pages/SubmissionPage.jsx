@@ -124,9 +124,9 @@ export default function SubmissionPage() {
     // Collapsible sections state
     const [collapsedSections, setCollapsedSections] = useState({
         profile: false,           // open by default
-        projectQuestions: true,   // collapsed by default
-        workLinks: true,          // collapsed by default
-        uploads: true,            // collapsed by default
+        projectQuestions: false,   // open by default
+        workLinks: false,          // open by default
+        uploads: false,            // open by default
     });
     // Upload retry queue: per-slot pending file with attempt counter so a
     // transient network drop doesn't lose the file selection.
@@ -1001,9 +1001,9 @@ export default function SubmissionPage() {
                 )}
             </header>
 
-            <div className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-8 md:py-16">
+            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-8 md:py-16">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-16 bg-white/60 rounded-3xl p-5 sm:p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
+                <section className="mb-10 sm:mb-16 bg-white/60 rounded-3xl p-5 sm:p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
                         <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
@@ -1052,7 +1052,7 @@ export default function SubmissionPage() {
 
                 {/* SECTION 2 — TALENT DETAILS FORM */}
                 <section
-                    className="pt-4 mb-16"
+                    className="pt-4 mb-10 sm:mb-16"
                     data-testid="talent-details-section"
                     data-step="1-2"
                 >
@@ -1502,7 +1502,7 @@ export default function SubmissionPage() {
                         </div>
 
                         {/* Section 2: Project Questions */}
-                        <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
+                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
                                 <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Project Questions</h3>
                                 <button
@@ -1756,7 +1756,7 @@ export default function SubmissionPage() {
                         </div>
 
                         {/* Section 3: Work Links & Additional Material */}
-                        <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
+                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
                                 <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Work Links</h3>
                                 <button

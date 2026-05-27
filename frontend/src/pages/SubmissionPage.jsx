@@ -807,14 +807,14 @@ export default function SubmissionPage() {
     // ---------------------------------------------------------------
     if (loading) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-50 to-white">
+            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white">
                 <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
             </div>
         );
     }
     if (!project) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-slate-500 p-6 text-center">
+            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-slate-500 p-6 text-center">
                 <p>Project not found.</p>
             </div>
         );
@@ -878,7 +878,7 @@ export default function SubmissionPage() {
             submission?.status === "updated" ? "Resubmitted" : "Submitted";
         const feedback = submission?.client_feedback || [];
         return (
-            <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden">
+            <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden">
                 <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-amber-200/20" />
                 <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
@@ -944,7 +944,7 @@ export default function SubmissionPage() {
     }
 
     return (
-        <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden" data-testid="submission-page" data-mobile-step={mobileStep}>
+        <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden" data-testid="submission-page" data-mobile-step={mobileStep}>
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
                 <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-amber-200/40 mix-blend-multiply animate-blob" />
@@ -1001,12 +1001,12 @@ export default function SubmissionPage() {
                 )}
             </header>
 
-            <div className="max-w-3xl mx-auto px-5 py-10 md:py-16">
+            <div className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-8 md:py-16">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-16 bg-white/60 rounded-3xl p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
+                <section className="mb-16 bg-white/60 rounded-3xl p-5 sm:p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
-                        <h1 className="font-display text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
+                        <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
                             Talentgram × {project.brand_name}
                         </h1>
                         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
@@ -1014,7 +1014,7 @@ export default function SubmissionPage() {
                             <span>Draft Auto-Saved</span>
                         </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-5 border-t border-slate-200/50 pt-6">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5 border-t border-slate-200/50 pt-6">
                         <Info label="Character" value={project.character} />
                         <Info label="Shoot Dates" value={project.shoot_dates} />
                         {/* Phase 1 (v37): expose Director + Production House so
@@ -1111,7 +1111,7 @@ export default function SubmissionPage() {
                             user is in control: Use this OR Edit manually. */}
                         {prefillSuggestion && !saved && (
                             <div
-                                className="bg-amber-50/40 border border-amber-200/60 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
+                                className="bg-amber-50/40 border border-amber-200/60 rounded-2xl p-5 flex flex-col md:flex-row md:items-center gap-4 justify-between"
                                 data-testid="prefill-suggestion-card"
                                 data-step="1"
                             >
@@ -1129,12 +1129,12 @@ export default function SubmissionPage() {
                                         {prefillSuggestion.data.height ? ` · ${prefillSuggestion.data.height}` : ""}
                                     </p>
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto shrink-0">
                                     <button
                                         type="button"
                                         onClick={applyPrefill}
                                         data-testid="prefill-use-btn"
-                                        className="bg-slate-900 text-white px-5 py-2.5 text-[11px] rounded-full hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200"
+                                        className="bg-slate-900 text-white px-5 py-2.5 text-[12px] rounded-full hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 w-full sm:w-auto"
                                     >
                                         <Check className="w-3.5 h-3.5" />
                                         Use this
@@ -1143,7 +1143,7 @@ export default function SubmissionPage() {
                                         type="button"
                                         onClick={dismissPrefill}
                                         data-testid="prefill-dismiss-btn"
-                                        className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[11px] rounded-full inline-flex items-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50"
+                                        className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[12px] rounded-full inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50 w-full sm:w-auto"
                                     >
                                         Edit manually
                                     </button>
@@ -1267,7 +1267,7 @@ export default function SubmissionPage() {
                                                         max={80}
                                                         placeholder="e.g. 25"
                                                         data-testid="form-override-age-input"
-                                                        className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                        className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                     />
                                                     <p className="text-[10px] text-slate-400 font-mono mt-1.5">
                                                         This age override is isolated to this submission only and will not change your global profile.
@@ -1308,7 +1308,7 @@ export default function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-height-trigger"
-                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select height" />
                                                     </SelectTrigger>
@@ -1406,7 +1406,7 @@ export default function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-ethnicity-trigger"
-                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select ethnicity" />
                                                     </SelectTrigger>
@@ -1451,7 +1451,7 @@ export default function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-instagram-followers-trigger"
-                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select range" />
                                                     </SelectTrigger>
@@ -1492,7 +1492,7 @@ export default function SubmissionPage() {
                                                 rows={3}
                                                 maxLength={600}
                                                 data-testid="form-bio"
-                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                 placeholder="A short note about you (max 600 chars)"
                                             />
                                         </label>
@@ -1588,7 +1588,7 @@ export default function SubmissionPage() {
                                                 rows={3}
                                                 placeholder="Please specify reason / alternate availability"
                                                 data-testid="availability-note-input"
-                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         )}
                                     </div>
@@ -1709,7 +1709,7 @@ export default function SubmissionPage() {
                                                 onBlur={saveForm}
                                                 placeholder="Enter your expected budget per day"
                                                 data-testid="budget-value-input"
-                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         )}
                                     </div>
@@ -2084,12 +2084,13 @@ export default function SubmissionPage() {
                             </div>
                         )}
 
-                        <div className="sticky bottom-4">
+                        <div className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
                             <button
                                 onClick={finalize}
                                 disabled={finalizing || !readyToSubmit}
                                 data-testid="finalize-submission-btn"
-                                className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-lg disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
+                                className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
+                                style={{ WebkitTapHighlightColor: "transparent" }}
                             >
                                 {finalizing ? (
                                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -2099,7 +2100,7 @@ export default function SubmissionPage() {
                                 Submit Audition
                             </button>
                             {!readyToSubmit && (
-                                <p className="text-[11px] text-slate-400 text-center mt-4 font-mono">
+                                <p className="text-[11px] text-slate-400 text-center mt-3 font-mono">
                                     Need: First+Last name · Height · Location ·
                                     Availability · Budget
                                 </p>
@@ -2121,7 +2122,7 @@ export default function SubmissionPage() {
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
             {emailGateUnlocked && mobileStep < 3 && (
                 <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-slate-200/60 px-4 py-4 shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-slate-200/60 px-4 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
                     data-testid="wizard-bottom-bar"
                 >
                     <div className="flex items-center gap-2 max-w-3xl mx-auto">
@@ -2131,6 +2132,7 @@ export default function SubmissionPage() {
                                 onClick={() => goToStep(mobileStep - 1)}
                                 data-testid="wizard-back-btn"
                                 className="px-5 py-3 border border-slate-200 text-slate-600 rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                style={{ WebkitTapHighlightColor: "transparent" }}
                             >
                                 Back
                             </button>
@@ -2140,7 +2142,8 @@ export default function SubmissionPage() {
                             onClick={() => goToStep(mobileStep + 1)}
                             disabled={starting}
                             data-testid="wizard-next-btn"
-                            className="flex-1 bg-slate-900 text-white py-3 rounded-full text-[13px] font-medium hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 disabled:opacity-50"
+                            className="flex-1 bg-slate-900 text-white py-3 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] inline-flex items-center justify-center gap-2 min-h-[48px] transition-all duration-200 disabled:opacity-50"
+                            style={{ WebkitTapHighlightColor: "transparent" }}
                         >
                             {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
                             {mobileStep === 1 ? "Continue to Brief" : "Continue to Uploads"}
@@ -2155,7 +2158,7 @@ export default function SubmissionPage() {
 function Info({ label, value, wide }) {
     if (!value) return null;
     return (
-        <div className={wide ? "col-span-2" : ""}>
+        <div className={wide ? "col-span-1 sm:col-span-2" : ""}>
             <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-1">
                 {label}
             </div>
@@ -2303,7 +2306,7 @@ function WorkLinksEditor({ links, onChange }) {
                     inputMode="url"
                     placeholder="https://… (paste & press Enter)"
                     data-testid="work-link-input"
-                    className="flex-1 bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                    className="flex-1 bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                 />
                 <button
                     type="button"
@@ -2387,7 +2390,7 @@ function PremiumFormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] text-slate-800 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-400 ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-slate-800 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-400 ${className}`}
             />
             {hint && (
                 <span className="block text-[10px] text-slate-400 mt-1 font-mono">
@@ -2615,7 +2618,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove }) {
                             }
                         }}
                         placeholder={`Take ${index}`}
-                        className={`bg-transparent outline-none text-[13px] w-full py-1.5 px-2 rounded-xl border transition-all duration-200 ${dirty ? "border-amber-300 bg-amber-50/30" : "border-transparent"} focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 text-slate-700`}
+                        className={`bg-transparent outline-none text-[16px] md:text-[13px] w-full py-1.5 px-2 rounded-xl border transition-all duration-200 ${dirty ? "border-amber-300 bg-amber-50/30" : "border-transparent"} focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 text-slate-700`}
                         data-testid={`take-label-${index}`}
                     />
                 ) : (
@@ -2671,7 +2674,7 @@ function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, in
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                     placeholder={`${fallback} — add a label`}
-                    className="flex-1 bg-transparent outline-none text-[13px] py-1.5 px-3 rounded-xl border border-slate-200 focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-slate-700"
+                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-slate-200 focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-slate-700"
                     enterKeyHint="done"
                     data-testid={`new-take-label-${number}`}
                 />

@@ -1179,7 +1179,7 @@ export default function SubmissionPage() {
                                                 Returning talents can log in and prefill saved details.
                                             </p>
                                         </div>
-                                        <div className="flex flex-col sm:flex-row gap-3">
+                                        <form onSubmit={handleInlineLookup} className="flex flex-col sm:flex-row gap-3">
                                             <input
                                                 type="email"
                                                 value={gatewayEmail}
@@ -1190,15 +1190,14 @@ export default function SubmissionPage() {
                                                 disabled={gatewayLoading}
                                             />
                                             <button
-                                                type="button"
-                                                onClick={handleInlineLookup}
+                                                type="submit"
                                                 disabled={gatewayLoading}
                                                 className="bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-medium hover:bg-slate-800 active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 min-w-[120px] h-[44px]"
                                             >
                                                 {gatewayLoading ? "Verifying..." : "Continue"}
                                                 <ArrowRight className="w-3.5 h-3.5" />
                                             </button>
-                                        </div>
+                                        </form>
                                         <p className="text-[10px] text-slate-400 font-mono mt-1">
                                             New talents can continue with the same email.
                                         </p>

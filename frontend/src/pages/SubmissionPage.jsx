@@ -32,6 +32,7 @@ import {
     ChevronDown,
     ArrowRight,
     ChevronRight,
+    User,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -204,6 +205,7 @@ export default function SubmissionPage() {
                     );
                     if (data && Object.keys(data).length > 0) {
                         setPrefillSuggestion({ data });
+                        setPrefillTried(true);
                     }
                 } catch (e) {
                     console.error("Auto prefill lookup failed:", e);
@@ -343,7 +345,7 @@ export default function SubmissionPage() {
             try {
                 localStorage.setItem(LS_DRAFT_KEY(slug), JSON.stringify(form));
             } catch (e) { console.error(e); }
-        }, 400);
+        }, 1200);
         return () => clearTimeout(t);
     }, [form, slug]);
 
@@ -516,6 +518,7 @@ export default function SubmissionPage() {
 
     const handleInlineLookup = async (e) => {
         if (e) e.preventDefault();
+        if (gatewayLoading) return;
         const trimmedEmail = gatewayEmail.trim().toLowerCase();
         if (!trimmedEmail || !trimmedEmail.includes("@")) {
             toast.error("Please enter a valid email address");
@@ -570,6 +573,7 @@ export default function SubmissionPage() {
     };
 
     const handleInlineCancel = () => {
+        localStorage.removeItem("talentgram_portal_email");
         setGatewayRecognition(null);
         setGatewayEmail("");
     };
@@ -1603,9 +1607,20 @@ export default function SubmissionPage() {
                                         <PremiumFormField
                                             label="Instagram Handle"
                                             value={form.instagram_handle}
-                                            onChange={(v) =>
-                                                setForm({ ...form, instagram_handle: v })
-                                            }
+                                            onChange={(v) => {
+                                                let clean = v.trim();
+                                                if (clean.includes("instagram.com/")) {
+                                                    const segments = clean.split("instagram.com/");
+                                                    if (segments[1]) {
+                                                        clean = segments[1].split(/[?#/]/)[0];
+                                                    }
+                                                }
+                                                if (clean.startsWith("@")) {
+                                                    clean = clean.substring(1);
+                                                }
+                                                clean = clean.replace(/\s+/g, "");
+                                                setForm({ ...form, instagram_handle: clean });
+                                            }}
                                             onBlur={saveForm}
                                             testid="form-instagram-handle"
                                             placeholder="@yourhandle"
@@ -2260,7 +2275,7 @@ export default function SubmissionPage() {
                             </div>
                         )}
 
-                        <div className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+                        <div className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
                             <button
                                 onClick={finalize}
                                 disabled={finalizing || !readyToSubmit}
@@ -2272,7 +2287,8 @@ export default function SubmissionPage() {
                                     <Loader2 className="w-4 h-4 animate-spin" />
                                 ) : (
                                     <Sparkles className="w-4 h-4" />
-                                )}
+                                )
+                                }
                                 Submit Audition
                             </button>
                             {!readyToSubmit && (
@@ -2298,7 +2314,7 @@ export default function SubmissionPage() {
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
             {emailGateUnlocked && mobileStep < 3 && (
                 <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-slate-200/60 px-4 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-slate-200/60 px-4 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
                     data-testid="wizard-bottom-bar"
                 >
                     <div className="flex items-center gap-2 max-w-3xl mx-auto">

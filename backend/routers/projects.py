@@ -33,6 +33,8 @@ router = APIRouter(prefix="/api", tags=["projects"])
 async def create_project(payload: ProjectIn, admin: dict = Depends(current_team_or_admin)):
     if payload.commission_percent and payload.commission_percent not in COMMISSION_OPTIONS:
         raise HTTPException(400, "Invalid commission_percent")
+    if payload.status not in ["ongoing", "hold", "complete", "locked"]:
+        raise HTTPException(400, "Invalid status")
     doc = payload.model_dump()
     doc["talent_budget"] = _clean_budget_lines(doc.get("talent_budget"))
     doc["client_budget"] = _clean_budget_lines(doc.get("client_budget"))
@@ -75,6 +77,8 @@ async def get_project(pid: str, admin: dict = Depends(current_team_or_admin)):
 async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(current_team_or_admin)):
     if payload.commission_percent and payload.commission_percent not in COMMISSION_OPTIONS:
         raise HTTPException(400, "Invalid commission_percent")
+    if payload.status not in ["ongoing", "hold", "complete", "locked"]:
+        raise HTTPException(400, "Invalid status")
     patch = payload.model_dump()
     patch["talent_budget"] = _clean_budget_lines(patch.get("talent_budget"))
     patch["client_budget"] = _clean_budget_lines(patch.get("client_budget"))

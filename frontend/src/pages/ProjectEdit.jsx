@@ -71,6 +71,7 @@ const empty = {
     talent_budget: [],
     client_budget: [],
     require_reapproval_on_edit: true,
+    status: "ongoing",
 };
 
 // ISSUE 2 & 3: More robust file validation using startsWith()
@@ -473,6 +474,23 @@ export default function ProjectEdit() {
                             </button>
                         </>
                     )}
+                    <Select
+                        value={project.status || "ongoing"}
+                        onValueChange={(v) => updateProject({ status: v })}
+                    >
+                        <SelectTrigger
+                            data-testid="project-status-select-trigger"
+                            className="bg-transparent border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium"
+                        >
+                            <SelectValue placeholder="Status" />
+                        </SelectTrigger>
+                        <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl">
+                            <SelectItem value="ongoing">Ongoing</SelectItem>
+                            <SelectItem value="hold">Hold</SelectItem>
+                            <SelectItem value="complete">Complete</SelectItem>
+                            <SelectItem value="locked">Locked</SelectItem>
+                        </SelectContent>
+                    </Select>
                     <button
                         onClick={save}
                         disabled={saving}

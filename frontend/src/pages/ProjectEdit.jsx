@@ -160,8 +160,8 @@ export default function ProjectEdit() {
                 if (isMounted.current) {
                     setProject({ ...empty, ...data });
                     setLoading(false);
+                    loadSubmissions(id);
                 }
-                loadSubmissions(id);
             } catch {
                 if (isMounted.current) {
                     toast.error("Failed to load project");
@@ -381,12 +381,13 @@ export default function ProjectEdit() {
     const addCustomQuestion = () => {
         const q = cqInput.trim();
         if (!q) return;
-        updateProject({
+        setProject(prev => ({
+            ...prev,
             custom_questions: [
-                ...(project.custom_questions || []),
+                ...(prev.custom_questions || []),
                 { id: crypto.randomUUID(), question: q, type: "text" },
-            ],
-        });
+            ]
+        }));
         setCqInput("");
     };
 
@@ -1017,7 +1018,7 @@ export default function ProjectEdit() {
                     </div>
 
                     {!collapsedSections.submissions && (
-                        <>
+                        <div className="w-full overflow-x-auto">
                             {submissions.length === 0 ? (
                                 <div className="p-8 text-center text-black/40 text-sm">
                                     No submissions yet. Share the link above with
@@ -1106,7 +1107,7 @@ export default function ProjectEdit() {
                                     </div>
                                 </>
                             )}
-                        </>
+                        </div>
                     )}
                 </section>
             )}
@@ -1178,7 +1179,7 @@ export default function ProjectEdit() {
     );
 }
 
-function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
+const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     const s = submission;
     const meta = {
         pending: { icon: Clock, label: "Pending", color: "text-black/60" },
@@ -1193,7 +1194,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     const isUpdated = s.status === "updated";
     const mediaCounts = {
         intro: (s.media || []).filter((m) => m.category === "intro_video")
-            .length,
+             .length,
         takes: (s.media || []).filter(
             (m) =>
                 m.category === "take" ||
@@ -1294,7 +1295,7 @@ function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
             </div>
         </div>
     );
-}
+});
 
 // Component to review individual submissions and manage per-asset curation
 function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onChanged }) {

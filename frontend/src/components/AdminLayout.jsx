@@ -559,7 +559,7 @@ export default function AdminLayout() {
         />
 
         {/* MAIN CONTENT */}
-        <main className="flex-1 min-w-0 md:pt-0 pt-14">
+        <main className="flex-1 min-w-0 md:pt-0 pt-14 pb-[safe-area-inset-bottom] pb-safe">
           <Suspense fallback={<LoadingFallback />}>
             <Outlet />
           </Suspense>

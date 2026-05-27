@@ -29,6 +29,7 @@ import {
     Plus,
     Mic,
     MessageSquare,
+    ChevronDown,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -119,6 +120,14 @@ export default function SubmissionPage() {
     // a draft on every advance.
     //   1 = Profile  · 2 = Brief / Questions  · 3 = Uploads
     const [mobileStep, setMobileStep] = useState(1);
+
+    // Collapsible sections state
+    const [collapsedSections, setCollapsedSections] = useState({
+        profile: false,           // open by default
+        projectQuestions: true,   // collapsed by default
+        workLinks: true,          // collapsed by default
+        uploads: true,            // collapsed by default
+    });
     // Upload retry queue: per-slot pending file with attempt counter so a
     // transient network drop doesn't lose the file selection.
     const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
@@ -1144,568 +1153,648 @@ export default function SubmissionPage() {
 
                         {emailGateUnlocked && (
                         <>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8" data-step="1">
-                            <PremiumFormField
-                                label="First Name *"
-                                value={form.first_name}
-                                onChange={(v) =>
-                                    setForm({ ...form, first_name: v })
-                                }
-                                onBlur={saveForm}
-                                testid="form-first-name"
-                                required
-                            />
-                            <PremiumFormField
-                                label="Last Name *"
-                                value={form.last_name}
-                                onChange={(v) =>
-                                    setForm({ ...form, last_name: v })
-                                }
-                                onBlur={saveForm}
-                                testid="form-last-name"
-                                required
-                            />
-                            <PremiumFormField
-                                label="Phone"
-                                type="tel"
-                                value={form.phone}
-                                onChange={(v) =>
-                                    setForm({ ...form, phone: v })
-                                }
-                                onBlur={saveForm}
-                                testid="form-phone"
-                            />
-                            <PremiumFormField
-                                label="Date of Birth (optional)"
-                                type="date"
-                                value={form.dob}
-                                max={new Date().toISOString().split("T")[0]}
-                                onChange={(v) =>
-                                    setForm({ ...form, dob: v, age: "" })
-                                }
-                                onBlur={saveForm}
-                                testid="form-dob"
-                                className="[color-scheme:light]"
-                                autoComplete="bday"
-                            />
-                            
-                            {/* Project-specific age override checkbox and input */}
-                            <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-slate-200/50 focus-within:border-amber-300 focus-within:ring-4 focus-within:ring-amber-50/50 transition-all duration-300 col-span-1 md:col-span-2">
-                                <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
-                                    <input
-                                        type="checkbox"
-                                        checked={form.overrideAge || false}
-                                        onChange={(e) => {
-                                            const active = e.target.checked;
-                                            setForm({
-                                                ...form,
-                                                overrideAge: active,
-                                                submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
-                                            });
-                                            setTimeout(saveForm, 0);
-                                        }}
-                                        data-testid="form-override-age-checkbox"
-                                        className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
+                        {/* Section 1: Your Profile */}
+                        <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                                <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Your Profile</h3>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setCollapsedSections(prev => ({
+                                            ...prev,
+                                            profile: !prev.profile,
+                                        }))
+                                    }
+                                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    title={collapsedSections.profile ? "Expand Profile" : "Collapse Profile"}
+                                >
+                                    <ChevronDown
+                                        className={`h-4 w-4 transform transition-transform duration-200 ${
+                                            collapsedSections.profile ? "-rotate-90" : ""
+                                        }`}
                                     />
-                                    <span className="text-sm font-medium text-slate-700 select-none">
-                                        Use different age for this project?
-                                    </span>
-                                </label>
-                                
-                                {form.overrideAge && (
-                                    <div className="mt-4 animate-fadeIn transition-all duration-300">
-                                        <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                            Project-Specific Age Override *
-                                        </span>
-                                        <input
-                                            type="number"
-                                            inputMode="numeric"
-                                            pattern="[0-9]*"
-                                            value={form.submitted_age_override || ""}
-                                            onChange={(e) =>
-                                                setForm({
-                                                    ...form,
-                                                    submitted_age_override: e.target.value,
-                                                })
+                                </button>
+                            </div>
+                            
+                            {!collapsedSections.profile && (
+                                <div className="space-y-8 animate-fadeIn">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8" data-step="1">
+                                        <PremiumFormField
+                                            label="First Name *"
+                                            value={form.first_name}
+                                            onChange={(v) =>
+                                                setForm({ ...form, first_name: v })
                                             }
                                             onBlur={saveForm}
-                                            min={10}
-                                            max={80}
-                                            placeholder="e.g. 25"
-                                            data-testid="form-override-age-input"
-                                            className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                            testid="form-first-name"
+                                            required
                                         />
-                                        <p className="text-[10px] text-slate-400 font-mono mt-1.5">
-                                            This age override is isolated to this submission only and will not change your global profile.
-                                        </p>
-                                    </div>
-                                )}
-                            </div>
+                                        <PremiumFormField
+                                            label="Last Name *"
+                                            value={form.last_name}
+                                            onChange={(v) =>
+                                                setForm({ ...form, last_name: v })
+                                            }
+                                            onBlur={saveForm}
+                                            testid="form-last-name"
+                                            required
+                                        />
+                                        <PremiumFormField
+                                            label="Phone"
+                                            type="tel"
+                                            value={form.phone}
+                                            onChange={(v) =>
+                                                setForm({ ...form, phone: v })
+                                            }
+                                            onBlur={saveForm}
+                                            testid="form-phone"
+                                        />
+                                        <PremiumFormField
+                                            label="Date of Birth (optional)"
+                                            type="date"
+                                            value={form.dob}
+                                            max={new Date().toISOString().split("T")[0]}
+                                            onChange={(v) =>
+                                                setForm({ ...form, dob: v, age: "" })
+                                            }
+                                            onBlur={saveForm}
+                                            testid="form-dob"
+                                            className="[color-scheme:light]"
+                                            autoComplete="bday"
+                                        />
+                                        
+                                        {/* Project-specific age override checkbox and input */}
+                                        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-slate-200/50 focus-within:border-amber-300 focus-within:ring-4 focus-within:ring-amber-50/50 transition-all duration-300 col-span-1 md:col-span-2">
+                                            <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={form.overrideAge || false}
+                                                    onChange={(e) => {
+                                                        const active = e.target.checked;
+                                                        setForm({
+                                                            ...form,
+                                                            overrideAge: active,
+                                                            submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
+                                                        });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                    data-testid="form-override-age-checkbox"
+                                                    className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
+                                                />
+                                                <span className="text-sm font-medium text-slate-700 select-none">
+                                                    Use different age for this project?
+                                                </span>
+                                            </label>
+                                            
+                                            {form.overrideAge && (
+                                                <div className="mt-4 animate-fadeIn transition-all duration-300">
+                                                    <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                        Project-Specific Age Override *
+                                                    </span>
+                                                    <input
+                                                        type="number"
+                                                        inputMode="numeric"
+                                                        pattern="[0-9]*"
+                                                        value={form.submitted_age_override || ""}
+                                                        onChange={(e) =>
+                                                            setForm({
+                                                                ...form,
+                                                                submitted_age_override: e.target.value,
+                                                            })
+                                                        }
+                                                        onBlur={saveForm}
+                                                        min={10}
+                                                        max={80}
+                                                        placeholder="e.g. 25"
+                                                        data-testid="form-override-age-input"
+                                                        className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                    />
+                                                    <p className="text-[10px] text-slate-400 font-mono mt-1.5">
+                                                        This age override is isolated to this submission only and will not change your global profile.
+                                                    </p>
+                                                </div>
+                                            )}
+                                        </div>
 
-                            <div data-testid="form-age-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Age {form.dob ? "(auto calculated)" : "*"}
-                                </span>
-                                <input
-                                    type="number"
-                                    value={
-                                        form.dob
-                                            ? (calcAge(form.dob) ?? "")
-                                            : form.age
-                                    }
-                                    disabled={true}
-                                    min={10}
-                                    max={80}
-                                    data-testid="form-age-input"
-                                    className="mt-2 w-full bg-slate-100 rounded-2xl border border-slate-200 outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                />
-                            </div>
-                            <div data-testid="form-height-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Height *
-                                </span>
-                                <div className="mt-2">
-                                    <Select
-                                        value={form.height || ""}
-                                        onValueChange={(v) => {
-                                            setForm({ ...form, height: v });
-                                            setTimeout(saveForm, 0);
-                                        }}
-                                    >
-                                        <SelectTrigger
-                                            data-testid="form-height-trigger"
-                                            className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
-                                        >
-                                            <SelectValue placeholder="Select height" />
-                                        </SelectTrigger>
-                                        <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
-                                            {HEIGHT_OPTIONS.map((h) => (
-                                                <SelectItem
-                                                    key={h}
-                                                    value={h}
+                                        <div data-testid="form-age-field">
+                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                Age {form.dob ? "(auto calculated)" : "*"}
+                                            </span>
+                                            <input
+                                                type="number"
+                                                value={
+                                                    form.dob
+                                                        ? (calcAge(form.dob) ?? "")
+                                                        : form.age
+                                                }
+                                                disabled={true}
+                                                min={10}
+                                                max={80}
+                                                data-testid="form-age-input"
+                                                className="mt-2 w-full bg-slate-100 rounded-2xl border border-slate-200 outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                            />
+                                        </div>
+                                        <div data-testid="form-height-field">
+                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                Height *
+                                            </span>
+                                            <div className="mt-2">
+                                                <Select
+                                                    value={form.height || ""}
+                                                    onValueChange={(v) => {
+                                                        setForm({ ...form, height: v });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
                                                 >
-                                                    {h}
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
+                                                    <SelectTrigger
+                                                        data-testid="form-height-trigger"
+                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                    >
+                                                        <SelectValue placeholder="Select height" />
+                                                    </SelectTrigger>
+                                                    <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
+                                                        {HEIGHT_OPTIONS.map((h) => (
+                                                            <SelectItem
+                                                                key={h}
+                                                                value={h}
+                                                            >
+                                                                {h}
+                                                            </SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </div>
+                                        <PremiumFormField
+                                            label="Current Location *"
+                                            value={form.location}
+                                            onChange={(v) =>
+                                                setForm({ ...form, location: v })
+                                            }
+                                            onBlur={saveForm}
+                                            testid="form-location"
+                                            required
+                                        />
+                                        {project.competitive_brand_enabled && (
+                                            <PremiumFormField
+                                                label="Competitive Brand (declare conflicts)"
+                                                value={form.competitive_brand}
+                                                onChange={(v) =>
+                                                    setForm({
+                                                        ...form,
+                                                        competitive_brand: v,
+                                                    })
+                                                }
+                                                onBlur={saveForm}
+                                                placeholder="Any brand conflict? Type 'None' if not"
+                                                testid="form-competitive-brand"
+                                                wide
+                                            />
+                                        )}
+                                    </div>
+
+                                    {/* Phase 2 — unified identity fields */}
+                                    <div
+                                        className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8"
+                                        data-step="1"
+                                        data-testid="unified-identity-block"
+                                    >
+                                        <div data-testid="form-gender-field">
+                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                Gender
+                                            </span>
+                                            <div className="mt-2 grid grid-cols-2 gap-2">
+                                                {GENDER_OPTIONS.map((g) => {
+                                                    const active = form.gender === g.key;
+                                                    return (
+                                                        <button
+                                                            key={g.key}
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setForm({
+                                                                    ...form,
+                                                                    gender: active
+                                                                        ? ""
+                                                                        : g.key,
+                                                                });
+                                                                setTimeout(saveForm, 0);
+                                                            }}
+                                                            data-testid={`form-gender-${g.key}`}
+                                                            className={`px-3 py-2.5 text-[12px] rounded-full border transition-all duration-200 min-h-[44px] active:scale-[0.97] ${
+                                                                active
+                                                                    ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                                                    : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                            }`}
+                                                        >
+                                                            {g.label}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                        <div data-testid="form-ethnicity-field">
+                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                Ethnicity
+                                            </span>
+                                            <div className="mt-2">
+                                                <Select
+                                                    value={form.ethnicity || ""}
+                                                    onValueChange={(v) => {
+                                                        setForm({ ...form, ethnicity: v });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                >
+                                                    <SelectTrigger
+                                                        data-testid="form-ethnicity-trigger"
+                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                    >
+                                                        <SelectValue placeholder="Select ethnicity" />
+                                                    </SelectTrigger>
+                                                    <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
+                                                        {ETHNICITY_OPTIONS.map((e) => (
+                                                            <SelectItem
+                                                                key={e.key}
+                                                                value={e.key}
+                                                                data-testid={`form-ethnicity-option-${e.key}`}
+                                                            >
+                                                                {e.label}
+                                                            </SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </div>
+                                        <PremiumFormField
+                                            label="Instagram Handle"
+                                            value={form.instagram_handle}
+                                            onChange={(v) =>
+                                                setForm({ ...form, instagram_handle: v })
+                                            }
+                                            onBlur={saveForm}
+                                            testid="form-instagram-handle"
+                                            placeholder="@yourhandle"
+                                        />
+                                        <div data-testid="form-instagram-followers-field">
+                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                Instagram Followers
+                                            </span>
+                                            <div className="mt-2">
+                                                <Select
+                                                    value={form.instagram_followers || ""}
+                                                    onValueChange={(v) => {
+                                                        setForm({
+                                                            ...form,
+                                                            instagram_followers: v,
+                                                        });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                >
+                                                    <SelectTrigger
+                                                        data-testid="form-instagram-followers-trigger"
+                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                    >
+                                                        <SelectValue placeholder="Select range" />
+                                                    </SelectTrigger>
+                                                    <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
+                                                        {FOLLOWER_TIERS.map((tier) => (
+                                                            <SelectGroup key={tier.label}>
+                                                                <SelectLabel className="text-[10px] tracking-wide uppercase text-slate-400 font-mono">
+                                                                    {tier.label}
+                                                                </SelectLabel>
+                                                                {tier.items.map((it) => (
+                                                                    <SelectItem
+                                                                        key={it}
+                                                                        value={it}
+                                                                    >
+                                                                        {it}
+                                                                    </SelectItem>
+                                                                ))}
+                                                                <SelectSeparator />
+                                                            </SelectGroup>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </div>
+                                        <label className="block md:col-span-2" data-testid="form-bio-field">
+                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                Bio (optional)
+                                            </span>
+                                            <textarea
+                                                value={form.bio}
+                                                onChange={(e) =>
+                                                    setForm({
+                                                        ...form,
+                                                        bio: e.target.value,
+                                                    })
+                                                }
+                                                onBlur={saveForm}
+                                                rows={3}
+                                                maxLength={600}
+                                                data-testid="form-bio"
+                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                placeholder="A short note about you (max 600 chars)"
+                                            />
+                                        </label>
+                                    </div>
                                 </div>
-                            </div>
-                            <PremiumFormField
-                                label="Current Location *"
-                                value={form.location}
-                                onChange={(v) =>
-                                    setForm({ ...form, location: v })
-                                }
-                                onBlur={saveForm}
-                                testid="form-location"
-                                required
-                            />
-                            {project.competitive_brand_enabled && (
-                                <PremiumFormField
-                                    label="Competitive Brand (declare conflicts)"
-                                    value={form.competitive_brand}
-                                    onChange={(v) =>
-                                        setForm({
-                                            ...form,
-                                            competitive_brand: v,
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    placeholder="Any brand conflict? Type 'None' if not"
-                                    testid="form-competitive-brand"
-                                    wide
-                                />
                             )}
                         </div>
 
-                        {/* Phase 2 — unified identity fields. These map 1:1
-                            to TalentIn (gender, ethnicity, instagram_*, bio,
-                            work_links) so the same shape lands in the master
-                            talent record on finalize. */}
-                        <div
-                            className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8"
-                            data-step="1"
-                            data-testid="unified-identity-block"
-                        >
-                            <div data-testid="form-gender-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Gender
-                                </span>
-                                <div className="mt-2 grid grid-cols-2 gap-2">
-                                    {GENDER_OPTIONS.map((g) => {
-                                        const active = form.gender === g.key;
-                                        return (
+                        {/* Section 2: Project Questions */}
+                        <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                                <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Project Questions</h3>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setCollapsedSections(prev => ({
+                                            ...prev,
+                                            projectQuestions: !prev.projectQuestions,
+                                        }))
+                                    }
+                                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    title={collapsedSections.projectQuestions ? "Expand Project Questions" : "Collapse Project Questions"}
+                                >
+                                    <ChevronDown
+                                        className={`h-4 w-4 transform transition-transform duration-200 ${
+                                            collapsedSections.projectQuestions ? "-rotate-90" : ""
+                                        }`}
+                                    />
+                                </button>
+                            </div>
+
+                            {!collapsedSections.projectQuestions && (
+                                <div className="space-y-8 animate-fadeIn">
+                                    {/* AVAILABILITY — decision block */}
+                                    <div
+                                        data-testid="availability-block"
+                                        data-step="2"
+                                    >
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-3">
+                                            Availability{" "}
+                                            <span className="text-rose-500">*</span>
+                                        </p>
+                                        {project.shoot_dates && (
+                                            <p className="text-[12px] text-slate-500 mb-5 leading-relaxed">
+                                                {project.shoot_dates}
+                                                {" — "}Costume trial and rehearsal dates
+                                                (if any) will be informed.
+                                            </p>
+                                        )}
+                                        <div className="grid grid-cols-2 gap-2 mb-4">
+                                            {AVAILABILITY_OPTIONS.map((opt) => {
+                                                const active =
+                                                    form.availability.status === opt.key;
+                                                return (
+                                                    <button
+                                                        key={opt.key}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setForm({
+                                                                ...form,
+                                                                availability: {
+                                                                    ...form.availability,
+                                                                    status: opt.key,
+                                                                },
+                                                            });
+                                                            setTimeout(saveForm, 0);
+                                                        }}
+                                                        data-testid={`avail-${opt.key}-btn`}
+                                                        className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                            active
+                                                                ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                                                : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                        }`}
+                                                    >
+                                                        {opt.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        {form.availability.status === "no" && (
+                                            <textarea
+                                                value={form.availability.note}
+                                                onChange={(e) =>
+                                                    setForm({
+                                                        ...form,
+                                                        availability: {
+                                                            ...form.availability,
+                                                            note: e.target.value,
+                                                        },
+                                                    })
+                                                }
+                                                onBlur={saveForm}
+                                                rows={3}
+                                                placeholder="Please specify reason / alternate availability"
+                                                data-testid="availability-note-input"
+                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                            />
+                                        )}
+                                    </div>
+
+                                    {/* BUDGET — decision block */}
+                                    <div
+                                        data-testid="budget-block"
+                                        data-step="2"
+                                    >
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-5">
+                                            Budget{" "}
+                                            <span className="text-rose-500">*</span>
+                                        </p>
+                                        {project.commission_percent && (
+                                            <div
+                                                className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                data-testid="commission-card"
+                                            >
+                                                <span className="text-[11px] tracking-[0.2em] uppercase font-mono text-slate-500">
+                                                    Commission
+                                                </span>
+                                                <span className="font-display text-2xl text-slate-800">
+                                                    {project.commission_percent}
+                                                </span>
+                                            </div>
+                                        )}
+                                        {(project.talent_budget || []).length > 0 && (
+                                            <div
+                                                className="bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                data-testid="talent-budget-hint"
+                                            >
+                                                <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-3">
+                                                    Offered Budget
+                                                </div>
+                                                <div className="space-y-2">
+                                                    {project.talent_budget.map((row, i) => (
+                                                        <div
+                                                            key={`${row.label || ""}-${i}`}
+                                                            className="flex items-center justify-between gap-3 text-[13px]"
+                                                            data-testid={`talent-budget-line-${i}`}
+                                                        >
+                                                            <span className="text-slate-500">
+                                                                {row.label || "—"}
+                                                            </span>
+                                                            <span className="font-mono text-slate-700">
+                                                                {row.value || "—"}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
                                             <button
-                                                key={g.key}
                                                 type="button"
                                                 onClick={() => {
                                                     setForm({
                                                         ...form,
-                                                        gender: active
-                                                            ? ""
-                                                            : g.key,
+                                                        budget: {
+                                                            status: "accept",
+                                                            value: "",
+                                                        },
                                                     });
                                                     setTimeout(saveForm, 0);
                                                 }}
-                                                data-testid={`form-gender-${g.key}`}
-                                                className={`px-3 py-2.5 text-[12px] rounded-full border transition-all duration-200 min-h-[44px] active:scale-[0.97] ${
-                                                    active
+                                                data-testid="budget-accept-btn"
+                                                className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                    form.budget.status === "accept"
                                                         ? "bg-slate-900 text-white border-slate-900 shadow-sm"
                                                         : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
                                                 }`}
                                             >
-                                                {g.label}
+                                                Accept
+                                                {project.budget_per_day && (
+                                                    <span className="block text-[11px] font-mono opacity-70 mt-1">
+                                                        {project.budget_per_day} / day
+                                                    </span>
+                                                )}
                                             </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                            <div data-testid="form-ethnicity-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Ethnicity
-                                </span>
-                                <div className="mt-2">
-                                    <Select
-                                        value={form.ethnicity || ""}
-                                        onValueChange={(v) => {
-                                            setForm({ ...form, ethnicity: v });
-                                            setTimeout(saveForm, 0);
-                                        }}
-                                    >
-                                        <SelectTrigger
-                                            data-testid="form-ethnicity-trigger"
-                                            className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
-                                        >
-                                            <SelectValue placeholder="Select ethnicity" />
-                                        </SelectTrigger>
-                                        <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
-                                            {ETHNICITY_OPTIONS.map((e) => (
-                                                <SelectItem
-                                                    key={e.key}
-                                                    value={e.key}
-                                                    data-testid={`form-ethnicity-option-${e.key}`}
-                                                >
-                                                    {e.label}
-                                                </SelectItem>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setForm({
+                                                        ...form,
+                                                        budget: {
+                                                            ...form.budget,
+                                                            status: "custom",
+                                                        },
+                                                    });
+                                                    setTimeout(saveForm, 0);
+                                                }}
+                                                data-testid="budget-custom-btn"
+                                                className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                    form.budget.status === "custom"
+                                                        ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                                        : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                }`}
+                                            >
+                                                Not accepting
+                                                <span className="block text-[11px] font-mono opacity-70 mt-1">
+                                                    Propose your own
+                                                </span>
+                                            </button>
+                                        </div>
+                                        {form.budget.status === "custom" && (
+                                            <input
+                                                type="text"
+                                                value={form.budget.value}
+                                                onChange={(e) =>
+                                                    setForm({
+                                                        ...form,
+                                                        budget: {
+                                                            ...form.budget,
+                                                            value: e.target.value,
+                                                        },
+                                                    })
+                                                }
+                                                onBlur={saveForm}
+                                                placeholder="Enter your expected budget per day"
+                                                data-testid="budget-value-input"
+                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                            />
+                                        )}
+                                    </div>
+
+                                    {project.medium_usage && (
+                                        <div className="border-t border-slate-100 pt-8" data-step="2">
+                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Medium / Usage</p>
+                                            <p className="text-[13px] leading-relaxed text-slate-600">
+                                                {project.medium_usage}
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {(project.custom_questions || []).length > 0 && (
+                                        <div className="border-t border-slate-100 pt-8 space-y-6" data-step="2">
+                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">Additional Questions</p>
+                                            {project.custom_questions.map((q) => (
+                                                <PremiumFormField
+                                                    key={q.id}
+                                                    label={q.question}
+                                                    value={
+                                                        (form.custom_answers || {})[q.id] ||
+                                                        ""
+                                                    }
+                                                    onChange={(v) =>
+                                                        setForm({
+                                                            ...form,
+                                                            custom_answers: {
+                                                                ...(form.custom_answers ||
+                                                                    {}),
+                                                                [q.id]: v,
+                                                            },
+                                                        })
+                                                    }
+                                                    onBlur={saveForm}
+                                                    testid={`form-cq-${q.id}`}
+                                                    wide
+                                                />
                                             ))}
-                                        </SelectContent>
-                                    </Select>
+                                        </div>
+                                    )}
                                 </div>
-                            </div>
-                            <PremiumFormField
-                                label="Instagram Handle"
-                                value={form.instagram_handle}
-                                onChange={(v) =>
-                                    setForm({ ...form, instagram_handle: v })
-                                }
-                                onBlur={saveForm}
-                                testid="form-instagram-handle"
-                                placeholder="@yourhandle"
-                            />
-                            <div data-testid="form-instagram-followers-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Instagram Followers
-                                </span>
-                                <div className="mt-2">
-                                    <Select
-                                        value={form.instagram_followers || ""}
-                                        onValueChange={(v) => {
-                                            setForm({
-                                                ...form,
-                                                instagram_followers: v,
-                                            });
-                                            setTimeout(saveForm, 0);
-                                        }}
-                                    >
-                                        <SelectTrigger
-                                            data-testid="form-instagram-followers-trigger"
-                                            className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
-                                        >
-                                            <SelectValue placeholder="Select range" />
-                                        </SelectTrigger>
-                                        <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
-                                            {FOLLOWER_TIERS.map((tier) => (
-                                                <SelectGroup key={tier.label}>
-                                                    <SelectLabel className="text-[10px] tracking-wide uppercase text-slate-400 font-mono">
-                                                        {tier.label}
-                                                    </SelectLabel>
-                                                    {tier.items.map((it) => (
-                                                        <SelectItem
-                                                            key={it}
-                                                            value={it}
-                                                        >
-                                                            {it}
-                                                        </SelectItem>
-                                                    ))}
-                                                    <SelectSeparator />
-                                                </SelectGroup>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                            </div>
-                            <label className="block md:col-span-2" data-testid="form-bio-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Bio (optional)
-                                </span>
-                                <textarea
-                                    value={form.bio}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            bio: e.target.value,
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    rows={3}
-                                    maxLength={600}
-                                    data-testid="form-bio"
-                                    className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                    placeholder="A short note about you (max 600 chars)"
-                                />
-                            </label>
-                            <div className="md:col-span-2" data-testid="form-work-links-field">
-                                <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
-                                    Work Links (optional)
-                                </span>
-                                <WorkLinksEditor
-                                    links={form.work_links || []}
-                                    onChange={(arr) => {
-                                        setForm({ ...form, work_links: arr });
-                                        setTimeout(saveForm, 0);
-                                    }}
-                                />
-                            </div>
+                            )}
                         </div>
 
-                        {/* AVAILABILITY — decision block */}
-                        <div
-                            className="border-t border-slate-100 pt-8"
-                            data-testid="availability-block"
-                            data-step="2"
-                        >
-                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-3">
-                                Availability{" "}
-                                <span className="text-rose-500">*</span>
-                            </p>
-                            {project.shoot_dates && (
-                                <p className="text-[12px] text-slate-500 mb-5 leading-relaxed">
-                                    {project.shoot_dates}
-                                    {" — "}Costume trial and rehearsal dates
-                                    (if any) will be informed.
-                                </p>
-                            )}
-                            <div className="grid grid-cols-2 gap-2 mb-4">
-                                {AVAILABILITY_OPTIONS.map((opt) => {
-                                    const active =
-                                        form.availability.status === opt.key;
-                                    return (
-                                        <button
-                                            key={opt.key}
-                                            type="button"
-                                            onClick={() => {
-                                                setForm({
-                                                    ...form,
-                                                    availability: {
-                                                        ...form.availability,
-                                                        status: opt.key,
-                                                    },
-                                                });
+                        {/* Section 3: Work Links & Additional Material */}
+                        <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                                <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Work Links</h3>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setCollapsedSections(prev => ({
+                                            ...prev,
+                                            workLinks: !prev.workLinks,
+                                        }))
+                                    }
+                                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    title={collapsedSections.workLinks ? "Expand Work Links" : "Collapse Work Links"}
+                                >
+                                    <ChevronDown
+                                        className={`h-4 w-4 transform transition-transform duration-200 ${
+                                            collapsedSections.workLinks ? "-rotate-90" : ""
+                                        }`}
+                                    />
+                                </button>
+                            </div>
+
+                            {!collapsedSections.workLinks && (
+                                <div className="space-y-4 animate-fadeIn">
+                                    <div data-testid="form-work-links-field">
+                                        <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            Work Links (optional)
+                                        </span>
+                                        <WorkLinksEditor
+                                            links={form.work_links || []}
+                                            onChange={(arr) => {
+                                                setForm({ ...form, work_links: arr });
                                                 setTimeout(saveForm, 0);
                                             }}
-                                            data-testid={`avail-${opt.key}-btn`}
-                                            className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
-                                                active
-                                                    ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                    : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
-                                            }`}
-                                        >
-                                            {opt.label}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                            {form.availability.status === "no" && (
-                                <textarea
-                                    value={form.availability.note}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            availability: {
-                                                ...form.availability,
-                                                note: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    rows={3}
-                                    placeholder="Please specify reason / alternate availability"
-                                    data-testid="availability-note-input"
-                                    className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                />
-                            )}
-                        </div>
-
-                        {/* BUDGET — decision block */}
-                        <div
-                            className="border-t border-slate-100 pt-8"
-                            data-testid="budget-block"
-                            data-step="2"
-                        >
-                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-5">
-                                Budget{" "}
-                                <span className="text-rose-500">*</span>
-                            </p>
-                            {project.commission_percent && (
-                                <div
-                                    className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                    data-testid="commission-card"
-                                >
-                                    <span className="text-[11px] tracking-[0.2em] uppercase font-mono text-slate-500">
-                                        Commission
-                                    </span>
-                                    <span className="font-display text-2xl text-slate-800">
-                                        {project.commission_percent}
-                                    </span>
-                                </div>
-                            )}
-                            {(project.talent_budget || []).length > 0 && (
-                                <div
-                                    className="bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                    data-testid="talent-budget-hint"
-                                >
-                                    <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-3">
-                                        Offered Budget
-                                    </div>
-                                    <div className="space-y-2">
-                                        {project.talent_budget.map((row, i) => (
-                                            <div
-                                                key={`${row.label || ""}-${i}`}
-                                                className="flex items-center justify-between gap-3 text-[13px]"
-                                                data-testid={`talent-budget-line-${i}`}
-                                            >
-                                                <span className="text-slate-500">
-                                                    {row.label || "—"}
-                                                </span>
-                                                <span className="font-mono text-slate-700">
-                                                    {row.value || "—"}
-                                                </span>
-                                            </div>
-                                        ))}
+                                        />
                                     </div>
                                 </div>
                             )}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setForm({
-                                            ...form,
-                                            budget: {
-                                                status: "accept",
-                                                value: "",
-                                            },
-                                        });
-                                        setTimeout(saveForm, 0);
-                                    }}
-                                    data-testid="budget-accept-btn"
-                                    className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
-                                        form.budget.status === "accept"
-                                            ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                            : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
-                                    }`}
-                                >
-                                    Accept
-                                    {project.budget_per_day && (
-                                        <span className="block text-[11px] font-mono opacity-70 mt-1">
-                                            {project.budget_per_day} / day
-                                        </span>
-                                    )}
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setForm({
-                                            ...form,
-                                            budget: {
-                                                ...form.budget,
-                                                status: "custom",
-                                            },
-                                        });
-                                        setTimeout(saveForm, 0);
-                                    }}
-                                    data-testid="budget-custom-btn"
-                                    className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
-                                        form.budget.status === "custom"
-                                            ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                            : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
-                                    }`}
-                                >
-                                    Not accepting
-                                    <span className="block text-[11px] font-mono opacity-70 mt-1">
-                                        Propose your own
-                                    </span>
-                                </button>
-                            </div>
-                            {form.budget.status === "custom" && (
-                                <input
-                                    type="text"
-                                    value={form.budget.value}
-                                    onChange={(e) =>
-                                        setForm({
-                                            ...form,
-                                            budget: {
-                                                ...form.budget,
-                                                value: e.target.value,
-                                            },
-                                        })
-                                    }
-                                    onBlur={saveForm}
-                                    placeholder="Enter your expected budget per day"
-                                    data-testid="budget-value-input"
-                                    className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                />
-                            )}
                         </div>
-
-                        {project.medium_usage && (
-                            <div className="border-t border-slate-100 pt-8" data-step="2">
-                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Medium / Usage</p>
-                                <p className="text-[13px] leading-relaxed text-slate-600">
-                                    {project.medium_usage}
-                                </p>
-                            </div>
-                        )}
-
-                        {(project.custom_questions || []).length > 0 && (
-                            <div className="border-t border-slate-100 pt-8 space-y-6" data-step="2">
-                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">Additional Questions</p>
-                                {project.custom_questions.map((q) => (
-                                    <PremiumFormField
-                                        key={q.id}
-                                        label={q.question}
-                                        value={
-                                            (form.custom_answers || {})[q.id] ||
-                                            ""
-                                        }
-                                        onChange={(v) =>
-                                            setForm({
-                                                ...form,
-                                                custom_answers: {
-                                                    ...(form.custom_answers ||
-                                                        {}),
-                                                    [q.id]: v,
-                                                },
-                                            })
-                                        }
-                                        onBlur={saveForm}
-                                        testid={`form-cq-${q.id}`}
-                                        wide
-                                    />
-                                ))}
-                            </div>
-                        )}
 
                         {!saved && (
                             <button
@@ -1734,243 +1823,266 @@ export default function SubmissionPage() {
                         data-step="3"
                     >
                         <div className="bg-white rounded-3xl p-7 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Uploads</p>
-                        <h2 className="font-display text-2xl md:text-3xl tracking-tight text-slate-900 mb-3 leading-[1.05]">
-                            Show us your work.
-                        </h2>
-                        <p
-                            className="text-[12px] text-slate-500 mb-10 font-mono"
-                            data-testid="uploads-optional-hint"
-                        >
-                            Optional — but recommended to increase your selection chances.
-                        </p>
-
-                        <PremiumUploadSlot
-                            title="Introduction Video"
-                            note="Optional (recommended). Your most recent professional introduction video (without contact info)."
-                            icon={Video}
-                            accept="video/*"
-                            inputRef={introRef}
-                            onPick={(f) => uploadFile(f[0], "intro_video")}
-                            uploading={uploading === "intro_video"}
-                            uploadPct={uploadPct}
-                            media={intro}
-                            onRemove={(m) => removeMedia(m.id)}
-                            testid="upload-intro"
-                            cameraCapture="user"
-                            failed={Boolean(retryQueue["intro_video"]?.failed)}
-                            onRetry={() => retryUpload("intro_video")}
-                        />
-
-                        <div className="mb-10" data-testid="takes-section">
-                            <div className="flex items-center justify-between mb-4">
-                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
-                                    Audition Takes{" "}
-                                    <span className="text-slate-400">
-                                        (up to {MAX_TAKES})
-                                    </span>
-                                </p>
-                                <span
-                                    className="text-[11px] font-mono text-slate-400"
-                                    data-testid="takes-counter"
-                                >
-                                    {takes.length}/{MAX_TAKES}
-                                </span>
+                        <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                            <div>
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-1">Uploads</p>
+                                <h2 className="font-display text-2xl tracking-tight text-slate-900 leading-[1.05]">
+                                    Show us your work.
+                                </h2>
                             </div>
-                            <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
-                                Optional (recommended). Upload each take as a
-                                separate video and label it (e.g., "Scene 1",
-                                "Closeup emotional"). Talents with takes have
-                                a stronger chance of selection.
-                            </p>
-
-                            {takes.map((t, i) => (
-                                <PremiumTakeRow
-                                    key={t.id}
-                                    index={i + 1}
-                                    media={t}
-                                    canRename={!t._legacy}
-                                    onRename={(lbl) =>
-                                        patchTakeLabel(t.id, lbl)
-                                    }
-                                    onRemove={() => removeMedia(t.id)}
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    setCollapsedSections(prev => ({
+                                        ...prev,
+                                        uploads: !prev.uploads,
+                                    }))
+                                }
+                                className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                title={collapsedSections.uploads ? "Expand Uploads" : "Collapse Uploads"}
+                            >
+                                <ChevronDown
+                                    className={`h-4 w-4 transform transition-transform duration-200 ${
+                                        collapsedSections.uploads ? "-rotate-90" : ""
+                                    }`}
                                 />
-                            ))}
-
-                            {canAddTake && (
-                                <PremiumAddTakeSlot
-                                    number={takes.length + 1}
-                                    uploading={uploading}
-                                    uploadPct={uploadPct}
-                                    onPick={(file, label) =>
-                                        uploadFile(file, "take", label)
-                                    }
-                                    inputRef={newTakeRef}
-                                />
-                            )}
+                            </button>
                         </div>
 
-                        <div className="mb-8" data-testid="images-upload-section">
-                            <div className="flex items-center justify-between mb-3">
-                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
-                                    Images{" "}
-                                    <span className="text-slate-400">
-                                        (optional)
-                                    </span>
-                                </p>
-                                <span
-                                    data-testid="image-counter"
-                                    className="text-[11px] font-mono text-slate-400"
+                        {!collapsedSections.uploads && (
+                            <div className="animate-fadeIn">
+                                <p
+                                    className="text-[12px] text-slate-500 mb-10 font-mono"
+                                    data-testid="uploads-optional-hint"
                                 >
-                                    {images.length}/{MAX_IMAGES_PER_CATEGORY}
-                                </span>
-                            </div>
-                            <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
-                                Optional (recommended). High-resolution
-                                portfolio images aligned with the brand's
-                                aesthetic improve your selection odds. Up to{" "}
-                                {MAX_IMAGES_PER_CATEGORY} per category
-                                (Indian / Western / general looks).
-                            </p>
+                                    Optional — but recommended to increase your selection chances.
+                                </p>
 
-                            {/* Phase 2 — optional Indian look images */}
-                            <PremiumPortfolioGroup
-                                label="Indian Look (optional)"
-                                hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
-                                items={indianImages}
-                                category="indian"
-                                allImagesCount={indianImages.length}
-                                maxImages={MAX_IMAGES_PER_CATEGORY}
-                                inputRef={indianImagesRef}
-                                uploadImages={uploadImages}
-                                removeMedia={removeMedia}
-                                uploading={uploading}
-                                uploadPct={uploadPct}
-                                testidPrefix="indian"
-                            />
+                                <PremiumUploadSlot
+                                    title="Introduction Video"
+                                    note="Optional (recommended). Your most recent professional introduction video (without contact info)."
+                                    icon={Video}
+                                    accept="video/*"
+                                    inputRef={introRef}
+                                    onPick={(f) => uploadFile(f[0], "intro_video")}
+                                    uploading={uploading === "intro_video"}
+                                    uploadPct={uploadPct}
+                                    media={intro}
+                                    onRemove={(m) => removeMedia(m.id)}
+                                    testid="upload-intro"
+                                    cameraCapture="user"
+                                    failed={Boolean(retryQueue["intro_video"]?.failed)}
+                                    onRetry={() => retryUpload("intro_video")}
+                                />
 
-                            {/* Phase 2 — optional Western look images */}
-                            <PremiumPortfolioGroup
-                                label="Western Look (optional)"
-                                hint="Casual, formal or western-styled references."
-                                items={westernImages}
-                                category="western"
-                                allImagesCount={westernImages.length}
-                                maxImages={MAX_IMAGES_PER_CATEGORY}
-                                inputRef={westernImagesRef}
-                                uploadImages={uploadImages}
-                                removeMedia={removeMedia}
-                                uploading={uploading}
-                                uploadPct={uploadPct}
-                                testidPrefix="western"
-                            />
-
-                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mt-4 mb-4" data-testid="generic-portfolio-label">
-                                Portfolio (general)
-                            </p>
-
-                            <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-                                {images.map((m) => (
-                                    <div
-                                        key={m.id}
-                                        className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
-                                    >
-                                        <img
-                                            src={thumbnailUrl(m)}
-                                            alt=""
-                                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                                        />
-                                        <button
-                                            onClick={() => removeMedia(m.id)}
-                                            className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
+                                <div className="mb-10" data-testid="takes-section">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
+                                            Audition Takes{" "}
+                                            <span className="text-slate-400">
+                                                (up to {MAX_TAKES})
+                                            </span>
+                                        </p>
+                                        <span
+                                            className="text-[11px] font-mono text-slate-400"
+                                            data-testid="takes-counter"
                                         >
-                                            <X className="w-3 h-3 text-slate-700" />
+                                            {takes.length}/{MAX_TAKES}
+                                        </span>
+                                    </div>
+                                    <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
+                                        Optional (recommended). Upload each take as a
+                                        separate video and label it (e.g., "Scene 1",
+                                        "Closeup emotional"). Talents with takes have
+                                        a stronger chance of selection.
+                                    </p>
+
+                                    {takes.map((t, i) => (
+                                        <PremiumTakeRow
+                                            key={t.id}
+                                            index={i + 1}
+                                            media={t}
+                                            canRename={!t._legacy}
+                                            onRename={(lbl) =>
+                                                patchTakeLabel(t.id, lbl)
+                                            }
+                                            onRemove={() => removeMedia(t.id)}
+                                        />
+                                    ))}
+
+                                    {canAddTake && (
+                                        <PremiumAddTakeSlot
+                                            number={takes.length + 1}
+                                            uploading={uploading}
+                                            uploadPct={uploadPct}
+                                            onPick={(file, label) =>
+                                                uploadFile(file, "take", label)
+                                            }
+                                            inputRef={newTakeRef}
+                                        />
+                                    )}
+                                </div>
+
+                                <div className="mb-8" data-testid="images-upload-section">
+                                    <div className="flex items-center justify-between mb-3">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
+                                            Images{" "}
+                                            <span className="text-slate-400">
+                                                (optional)
+                                            </span>
+                                        </p>
+                                        <span
+                                            data-testid="image-counter"
+                                            className="text-[11px] font-mono text-slate-400"
+                                        >
+                                            {images.length}/{MAX_IMAGES_PER_CATEGORY}
+                                        </span>
+                                    </div>
+                                    <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
+                                        Optional (recommended). High-resolution
+                                        portfolio images aligned with the brand's
+                                        aesthetic improve your selection odds. Up to{" "}
+                                        {MAX_IMAGES_PER_CATEGORY} per category
+                                        (Indian / Western / general looks).
+                                    </p>
+
+                                    {/* Phase 2 — optional Indian look images */}
+                                    <PremiumPortfolioGroup
+                                        label="Indian Look (optional)"
+                                        hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
+                                        items={indianImages}
+                                        category="indian"
+                                        allImagesCount={indianImages.length}
+                                        maxImages={MAX_IMAGES_PER_CATEGORY}
+                                        inputRef={indianImagesRef}
+                                        uploadImages={uploadImages}
+                                        removeMedia={removeMedia}
+                                        uploading={uploading}
+                                        uploadPct={uploadPct}
+                                        testidPrefix="indian"
+                                    />
+
+                                    {/* Phase 2 — optional Western look images */}
+                                    <PremiumPortfolioGroup
+                                        label="Western Look (optional)"
+                                        hint="Casual, formal or western-styled references."
+                                        items={westernImages}
+                                        category="western"
+                                        allImagesCount={westernImages.length}
+                                        maxImages={MAX_IMAGES_PER_CATEGORY}
+                                        inputRef={westernImagesRef}
+                                        uploadImages={uploadImages}
+                                        removeMedia={removeMedia}
+                                        uploading={uploading}
+                                        uploadPct={uploadPct}
+                                        testidPrefix="western"
+                                    />
+
+                                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mt-4 mb-4" data-testid="generic-portfolio-label">
+                                        Portfolio (general)
+                                    </p>
+
+                                    <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
+                                        {images.map((m) => (
+                                            <div
+                                                key={m.id}
+                                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
+                                            >
+                                                <img
+                                                    src={thumbnailUrl(m)}
+                                                    alt=""
+                                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                                />
+                                                <button
+                                                    onClick={() => removeMedia(m.id)}
+                                                    className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
+                                                >
+                                                    <X className="w-3 h-3 text-slate-700" />
+                                                </button>
+                                            </div>
+                                        ))}
+                                        {images.length < MAX_IMAGES_PER_CATEGORY && (
+                                            <button
+                                                onClick={() =>
+                                                    imagesRef.current?.click()
+                                                }
+                                                disabled={uploading === "image"}
+                                                data-testid="add-image-btn"
+                                                className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                            >
+                                                {uploading === "image" && uploadPct > 0 && (
+                                                    <span
+                                                        aria-hidden
+                                                        className="absolute inset-y-0 left-0 bg-amber-200/30"
+                                                        style={{ width: `${uploadPct}%` }}
+                                                    />
+                                                )}
+                                                {uploading === "image" ? (
+                                                    <div className="relative flex flex-col items-center gap-1">
+                                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                                        <span className="text-[10px] font-mono">
+                                                            {uploadPct ? `${uploadPct}%` : "…"}
+                                                        </span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="relative flex flex-col items-center gap-1">
+                                                        <Camera className="w-5 h-5" />
+                                                        <span className="text-[10px] font-mono">
+                                                            Add
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </button>
+                                        )}
+                                    </div>
+                                    <input
+                                        ref={imagesRef}
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            if (e.target.files?.length)
+                                                uploadImages(e.target.files);
+                                            e.target.value = "";
+                                        }}
+                                    />
+                                    {/* Mobile-only camera-first action */}
+                                    <input
+                                        ref={cameraImagesRef}
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            if (e.target.files?.length)
+                                                uploadImages(e.target.files);
+                                            e.target.value = "";
+                                        }}
+                                    />
+                                    <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => cameraImagesRef.current?.click()}
+                                            disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                            data-testid="add-image-camera-btn"
+                                            className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                        >
+                                            <Camera className="w-3.5 h-3.5" /> Take photo
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => imagesRef.current?.click()}
+                                            disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                            data-testid="add-image-library-btn"
+                                            className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                        >
+                                            <FolderOpen className="w-3.5 h-3.5" /> From library
                                         </button>
                                     </div>
-                                ))}
-                                {images.length < MAX_IMAGES_PER_CATEGORY && (
-                                    <button
-                                        onClick={() =>
-                                            imagesRef.current?.click()
-                                        }
-                                        disabled={uploading === "image"}
-                                        data-testid="add-image-btn"
-                                        className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
-                                    >
-                                        {uploading === "image" && uploadPct > 0 && (
-                                            <span
-                                                aria-hidden
-                                                className="absolute inset-y-0 left-0 bg-amber-200/30"
-                                                style={{ width: `${uploadPct}%` }}
-                                            />
-                                        )}
-                                        {uploading === "image" ? (
-                                            <div className="relative flex flex-col items-center gap-1">
-                                                <Loader2 className="w-5 h-5 animate-spin" />
-                                                <span className="text-[10px] font-mono">
-                                                    {uploadPct ? `${uploadPct}%` : "…"}
-                                                </span>
-                                            </div>
-                                        ) : (
-                                            <div className="relative flex flex-col items-center gap-1">
-                                                <Camera className="w-5 h-5" />
-                                                <span className="text-[10px] font-mono">
-                                                    Add
-                                                </span>
-                                            </div>
-                                        )}
-                                    </button>
-                                )}
+                                </div>
                             </div>
-                            <input
-                                ref={imagesRef}
-                                type="file"
-                                accept="image/*"
-                                multiple
-                                className="hidden"
-                                onChange={(e) => {
-                                    if (e.target.files?.length)
-                                        uploadImages(e.target.files);
-                                    e.target.value = "";
-                                }}
-                            />
-                            {/* Mobile-only camera-first action — quick add of
-                                a single shot from the rear camera. The +
-                                tile in the grid still opens the full library
-                                picker (multiple). */}
-                            <input
-                                ref={cameraImagesRef}
-                                type="file"
-                                accept="image/*"
-                                capture="environment"
-                                className="hidden"
-                                onChange={(e) => {
-                                    if (e.target.files?.length)
-                                        uploadImages(e.target.files);
-                                    e.target.value = "";
-                                }}
-                            />
-                            <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
-                                <button
-                                    type="button"
-                                    onClick={() => cameraImagesRef.current?.click()}
-                                    disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
-                                    data-testid="add-image-camera-btn"
-                                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                >
-                                    <Camera className="w-3.5 h-3.5" /> Take photo
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => imagesRef.current?.click()}
-                                    disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
-                                    data-testid="add-image-library-btn"
-                                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                >
-                                    <FolderOpen className="w-3.5 h-3.5" /> From library
-                                </button>
-                            </div>
-                        </div>
+                        )}
 
                         <div className="sticky bottom-4">
                             <button

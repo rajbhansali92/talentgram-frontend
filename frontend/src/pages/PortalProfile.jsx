@@ -224,7 +224,7 @@ export default function PortalProfile() {
                                         name="height"
                                         value={profile.height || ""}
                                         onChange={handleFieldChange}
-                                        placeholder="e.g. 5'9\""
+                                        placeholder={"e.g. 5'9\""}
                                         style={{ fontSize: "16px" }}
                                         className="px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
                                     />

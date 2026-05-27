@@ -30,6 +30,7 @@ import {
     Mic,
     MessageSquare,
     ChevronDown,
+    ArrowRight,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,

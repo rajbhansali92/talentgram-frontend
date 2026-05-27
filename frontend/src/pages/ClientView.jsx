@@ -641,71 +641,64 @@ export default function ClientView() {
 
     if (!identified) {
         return (
-            <div className="min-h-screen bg-white relative">
-                <div
-                    className="absolute inset-0 opacity-8"
-                    style={{
-                        backgroundImage:
-                            "url('https://images.pexels.com/photos/15128321/pexels-photo-15128321.jpeg')",
-                        backgroundSize: "cover",
-                        backgroundPosition: "center",
-                    }}
-                />
-                <div className="absolute inset-0 bg-gradient-to-b from-white/55 via-white/72 to-white" />
-                <div className="relative z-10 min-h-screen flex items-center justify-center px-6">
-                    <form
-                        onSubmit={identify}
-                        className="w-full max-w-md bg-white/98 backdrop-blur-sm border border-black/[0.04] p-10 rounded-2xl shadow-[0_20px_40px_-12px_rgba(0,0,0,0.06)]"
-                        data-testid="identity-gate-form"
-                    >
-                        <div className="flex justify-center mb-8">
-                            <Logo size="md" />
-                        </div>
-                        <p className="eyebrow mb-3 tracking-[0.12em] text-[#5C5C5C]">Curated Portfolio</p>
-                        <h1 className="font-display text-3xl tracking-wide mb-4 text-[#111111]">
-                            A private review awaits you.
-                        </h1>
-                        <p className="text-[#8A8A8A] text-sm mb-10 leading-relaxed">
-                            Please share your name and email to continue. This
-                            helps us follow up on your selections.
-                        </p>
-                        <label className="block mb-5">
-                            <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
-                                Your Name
-                            </span>
-                            <input
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                                required
-                                data-testid="identity-name-input"
-                                className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2.5 text-sm text-[#111111] placeholder:text-black/25 transition-colors duration-150"
-                            />
-                        </label>
-                        <label className="block mb-10">
-                            <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
-                                Email
-                            </span>
-                            <input
-                                type="email"
-                                value={email}
-                                onChange={(e) => setEmail(e.target.value)}
-                                required
-                                data-testid="identity-email-input"
-                                className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2.5 text-sm text-[#111111] placeholder:text-black/25 transition-colors duration-150"
-                            />
-                        </label>
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            data-testid="identity-submit-btn"
-                            className="w-full bg-[#1A1A1A] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150 inline-flex items-center justify-center gap-2 tracking-[0.04em]"
+            <div className="min-h-screen bg-white flex items-center justify-center p-6 text-black/85">
+                <div className="w-full max-w-md flex flex-col items-center">
+                    {/* Logo top-centered */}
+                    <div className="mb-10 text-center">
+                        <Logo size={120} className="mx-auto" forceVariant="black" />
+                    </div>
+
+                    <div className="w-full border border-black/[0.06] rounded-2xl p-8 md:p-10 bg-white">
+                        <form
+                            onSubmit={identify}
+                            data-testid="identity-gate-form"
                         >
-                            {loading && (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                            )}
-                            Enter Review
-                        </button>
-                    </form>
+                            <p className="eyebrow mb-2 tracking-[0.12em] text-[#5C5C5C]">Curated Portfolio</p>
+                            <h1 className="font-display text-2xl tracking-wide mb-4 text-[#111111]">
+                                A private review awaits you.
+                            </h1>
+                            <p className="text-[#8A8A8A] text-sm mb-8 leading-relaxed">
+                                Please share your name and email to continue. This
+                                helps us follow up on your selections.
+                            </p>
+                            <label className="block mb-5">
+                                <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
+                                    Your Name
+                                </span>
+                                <input
+                                    value={name}
+                                    onChange={(e) => setName(e.target.value)}
+                                    required
+                                    data-testid="identity-name-input"
+                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-sm text-[#111111] placeholder:text-black/25 transition-colors duration-150"
+                                />
+                            </label>
+                            <label className="block mb-8">
+                                <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
+                                    Email
+                                </span>
+                                <input
+                                    type="email"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    required
+                                    data-testid="identity-email-input"
+                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-sm text-[#111111] placeholder:text-black/25 transition-colors duration-150"
+                                />
+                            </label>
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                data-testid="identity-submit-btn"
+                                className="w-full bg-[#1A1A1A] text-white py-3.5 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150 inline-flex items-center justify-center gap-2 tracking-[0.04em]"
+                            >
+                                {loading && (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                )}
+                                Enter Review
+                            </button>
+                        </form>
+                    </div>
                 </div>
             </div>
         );

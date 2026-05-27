@@ -394,114 +394,120 @@ export default function ApplicationPage() {
     if (!started) {
         return (
             <div
-                className="min-h-screen bg-[#faf9f6] text-[#1a1a1a]"
+                className="min-h-screen bg-[#ffffff] text-[#1a1a1a]"
                 data-testid="application-identity-page"
             >
-                <Header />
-                <div className="max-w-xl mx-auto px-6 py-16 md:py-24">
-                    <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Talent Application</p>
-                    <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#1a1a1a] mb-4">
-                        Apply to join Talentgram
-                    </h1>
-                    <p className="text-[#6b6b6b] text-sm mb-10 leading-relaxed">
-                        Submit your portfolio once — get considered for every
-                        brand, film, and campaign we cast. Takes about 5 minutes.
-                    </p>
-                    <div className="space-y-5">
-                        <Row
-                            label="Email *"
-                            type="email"
-                            value={basics.email}
-                            onChange={(v) => {
-                                setBasics({ ...basics, email: v });
-                                // Re-arm the prefill if the email changed.
-                                if (v.trim().toLowerCase() !== applyPrefillTried) {
-                                    setEmailGateUnlocked(false);
-                                    setApplyPrefill(null);
-                                }
-                            }}
-                            onBlur={tryEmailPrefill}
-                            testid="apply-email"
-                            hint="Used as your unique identifier — we'll resume from where you stop"
-                        />
-
-                        {applyPrefill && !emailGateUnlocked && (
-                            <div
-                                className="bg-white rounded-xl border border-[#e8e6df] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
-                                data-testid="apply-prefill-card"
-                            >
-                                <div className="min-w-0 flex-1">
-                                    <p className="text-sm text-[#1a1a1a]">
-                                        We found your profile.{" "}
-                                        <span className="text-[#6b6b6b]">
-                                            Use saved details?
-                                        </span>
-                                    </p>
-                                    <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
-                                        {applyPrefill.data.first_name}{" "}
-                                        {applyPrefill.data.last_name || ""}
-                                        {applyPrefill.data.location ? ` · ${applyPrefill.data.location}` : ""}
-                                        {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
-                                    </p>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={useApplyPrefill}
-                                        data-testid="apply-prefill-use-btn"
-                                        className="bg-[#1a1a1a] text-white px-4 py-2.5 text-xs rounded-lg hover:bg-[#333] transition-colors duration-150 inline-flex items-center gap-1.5 min-h-[44px]"
-                                    >
-                                        <Check className="w-3.5 h-3.5" />
-                                        Use this
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={dismissApplyPrefill}
-                                        data-testid="apply-prefill-dismiss-btn"
-                                        className="border border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#b0aea6] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
-                                    >
-                                        Edit manually
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        {emailGateUnlocked && (
-                            <div className="space-y-5" data-testid="apply-identity-rest">
-                                <Row
-                                    label="First Name *"
-                                    value={basics.first_name}
-                                    onChange={(v) => setBasics({ ...basics, first_name: v })}
-                                    testid="apply-first-name"
-                                />
-                                <Row
-                                    label="Last Name *"
-                                    value={basics.last_name}
-                                    onChange={(v) => setBasics({ ...basics, last_name: v })}
-                                    testid="apply-last-name"
-                                />
-                                <Row
-                                    label="Phone"
-                                    value={basics.phone}
-                                    onChange={(v) => setBasics({ ...basics, phone: v })}
-                                    testid="apply-phone"
-                                />
-                            </div>
-                        )}
+                <div className="max-w-xl mx-auto px-6 py-16 md:py-24 flex flex-col items-center">
+                    {/* Centered standardized prominent logo with breathing room */}
+                    <div className="mb-12 text-center">
+                        <Logo size={120} className="mx-auto" forceVariant="black" />
                     </div>
-                    <button
-                        onClick={startApplication}
-                        disabled={saving || !emailGateUnlocked}
-                        data-testid="apply-start-btn"
-                        className="mt-10 inline-flex items-center gap-2 bg-[#1a1a1a] text-white px-6 py-3.5 rounded-lg text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40"
-                    >
-                        {saving ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                            <ArrowRight className="w-4 h-4" />
-                        )}
-                        Continue
-                    </button>
+
+                    <div className="w-full">
+                        <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Talent Application</p>
+                        <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#1a1a1a] mb-4">
+                            Apply to join Talentgram
+                        </h1>
+                        <p className="text-[#6b6b6b] text-sm mb-10 leading-relaxed">
+                            Submit your portfolio once — get considered for every
+                            brand, film, and campaign we cast. Takes about 5 minutes.
+                        </p>
+                        <div className="space-y-5">
+                            <Row
+                                label="Email *"
+                                type="email"
+                                value={basics.email}
+                                onChange={(v) => {
+                                    setBasics({ ...basics, email: v });
+                                    // Re-arm the prefill if the email changed.
+                                    if (v.trim().toLowerCase() !== applyPrefillTried) {
+                                        setEmailGateUnlocked(false);
+                                        setApplyPrefill(null);
+                                    }
+                                }}
+                                onBlur={tryEmailPrefill}
+                                testid="apply-email"
+                                hint="Used as your unique identifier — we'll resume from where you stop"
+                            />
+
+                            {applyPrefill && !emailGateUnlocked && (
+                                <div
+                                    className="bg-white rounded-xl border border-[#e8e6df] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
+                                    data-testid="apply-prefill-card"
+                                >
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-sm text-[#1a1a1a]">
+                                            We found your profile.{" "}
+                                            <span className="text-[#6b6b6b]">
+                                                Use saved details?
+                                            </span>
+                                        </p>
+                                        <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
+                                            {applyPrefill.data.first_name}{" "}
+                                            {applyPrefill.data.last_name || ""}
+                                            {applyPrefill.data.location ? ` · ${applyPrefill.data.location}` : ""}
+                                            {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={useApplyPrefill}
+                                            data-testid="apply-prefill-use-btn"
+                                            className="bg-[#1a1a1a] text-white px-4 py-2.5 text-xs rounded-lg hover:bg-[#333] transition-colors duration-150 inline-flex items-center gap-1.5 min-h-[44px]"
+                                        >
+                                            <Check className="w-3.5 h-3.5" />
+                                            Use this
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={dismissApplyPrefill}
+                                            data-testid="apply-prefill-dismiss-btn"
+                                            className="border border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#b0aea6] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
+                                        >
+                                            Edit manually
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {emailGateUnlocked && (
+                                <div className="space-y-5" data-testid="apply-identity-rest">
+                                    <Row
+                                        label="First Name *"
+                                        value={basics.first_name}
+                                        onChange={(v) => setBasics({ ...basics, first_name: v })}
+                                        testid="apply-first-name"
+                                    />
+                                    <Row
+                                        label="Last Name *"
+                                        value={basics.last_name}
+                                        onChange={(v) => setBasics({ ...basics, last_name: v })}
+                                        testid="apply-last-name"
+                                    />
+                                    <Row
+                                        label="Phone"
+                                        value={basics.phone}
+                                        onChange={(v) => setBasics({ ...basics, phone: v })}
+                                        testid="apply-phone"
+                                    />
+                                </div>
+                            )}
+                        </div>
+                        <button
+                            onClick={startApplication}
+                            disabled={saving || !emailGateUnlocked}
+                            data-testid="apply-start-btn"
+                            className="mt-10 inline-flex items-center gap-2 bg-[#1a1a1a] text-white px-6 py-3.5 rounded-lg text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40"
+                        >
+                            {saving ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                                <ArrowRight className="w-4 h-4" />
+                            )}
+                            Continue
+                        </button>
+                    </div>
                 </div>
             </div>
         );

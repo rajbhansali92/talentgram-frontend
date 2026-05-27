@@ -1311,7 +1311,7 @@ export default function SubmissionPage() {
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={dismissPrefill}
+                                        onClick={() => setPrefillSuggestion(null)}
                                         data-testid="prefill-dismiss-btn"
                                         className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[12px] rounded-full inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50 w-full sm:w-auto"
                                     >

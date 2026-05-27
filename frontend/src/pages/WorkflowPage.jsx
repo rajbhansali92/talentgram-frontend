@@ -64,6 +64,7 @@ export default function WorkflowPage() {
     const [notifications, setNotifications] = useState([]);
     const [loadingTasks, setLoadingTasks] = useState(true);
     const [loadingScouts, setLoadingScouts] = useState(true);
+    const [loadingProjects, setLoadingProjects] = useState(true);
 
     // Expand states for task feed
     const [expandedTaskId, setExpandedTaskId] = useState(null);
@@ -137,11 +138,27 @@ export default function WorkflowPage() {
     };
 
     const fetchProjects = async () => {
+        setLoadingProjects(true);
         try {
             const { data } = await adminApi.get("/projects");
-            setProjects(data || []);
+            const rawList = data || [];
+            
+            // Normalize safely before rendering
+            const normalized = rawList.map((project) => ({
+                id: project._id || project.id,
+                name: project.name || project.title || project.project_name || "Untitled Project",
+                status: project.status || "ongoing",
+                created_at: project.created_at,
+            }))
+            .filter((p) => p.status !== "locked" && p.status !== "complete")
+            .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)); // Sort newest first
+            
+            setProjects(normalized);
         } catch (e) {
             console.error("Failed to fetch projects:", e);
+            setProjects([]);
+        } finally {
+            setLoadingProjects(false);
         }
     };
 
@@ -445,7 +462,7 @@ export default function WorkflowPage() {
     const getProjectName = (pid) => {
         if (!pid) return "";
         const found = projects.find((p) => p.id === pid);
-        return found ? found.title : "";
+        return found ? found.name : "";
     };
 
     const handleProjectSelect = (pid) => {
@@ -457,7 +474,7 @@ export default function WorkflowPage() {
         setNewTask({
             ...newTask,
             project_id: pid,
-            project_name: proj ? proj.title : "",
+            project_name: proj ? proj.name : "",
         });
     };
 
@@ -613,12 +630,20 @@ export default function WorkflowPage() {
                                     onChange={(e) => handleProjectSelect(e.target.value)}
                                     className="w-full text-xs px-2 py-2 border border-black/[0.08] rounded-sm bg-white focus:outline-none"
                                 >
-                                    <option value="">Select Project Reference...</option>
-                                    {projects.map((p) => (
-                                        <option key={p.id} value={p.id}>
-                                            {p.title}
-                                        </option>
-                                    ))}
+                                    {loadingProjects ? (
+                                        <option value="">Loading projects...</option>
+                                    ) : projects.length === 0 ? (
+                                        <option value="">No active projects available</option>
+                                    ) : (
+                                        <>
+                                            <option value="">Select Project Reference...</option>
+                                            {projects.map((p) => (
+                                                <option key={p.id} value={p.id}>
+                                                    {p.name}
+                                                </option>
+                                            ))}
+                                        </>
+                                    )}
                                 </select>
                             </div>
 

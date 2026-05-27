@@ -8,6 +8,9 @@ const BACKEND_URL =
 // ✅ STEP 2: API base
 export const API = `${BACKEND_URL}/api`;
 
+// ✅ Centralized Public Frontend URL to prevent Vercel preview auth wall on public links
+export const PUBLIC_FRONTEND_URL = "https://talentgram-frontend.vercel.app";
+
 // 🔍 Debug (remove later if needed)
 console.log("🚀 Backend URL:", BACKEND_URL);
 console.log("🚀 API URL:", API);

@@ -26,6 +26,7 @@ from routers import (
     talents,
     users,
     workflow,
+    portal,
 )
 
 app = FastAPI(title="Talentgram Portfolio Engine")
@@ -33,6 +34,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# SecurityHeadersMiddleware
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
@@ -83,6 +85,8 @@ app.include_router(marketing_router.router)
 app.include_router(feedback.router)
 app.include_router(casting_pipeline.router)
 app.include_router(workflow.router)
+app.include_router(portal.router)
+
 
 # Middleware — order matters: last registered = outermost (first to run).
 # SecurityHeadersMiddleware is registered first so it wraps the full response.

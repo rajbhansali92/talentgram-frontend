@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, isAdmin } from "@/lib/api";
+import { adminApi, isAdmin, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import { toast } from "sonner";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import BulkSelectBar from "@/components/BulkSelectBar";
@@ -67,13 +67,13 @@ export default function LinkHistory() {
     }, []);
 
     const copyLink = (slug) => {
-        const url = `${window.location.origin}/l/${slug}`;
+        const url = `${PUBLIC_FRONTEND_URL}/l/${slug}`;
         navigator.clipboard.writeText(url);
         toast.success("Link copied");
     };
 
     const shareWhatsApp = (l) => {
-        const url = `${window.location.origin}/l/${l.slug}`;
+        const url = `${PUBLIC_FRONTEND_URL}/l/${l.slug}`;
         const msg = encodeURIComponent(
             `${l.title}\n\nCurated portfolio review — ${url}`,
         );

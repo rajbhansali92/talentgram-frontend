@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { adminApi } from "@/lib/api";
+import { adminApi, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     ArrowLeft,
@@ -128,7 +128,7 @@ export default function LinkResults() {
     }, [id]);
 
     const subjects = data?.subjects || {};
-    const url = data ? `${window.location.origin}/l/${data.link.slug}` : "";
+    const url = data ? `${PUBLIC_FRONTEND_URL}/l/${data.link.slug}` : "";
     const totalDownloads = data?.downloads?.length || 0;
     const viewers = data?.viewers || [];
     const downloads = data?.downloads || [];

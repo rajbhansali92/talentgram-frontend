@@ -26,6 +26,9 @@ import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import Landing from "@/pages/Landing";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import WorkflowPage from "@/pages/WorkflowPage";
+import PortalGateway from "@/pages/PortalGateway";
+import PortalHome from "@/pages/PortalHome";
+import PortalProfile from "@/pages/PortalProfile";
 
 function App() {
     return (
@@ -81,6 +84,9 @@ function App() {
                         <Route path="workflow" element={<WorkflowPage />} />
                     </Route>
                     <Route path="/l/:slug" element={<ClientView />} />
+                    <Route path="/portal/:slug" element={<PortalGateway />} />
+                    <Route path="/portal/home" element={<PortalHome />} />
+                    <Route path="/portal/profile" element={<PortalProfile />} />
                     <Route path="/submit/:slug" element={<SubmissionPage />} />
                     <Route path="/apply" element={<ApplicationPage />} />
                     <Route path="/signup" element={<SignupPage />} />

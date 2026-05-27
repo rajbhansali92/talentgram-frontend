@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { adminApi } from "@/lib/api";
+import { adminApi, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import { Link } from "react-router-dom";
 import {
     Clapperboard,
@@ -239,7 +239,7 @@ function formatTimeAgo(dateStr) {
 }
 
 function OnboardingLinkCard() {
-    const url = `${window.location.origin}/apply`;
+    const url = `${PUBLIC_FRONTEND_URL}/apply`;
 
     const copy = async () => {
         try {

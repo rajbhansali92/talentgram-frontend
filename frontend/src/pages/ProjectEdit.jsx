@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, isAdmin } from "@/lib/api";
+import { adminApi, isAdmin, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
@@ -192,7 +192,7 @@ export default function ProjectEdit() {
     };
 
     const submissionUrl = project?.slug
-        ? `${window.location.origin}/submit/${project.slug}`
+        ? `${PUBLIC_FRONTEND_URL}/submit/${project.slug}`
         : "";
 
     const copySubmitLink = () => {

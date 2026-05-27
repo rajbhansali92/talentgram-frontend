@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
-import { IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
@@ -499,7 +499,7 @@ export default function ClientView() {
                 },
             );
             
-            const shareUrl = `${window.location.origin}/l/${slug}?share=${data.share_id}`;
+            const shareUrl = `${PUBLIC_FRONTEND_URL}/l/${slug}?share=${data.share_id}`;
             
             if (navigator.share) {
                 try {

@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { ArrowLeft, User, MapPin, Sparkles, Instagram, Plus, Trash2, Save, FileText } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
+import { api as axios } from "@/lib/api";
 
 export default function PortalProfile() {
     const navigate = useNavigate();
@@ -35,11 +36,7 @@ export default function PortalProfile() {
 
         const fetchProfile = async () => {
             try {
-                const res = await fetch(`/api/portal/profile?email=${encodeURIComponent(email)}`);
-                if (!res.ok) {
-                    throw new Error("Failed to load profile");
-                }
-                const data = await res.json();
+                const { data } = await axios.get(`/portal/profile?email=${encodeURIComponent(email)}`);
                 setProfile({
                     name: data.name || "",
                     phone: data.phone || "",
@@ -112,18 +109,10 @@ export default function PortalProfile() {
 
         setSaving(true);
         try {
-            const res = await fetch("/api/portal/profile", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    email,
-                    ...profile,
-                }),
+            await axios.put("/portal/profile", {
+                email,
+                ...profile,
             });
-
-            if (!res.ok) {
-                throw new Error("Failed to save changes");
-            }
 
             toast.success("Profile saved and synchronized globally!");
             navigate("/portal/home");

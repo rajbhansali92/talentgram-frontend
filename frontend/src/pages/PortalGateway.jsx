@@ -3,6 +3,7 @@ import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Sparkles, MapPin, User, Mail, ChevronRight } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
+import { api as axios } from "@/lib/api";
 
 export default function PortalGateway() {
     const { slug } = useParams();
@@ -31,12 +32,7 @@ export default function PortalGateway() {
 
         setLoading(true);
         try {
-            const res = await fetch("/api/portal/lookup", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: trimmedEmail }),
-            });
-            const data = await res.json();
+            const { data } = await axios.post("/portal/lookup", { email: trimmedEmail });
             
             if (data.exists) {
                 // Set recognition payload

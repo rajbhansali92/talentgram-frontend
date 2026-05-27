@@ -523,12 +523,7 @@ export default function SubmissionPage() {
 
         setGatewayLoading(true);
         try {
-            const res = await fetch("/api/portal/lookup", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: trimmedEmail }),
-            });
-            const data = await res.json();
+            const { data } = await axios.post("/portal/lookup", { email: trimmedEmail });
             
             if (data.exists) {
                 setGatewayRecognition(data.talent);

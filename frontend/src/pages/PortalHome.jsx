@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { User, MapPin, ArrowUpRight, LogOut, Edit3, Briefcase, Award, CheckCircle } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
+import { api as axios } from "@/lib/api";
 
 export default function PortalHome() {
     const navigate = useNavigate();
@@ -21,28 +22,20 @@ export default function PortalHome() {
         const fetchPortalData = async () => {
             try {
                 // Fetch profile
-                const profileRes = await fetch(`/api/portal/profile?email=${encodeURIComponent(email)}`);
-                if (profileRes.status === 404) {
-                    toast.error("Your profile session has expired or was removed.");
-                    localStorage.removeItem("talentgram_portal_email");
-                    navigate("/");
-                    return;
-                }
-                if (!profileRes.ok) {
-                    throw new Error("Failed to load profile");
-                }
-                const profileData = await profileRes.json();
-                setTalent(profileData);
+                const profileRes = await axios.get(`/portal/profile?email=${encodeURIComponent(email)}`);
+                setTalent(profileRes.data);
 
                 // Fetch synced projects
-                const projectsRes = await fetch(`/api/portal/projects?email=${encodeURIComponent(email)}`);
-                if (projectsRes.ok) {
-                    const projectsData = await projectsRes.json();
-                    setProjects(projectsData);
-                }
+                const projectsRes = await axios.get(`/portal/projects?email=${encodeURIComponent(email)}`);
+                setProjects(projectsRes.data);
             } catch (err) {
                 console.error("Portal fetch error:", err);
-                toast.error("Unable to load your profile. Please sign in again.");
+                const status = err?.response?.status;
+                if (status === 404) {
+                    toast.error("Your profile session has expired or was removed.");
+                } else {
+                    toast.error("Unable to load your profile. Please sign in again.");
+                }
                 localStorage.removeItem("talentgram_portal_email");
                 navigate("/");
             } finally {

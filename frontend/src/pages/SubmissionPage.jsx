@@ -31,6 +31,7 @@ import {
     MessageSquare,
     ChevronDown,
     ArrowRight,
+    ChevronRight,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,

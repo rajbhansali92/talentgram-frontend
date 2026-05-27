@@ -88,7 +88,7 @@ function PipelineBoard({ projectId, projectName }) {
     const [focusedStageId, setFocusedStageId] = useState(null);
 
     // Section collapse states
-    const [pipelineCollapsed, setPipelineCollapsed] = useState(false);
+    const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
     const [filtersCollapsed, setFiltersCollapsed] = useState(false);
 
     const mainStages = useMemo(() => 
@@ -284,8 +284,8 @@ function PipelineBoard({ projectId, projectName }) {
                                 <button
                                     type="button"
                                     onClick={() => setFiltersCollapsed(prev => !prev)}
-                                    disabled={pipelineCollapsed}
-                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-[10px] tracking-wide uppercase text-black/55 hover:text-black transition-colors ${pipelineCollapsed ? "opacity-40 cursor-not-allowed" : ""}`}
+                                    disabled={toolbarCollapsed}
+                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-[10px] tracking-wide uppercase text-black/55 hover:text-black transition-colors ${toolbarCollapsed ? "opacity-40 cursor-not-allowed" : ""}`}
                                     title={filtersCollapsed ? "Show Filters Panel" : "Hide Filters Panel"}
                                 >
                                     {filtersCollapsed ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
@@ -293,11 +293,11 @@ function PipelineBoard({ projectId, projectName }) {
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => setPipelineCollapsed(prev => !prev)}
+                                    onClick={() => setToolbarCollapsed(prev => !prev)}
                                     className="p-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-black/55 hover:text-black transition-colors"
-                                    title={pipelineCollapsed ? "Expand Entire Pipeline" : "Collapse Entire Pipeline"}
+                                    title={toolbarCollapsed ? "Expand Filters & Search" : "Collapse Filters & Search"}
                                 >
-                                    <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${pipelineCollapsed ? "-rotate-90" : ""}`} />
+                                    <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${toolbarCollapsed ? "-rotate-90" : ""}`} />
                                 </button>
                             </div>
                         </div>
@@ -305,7 +305,7 @@ function PipelineBoard({ projectId, projectName }) {
                 </div>
 
                 {/* Unified Control Deck with operational styling - sticky with backdrop */}
-                {!pipelineCollapsed && !filtersCollapsed && (
+                {!toolbarCollapsed && !filtersCollapsed && (
                     <div className="sticky top-0 z-40 bg-[#f5f5f3]/90 backdrop-blur-sm -mx-5 px-5 pt-2 pb-2">
                         <div className="bg-white border border-black/[0.06] rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                             <div className="px-4 py-3">
@@ -349,8 +349,7 @@ function PipelineBoard({ projectId, projectName }) {
                 )}
 
                 {/* Workflow Content with operational rhythm */}
-                {!pipelineCollapsed && (
-                    <div className="space-y-4 mt-6">
+                <div className="space-y-4 mt-6">
                         {hasZeroAfterFilter && (
                             <div className="mt-8">
                                 <FilterEmptyState onReset={clearAllFilters} />
@@ -418,9 +417,7 @@ function PipelineBoard({ projectId, projectName }) {
                                     ))}
                                 </BoardRow>
                             </BoardSection>
-                        )}
                     </div>
-                )}
 
                 <BulkActionBar
                     count={bulkIds.size}

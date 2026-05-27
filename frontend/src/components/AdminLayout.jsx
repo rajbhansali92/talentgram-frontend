@@ -18,6 +18,7 @@ import {
   ChevronLeft,
   X,
   AlertCircle,
+  ListTodo,
 } from "lucide-react";
 
 // ============================================================================
@@ -87,6 +88,7 @@ export const NAV_ITEMS = {
     { to: "/admin/links", label: "Links", icon: Link2 },
     { to: "/admin/marketing", label: "Marketing", icon: Briefcase },
     { to: "/admin/feedback", label: "Feedback", icon: MessageSquare },
+    { to: "/admin/workflow", label: "Workflow", icon: ListTodo },
   ],
   adminOnly: [
     { to: "/admin/users", label: "Users", icon: Shield, adminOnly: true },

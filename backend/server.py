@@ -25,6 +25,7 @@ from routers import (
     submissions,
     talents,
     users,
+    workflow,
 )
 
 app = FastAPI(title="Talentgram Portfolio Engine")
@@ -81,6 +82,7 @@ app.include_router(notifications_router.router)
 app.include_router(marketing_router.router)
 app.include_router(feedback.router)
 app.include_router(casting_pipeline.router)
+app.include_router(workflow.router)
 
 # Middleware — order matters: last registered = outermost (first to run).
 # SecurityHeadersMiddleware is registered first so it wraps the full response.
@@ -157,6 +159,15 @@ async def on_startup():
             )
         except Exception as _e:
             logger.warning("casting_pipeline unique index: %s", _e)
+
+        # Workflow indexes
+        try:
+            await db.workflow_tasks.create_index([("assignee_id", 1), ("status", 1)])
+            await db.workflow_tasks.create_index([("creator_id", 1)])
+            await db.workflow_scouts.create_index([("status", 1), ("created_at", -1)])
+            await db.workflow_notifications.create_index([("user_id", 1), ("read_at", 1)])
+        except Exception as _e:
+            logger.warning("workflow indexes: %s", _e)
 
         logger.info("Mongo indexes ready")
 

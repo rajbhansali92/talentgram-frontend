@@ -25,6 +25,7 @@ import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import Landing from "@/pages/Landing";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import WorkflowPage from "@/pages/WorkflowPage";
 
 function App() {
     return (
@@ -77,6 +78,7 @@ function App() {
                         <Route path="feedback" element={<AdminFeedback />} />
                         <Route path="marketing" element={<MarketingHub />} />
                         <Route path="notifications" element={<NotificationsPage />} />
+                        <Route path="workflow" element={<WorkflowPage />} />
                     </Route>
                     <Route path="/l/:slug" element={<ClientView />} />
                     <Route path="/submit/:slug" element={<SubmissionPage />} />

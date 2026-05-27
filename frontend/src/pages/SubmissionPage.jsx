@@ -1179,25 +1179,32 @@ export default function SubmissionPage() {
                                                 Returning talents can log in and prefill saved details.
                                             </p>
                                         </div>
-                                        <form onSubmit={handleInlineLookup} className="flex flex-col sm:flex-row gap-3">
+                                        <div className="flex flex-col sm:flex-row gap-3">
                                             <input
                                                 type="email"
                                                 value={gatewayEmail}
                                                 onChange={(e) => setGatewayEmail(e.target.value)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter") {
+                                                        e.preventDefault();
+                                                        handleInlineLookup();
+                                                    }
+                                                }}
                                                 placeholder="Enter your email address"
                                                 style={{ fontSize: "16px" }}
                                                 className="flex-1 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-800 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none transition duration-150 h-[44px]"
                                                 disabled={gatewayLoading}
                                             />
                                             <button
-                                                type="submit"
+                                                type="button"
+                                                onClick={handleInlineLookup}
                                                 disabled={gatewayLoading}
                                                 className="bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-medium hover:bg-slate-800 active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 min-w-[120px] h-[44px]"
                                             >
                                                 {gatewayLoading ? "Verifying..." : "Continue"}
                                                 <ArrowRight className="w-3.5 h-3.5" />
                                             </button>
-                                        </form>
+                                        </div>
                                         <p className="text-[10px] text-slate-400 font-mono mt-1">
                                             New talents can continue with the same email.
                                         </p>

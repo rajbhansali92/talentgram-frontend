@@ -417,6 +417,7 @@ function PipelineBoard({ projectId, projectName }) {
                                     ))}
                                 </BoardRow>
                             </BoardSection>
+                        )}
                     </div>
 
                 <BulkActionBar

@@ -19,6 +19,8 @@ import QuickAddTalents from "./QuickAddTalents";
 import BulkAddModal from "./BulkAddModal";
 import TalentBrowserModal from "./TalentBrowserModal";
 
+import { ChevronDown, Eye, EyeOff } from "lucide-react";
+
 import {
     INDEPENDENT_STAGES,
     MAIN_FLOW_STAGES,
@@ -84,6 +86,10 @@ function PipelineBoard({ projectId, projectName }) {
 
     // Stage focus state
     const [focusedStageId, setFocusedStageId] = useState(null);
+
+    // Section collapse states
+    const [pipelineCollapsed, setPipelineCollapsed] = useState(false);
+    const [filtersCollapsed, setFiltersCollapsed] = useState(false);
 
     const mainStages = useMemo(() => 
         MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
@@ -248,145 +254,173 @@ function PipelineBoard({ projectId, projectName }) {
                             <h1 className="text-[22px] font-semibold text-black/85 tracking-[-0.01em]">Casting Pipeline</h1>
                             <div className="text-xs text-black/40 mt-0.5">Project · {displayProjectName}</div>
                         </div>
-                        {/* Restrained operational summary indicators - monochrome */}
-                        <div className="flex gap-5 text-xs">
-                            <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
-                                <span className="text-black/50">Active</span>
-                                <span className="font-medium text-black/70 ml-1">{activeCount}</span>
+                        {/* Restrained operational summary indicators - monochrome with toggles */}
+                        <div className="flex items-center gap-6 text-xs flex-wrap">
+                            <div className="flex gap-5">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
+                                    <span className="text-black/50">Active</span>
+                                    <span className="font-medium text-black/70 ml-1">{activeCount}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
+                                    <span className="text-black/50">Shortlisted</span>
+                                    <span className="font-medium text-black/70 ml-1">{shortlistedCount}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
+                                    <span className="text-black/50">Approved</span>
+                                    <span className="font-medium text-black/70 ml-1">{approvedCount}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
+                                    <span className="text-black/50">Pending Tests</span>
+                                    <span className="font-medium text-black/70 ml-1">{pendingTestsCount}</span>
+                                </div>
                             </div>
-                            <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
-                                <span className="text-black/50">Shortlisted</span>
-                                <span className="font-medium text-black/70 ml-1">{shortlistedCount}</span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
-                                <span className="text-black/50">Approved</span>
-                                <span className="font-medium text-black/70 ml-1">{approvedCount}</span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
-                                <span className="text-black/50">Pending Tests</span>
-                                <span className="font-medium text-black/70 ml-1">{pendingTestsCount}</span>
+
+                            {/* Section Declutter Toggles */}
+                            <div className="flex items-center gap-2 border-l border-black/[0.08] pl-5 ml-1">
+                                <button
+                                    type="button"
+                                    onClick={() => setFiltersCollapsed(prev => !prev)}
+                                    disabled={pipelineCollapsed}
+                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-[10px] tracking-wide uppercase text-black/55 hover:text-black transition-colors ${pipelineCollapsed ? "opacity-40 cursor-not-allowed" : ""}`}
+                                    title={filtersCollapsed ? "Show Filters Panel" : "Hide Filters Panel"}
+                                >
+                                    {filtersCollapsed ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                                    <span>{filtersCollapsed ? "Show Filters" : "Hide Filters"}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setPipelineCollapsed(prev => !prev)}
+                                    className="p-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-black/55 hover:text-black transition-colors"
+                                    title={pipelineCollapsed ? "Expand Entire Pipeline" : "Collapse Entire Pipeline"}
+                                >
+                                    <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${pipelineCollapsed ? "-rotate-90" : ""}`} />
+                                </button>
                             </div>
                         </div>
                     </div>
                 </div>
 
                 {/* Unified Control Deck with operational styling - sticky with backdrop */}
-                <div className="sticky top-0 z-40 bg-[#f5f5f3]/90 backdrop-blur-sm -mx-5 px-5 pt-2 pb-2">
-                    <div className="bg-white border border-black/[0.06] rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-                        <div className="px-4 py-3">
-                            <PipelineToolbar
-                                projectId={projectId}
-                                bulkMode={bulkMode}
-                                onToggleBulkMode={handleToggleBulkMode}
-                                onOpenBulkAdd={() => setShowBulkAdd(true)}
-                                onOpenTalentBrowser={() => setShowTalentBrowser(true)}
-                            />
-                        </div>
-                        <div className="border-t border-black/[0.04] px-4 py-3">
-                            <QuickAddTalents
-                                searchQuery={searchQuery}
-                                onSearchQueryChange={setSearchQuery}
-                                searchLoading={searchLoading}
-                                searchResults={searchResults}
-                                selectedTalents={selectedTalents}
-                                onToggleTalent={toggleTalentSelect}
-                                onAddSelected={addSelectedToPipeline}
-                            />
-                        </div>
-                        <div className="border-t border-black/[0.04] px-4 py-3">
-                            <PipelineFilters
-                                search={search}
-                                onSearch={setSearch}
-                                statusFocus={statusFocus}
-                                onStatusFocus={setStatusFocus}
-                                hasSubmission={hasSubmission}
-                                onHasSubmission={setHasSubmission}
-                                hasIg={hasIg}
-                                onHasIg={setHasIg}
-                                filtersActive={filtersActive}
-                                onClearAll={clearAllFilters}
-                                totalCount={data.length}
-                                filteredCount={filteredData.length}
-                            />
+                {!pipelineCollapsed && !filtersCollapsed && (
+                    <div className="sticky top-0 z-40 bg-[#f5f5f3]/90 backdrop-blur-sm -mx-5 px-5 pt-2 pb-2">
+                        <div className="bg-white border border-black/[0.06] rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                            <div className="px-4 py-3">
+                                <PipelineToolbar
+                                    projectId={projectId}
+                                    bulkMode={bulkMode}
+                                    onToggleBulkMode={handleToggleBulkMode}
+                                    onOpenBulkAdd={() => setShowBulkAdd(true)}
+                                    onOpenTalentBrowser={() => setShowTalentBrowser(true)}
+                                />
+                            </div>
+                            <div className="border-t border-black/[0.04] px-4 py-3">
+                                <QuickAddTalents
+                                    searchQuery={searchQuery}
+                                    onSearchQueryChange={setSearchQuery}
+                                    searchLoading={searchLoading}
+                                    searchResults={searchResults}
+                                    selectedTalents={selectedTalents}
+                                    onToggleTalent={toggleTalentSelect}
+                                    onAddSelected={addSelectedToPipeline}
+                                />
+                            </div>
+                            <div className="border-t border-black/[0.04] px-4 py-3">
+                                <PipelineFilters
+                                    search={search}
+                                    onSearch={setSearch}
+                                    statusFocus={statusFocus}
+                                    onStatusFocus={setStatusFocus}
+                                    hasSubmission={hasSubmission}
+                                    onHasSubmission={setHasSubmission}
+                                    hasIg={hasIg}
+                                    onHasIg={setHasIg}
+                                    filtersActive={filtersActive}
+                                    onClearAll={clearAllFilters}
+                                    totalCount={data.length}
+                                    filteredCount={filteredData.length}
+                                />
+                            </div>
                         </div>
                     </div>
-                </div>
+                )}
 
                 {/* Workflow Content with operational rhythm */}
-                <div className="space-y-4 mt-6">
-                    {hasZeroAfterFilter && (
-                        <div className="mt-8">
-                            <FilterEmptyState onReset={clearAllFilters} />
-                        </div>
-                    )}
+                {!pipelineCollapsed && (
+                    <div className="space-y-4 mt-6">
+                        {hasZeroAfterFilter && (
+                            <div className="mt-8">
+                                <FilterEmptyState onReset={clearAllFilters} />
+                            </div>
+                        )}
 
-                    {!hasZeroAfterFilter && !showOnlyFollowUp && mainStages.length > 0 && (
-                        <BoardSection
-                            eyebrow="Pipeline"
-                            helper={`${MAIN_FLOW_STAGES.length} stages`}
-                        >
-                            <BoardRow testid="pipeline-main-flow">
-                                {mainStages.map((stage) => (
-                                    <PipelineColumn
-                                        key={stage}
-                                        stage={stage}
-                                        items={itemsForStage(stage)}
-                                        isFocused={focusedStageId === stage}
-                                        {...columnCommons}
-                                    />
-                                ))}
-                            </BoardRow>
-                        </BoardSection>
-                    )}
+                        {!hasZeroAfterFilter && !showOnlyFollowUp && mainStages.length > 0 && (
+                            <BoardSection
+                                eyebrow="Pipeline"
+                                helper={`${MAIN_FLOW_STAGES.length} stages`}
+                            >
+                                <BoardRow testid="pipeline-main-flow">
+                                    {mainStages.map((stage) => (
+                                        <PipelineColumn
+                                            key={stage}
+                                            stage={stage}
+                                            items={itemsForStage(stage)}
+                                            isFocused={focusedStageId === stage}
+                                            {...columnCommons}
+                                        />
+                                    ))}
+                                </BoardRow>
+                            </BoardSection>
+                        )}
 
-                    {/* Supportive Follow-up Lane - clean, no opacity hacks */}
-                    {!hasZeroAfterFilter && (!focusedStageId || focusedStageId === 'follow_up') && (
-                        <div className="mt-2">
-                            <FollowUpLane
-                                items={filteredData.filter((i) => i.is_follow_up === true)}
-                                refresh={fetchPipeline}
-                                focusedStageId={focusedStageId}
-                                onFocus={setFocusedStageId}
-                            />
-                        </div>
-                    )}
+                        {/* Supportive Follow-up Lane - clean, no opacity hacks */}
+                        {!hasZeroAfterFilter && (!focusedStageId || focusedStageId === 'follow_up') && (
+                            <div className="mt-2">
+                                <FollowUpLane
+                                    items={filteredData.filter((i) => i.is_follow_up === true)}
+                                    refresh={fetchPipeline}
+                                    focusedStageId={focusedStageId}
+                                    onFocus={setFocusedStageId}
+                                />
+                            </div>
+                        )}
 
-                    {!hasZeroAfterFilter && !showOnlyFollowUp && outcomeStages.length > 0 && (
-                        <BoardSection eyebrow="Outcomes" muted>
-                            <BoardRow testid="pipeline-outcomes">
-                                {outcomeStages.map((stage) => (
-                                    <PipelineColumn
-                                        key={stage}
-                                        stage={stage}
-                                        items={itemsForStage(stage)}
-                                        isFocused={focusedStageId === stage}
-                                        {...columnCommons}
-                                    />
-                                ))}
-                            </BoardRow>
-                        </BoardSection>
-                    )}
+                        {!hasZeroAfterFilter && !showOnlyFollowUp && outcomeStages.length > 0 && (
+                            <BoardSection eyebrow="Outcomes" muted>
+                                <BoardRow testid="pipeline-outcomes">
+                                    {outcomeStages.map((stage) => (
+                                        <PipelineColumn
+                                            key={stage}
+                                            stage={stage}
+                                            items={itemsForStage(stage)}
+                                            isFocused={focusedStageId === stage}
+                                            {...columnCommons}
+                                        />
+                                    ))}
+                                </BoardRow>
+                            </BoardSection>
+                        )}
 
-                    {!hasZeroAfterFilter && !showOnlyFollowUp && independentStages.length > 0 && (
-                        <BoardSection eyebrow="Pitch" divider>
-                            <BoardRow testid="pipeline-pitch">
-                                {independentStages.map((stage) => (
-                                    <PipelineColumn
-                                        key={stage}
-                                        stage={stage}
-                                        items={itemsForStage(stage)}
-                                        isFocused={focusedStageId === stage}
-                                        {...columnCommons}
-                                    />
-                                ))}
-                            </BoardRow>
-                        </BoardSection>
-                    )}
-                </div>
+                        {!hasZeroAfterFilter && !showOnlyFollowUp && independentStages.length > 0 && (
+                            <BoardSection eyebrow="Pitch" divider>
+                                <BoardRow testid="pipeline-pitch">
+                                    {independentStages.map((stage) => (
+                                        <PipelineColumn
+                                            key={stage}
+                                            stage={stage}
+                                            items={itemsForStage(stage)}
+                                            isFocused={focusedStageId === stage}
+                                            {...columnCommons}
+                                        />
+                                    ))}
+                                </BoardRow>
+                            </BoardSection>
+                        )}
+                    </div>
+                )}
 
                 <BulkActionBar
                     count={bulkIds.size}

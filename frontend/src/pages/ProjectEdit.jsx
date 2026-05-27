@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import {
     ArrowLeft,
+    ChevronDown,
     Upload,
     Trash2,
     Loader2,
@@ -115,6 +116,14 @@ export default function ProjectEdit() {
     const [submissionFilter, setSubmissionFilter] = useState("all");
     const [deleteSubmissionId, setDeleteSubmissionId] = useState(null);
     const [deleteMaterialId, setDeleteMaterialId] = useState(null);
+    const [collapsedSections, setCollapsedSections] = useState({
+        projectDetails: false,
+        additionalDetails: false,
+        auditionMaterial: false,
+        formConfig: false,
+        submissionLink: false,
+        submissions: false,
+    });
     const scriptRef = useRef();
     const imageRef = useRef();
     const audioRef = useRef();
@@ -478,96 +487,122 @@ export default function ProjectEdit() {
 
             {/* Project details */}
             <section className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6">
-                <p className="eyebrow mb-6">Project Details</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-                    <TextField
-                        label="Project / Brand Name"
-                        value={project.brand_name}
-                        onChange={(v) => updateProject({ brand_name: v })}
-                        data-testid="project-brand-input"
-                    />
-                    <TextField
-                        label="Project / Brand Link"
-                        value={project.brand_link}
-                        onChange={(v) => updateProject({ brand_link: v })}
-                        placeholder="https://..."
-                    />
-                    <TextField
-                        label="Character"
-                        value={project.character}
-                        onChange={(v) => updateProject({ character: v })}
-                        placeholder="e.g. Young Mother, 28-35"
-                    />
-                    <TextField
-                        label="Shoot Dates"
-                        value={project.shoot_dates}
-                        onChange={(v) => updateProject({ shoot_dates: v })}
-                        placeholder="e.g. 15–18 March 2026"
-                    />
-                    <TextField
-                        label="Budget per Day"
-                        value={project.budget_per_day}
-                        onChange={(v) => updateProject({ budget_per_day: v })}
-                        placeholder="e.g. ₹50,000"
-                    />
-                    <div>
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
-                            Commission %
-                        </span>
-                        <div className="mt-2">
-                            <Select
-                                value={project.commission_percent || ""}
-                                onValueChange={(v) => updateProject({ commission_percent: v })}
-                            >
-                                <SelectTrigger
-                                    data-testid="commission-select-trigger"
-                                    className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
-                                >
-                                    <SelectValue placeholder="Select commission" />
-                                </SelectTrigger>
-                                <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl">
-                                    {COMMISSION_OPTIONS.map((c) => (
-                                        <SelectItem
-                                            key={c}
-                                            value={c}
-                                            className="focus:bg-black/5 focus:text-black"
-                                            data-testid={`commission-option-${c}`}
+                <div className="flex items-center justify-between mb-6">
+                    <p className="eyebrow">Project Details</p>
+                    <button
+                        type="button"
+                        onClick={() => setCollapsedSections(prev => ({ ...prev, projectDetails: !prev.projectDetails }))}
+                        className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors"
+                        aria-label={collapsedSections.projectDetails ? "Expand project details" : "Collapse project details"}
+                    >
+                        <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.projectDetails ? "-rotate-90" : ""}`} />
+                    </button>
+                </div>
+                {!collapsedSections.projectDetails && (
+                    <>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                            <TextField
+                                label="Project / Brand Name"
+                                value={project.brand_name}
+                                onChange={(v) => updateProject({ brand_name: v })}
+                                data-testid="project-brand-input"
+                            />
+                            <TextField
+                                label="Project / Brand Link"
+                                value={project.brand_link}
+                                onChange={(v) => updateProject({ brand_link: v })}
+                                placeholder="https://..."
+                            />
+                            <TextField
+                                label="Character"
+                                value={project.character}
+                                onChange={(v) => updateProject({ character: v })}
+                                placeholder="e.g. Young Mother, 28-35"
+                            />
+                            <TextField
+                                label="Shoot Dates"
+                                value={project.shoot_dates}
+                                onChange={(v) => updateProject({ shoot_dates: v })}
+                                placeholder="e.g. 15–18 March 2026"
+                            />
+                            <TextField
+                                label="Budget per Day"
+                                value={project.budget_per_day}
+                                onChange={(v) => updateProject({ budget_per_day: v })}
+                                placeholder="e.g. ₹50,000"
+                            />
+                            <div>
+                                <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                                    Commission %
+                                </span>
+                                <div className="mt-2">
+                                    <Select
+                                        value={project.commission_percent || ""}
+                                        onValueChange={(v) => updateProject({ commission_percent: v })}
+                                    >
+                                        <SelectTrigger
+                                            data-testid="commission-select-trigger"
+                                            className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
                                         >
-                                            {c}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
+                                            <SelectValue placeholder="Select commission" />
+                                        </SelectTrigger>
+                                        <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl">
+                                            {COMMISSION_OPTIONS.map((c) => (
+                                                <SelectItem
+                                                    key={c}
+                                                    value={c}
+                                                    className="focus:bg-black/5 focus:text-black"
+                                                    data-testid={`commission-option-${c}`}
+                                                >
+                                                    {c}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+                            <TextField
+                                label="Medium / Usage"
+                                value={project.medium_usage}
+                                onChange={(v) => updateProject({ medium_usage: v })}
+                                placeholder="e.g. TVC · Digital · Print — 1yr"
+                            />
+                            <TextField
+                                label="Director"
+                                value={project.director}
+                                onChange={(v) => updateProject({ director: v })}
+                            />
+                            <TextField
+                                label="Production House"
+                                value={project.production_house}
+                                onChange={(v) => updateProject({ production_house: v })}
+                            />
                         </div>
-                    </div>
-                    <TextField
-                        label="Medium / Usage"
-                        value={project.medium_usage}
-                        onChange={(v) => updateProject({ medium_usage: v })}
-                        placeholder="e.g. TVC · Digital · Print — 1yr"
-                    />
-                    <TextField
-                        label="Director"
-                        value={project.director}
-                        onChange={(v) => updateProject({ director: v })}
-                    />
-                    <TextField
-                        label="Production House"
-                        value={project.production_house}
-                        onChange={(v) => updateProject({ production_house: v })}
-                    />
-                </div>
-                <div className="mt-6">
-                    <span className="text-[11px] text-black/45 tracking-widest uppercase">
-                        Additional Details
-                    </span>
-                    <textarea
-                        value={project.additional_details || ""}
-                        onChange={(e) => updateProject({ additional_details: e.target.value })}
-                        rows={3}
-                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
-                    />
-                </div>
+                        <div className="mt-6 border-t border-black/[0.08] pt-6">
+                            <div className="flex items-center justify-between mb-4">
+                                <span className="text-[11px] text-black/45 tracking-widest uppercase font-semibold">
+                                    Additional Details
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => setCollapsedSections(prev => ({ ...prev, additionalDetails: !prev.additionalDetails }))}
+                                    className="p-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-black/55 hover:text-black transition-colors"
+                                    aria-label={collapsedSections.additionalDetails ? "Expand additional details" : "Collapse additional details"}
+                                >
+                                    <ChevronDown className={`w-3 h-3 transform transition-transform duration-200 ${collapsedSections.additionalDetails ? "-rotate-90" : ""}`} />
+                                </button>
+                            </div>
+                            {!collapsedSections.additionalDetails && (
+                                <textarea
+                                    value={project.additional_details || ""}
+                                    onChange={(e) => updateProject({ additional_details: e.target.value })}
+                                    rows={3}
+                                    className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
+                                />
+                            )}
+                        </div>
+                    </>
+                )}
             </section>
 
             {/* Audition Material uploads */}
@@ -584,105 +619,119 @@ export default function ProjectEdit() {
                                 notes, and video links
                             </p>
                         </div>
+                        <button
+                            type="button"
+                            onClick={() => setCollapsedSections(prev => ({ ...prev, auditionMaterial: !prev.auditionMaterial }))}
+                            className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                            aria-label={collapsedSections.auditionMaterial ? "Expand audition material" : "Collapse audition material"}
+                        >
+                            <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.auditionMaterial ? "-rotate-90" : ""}`} />
+                        </button>
                     </div>
 
-                    <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                        <UploadTile
-                            title="Script (PDF)"
-                            icon={FileText}
-                            accept="application/pdf,.pdf"
-                            onPick={(files) => uploadMaterial(files, "script")}
-                            inputRef={scriptRef}
-                            uploading={uploading === "script"}
-                            testid="upload-script"
-                        />
-                        <UploadTile
-                            title="Images"
-                            icon={ImageIcon}
-                            accept="image/*"
-                            multiple
-                            onPick={(files) => uploadMaterial(files, "image")}
-                            inputRef={imageRef}
-                            uploading={uploading === "image"}
-                            testid="upload-image"
-                        />
-                        <UploadTile
-                            title="Audio Notes"
-                            icon={Music}
-                            accept="audio/*"
-                            multiple
-                            onPick={(files) => uploadMaterial(files, "audio")}
-                            inputRef={audioRef}
-                            uploading={uploading === "audio"}
-                            testid="upload-audio"
-                        />
-                        <UploadTile
-                            title="Reference Videos"
-                            icon={Film}
-                            accept="video/*"
-                            multiple
-                            onPick={(files) => uploadMaterial(files, "video_file")}
-                            inputRef={videoFileRef}
-                            uploading={uploading === "video_file"}
-                            testid="upload-video-file"
-                            hint="Max 100 MB · mp4/mov/webm"
-                        />
-                    </div>
+                    {!collapsedSections.auditionMaterial && (
+                        <>
+                            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                                <UploadTile
+                                    title="Script (PDF)"
+                                    icon={FileText}
+                                    accept="application/pdf,.pdf"
+                                    onPick={(files) => uploadMaterial(files, "script")}
+                                    inputRef={scriptRef}
+                                    uploading={uploading === "script"}
+                                    testid="upload-script"
+                                />
+                                <UploadTile
+                                    title="Images"
+                                    icon={ImageIcon}
+                                    accept="image/*"
+                                    multiple
+                                    onPick={(files) => uploadMaterial(files, "image")}
+                                    inputRef={imageRef}
+                                    uploading={uploading === "image"}
+                                    testid="upload-image"
+                                />
+                                <UploadTile
+                                    title="Audio Notes"
+                                    icon={Music}
+                                    accept="audio/*"
+                                    multiple
+                                    onPick={(files) => uploadMaterial(files, "audio")}
+                                    inputRef={audioRef}
+                                    uploading={uploading === "audio"}
+                                    testid="upload-audio"
+                                />
+                                <UploadTile
+                                    title="Reference Videos"
+                                    icon={Film}
+                                    accept="video/*"
+                                    multiple
+                                    onPick={(files) => uploadMaterial(files, "video_file")}
+                                    inputRef={videoFileRef}
+                                    uploading={uploading === "video_file"}
+                                    testid="upload-video-file"
+                                    hint="Max 100 MB · mp4/mov/webm"
+                                />
+                            </div>
 
-                    {/* Video links list */}
-                    <div>
-                        <div className="flex items-center gap-2 mb-3">
-                            <PlayCircle className="w-3.5 h-3.5 text-black/60" />
-                            <p className="eyebrow">Video Links</p>
-                        </div>
-                        <div className="space-y-2 mb-3">
-                            {(project.video_links || []).map((v, i) => (
-                                <div
-                                    key={v}
-                                    className="flex items-center gap-2 border-b border-black/[0.06] pb-2"
-                                >
-                                    <a
-                                        href={v}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="flex-1 text-sm text-black/75 tg-mono truncate hover:text-black"
-                                    >
-                                        {v}
-                                    </a>
+                            {/* Video links list */}
+                            <div>
+                                <div className="flex items-center gap-2 mb-3">
+                                    <PlayCircle className="w-3.5 h-3.5 text-black/60" />
+                                    <p className="eyebrow">Video Links</p>
+                                </div>
+                                <div className="space-y-2 mb-3">
+                                    {(project.video_links || []).map((v, i) => (
+                                        <div
+                                            key={v}
+                                            className="flex items-center gap-2 border-b border-black/[0.06] pb-2"
+                                        >
+                                            <a
+                                                href={v}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="flex-1 text-sm text-black/75 tg-mono truncate hover:text-black"
+                                            >
+                                                {v}
+                                            </a>
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    updateProject({
+                                                        video_links: project.video_links.filter(
+                                                            (_, j) => j !== i,
+                                                        ),
+                                                    })
+                                                }
+                                                className="text-black/40 hover:text-red-600 transition-colors"
+                                            >
+                                                <X className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="url"
+                                        value={videoInput}
+                                        onChange={(e) => setVideoInput(e.target.value)}
+                                        placeholder="https://youtube.com/..."
+                                        className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                    />
                                     <button
-                                        onClick={() =>
-                                            updateProject({
-                                                video_links: project.video_links.filter(
-                                                    (_, j) => j !== i,
-                                                ),
-                                            })
-                                        }
-                                        className="text-black/40 hover:text-red-600 transition-colors"
+                                        type="button"
+                                        onClick={addVideoLink}
+                                        className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
                                     >
-                                        <X className="w-3.5 h-3.5" />
+                                        <Plus className="w-3 h-3" /> Add link
                                     </button>
                                 </div>
-                            ))}
-                        </div>
-                        <div className="flex gap-2">
-                            <input
-                                type="url"
-                                value={videoInput}
-                                onChange={(e) => setVideoInput(e.target.value)}
-                                placeholder="https://youtube.com/..."
-                                className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                            />
-                            <button
-                                onClick={addVideoLink}
-                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
-                            >
-                                <Plus className="w-3 h-3" /> Add link
-                            </button>
-                        </div>
-                        <p className="text-[10px] text-black/35 mt-3 tg-mono">
-                            Save project after adding video links
-                        </p>
-                    </div>
+                                <p className="text-[10px] text-black/35 mt-3 tg-mono">
+                                    Save project after adding video links
+                                </p>
+                            </div>
+                        </>
+                    )}
                 </section>
             )}
             {!isEdit && (
@@ -753,103 +802,120 @@ export default function ProjectEdit() {
                     className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="form-config-section"
                 >
-                    <p className="eyebrow mb-6">Submission Form Configuration</p>
-                    <label className="flex items-center justify-between cursor-pointer mb-6">
-                        <div>
-                            <div className="text-sm text-black/80">
-                                Re-approval required on edit
-                            </div>
-                            <div className="text-[11px] text-black/45 tg-mono mt-0.5">
-                                When ON, any retake or form edit after a decision moves the submission back to Pending. Turn OFF to silently keep the existing decision.
-                            </div>
-                        </div>
-                        <input
-                            type="checkbox"
-                            checked={project.require_reapproval_on_edit !== false}
-                            onChange={(e) => updateProject({ require_reapproval_on_edit: e.target.checked })}
-                            data-testid="require-reapproval-toggle"
-                            className="w-5 h-5 accent-black"
-                        />
-                    </label>
-                    <label className="flex items-center justify-between cursor-pointer mb-6">
-                        <div>
-                            <div className="text-sm text-black/80">
-                                Ask "Competitive Brand" field
-                            </div>
-                            <div className="text-xs text-black/45 mt-1">
-                                When enabled, talents must declare any brand
-                                conflicts
-                            </div>
-                        </div>
+                    <div className="flex items-center justify-between mb-6">
+                        <p className="eyebrow">Submission Form Configuration</p>
                         <button
                             type="button"
-                            onClick={() =>
-                                updateProject({
-                                    competitive_brand_enabled: !project.competitive_brand_enabled,
-                                })
-                            }
-                            data-testid="toggle-competitive-brand"
-                            className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
+                            onClick={() => setCollapsedSections(prev => ({ ...prev, formConfig: !prev.formConfig }))}
+                            className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                            aria-label={collapsedSections.formConfig ? "Expand form config" : "Collapse form config"}
                         >
-                            <span
-                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${project.competitive_brand_enabled ? "translate-x-5 bg-white" : "bg-black"}`}
-                            />
+                            <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.formConfig ? "-rotate-90" : ""}`} />
                         </button>
-                    </label>
+                    </div>
 
-                    <div className="border-t border-black/[0.08] pt-6">
-                        <p className="text-sm text-black/80 mb-1">
-                            Custom Questions
-                        </p>
-                        <p className="text-xs text-black/45 mb-4">
-                            Ask project-specific questions. Shown on the talent
-                            submission form.
-                        </p>
-                        <div className="space-y-2 mb-3">
-                            {(project.custom_questions || []).map((q, i) => (
-                                <div
-                                    key={q.id}
-                                    className="flex items-center gap-2 border-b border-black/[0.06] pb-2"
-                                    data-testid={`cq-row-${i}`}
+                    {!collapsedSections.formConfig && (
+                        <>
+                            <label className="flex items-center justify-between cursor-pointer mb-6">
+                                <div>
+                                    <div className="text-sm text-black/80">
+                                        Re-approval required on edit
+                                    </div>
+                                    <div className="text-[11px] text-black/45 tg-mono mt-0.5">
+                                        When ON, any retake or form edit after a decision moves the submission back to Pending. Turn OFF to silently keep the existing decision.
+                                    </div>
+                                </div>
+                                <input
+                                    type="checkbox"
+                                    checked={project.require_reapproval_on_edit !== false}
+                                    onChange={(e) => updateProject({ require_reapproval_on_edit: e.target.checked })}
+                                    data-testid="require-reapproval-toggle"
+                                    className="w-5 h-5 accent-black"
+                                />
+                            </label>
+                            <label className="flex items-center justify-between cursor-pointer mb-6">
+                                <div>
+                                    <div className="text-sm text-black/80">
+                                        Ask "Competitive Brand" field
+                                    </div>
+                                    <div className="text-xs text-black/45 mt-1">
+                                        When enabled, talents must declare any brand
+                                        conflicts
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        updateProject({
+                                            competitive_brand_enabled: !project.competitive_brand_enabled,
+                                        })
+                                    }
+                                    data-testid="toggle-competitive-brand"
+                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
                                 >
-                                    <span className="text-sm text-black/75 flex-1 truncate">
-                                        {q.question}
-                                    </span>
+                                    <span
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${project.competitive_brand_enabled ? "translate-x-5 bg-white" : "bg-black"}`}
+                                    />
+                                </button>
+                            </label>
+
+                            <div className="border-t border-black/[0.08] pt-6">
+                                <p className="text-sm text-black/80 mb-1">
+                                    Custom Questions
+                                </p>
+                                <p className="text-xs text-black/45 mb-4">
+                                    Ask project-specific questions. Shown on the talent
+                                    submission form.
+                                </p>
+                                <div className="space-y-2 mb-3">
+                                    {(project.custom_questions || []).map((q, i) => (
+                                        <div
+                                            key={q.id}
+                                            className="flex items-center gap-2 border-b border-black/[0.06] pb-2"
+                                            data-testid={`cq-row-${i}`}
+                                        >
+                                            <span className="text-sm text-black/75 flex-1 truncate">
+                                                {q.question}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    updateProject({
+                                                        custom_questions: project.custom_questions.filter(
+                                                            (_, j) => j !== i,
+                                                        ),
+                                                    })
+                                                }
+                                                className="text-black/40 hover:text-red-600 transition-colors"
+                                            >
+                                                <X className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flex gap-2">
+                                    <input
+                                        value={cqInput}
+                                        onChange={(e) => setCqInput(e.target.value)}
+                                        placeholder="e.g. Can you ride a bike?"
+                                        data-testid="cq-input"
+                                        className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                    />
                                     <button
-                                        onClick={() =>
-                                            updateProject({
-                                                custom_questions: project.custom_questions.filter(
-                                                    (_, j) => j !== i,
-                                                ),
-                                            })
-                                        }
-                                        className="text-black/40 hover:text-red-600 transition-colors"
+                                        type="button"
+                                        onClick={addCustomQuestion}
+                                        data-testid="cq-add-btn"
+                                        className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
                                     >
-                                        <X className="w-3.5 h-3.5" />
+                                        <Plus className="w-3 h-3" /> Add
                                     </button>
                                 </div>
-                            ))}
-                        </div>
-                        <div className="flex gap-2">
-                            <input
-                                value={cqInput}
-                                onChange={(e) => setCqInput(e.target.value)}
-                                placeholder="e.g. Can you ride a bike?"
-                                data-testid="cq-input"
-                                className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                            />
-                            <button
-                                onClick={addCustomQuestion}
-                                data-testid="cq-add-btn"
-                                className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
-                            >
-                                <Plus className="w-3 h-3" /> Add
-                            </button>
-                        </div>
-                        <p className="text-[10px] text-black/35 mt-3 tg-mono">
-                            Save project to apply changes
-                        </p>
-                    </div>
+                                <p className="text-[10px] text-black/35 mt-3 tg-mono">
+                                    Save project to apply changes
+                                </p>
+                            </div>
+                        </>
+                    )}
                 </section>
             )}
 
@@ -867,7 +933,7 @@ export default function ProjectEdit() {
                                 submit intro video, takes and images.
                             </p>
                         </div>
-                        <div className="flex gap-2 flex-wrap">
+                        <div className="flex gap-2 flex-wrap items-center">
                             <a
                                 href={submissionUrl}
                                 target="_blank"
@@ -891,11 +957,21 @@ export default function ProjectEdit() {
                                 <MessageCircle className="w-3.5 h-3.5" />{" "}
                                 WhatsApp
                             </button>
+                            <button
+                                type="button"
+                                onClick={() => setCollapsedSections(prev => ({ ...prev, submissionLink: !prev.submissionLink }))}
+                                className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                                aria-label={collapsedSections.submissionLink ? "Expand submission link" : "Collapse submission link"}
+                            >
+                                <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissionLink ? "-rotate-90" : ""}`} />
+                            </button>
                         </div>
                     </div>
-                    <div className="border border-black/[0.08] bg-[#fafaf8] px-4 py-3 tg-mono text-xs text-black/70 break-all">
-                        {submissionUrl}
-                    </div>
+                    {!collapsedSections.submissionLink && (
+                        <div className="border border-black/[0.08] bg-[#fafaf8] px-4 py-3 tg-mono text-xs text-black/70 break-all">
+                            {submissionUrl}
+                        </div>
+                    )}
                 </section>
             )}
 
@@ -912,93 +988,106 @@ export default function ProjectEdit() {
                                 {submissions.length} total · {approvedCount} approved · {rejectedCount} rejected
                             </p>
                         </div>
+                        <button
+                            type="button"
+                            onClick={() => setCollapsedSections(prev => ({ ...prev, submissions: !prev.submissions }))}
+                            className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                            aria-label={collapsedSections.submissions ? "Expand submissions" : "Collapse submissions"}
+                        >
+                            <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissions ? "-rotate-90" : ""}`} />
+                        </button>
                     </div>
-                    {submissions.length === 0 ? (
-                        <div className="p-8 text-center text-black/40 text-sm">
-                            No submissions yet. Share the link above with
-                            talents.
-                        </div>
-                    ) : (
+
+                    {!collapsedSections.submissions && (
                         <>
-                            <div
-                                className="px-6 py-3 border-b border-black/[0.08] flex items-center gap-2 flex-wrap"
-                                data-testid="submission-filters"
-                            >
-                                <button
-                                    type="button"
-                                    onClick={() => setSubmissionFilter("all")}
-                                    data-testid="filter-chip-all"
-                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "all" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
-                                >
-                                    All
-                                    <span className={`ml-2 tg-mono ${submissionFilter === "all" ? "text-white/60" : "text-black/40"}`}>
-                                        {submissions.length}
-                                    </span>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSubmissionFilter("pending")}
-                                    data-testid="filter-chip-pending"
-                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "pending" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
-                                >
-                                    Pending
-                                    <span className={`ml-2 tg-mono ${submissionFilter === "pending" ? "text-white/60" : "text-black/40"}`}>
-                                        {pendingCount}
-                                    </span>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSubmissionFilter("approved")}
-                                    data-testid="filter-chip-approved"
-                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "approved" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
-                                >
-                                    Approved
-                                    <span className={`ml-2 tg-mono ${submissionFilter === "approved" ? "text-white/60" : "text-black/40"}`}>
-                                        {approvedCount}
-                                    </span>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSubmissionFilter("rejected")}
-                                    data-testid="filter-chip-rejected"
-                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "rejected" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
-                                >
-                                    Rejected
-                                    <span className={`ml-2 tg-mono ${submissionFilter === "rejected" ? "text-white/60" : "text-black/40"}`}>
-                                        {rejectedCount}
-                                    </span>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSubmissionFilter("updated")}
-                                    data-testid="filter-chip-updated"
-                                    className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "updated" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
-                                >
-                                    Updated
-                                    <span className={`ml-2 tg-mono ${submissionFilter === "updated" ? "text-white/60" : "text-black/40"}`}>
-                                        {updatedCount}
-                                    </span>
-                                </button>
-                            </div>
-                            <div className="divide-y divide-black/[0.06]">
-                                {filteredSubmissions.map((s) => (
-                                    <SubmissionRow
-                                        key={s.id}
-                                        submission={s}
-                                        onOpen={() => setReviewingSid(s.id)}
-                                        onDecision={(d) => setDecision(s.id, d)}
-                                        onDelete={isAdminRole ? () => confirmDeleteSubmission(s.id) : null}
-                                    />
-                                ))}
-                                {filteredSubmissions.length === 0 && (
+                            {submissions.length === 0 ? (
+                                <div className="p-8 text-center text-black/40 text-sm">
+                                    No submissions yet. Share the link above with
+                                    talents.
+                                </div>
+                            ) : (
+                                <>
                                     <div
-                                        className="p-8 text-center text-black/35 text-sm"
-                                        data-testid="filter-empty-state"
+                                        className="px-6 py-3 border-b border-black/[0.08] flex items-center gap-2 flex-wrap"
+                                        data-testid="submission-filters"
                                     >
-                                        No submissions match this filter.
+                                        <button
+                                            type="button"
+                                            onClick={() => setSubmissionFilter("all")}
+                                            data-testid="filter-chip-all"
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "all" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                        >
+                                            All
+                                            <span className={`ml-2 tg-mono ${submissionFilter === "all" ? "text-white/60" : "text-black/40"}`}>
+                                                {submissions.length}
+                                            </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSubmissionFilter("pending")}
+                                            data-testid="filter-chip-pending"
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "pending" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                        >
+                                            Pending
+                                            <span className={`ml-2 tg-mono ${submissionFilter === "pending" ? "text-white/60" : "text-black/40"}`}>
+                                                {pendingCount}
+                                            </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSubmissionFilter("approved")}
+                                            data-testid="filter-chip-approved"
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "approved" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                        >
+                                            Approved
+                                            <span className={`ml-2 tg-mono ${submissionFilter === "approved" ? "text-white/60" : "text-black/40"}`}>
+                                                {approvedCount}
+                                            </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSubmissionFilter("rejected")}
+                                            data-testid="filter-chip-rejected"
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "rejected" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                        >
+                                            Rejected
+                                            <span className={`ml-2 tg-mono ${submissionFilter === "rejected" ? "text-white/60" : "text-black/40"}`}>
+                                                {rejectedCount}
+                                            </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSubmissionFilter("updated")}
+                                            data-testid="filter-chip-updated"
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "updated" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                        >
+                                            Updated
+                                            <span className={`ml-2 tg-mono ${submissionFilter === "updated" ? "text-white/60" : "text-black/40"}`}>
+                                                {updatedCount}
+                                            </span>
+                                        </button>
                                     </div>
-                                )}
-                            </div>
+                                    <div className="divide-y divide-black/[0.06]">
+                                        {filteredSubmissions.map((s) => (
+                                            <SubmissionRow
+                                                key={s.id}
+                                                submission={s}
+                                                onOpen={() => setReviewingSid(s.id)}
+                                                onDecision={(d) => setDecision(s.id, d)}
+                                                onDelete={isAdminRole ? () => confirmDeleteSubmission(s.id) : null}
+                                            />
+                                        ))}
+                                        {filteredSubmissions.length === 0 && (
+                                            <div
+                                                className="p-8 text-center text-black/35 text-sm"
+                                                data-testid="filter-empty-state"
+                                            >
+                                                No submissions match this filter.
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
                         </>
                     )}
                 </section>

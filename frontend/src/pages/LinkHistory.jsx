@@ -14,6 +14,31 @@ import {
     Check,
 } from "lucide-react";
 
+// Helper function for safe clipboard operations
+const copyToClipboard = async (text) => {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch (err) {
+        // Fallback for older browsers or permission issues
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.top = "-9999px";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand("copy");
+            return true;
+        } catch (e) {
+            return false;
+        } finally {
+            document.body.removeChild(textarea);
+        }
+    }
+};
+
 export default function LinkHistory() {
     const [links, setLinks] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -66,10 +91,14 @@ export default function LinkHistory() {
         load();
     }, []);
 
-    const copyLink = (slug) => {
+    const copyLink = async (slug) => {
         const url = `${PUBLIC_FRONTEND_URL}/l/${slug}`;
-        navigator.clipboard.writeText(url);
-        toast.success("Link copied");
+        const success = await copyToClipboard(url);
+        if (success) {
+            toast.success("Link copied");
+        } else {
+            toast.error("Failed to copy link. Please copy manually.");
+        }
     };
 
     const shareWhatsApp = (l) => {

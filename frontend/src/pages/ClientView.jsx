@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
-import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL, API } from "@/lib/api";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
@@ -29,11 +29,7 @@ import {
     Share2,
 } from "lucide-react";
 
-// Safety fallback to prevent catastrophic failures when env var is missing
-const API =
-    process.env.REACT_APP_BACKEND_URL
-        ? `${process.env.REACT_APP_BACKEND_URL}/api`
-        : "http://localhost:8000/api";
+// API is imported from @/lib/api above — single source of truth across all pages.
 
 /**
  * Client-facing privacy helper — collapses the talent's full name to
@@ -222,16 +218,26 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
     );
 }
 
-export default function ClientView() {
-    const { slug } = useParams();
-    const getSessionId = () => {
+/**
+ * Stable session-ID helper hoisted outside the component so it is never
+ * recreated per render. Includes a try/catch for Safari private mode where
+ * sessionStorage access can throw a SecurityError.
+ */
+function getSessionId() {
+    try {
         let sid = sessionStorage.getItem("client_session_id");
         if (!sid) {
             sid = Math.random().toString(36).substring(2) + Date.now().toString(36);
             sessionStorage.setItem("client_session_id", sid);
         }
         return sid;
-    };
+    } catch (e) {
+        return "guest-session";
+    }
+}
+
+export default function ClientView() {
+    const { slug } = useParams();
     const queryParams = new URLSearchParams(window.location.search);
     const shareId = queryParams.get("share");
 
@@ -253,11 +259,23 @@ export default function ClientView() {
     const [activeTab, setActiveTab] = useState("pending_action");
     const [showResumeBanner, setShowResumeBanner] = useState(false);
 
+    // ── Stabilization refs ───────────────────────────────────────────────────
+    /** Prevents double-submission on rapid taps on the identity gate. */
+    const identifyInFlightRef = useRef(false);
+    /** Deduplicates view_talent analytics — fires at most once per talent per session. */
+    const trackedSeenRef = useRef(new Set());
+    /** Deduplicates review_talent analytics — fires at most once per talent per session. */
+    const trackedReviewedRef = useRef(new Set());
+    /** Prevents stale state updates when loadData resolves after navigation away. */
+    const loadDataMountedRef = useRef(true);
+
+    // Depend specifically on data?.actions — not the whole data object — so this memo
+    // does not recompute when unrelated fields (seen_ids, etc.) are updated.
     const viewerActions = useMemo(() => {
         const m = {};
         (data?.actions || []).forEach((a) => (m[a.talent_id] = a));
         return m;
-    }, [data]);
+    }, [data?.actions]);
 
     useEffect(() => {
         if (!shareId) return;
@@ -317,6 +335,8 @@ export default function ClientView() {
                     Authorization: `Bearer ${getViewerToken(slug)}`,
                 },
             });
+            // Guard: skip state updates if component unmounted before response arrived
+            if (!loadDataMountedRef.current) return;
             setData(data);
             setSeenIds(new Set(data?.client_state?.seen_talent_ids || []));
             setReviewedIds(new Set(data?.client_state?.reviewed_talent_ids || []));
@@ -325,6 +345,7 @@ export default function ClientView() {
                 session_id: getSessionId(),
             }).catch(() => {});
         } catch (e) {
+            if (!loadDataMountedRef.current) return;
             if (e?.response?.status === 401) {
                 setIdentified(false);
             } else {
@@ -337,6 +358,12 @@ export default function ClientView() {
         if (identified) loadData();
     }, [identified, loadData]);
 
+    // Mark component as unmounted so in-flight loadData callbacks safely abort
+    useEffect(() => {
+        loadDataMountedRef.current = true;
+        return () => { loadDataMountedRef.current = false; };
+    }, []);
+
     const markReviewed = useCallback(
         async (talentId) => {
             if (!talentId) return;
@@ -346,11 +373,16 @@ export default function ClientView() {
                 n.add(talentId);
                 return n;
             });
-            axios.post(`${API}/public/links/${slug}/track`, {
-                event_type: "review_talent",
-                session_id: getSessionId(),
-                talent_id: talentId,
-            }).catch(() => {});
+            // Analytics deduplication: fire review_talent track at most once per session per talent.
+            // Prevents duplicate events from the 15s auto-review timer + manual markReviewed calls.
+            if (!trackedReviewedRef.current.has(talentId)) {
+                trackedReviewedRef.current.add(talentId);
+                axios.post(`${API}/public/links/${slug}/track`, {
+                    event_type: "review_talent",
+                    session_id: getSessionId(),
+                    talent_id: talentId,
+                }).catch(() => {});
+            }
             try {
                 await axios.post(
                     `${API}/public/links/${slug}/reviewed`,
@@ -397,6 +429,10 @@ export default function ClientView() {
 
     const identify = async (e) => {
         e.preventDefault();
+        // Synchronous in-flight guard: prevents double-submission on rapid taps
+        // (state-based `loading` flag is async and doesn't block a second call immediately).
+        if (identifyInFlightRef.current) return;
+        identifyInFlightRef.current = true;
         setLoading(true);
         try {
             const response = await axios.post(
@@ -420,6 +456,7 @@ export default function ClientView() {
             console.error("IDENTIFY ERROR:", errorMessage);
             toast.error(errorMessage);
         } finally {
+            identifyInFlightRef.current = false;
             setLoading(false);
         }
     };
@@ -564,17 +601,22 @@ export default function ClientView() {
     const markSeen = useCallback(
         async (talentId) => {
             if (!talentId) return;
+            // Analytics deduplication: fire view_talent track at most once per session per talent.
+            // Prevents double-firing from concurrent IntersectionObserver + onOpen calls.
+            if (!trackedSeenRef.current.has(talentId)) {
+                trackedSeenRef.current.add(talentId);
+                axios.post(`${API}/public/links/${slug}/track`, {
+                    event_type: "view_talent",
+                    session_id: getSessionId(),
+                    talent_id: talentId,
+                }).catch(() => {});
+            }
             setSeenIds((prev) => {
                 if (prev.has(talentId)) return prev;
                 const n = new Set(prev);
                 n.add(talentId);
                 return n;
             });
-            axios.post(`${API}/public/links/${slug}/track`, {
-                event_type: "view_talent",
-                session_id: getSessionId(),
-                talent_id: talentId,
-            }).catch(() => {});
             try {
                 await axios.post(
                     `${API}/public/links/${slug}/seen`,
@@ -670,7 +712,7 @@ export default function ClientView() {
                                     onChange={(e) => setName(e.target.value)}
                                     required
                                     data-testid="identity-name-input"
-                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-sm text-[#111111] placeholder:text-black/25 transition-colors duration-150"
+                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-base text-[#111111] placeholder:text-black/25 transition-colors duration-150"
                                 />
                             </label>
                             <label className="block mb-8">
@@ -683,7 +725,7 @@ export default function ClientView() {
                                     onChange={(e) => setEmail(e.target.value)}
                                     required
                                     data-testid="identity-email-input"
-                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-sm text-[#111111] placeholder:text-black/25 transition-colors duration-150"
+                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-base text-[#111111] placeholder:text-black/25 transition-colors duration-150"
                                 />
                             </label>
                             <button
@@ -776,8 +818,10 @@ export default function ClientView() {
 
             <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-6 md:py-16">
                 {showResumeBanner && (() => {
-                    const lastId = localStorage.getItem(`tg_last_viewed_${slug}`);
-                    const lastTalent = talents.find(t => t.id === lastId);
+                    // Guard: localStorage.getItem can throw in Safari private browsing
+                    let lastId = null;
+                    try { lastId = localStorage.getItem(`tg_last_viewed_${slug}`); } catch (e) { /* storage disabled */ }
+                    const lastTalent = lastId ? talents.find(t => t.id === lastId) : null;
                     if (!lastTalent) return null;
                     return (
                         <div className="mb-8 animate-fade-in" data-testid="resume-review-banner">
@@ -940,14 +984,9 @@ export default function ClientView() {
                                 action={viewerActions[t.id]?.action}
                                 seen={seenIds.has(t.id)}
                                 isNew={isNew(t.id)}
-                                onOpen={() => {
-                                    setActiveTalent(t);
-                                    markSeen(t.id);
-                                    try {
-                                        localStorage.setItem(`tg_last_viewed_${slug}`, t.id);
-                                    } catch (e) { console.error(e); }
-                                }}
-                                onSeen={() => markSeen(t.id)}
+                                slug={slug}
+                                setActiveTalent={setActiveTalent}
+                                markSeen={markSeen}
                             />
                         ))
                     )}
@@ -1044,6 +1083,30 @@ function TalentDetail({
     const [busyAction, setBusyAction] = useState(null);
     const overlayRef = useRef(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    /** Prevents post-unmount state updates inside quickAction's 350ms timeout. */
+    const mountedRef = useRef(true);
+    /**
+     * Mirrors viewerAction in a ref so the keyboard handler can read the latest
+     * action without being listed as a dependency (which caused handler re-registration
+     * and a brief keyboard responsiveness gap on every action button tap).
+     */
+    const viewerActionRef = useRef(viewerAction);
+
+    useEffect(() => {
+        viewerActionRef.current = viewerAction;
+    }, [viewerAction]);
+
+    // Cleanup: mark unmounted so quickAction's deferred setTimeout cannot fire setState
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
+
+    // Reset gallery image index on talent navigation — prevents broken images when
+    // navigating from a talent with many images to one with fewer (AUDIT: MED-01).
+    useEffect(() => {
+        setIdx(0);
+    }, [talent.id]);
 
     useEffect(() => {
         if (!talent?.id || isReviewed) return;
@@ -1056,10 +1119,21 @@ function TalentDetail({
     const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
     const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
 
+    // Effect 1: Body scroll lock — empty deps so it only runs on mount/unmount.
+    // Previously combined with the keyboard effect whose deps included viewerAction?.action,
+    // causing scroll to flicker on every action button tap (mobile jank).
     useEffect(() => {
         document.body.style.overflow = "hidden";
         setIsModalOpen(true);
-        
+        return () => {
+            document.body.style.overflow = "";
+        };
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Effect 2: Keyboard shortcuts — uses viewerActionRef instead of viewerAction
+    // so this handler is NOT re-registered on every action change (eliminates the
+    // momentary keyboard dead-zone after each Shortlist/Reject press).
+    useEffect(() => {
         const handleKeyDown = (e) => {
             if (e.key === "Escape" && !isSharePreview) {
                 onClose();
@@ -1068,20 +1142,18 @@ function TalentDetail({
             } else if (e.key === "ArrowRight") {
                 next();
             } else if (e.key === "1" && !isSharePreview) {
-                setAction(talent.id, viewerAction?.action === "shortlist" ? null : "shortlist");
+                setAction(talent.id, viewerActionRef.current?.action === "shortlist" ? null : "shortlist");
             } else if (e.key === "2" && !isSharePreview) {
-                setAction(talent.id, viewerAction?.action === "not_sure" ? null : "not_sure");
+                setAction(talent.id, viewerActionRef.current?.action === "not_sure" ? null : "not_sure");
             } else if (e.key === "3" && !isSharePreview) {
-                setAction(talent.id, viewerAction?.action === "not_for_this" ? null : "not_for_this");
+                setAction(talent.id, viewerActionRef.current?.action === "not_for_this" ? null : "not_for_this");
             }
         };
         document.addEventListener("keydown", handleKeyDown);
-        
         return () => {
-            document.body.style.overflow = "";
             document.removeEventListener("keydown", handleKeyDown);
         };
-    }, [onClose, prev, next, setAction, talent.id, viewerAction?.action, isSharePreview]);
+    }, [onClose, prev, next, setAction, talent.id, isSharePreview]);
 
     const list = useMemo(() => (
         Array.isArray(talents) ? talents : []
@@ -1178,10 +1250,12 @@ function TalentDetail({
             await setAction(talent.id, key);
             setTimeout(() => {
                 if (hasNextTalent) goNextTalent();
-                setBusyAction(null);
+                // Guard: component may be unmounted by the time this timeout fires
+                // (goNextTalent navigates away, unmounting TalentDetail immediately).
+                if (mountedRef.current) setBusyAction(null);
             }, 350);
         } catch {
-            setBusyAction(null);
+            if (mountedRef.current) setBusyAction(null);
         }
     }, [busyAction, setAction, talent.id, hasNextTalent, goNextTalent]);
 
@@ -1206,7 +1280,8 @@ function TalentDetail({
             <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
                 <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
                     {/* Left Column - Image */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-[#FCFBF8] overflow-y-auto">
+                    {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
+                    <div className="w-full md:w-[58%] lg:w-[60%] bg-[#FCFBF8] overflow-y-auto min-h-0">
                         <div className="p-4 md:p-8">
                             {vis.takes !== false && takes.length > 0 && (
                                 <div className="mb-10">
@@ -1314,7 +1389,7 @@ function TalentDetail({
                                         <button
                                             key={m.id}
                                             onClick={() => setIdx(i)}
-                                            className={`shrink-0 w-20 h-24 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
+                                            className={`shrink-0 w-20 h-28 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
                                         >
                                             <img
                                                 src={thumbnailUrl(m)}
@@ -1329,8 +1404,10 @@ function TalentDetail({
                     </div>
 
                     {/* Right Column - Details (scrollable with soft shadow) */}
-                    <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)]">
-                        <div className="p-6 md:p-8">
+                    {/* min-h-0: required for iOS Safari scroll fix in flex context */}
+                    <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
+                        {/* pb-[130px] gives clearance above the fixed mobile bottom action bar + home indicator */}
+                        <div className="p-6 md:p-8 pb-[130px] md:pb-8">
                             <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
                                 {!isSharePreview && (
                                     <button
@@ -1524,13 +1601,37 @@ function TalentDetail({
     );
 }
 
-function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
+/**
+ * TalentCard — wrapped in React.memo so it only re-renders when its own props change.
+ *
+ * Key stabilization changes:
+ * - Accepts `slug`, `setActiveTalent`, `markSeen` as stable props instead of inline
+ *   arrow functions. This prevents 100+ new function objects per parent render.
+ * - `handleOpen` is computed inside the card via useCallback with stable deps.
+ * - IntersectionObserver deps are now [seen, talent.id, markSeen] — all stable —
+ *   eliminating the observer disconnect/reconnect churn on every parent re-render.
+ * - `transition-all` on cover image replaced with `transition-transform` (cheaper).
+ */
+const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, isNew, slug, setActiveTalent, markSeen }) {
     const ref = useRef(null);
     const timerRef = useRef(null);
 
     const cover = resolveTalentCover(talent);
     const isShortlisted = action === "shortlist";
 
+    // Stable open handler — computed inside the card so the parent doesn't need
+    // to create a new inline arrow function per render per card.
+    const handleOpen = useCallback(() => {
+        setActiveTalent(talent);
+        markSeen(talent.id);
+        try {
+            localStorage.setItem(`tg_last_viewed_${slug}`, talent.id);
+        } catch (e) { console.error(e); }
+    }, [talent, slug, setActiveTalent, markSeen]);
+
+    // Stabilized deps: [seen, talent.id, markSeen] are all stable references.
+    // Previously [seen, onSeen] where onSeen was a new inline arrow per render,
+    // causing all 100 observers to disconnect and reconnect on every state change.
     useEffect(() => {
         if (seen || !ref.current) return;
         const node = ref.current;
@@ -1540,7 +1641,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                     if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
                         if (!timerRef.current) {
                             timerRef.current = setTimeout(() => {
-                                onSeen();
+                                markSeen(talent.id);
                                 timerRef.current = null;
                             }, 5000);
                         }
@@ -1557,12 +1658,12 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
             if (timerRef.current) clearTimeout(timerRef.current);
             observer.disconnect();
         };
-    }, [seen, onSeen]);
+    }, [seen, talent.id, markSeen]);
 
     return (
         <button
             ref={ref}
-            onClick={onOpen}
+            onClick={handleOpen}
             data-testid={`client-talent-${talent.id}`}
             data-seen={seen ? "true" : "false"}
             data-new={isNew ? "true" : "false"}
@@ -1574,7 +1675,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
                         src={thumbnailUrl(cover)}
                         alt={privatizeName(talent.name)}
                         loading="lazy"
-                        className="w-full h-full object-cover group-hover:scale-105 transition-all duration-500 ease-out"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
                     />
                 ) : (
                     <div className="w-full h-full flex items-center justify-center text-[#8A8A8A]">
@@ -1635,7 +1736,7 @@ function TalentCard({ talent, vis, action, seen, isNew, onOpen, onSeen }) {
             </div>
         </button>
     );
-}
+});
 
 function InfoRow({ label, value }) {
     return (

@@ -21,13 +21,22 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
     const recRef = useRef(null);
     const chunksRef = useRef([]);
     const timerRef = useRef(null);
+    const isMountedRef = useRef(true);
+    const streamRef = useRef(null);
 
     useEffect(() => {
+        isMountedRef.current = true;
         return () => {
+            isMountedRef.current = false;
             if (timerRef.current) clearInterval(timerRef.current);
             if (recRef.current && recRef.current.state !== "inactive") {
                 try {
                     recRef.current.stop();
+                } catch (e) { console.error(e); }
+            }
+            if (streamRef.current) {
+                try {
+                    streamRef.current.getTracks().forEach((t) => t.stop());
                 } catch (e) { console.error(e); }
             }
             if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -39,6 +48,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
         setPermError(null);
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
             const mr = new MediaRecorder(stream);
             chunksRef.current = [];
             mr.ondataavailable = (e) => {
@@ -47,9 +57,12 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
             mr.onstop = () => {
                 const b = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
                 chunksRef.current = [];
-                setBlob(b);
-                setPreviewUrl(URL.createObjectURL(b));
+                if (isMountedRef.current) {
+                    setBlob(b);
+                    setPreviewUrl(URL.createObjectURL(b));
+                }
                 stream.getTracks().forEach((t) => t.stop());
+                streamRef.current = null;
             };
             recRef.current = mr;
             mr.start();
@@ -116,7 +129,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                     onClick={start}
                     disabled={disabled}
                     data-testid="voice-record-start"
-                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-white/20 hover:border-white rounded-sm text-sm transition-all disabled:opacity-40"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/20 rounded-sm text-sm transition-all disabled:opacity-40"
                 >
                     <Mic className="w-4 h-4" />
                     Record voice note
@@ -134,7 +147,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                     </button>
                     <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-[#FF3B30] animate-pulse" />
-                        <span className="tg-mono text-xs text-white/70">
+                        <span className="tg-mono text-xs text-black/60">
                             {fmt(seconds)} / {fmt(MAX_SEC)}
                         </span>
                     </div>
@@ -155,7 +168,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                             onClick={send}
                             disabled={sending}
                             data-testid="voice-send-btn"
-                            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white text-black hover:opacity-90 rounded-sm text-sm transition-all disabled:opacity-40"
+                            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white text-black hover:opacity-90 rounded-sm text-sm transition-all disabled:opacity-40 border border-black/[0.08]"
                         >
                             {sending ? (
                                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -169,7 +182,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                             onClick={reset}
                             disabled={sending}
                             data-testid="voice-discard-btn"
-                            className="inline-flex items-center gap-2 px-3 py-2.5 border border-white/15 hover:border-white/40 rounded-sm text-xs"
+                            className="inline-flex items-center gap-2 px-3 py-2.5 border border-black/[0.08] hover:border-black/20 rounded-sm text-xs text-black/70 hover:text-black"
                         >
                             <Trash2 className="w-3.5 h-3.5" />
                             Discard

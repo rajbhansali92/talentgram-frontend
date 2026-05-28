@@ -1,9 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-
-const API =
-    process.env.REACT_APP_BACKEND_URL
-        ? `${process.env.REACT_APP_BACKEND_URL}/api`
-        : "http://localhost:8000/api";
+import { API } from "@/lib/api";
 
 /**
  * Premium Lazy Video Player component.
@@ -19,29 +15,54 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
     useEffect(() => {
         if (!isPlaying || !videoRef.current || !slug || !mediaId) return;
 
-        lastTrackedTimeRef.current = videoRef.current.currentTime;
+        let intervalId = null;
 
-        const intervalId = setInterval(() => {
-            if (!videoRef.current) return;
-            const current = videoRef.current.currentTime;
-            const delta = current - lastTrackedTimeRef.current;
-            if (delta > 0 && !videoRef.current.paused) {
-                let sid = sessionStorage.getItem("client_session_id") || "guest-session";
-                fetch(`${API}/public/links/${slug}/track`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        event_type: "watch_video",
-                        session_id: sid,
-                        media_id: mediaId,
-                        watch_time: delta
-                    })
-                }).catch(() => {});
+        const startTracking = () => {
+            if (intervalId) return;
+            lastTrackedTimeRef.current = videoRef.current.currentTime;
+            intervalId = setInterval(() => {
+                if (!videoRef.current) return;
+                const current = videoRef.current.currentTime;
+                const delta = current - lastTrackedTimeRef.current;
+                if (delta > 0 && !videoRef.current.paused) {
+                    let sid = sessionStorage.getItem("client_session_id") || "guest-session";
+                    fetch(`${API}/public/links/${slug}/track`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            event_type: "watch_video",
+                            session_id: sid,
+                            media_id: mediaId,
+                            watch_time: delta
+                        })
+                    }).catch(() => {});
+                }
+                lastTrackedTimeRef.current = current;
+            }, 3000);
+        };
+
+        const stopTracking = () => {
+            if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = null;
             }
-            lastTrackedTimeRef.current = current;
-        }, 3000);
+        };
 
-        return () => clearInterval(intervalId);
+        const video = videoRef.current;
+        video.addEventListener("play", startTracking);
+        video.addEventListener("pause", stopTracking);
+        video.addEventListener("ended", stopTracking);
+
+        if (!video.paused) {
+            startTracking();
+        }
+
+        return () => {
+            video.removeEventListener("play", startTracking);
+            video.removeEventListener("pause", stopTracking);
+            video.removeEventListener("ended", stopTracking);
+            stopTracking();
+        };
     }, [isPlaying, slug, mediaId]);
 
     if (!src) return null;
@@ -55,7 +76,6 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
                     controls
                     autoPlay
                     playsInline
-                    preload="metadata"
                     className="w-full h-full object-contain"
                 />
             </div>

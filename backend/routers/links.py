@@ -78,12 +78,16 @@ async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
         proj = await db.projects.find_one({"id": auto_project_id}, {"_id": 0, "id": 1})
         if not proj:
             raise HTTPException(400, "auto_project_id does not match any project")
+        talent_ids = []
+        submission_ids = []
     elif not talent_ids and not submission_ids:
         raise HTTPException(400, "Select at least one talent or submission")
     # Constrain talent_field_visibility to the talent_ids attached to the link
     # so we don't accumulate stale entries when admins edit talent lists.
     raw_tfv = payload.talent_field_visibility or {}
     tfv = {tid: dict(raw_tfv[tid]) for tid in raw_tfv if tid in talent_ids and isinstance(raw_tfv[tid], dict)}
+    if auto_pull or not talent_ids:
+        tfv = {}
     now_iso = _now()
     # Track when each subject was first added to this link. Drives "new since
     # last visit" detection on the client view (M1/M3 manual links). For M2
@@ -183,6 +187,8 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
         proj = await db.projects.find_one({"id": update["auto_project_id"]}, {"_id": 0, "id": 1})
         if not proj:
             raise HTTPException(400, "auto_project_id does not match any project")
+        update["talent_ids"] = []
+        update["submission_ids"] = []
     elif not update["talent_ids"] and not update["submission_ids"]:
         raise HTTPException(400, "Select at least one talent or submission")
     raw_tfv = update.get("talent_field_visibility") or {}
@@ -191,6 +197,8 @@ async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_a
         for tid in raw_tfv
         if tid in update["talent_ids"] and isinstance(raw_tfv[tid], dict)
     }
+    if update["auto_pull"] or not update["talent_ids"]:
+        update["talent_field_visibility"] = {}
     # Preserve existing subject_added_at entries; stamp newly-added subjects with `now`.
     existing_link = await db.links.find_one({"id": lid}, {"_id": 0, "subject_added_at": 1})
     prev_added = (existing_link or {}).get("subject_added_at") or {}
@@ -230,9 +238,10 @@ async def bulk_delete_links(
     v = await db.link_views.delete_many({"link_id": {"$in": ids}})
     a = await db.link_actions.delete_many({"link_id": {"$in": ids}})
     d = await db.link_downloads.delete_many({"link_id": {"$in": ids}})
+    e = await db.link_events.delete_many({"link_id": {"$in": ids}})
     logger.info(
-        "BULK DELETE /links by admin=%s removed=%d views=%d actions=%d downloads=%d",
-        admin.get("email"), res.deleted_count, v.deleted_count, a.deleted_count, d.deleted_count,
+        "BULK DELETE /links by admin=%s removed=%d views=%d actions=%d downloads=%d events=%d",
+        admin.get("email"), res.deleted_count, v.deleted_count, a.deleted_count, d.deleted_count, e.deleted_count,
     )
     return {
         "ok": True,
@@ -243,6 +252,7 @@ async def bulk_delete_links(
             "views": v.deleted_count,
             "actions": a.deleted_count,
             "downloads": d.deleted_count,
+            "events": e.deleted_count,
         },
     }
 
@@ -260,9 +270,10 @@ async def delete_link(lid: str, admin: dict = Depends(current_admin)):
     v = await db.link_views.delete_many({"link_id": lid})
     a = await db.link_actions.delete_many({"link_id": lid})
     d = await db.link_downloads.delete_many({"link_id": lid})
+    e = await db.link_events.delete_many({"link_id": lid})
     logger.info(
-        "DELETE /links/%s succeeded (by %s); cascade views=%d actions=%d downloads=%d",
-        lid, admin.get("email"), v.deleted_count, a.deleted_count, d.deleted_count,
+        "DELETE /links/%s succeeded (by %s); cascade views=%d actions=%d downloads=%d events=%d",
+        lid, admin.get("email"), v.deleted_count, a.deleted_count, d.deleted_count, e.deleted_count,
     )
     return {
         "ok": True,
@@ -271,6 +282,7 @@ async def delete_link(lid: str, admin: dict = Depends(current_admin)):
             "views": v.deleted_count,
             "actions": a.deleted_count,
             "downloads": d.deleted_count,
+            "events": e.deleted_count,
         },
     }
 

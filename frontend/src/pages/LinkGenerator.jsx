@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
@@ -109,6 +109,7 @@ export default function LinkGenerator() {
     const [perTalentVis, setPerTalentVis] = useState({}); // {talentId: {key: bool}}
     const [editingTalentId, setEditingTalentId] = useState(null);
     const [q, setQ] = useState("");
+    const [qInput, setQInput] = useState(""); // debounced search input state
     const [title, setTitle] = useState("Talentgram x ");
     const [brand, setBrand] = useState("");
     const [visibility, setVisibility] = useState(DEFAULT_VIS);
@@ -116,35 +117,62 @@ export default function LinkGenerator() {
     const [notes, setNotes] = useState("");
     const [clientBudgetOverride, setClientBudgetOverride] = useState([]);
     const [saving, setSaving] = useState(false);
+    const debounceRef = useRef(null);
 
+    // FIX 1 — Async unmount safety: isMounted guard prevents stale state updates
     useEffect(() => {
+        let isMounted = true;
         (async () => {
-            const [tRes, sRes, pRes] = await Promise.all([
-                adminApi.get("/talents"),
-                adminApi.get("/submissions/approved"),
-                adminApi.get("/projects"),
-            ]);
-            setTalents(tRes.data || []);
-            setSubmissions(sRes.data || []);
-            setProjects(pRes.data || []);
+            try {
+                const [tRes, sRes, pRes] = await Promise.all([
+                    adminApi.get("/talents"),
+                    adminApi.get("/submissions/approved"),
+                    adminApi.get("/projects"),
+                ]);
+                if (!isMounted) return;
+                setTalents(tRes.data || []);
+                setSubmissions(sRes.data || []);
+                setProjects(pRes.data || []);
+            } catch (_) {
+                // silently ignore if unmounted before resolution
+            }
         })();
         if (isEdit) {
             (async () => {
-                const { data } = await adminApi.get(`/links/${id}`);
-                setMode(inferMode(data));
-                setTitle(data.title);
-                setBrand(data.brand_name || "");
-                setSelectedTalents(new Set(data.talent_ids || []));
-                setSelectedSubs(new Set(data.submission_ids || []));
-                setAutoProjectId(data.auto_project_id || "");
-                setPerTalentVis(data.talent_field_visibility || {});
-                setVisibility({ ...DEFAULT_VIS, ...(data.visibility || {}) });
-                setIsPublic(data.is_public);
-                setNotes(data.notes || "");
-                setClientBudgetOverride(data.client_budget_override || []);
+                try {
+                    const { data } = await adminApi.get(`/links/${id}`);
+                    if (!isMounted) return;
+                    setMode(inferMode(data));
+                    setTitle(data.title);
+                    setBrand(data.brand_name || "");
+                    setSelectedTalents(new Set(data.talent_ids || []));
+                    setSelectedSubs(new Set(data.submission_ids || []));
+                    setAutoProjectId(data.auto_project_id || "");
+                    setPerTalentVis(data.talent_field_visibility || {});
+                    setVisibility({ ...DEFAULT_VIS, ...(data.visibility || {}) });
+                    setIsPublic(data.is_public);
+                    setNotes(data.notes || "");
+                    setClientBudgetOverride(data.client_budget_override || []);
+                } catch (_) {
+                    // silently ignore if unmounted before resolution
+                }
             })();
         }
+        return () => { isMounted = false; };
     }, [id, isEdit]);
+
+    // FIX 2 — Search debouncing: 200 ms debounce prevents per-keystroke filter thrash
+    const handleSearchChange = useCallback((e) => {
+        const val = e.target.value;
+        setQInput(val);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => setQ(val), 200);
+    }, []);
+
+    // Cleanup debounce timer on unmount
+    useEffect(() => () => {
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+    }, []);
 
     const filteredTalents = useMemo(() => {
         if (!q) return talents;
@@ -163,18 +191,32 @@ export default function LinkGenerator() {
         );
     }, [q, submissions]);
 
-    const toggleTalent = (tid) => {
-        const next = new Set(selectedTalents);
-        if (next.has(tid)) next.delete(tid);
-        else next.add(tid);
-        setSelectedTalents(next);
-    };
-    const toggleSub = (sid) => {
-        const next = new Set(selectedSubs);
-        if (next.has(sid)) next.delete(sid);
-        else next.add(sid);
-        setSelectedSubs(next);
-    };
+    // FIX 4 — Precompute per-project approved submission counts (avoids O(n×m) in render)
+    const approvedCountByProject = useMemo(() => {
+        const counts = {};
+        for (const s of submissions) {
+            if (s.project_id) counts[s.project_id] = (counts[s.project_id] || 0) + 1;
+        }
+        return counts;
+    }, [submissions]);
+
+    const toggleTalent = useCallback((tid) => {
+        setSelectedTalents((prev) => {
+            const next = new Set(prev);
+            if (next.has(tid)) next.delete(tid);
+            else next.add(tid);
+            return next;
+        });
+    }, []);
+
+    const toggleSub = useCallback((sid) => {
+        setSelectedSubs((prev) => {
+            const next = new Set(prev);
+            if (next.has(sid)) next.delete(sid);
+            else next.add(sid);
+            return next;
+        });
+    }, []);
 
     const totalSelected =
         mode === "individual"
@@ -505,8 +547,8 @@ export default function LinkGenerator() {
                             <div className="relative">
                                 <Search className="absolute left-0 top-2.5 w-4 h-4 text-black/35" />
                                 <input
-                                    value={q}
-                                    onChange={(e) => setQ(e.target.value)}
+                                    value={qInput}
+                                    onChange={handleSearchChange}
                                     placeholder="Search..."
                                     data-testid="subject-select-search"
                                     className="bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 pl-7 text-sm text-black/85 placeholder:text-black/30 transition-colors duration-150 w-56"
@@ -533,73 +575,21 @@ export default function LinkGenerator() {
                                 className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4"
                                 data-testid="talent-select-grid"
                             >
-                                {filteredTalents.map((t) => {
-                                    const cover = resolveTalentCover(t);
-                                    const active = selectedTalents.has(t.id);
-                                    const hasOverride =
-                                        active &&
-                                        perTalentVis[t.id] &&
-                                        Object.keys(perTalentVis[t.id])
-                                            .length > 0;
-                                    return (
-                                        <div
-                                            key={t.id}
-                                            className={`relative bg-white border rounded-lg transition-colors duration-150 ${active ? "border-black/40" : "border-black/[0.08] hover:border-black/[0.16]"}`}
-                                            data-testid={`select-talent-${t.id}`}
-                                        >
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    toggleTalent(t.id)
-                                                }
-                                                className="block w-full text-left"
-                                            >
-                                                <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-lg overflow-hidden">
-                                                    {cover ? (
-                                                        <img
-                                                            src={thumbnailUrl(cover)}
-                                                            alt={t.name}
-                                                            className="w-full h-full object-cover"
-                                                        />
-                                                    ) : (
-                                                        <div className="w-full h-full flex items-center justify-center text-black/20">
-                                                            <ImageIcon className="w-6 h-6" />
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                <div className="p-3">
-                                                    <div className="text-sm font-display text-black/85 truncate">
-                                                        {t.name}
-                                                    </div>
-                                                    <div className="text-[10px] text-black/45 truncate">
-                                                        {t.location || "—"}
-                                                    </div>
-                                                </div>
-                                                {active && (
-                                                    <div className="absolute top-2 right-2 w-6 h-6 bg-black text-white flex items-center justify-center rounded-md">
-                                                        <Check className="w-3.5 h-3.5" />
-                                                    </div>
-                                                )}
-                                            </button>
-                                            {active && (
-                                                <button
-                                                    type="button"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setEditingTalentId(
-                                                            t.id,
-                                                        );
-                                                    }}
-                                                    title="Per-talent visibility override"
-                                                    data-testid={`per-talent-override-${t.id}`}
-                                                    className={`absolute bottom-2 right-2 p-1.5 rounded-md transition-colors duration-150 ${hasOverride ? "bg-[#c9a961] text-white" : "bg-black/70 text-white/70 hover:text-white"}`}
-                                                >
-                                                    <Settings2 className="w-3.5 h-3.5" />
-                                                </button>
-                                            )}
-                                        </div>
-                                    );
-                                })}
+                                {/* FIX 3 — TalentCard as memoized component to prevent rerender spikes */}
+                                {filteredTalents.map((t) => (
+                                    <TalentCard
+                                        key={t.id}
+                                        talent={t}
+                                        active={selectedTalents.has(t.id)}
+                                        hasOverride={
+                                            selectedTalents.has(t.id) &&
+                                            perTalentVis[t.id] &&
+                                            Object.keys(perTalentVis[t.id]).length > 0
+                                        }
+                                        onToggle={toggleTalent}
+                                        onOpenOverride={setEditingTalentId}
+                                    />
+                                ))}
                             </div>
                         )
                     )}
@@ -623,58 +613,15 @@ export default function LinkGenerator() {
                                 className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4"
                                 data-testid="submission-select-grid"
                             >
-                                {filteredSubs.map((s) => {
-                                    const cover =
-                                        (s.media || []).find(
-                                            (m) =>
-                                                m.id === s.cover_media_id,
-                                        ) ||
-                                        (s.media || []).find(
-                                            (m) =>
-                                                m.category === "portfolio" ||
-                                                m.category === "image",
-                                        );
-                                    const active = selectedSubs.has(s.id);
-                                    return (
-                                        <button
-                                            key={s.id}
-                                            type="button"
-                                            onClick={() => toggleSub(s.id)}
-                                            data-testid={`select-submission-${s.id}`}
-                                            className={`relative group text-left bg-white border rounded-lg transition-colors duration-150 ${active ? "border-green-600/50" : "border-black/[0.08] hover:border-black/[0.16]"}`}
-                                        >
-                                            <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-lg overflow-hidden">
-                                                {cover ? (
-                                                    <img
-                                                        src={cover.url}
-                                                        alt={s.talent_name}
-                                                        className="w-full h-full object-cover"
-                                                    />
-                                                ) : (
-                                                    <div className="w-full h-full flex items-center justify-center text-black/20">
-                                                        <ImageIcon className="w-6 h-6" />
-                                                    </div>
-                                                )}
-                                                <div className="absolute top-2 left-2 text-[9px] font-mono tracking-widest uppercase bg-green-600 text-white px-2 py-0.5 rounded-md">
-                                                    Audition
-                                                </div>
-                                            </div>
-                                            <div className="p-3">
-                                                <div className="text-sm font-display text-black/85 truncate">
-                                                    {s.talent_name}
-                                                </div>
-                                                <div className="text-[10px] text-black/45 truncate">
-                                                    {s.project_brand || "—"}
-                                                </div>
-                                            </div>
-                                            {active && (
-                                                <div className="absolute top-2 right-2 w-6 h-6 bg-green-600 text-white flex items-center justify-center rounded-md">
-                                                    <Check className="w-3.5 h-3.5" />
-                                                </div>
-                                            )}
-                                        </button>
-                                    );
-                                })}
+                                {/* FIX 3 — SubmissionCard as memoized component to prevent rerender spikes */}
+                                {filteredSubs.map((s) => (
+                                    <SubmissionCard
+                                        key={s.id}
+                                        submission={s}
+                                        active={selectedSubs.has(s.id)}
+                                        onToggle={toggleSub}
+                                    />
+                                ))}
                             </div>
                         )
                     )}
@@ -702,12 +649,11 @@ export default function LinkGenerator() {
                                     className="grid sm:grid-cols-2 gap-3"
                                     data-testid="project-select-grid"
                                 >
+                                    {/* FIX 4 — use pre-computed approvedCountByProject (O(1) lookup) */}
                                     {projects.map((p) => {
                                         const active =
                                             autoProjectId === p.id;
-                                        const approvedCount = submissions.filter(
-                                            (s) => s.project_id === p.id,
-                                        ).length;
+                                        const approvedCount = approvedCountByProject[p.id] || 0;
                                         return (
                                             <button
                                                 key={p.id}
@@ -749,6 +695,30 @@ export default function LinkGenerator() {
                 </div>
             </div>
 
+            {/* FIX 5 — Sticky mobile dock: fixed bottom bar visible only on small screens */}
+            {mode && mode !== "showcase" && (
+                <div
+                    className="fixed bottom-0 left-0 right-0 z-40 lg:hidden bg-white/95 backdrop-blur border-t border-black/[0.08] px-4 py-3 flex items-center justify-between gap-3"
+                    data-testid="mobile-generate-dock"
+                    style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}
+                >
+                    <span className="text-sm text-black/60">
+                        {mode === "individual"
+                            ? `${selectedTalents.size} talent${selectedTalents.size === 1 ? "" : "s"} selected`
+                            : `${selectedSubs.size} submission${selectedSubs.size === 1 ? "" : "s"} selected`}
+                    </span>
+                    <button
+                        onClick={submit}
+                        disabled={saving}
+                        data-testid="mobile-generate-btn"
+                        className="bg-black text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-black/90 transition-colors duration-150 inline-flex items-center gap-2 shrink-0"
+                    >
+                        {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                        {isEdit ? "Save & View" : "Generate Link"}
+                    </button>
+                </div>
+            )}
+
             {/* Per-talent visibility override modal */}
             {editingTalentId && (
                 <PerTalentVisibilityModal
@@ -776,6 +746,124 @@ export default function LinkGenerator() {
         </div>
     );
 }
+
+/* ── FIX 3: Memoized card components ────────────────────────────────────────
+   Extracting TalentCard and SubmissionCard as React.memo prevents the entire
+   grid from re-rendering when only one card's selection state changes.
+   useCallback on toggleTalent/toggleSub ensures stable function refs.        */
+
+const TalentCard = React.memo(function TalentCard({
+    talent,
+    active,
+    hasOverride,
+    onToggle,
+    onOpenOverride,
+}) {
+    const cover = resolveTalentCover(talent);
+    return (
+        <div
+            className={`relative bg-white border rounded-lg transition-colors duration-150 ${active ? "border-black/40" : "border-black/[0.08] hover:border-black/[0.16]"}`}
+            data-testid={`select-talent-${talent.id}`}
+        >
+            <button
+                type="button"
+                onClick={() => onToggle(talent.id)}
+                className="block w-full text-left"
+            >
+                <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-lg overflow-hidden">
+                    {cover ? (
+                        <img
+                            src={thumbnailUrl(cover)}
+                            alt={talent.name}
+                            className="w-full h-full object-cover"
+                        />
+                    ) : (
+                        <div className="w-full h-full flex items-center justify-center text-black/20">
+                            <ImageIcon className="w-6 h-6" />
+                        </div>
+                    )}
+                </div>
+                <div className="p-3">
+                    <div className="text-sm font-display text-black/85 truncate">
+                        {talent.name}
+                    </div>
+                    <div className="text-[10px] text-black/45 truncate">
+                        {talent.location || "—"}
+                    </div>
+                </div>
+                {active && (
+                    <div className="absolute top-2 right-2 w-6 h-6 bg-black text-white flex items-center justify-center rounded-md">
+                        <Check className="w-3.5 h-3.5" />
+                    </div>
+                )}
+            </button>
+            {active && (
+                <button
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenOverride(talent.id);
+                    }}
+                    title="Per-talent visibility override"
+                    data-testid={`per-talent-override-${talent.id}`}
+                    className={`absolute bottom-2 right-2 p-1.5 rounded-md transition-colors duration-150 ${hasOverride ? "bg-[#c9a961] text-white" : "bg-black/70 text-white/70 hover:text-white"}`}
+                >
+                    <Settings2 className="w-3.5 h-3.5" />
+                </button>
+            )}
+        </div>
+    );
+});
+
+const SubmissionCard = React.memo(function SubmissionCard({
+    submission: s,
+    active,
+    onToggle,
+}) {
+    const cover =
+        (s.media || []).find((m) => m.id === s.cover_media_id) ||
+        (s.media || []).find(
+            (m) => m.category === "portfolio" || m.category === "image",
+        );
+    return (
+        <button
+            type="button"
+            onClick={() => onToggle(s.id)}
+            data-testid={`select-submission-${s.id}`}
+            className={`relative group text-left bg-white border rounded-lg transition-colors duration-150 ${active ? "border-green-600/50" : "border-black/[0.08] hover:border-black/[0.16]"}`}
+        >
+            <div className="aspect-[3/4] bg-[#fafaf8] rounded-t-lg overflow-hidden">
+                {cover ? (
+                    <img
+                        src={cover.url}
+                        alt={s.talent_name}
+                        className="w-full h-full object-cover"
+                    />
+                ) : (
+                    <div className="w-full h-full flex items-center justify-center text-black/20">
+                        <ImageIcon className="w-6 h-6" />
+                    </div>
+                )}
+                <div className="absolute top-2 left-2 text-[9px] font-mono tracking-widest uppercase bg-green-600 text-white px-2 py-0.5 rounded-md">
+                    Audition
+                </div>
+            </div>
+            <div className="p-3">
+                <div className="text-sm font-display text-black/85 truncate">
+                    {s.talent_name}
+                </div>
+                <div className="text-[10px] text-black/45 truncate">
+                    {s.project_brand || "—"}
+                </div>
+            </div>
+            {active && (
+                <div className="absolute top-2 right-2 w-6 h-6 bg-green-600 text-white flex items-center justify-center rounded-md">
+                    <Check className="w-3.5 h-3.5" />
+                </div>
+            )}
+        </button>
+    );
+});
 
 function PerTalentVisibilityModal({
     talent,
@@ -846,12 +934,13 @@ function PerTalentVisibilityModal({
                                             : `Inherit (${baseVisibility[v.key] ? "ON" : "OFF"})`}
                                     </div>
                                 </div>
+                                {/* FIX 6 — Enlarged touch targets: px-3 py-2 for 44px+ tap area on mobile */}
                                 <div className="flex items-center gap-1">
                                     <button
                                         type="button"
                                         onClick={() => setKey(v.key, true)}
                                         data-testid={`tfv-${v.key}-on`}
-                                        className={`text-[10px] px-2 py-1 border rounded-md transition-colors duration-150 ${overridden && draft[v.key] === true ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/20"}`}
+                                        className={`text-[10px] px-3 py-2 border rounded-md transition-colors duration-150 ${overridden && draft[v.key] === true ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/20"}`}
                                     >
                                         ON
                                     </button>
@@ -859,7 +948,7 @@ function PerTalentVisibilityModal({
                                         type="button"
                                         onClick={() => setKey(v.key, false)}
                                         data-testid={`tfv-${v.key}-off`}
-                                        className={`text-[10px] px-2 py-1 border rounded-md transition-colors duration-150 ${overridden && draft[v.key] === false ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/20"}`}
+                                        className={`text-[10px] px-3 py-2 border rounded-md transition-colors duration-150 ${overridden && draft[v.key] === false ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/20"}`}
                                     >
                                         OFF
                                     </button>
@@ -867,7 +956,7 @@ function PerTalentVisibilityModal({
                                         type="button"
                                         onClick={() => reset(v.key)}
                                         data-testid={`tfv-${v.key}-inherit`}
-                                        className={`text-[10px] px-2 py-1 border rounded-md transition-colors duration-150 ${!overridden ? "border-[#c9a961] text-[#c9a961]" : "border-black/[0.08] text-black/40 hover:text-black/70"}`}
+                                        className={`text-[10px] px-3 py-2 border rounded-md transition-colors duration-150 ${!overridden ? "border-[#c9a961] text-[#c9a961]" : "border-black/[0.08] text-black/40 hover:text-black/70"}`}
                                     >
                                         INHERIT
                                     </button>

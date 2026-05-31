@@ -135,30 +135,47 @@ async def prefill_for_email(email: str, request: Request):
                 "created_at": m.get("created_at") or _now(),
             })
 
-    # Intro video prefill: fetch the latest finalized submission for that email
+    # Intro video prefill: priority 1: db.talents.media
     latest_intro = None
-    latest_sub = await db.submissions.find_one(
-        {
-            "talent_email": email,
-            "media.category": {"$in": ["intro_video", "video"]}
-        },
-        sort=[("submitted_at", -1), ("created_at", -1)]
-    )
-    if latest_sub:
-        for m in (latest_sub.get("media") or []):
-            if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                latest_intro = {
-                    "id": m.get("id"),
-                    "category": "intro_video",
-                    "url": m.get("url"),
-                    "public_id": m.get("public_id"),
-                    "resource_type": m.get("resource_type") or "video",
-                    "content_type": m.get("content_type") or "video/mp4",
-                    "original_filename": m.get("original_filename"),
-                    "size": m.get("size") or 0,
-                    "created_at": m.get("created_at") or _now(),
-                }
-                break
+    for m in (talent.get("media") or []):
+        if m.get("category") in {"video", "intro_video"} and m.get("url"):
+            latest_intro = {
+                "id": m.get("id"),
+                "category": "intro_video",
+                "url": m.get("url"),
+                "public_id": m.get("public_id"),
+                "resource_type": m.get("resource_type") or "video",
+                "content_type": m.get("content_type") or "video/mp4",
+                "original_filename": m.get("original_filename"),
+                "size": m.get("size") or 0,
+                "created_at": m.get("created_at") or _now(),
+            }
+            break
+
+    # Priority 2: db.submissions
+    if not latest_intro:
+        latest_sub = await db.submissions.find_one(
+            {
+                "talent_email": email,
+                "media.category": {"$in": ["intro_video", "video"]}
+            },
+            sort=[("submitted_at", -1), ("created_at", -1)]
+        )
+        if latest_sub:
+            for m in (latest_sub.get("media") or []):
+                if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                    latest_intro = {
+                        "id": m.get("id"),
+                        "category": "intro_video",
+                        "url": m.get("url"),
+                        "public_id": m.get("public_id"),
+                        "resource_type": m.get("resource_type") or "video",
+                        "content_type": m.get("content_type") or "video/mp4",
+                        "original_filename": m.get("original_filename"),
+                        "size": m.get("size") or 0,
+                        "created_at": m.get("created_at") or _now(),
+                    }
+                    break
 
     if not latest_intro:
         latest_app = await db.applications.find_one(
@@ -283,30 +300,47 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
                         "created_at": m.get("created_at") or _now(),
                     })
             
-            # Intro video prefill: fetch the latest finalized submission for that email
-            latest_sub = await db.submissions.find_one(
-                {
-                    "talent_email": email,
-                    "media.category": {"$in": ["intro_video", "video"]}
-                },
-                sort=[("submitted_at", -1), ("created_at", -1)]
-            )
+            # Intro video prefill: priority 1: db.talents.media
             latest_intro = None
-            if latest_sub:
-                for m in (latest_sub.get("media") or []):
-                    if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                        latest_intro = {
-                            "id": m.get("id"),
-                            "category": "intro_video",
-                            "url": m.get("url"),
-                            "public_id": m.get("public_id"),
-                            "resource_type": m.get("resource_type") or "video",
-                            "content_type": m.get("content_type") or "video/mp4",
-                            "original_filename": m.get("original_filename"),
-                            "size": m.get("size") or 0,
-                            "created_at": m.get("created_at") or _now(),
-                        }
-                        break
+            for m in (talent_doc.get("media") or []):
+                if m.get("category") in {"video", "intro_video"} and m.get("url"):
+                    latest_intro = {
+                        "id": m.get("id"),
+                        "category": "intro_video",
+                        "url": m.get("url"),
+                        "public_id": m.get("public_id"),
+                        "resource_type": m.get("resource_type") or "video",
+                        "content_type": m.get("content_type") or "video/mp4",
+                        "original_filename": m.get("original_filename"),
+                        "size": m.get("size") or 0,
+                        "created_at": m.get("created_at") or _now(),
+                    }
+                    break
+
+            # Priority 2: db.submissions
+            if not latest_intro:
+                latest_sub = await db.submissions.find_one(
+                    {
+                        "talent_email": email,
+                        "media.category": {"$in": ["intro_video", "video"]}
+                    },
+                    sort=[("submitted_at", -1), ("created_at", -1)]
+                )
+                if latest_sub:
+                    for m in (latest_sub.get("media") or []):
+                        if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                            latest_intro = {
+                                "id": m.get("id"),
+                                "category": "intro_video",
+                                "url": m.get("url"),
+                                "public_id": m.get("public_id"),
+                                "resource_type": m.get("resource_type") or "video",
+                                "content_type": m.get("content_type") or "video/mp4",
+                                "original_filename": m.get("original_filename"),
+                                "size": m.get("size") or 0,
+                                "created_at": m.get("created_at") or _now(),
+                            }
+                            break
             
             if not latest_intro:
                 latest_app = await db.applications.find_one(

@@ -390,8 +390,8 @@ def cloudinary_url_for(
 
 
 def stream_video_url(public_id: Optional[str]) -> Optional[str]:
-    """Build an adaptive streaming URL for a video.
-    Uses: q_auto:good, vc_auto, sp_auto, br_auto, f_auto
+    """Build a optimized video URL for a video.
+    Uses: q_auto:good, vc_auto, f_auto
     """
     if not public_id:
         return None
@@ -403,8 +403,6 @@ def stream_video_url(public_id: Optional[str]) -> Optional[str]:
         secure=True,
         quality="auto:good",
         video_codec="auto",
-        streaming_profile="auto",
-        bit_rate="auto",
         fetch_format="auto"
     )
     return url

@@ -1639,14 +1639,27 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     if not source_id:
         return
 
+    talent = await db.talents.find_one({"email": email})
+    if not talent:
+        return
+
+    # Strict deduplication: check if this media asset already exists by public_id, url, or source-id
+    pub_id = media.get("public_id")
+    url = media.get("url")
+    for m in (talent.get("media") or []):
+        if (pub_id and m.get("public_id") == pub_id) or \
+           (url and m.get("url") == url) or \
+           (m.get("source_submission_media_id") == source_id):
+            return
+
     # Build the mirror item — preserves Cloudinary url + public_id so the
     # global profile renders identically to the submission. New `id` is
     # generated to keep talent.media ids unique across mirror sources.
     mirror = {
         "id": str(uuid.uuid4()),
         "category": cat,
-        "url": media.get("url"),
-        "public_id": media.get("public_id"),
+        "url": url,
+        "public_id": pub_id,
         "resource_type": media.get("resource_type"),
         "mime": media.get("mime"),
         "content_type": media.get("content_type"),
@@ -1657,18 +1670,11 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
         "source_submission_media_id": source_id,
     }
 
-    # Idempotent push: only insert if no existing item carries this
-    # source_submission_media_id.
     await db.talents.update_one(
-        {
-            "email": email,
-            "media.source_submission_media_id": {"$ne": source_id},
-        },
+        {"id": talent["id"]},
         {"$push": {"media": mirror}},
     )
-    talent = await db.talents.find_one({"email": email}, {"id": 1})
-    if talent:
-        await update_talent_cover_cache(talent["id"])
+    await update_talent_cover_cache(talent["id"])
 
 
 async def remove_synced_media_from_global_talent(submission: dict, source_media_id: str) -> None:

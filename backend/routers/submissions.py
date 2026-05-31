@@ -119,7 +119,6 @@ async def prefill_for_email(email: str, request: Request):
     latest_sub = await db.submissions.find_one(
         {
             "talent_email": email,
-            "status": {"$in": ["submitted", "updated"]},
             "media.category": {"$in": ["intro_video", "video"]}
         },
         sort=[("submitted_at", -1), ("created_at", -1)]
@@ -243,7 +242,6 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
             latest_sub = await db.submissions.find_one(
                 {
                     "talent_email": email,
-                    "status": {"$in": ["submitted", "updated"]},
                     "media.category": {"$in": ["intro_video", "video"]}
                 },
                 sort=[("submitted_at", -1), ("created_at", -1)]

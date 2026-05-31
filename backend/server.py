@@ -2,13 +2,14 @@
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 import os
 
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
-from core import db, mongo_client, seed_admin
+from core import db, mongo_client, seed_admin, update_talent_cover_cache
 from drive_backup import attach_db, drive_enabled, start_drive_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from routers import (
@@ -125,10 +126,102 @@ app.add_middleware(
 
 
 # Startup
+async def run_media_duplicate_cleanup_migration() -> None:
+    """Group media by public_id. Keep oldest record, delete newer duplicates.
+
+    Preserve: cover_media_id, cover_url.
+    Save run report in db.migration_reports collection.
+    """
+    logger.info("== STARTING MEDIA DUPLICATE CLEANUP MIGRATION ==")
+    scanned = 0
+    report_records = []
+
+    async for talent in db.talents.find({"media": {"$exists": True, "$ne": []}}):
+        tid = talent.get("id")
+        media = talent.get("media") or []
+        scanned += 1
+
+        # Group by public_id
+        groups = {}
+        for m in media:
+            pid = m.get("public_id")
+            if not pid:
+                continue
+            groups.setdefault(pid, []).append(m)
+
+        to_delete_ids = set()
+        affected_pids = []
+
+        for pid, items in groups.items():
+            if len(items) > 1:
+                # Group has duplicates!
+                # Map each item to its index in the original media list to keep the oldest
+                indexed_items = [(idx, item) for idx, item in enumerate(media) if item.get("public_id") == pid]
+                indexed_items.sort(key=lambda x: x[0])
+
+                surviving_idx, surviving_item = indexed_items[0]
+                duplicates = indexed_items[1:]
+
+                for idx, duplicate_item in duplicates:
+                    to_delete_ids.add(duplicate_item.get("id"))
+
+                affected_pids.append(pid)
+
+        if to_delete_ids:
+            # Keep only items not in to_delete_ids
+            new_media = [m for m in media if m.get("id") not in to_delete_ids]
+
+            # Preserve cover: if the deleted item was cover_media_id,
+            # update cover_media_id to point to the surviving oldest record sharing that public_id.
+            cover_id = talent.get("cover_media_id")
+            new_cover_id = cover_id
+
+            if cover_id in to_delete_ids:
+                deleted_cover_item = next((m for m in media if m.get("id") == cover_id), None)
+                if deleted_cover_item:
+                    pid = deleted_cover_item.get("public_id")
+                    surviving_item = next((m for m in new_media if m.get("public_id") == pid), None)
+                    if surviving_item:
+                        new_cover_id = surviving_item.get("id")
+                    else:
+                        new_cover_id = None
+
+            # Update the talent doc in DB
+            await db.talents.update_one(
+                {"id": tid},
+                {
+                    "$set": {
+                        "media": new_media,
+                        "cover_media_id": new_cover_id
+                    }
+                }
+            )
+
+            # Recalculate cover cache
+            await update_talent_cover_cache(tid)
+
+            report_records.append({
+                "talent_id": tid,
+                "duplicate_count_removed": len(to_delete_ids),
+                "public_ids_affected": affected_pids
+            })
+            logger.info("DEDUPLICATED TALENT %s: removed %d duplicates of %s", tid, len(to_delete_ids), affected_pids)
+
+    # Save the migration report in the database
+    await db.migration_reports.insert_one({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "report": report_records,
+        "scanned": scanned
+    })
+    logger.info("== MEDIA DUPLICATE CLEANUP MIGRATION COMPLETED ==")
+
+
 @app.on_event("startup")
 async def on_startup():
     try:
         logger.info("Starting Talentgram backend...")
+
+        await run_media_duplicate_cleanup_migration()
 
         await seed_admin()
         logger.info("Admin seed complete")

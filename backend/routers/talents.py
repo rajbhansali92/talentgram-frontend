@@ -330,6 +330,17 @@ async def bulk_talents(
     return {"success": True, "data": ordered}
 
 
+@router.get("/talents/migration/report")
+async def get_migration_report(admin: dict = Depends(current_admin)):
+    """Fetch the latest duplicate media cleanup migration report."""
+    report = await db.migration_reports.find_one(sort=[("timestamp", -1)])
+    if not report:
+        raise HTTPException(404, "No migration reports found")
+    if "_id" in report:
+        del report["_id"]
+    return report
+
+
 @router.get("/talents/{tid}")
 async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})

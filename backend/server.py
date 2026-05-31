@@ -129,6 +129,7 @@ app.add_middleware(
 async def run_media_duplicate_cleanup_migration() -> None:
     """Group media by public_id. Keep oldest record, delete newer duplicates.
 
+    This migration is idempotent and runs as a no-op on subsequent boots.
     Preserve: cover_media_id, cover_url.
     Save run report in db.migration_reports collection.
     """

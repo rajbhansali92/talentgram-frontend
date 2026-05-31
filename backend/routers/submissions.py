@@ -51,6 +51,27 @@ from notifications import fanout as notify_fanout
 router = APIRouter(prefix="/api", tags=["submissions"])
 
 
+def deduplicate_media(media_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen_public_ids = set()
+    seen_urls = set()
+    deduped = []
+    for m in media_list:
+        pub_id = m.get("public_id")
+        url = m.get("url")
+        if pub_id:
+            if pub_id in seen_public_ids:
+                continue
+            seen_public_ids.add(pub_id)
+            if url:
+                seen_urls.add(url)
+        elif url:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+        deduped.append(m)
+    return deduped
+
+
 # --------------------------------------------------------------------------
 # Public (talent-facing) flow
 # --------------------------------------------------------------------------
@@ -182,7 +203,7 @@ async def prefill_for_email(email: str, request: Request):
         # back to the first portfolio/indian/western image. None when the
         # talent has no usable image — the card hides the thumb gracefully.
         "image_url": _resolve_cover_url(talent),
-        "prefill_media": prefill_images + ([latest_intro] if latest_intro else []),
+        "prefill_media": deduplicate_media(prefill_images + ([latest_intro] if latest_intro else [])),
     }
 
 
@@ -336,7 +357,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "field_visibility": {**DEFAULT_FIELD_VISIBILITY},
         "submitted_age_override": submitted_age_override_val,
         "effective_age": effective_age_val,
-        "media": prefill_media,
+        "media": deduplicate_media(prefill_media),
         "status": "draft",
         "decision": "pending",
         "created_at": _now(),

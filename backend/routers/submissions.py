@@ -97,6 +97,49 @@ async def prefill_for_email(email: str, request: Request):
     parts = name.split(" ", 1)
     first = parts[0] if parts else ""
     last = parts[1] if len(parts) > 1 else ""
+
+    # Image prefill: fetch existing image, indian, western look images from master profile
+    prefill_images = []
+    for m in (talent.get("media") or []):
+        if m.get("category") in {"image", "indian", "western"} and m.get("url"):
+            prefill_images.append({
+                "id": m.get("id"),
+                "category": m.get("category"),
+                "url": m.get("url"),
+                "public_id": m.get("public_id"),
+                "resource_type": m.get("resource_type") or "image",
+                "content_type": m.get("content_type") or "image/jpeg",
+                "original_filename": m.get("original_filename"),
+                "size": m.get("size") or 0,
+                "created_at": m.get("created_at") or _now(),
+            })
+
+    # Intro video prefill: fetch the latest finalized submission for that email
+    latest_intro = None
+    latest_sub = await db.submissions.find_one(
+        {
+            "talent_email": email,
+            "status": {"$in": ["submitted", "updated"]},
+            "media.category": {"$in": ["intro_video", "video"]}
+        },
+        sort=[("submitted_at", -1), ("created_at", -1)]
+    )
+    if latest_sub:
+        for m in (latest_sub.get("media") or []):
+            if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                latest_intro = {
+                    "id": m.get("id"),
+                    "category": "intro_video",
+                    "url": m.get("url"),
+                    "public_id": m.get("public_id"),
+                    "resource_type": m.get("resource_type") or "video",
+                    "content_type": m.get("content_type") or "video/mp4",
+                    "original_filename": m.get("original_filename"),
+                    "size": m.get("size") or 0,
+                    "created_at": m.get("created_at") or _now(),
+                }
+                break
+
     return {
         "first_name": first,
         "last_name": last,
@@ -116,7 +159,9 @@ async def prefill_for_email(email: str, request: Request):
         # back to the first portfolio/indian/western image. None when the
         # talent has no usable image — the card hides the thumb gracefully.
         "image_url": _resolve_cover_url(talent),
+        "prefill_media": prefill_images + ([latest_intro] if latest_intro else []),
     }
+
 
 
 # Sliding-window rate limiter for the prefill endpoint. 20 reqs / 60 s / IP.
@@ -171,10 +216,53 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
 
     fd = payload.form_data or {}
     talent_age = None
+    prefill_media = []
     if email:
-        talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+        talent_doc = await db.talents.find_one(
+            {"$or": [{"email": email}, {"source.talent_email": email}]},
+            {"age": 1, "dob": 1, "media": 1}
+        )
         if talent_doc:
             talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+            # Image prefill: fetch existing image, indian, western look images from master profile
+            for m in (talent_doc.get("media") or []):
+                if m.get("category") in {"image", "indian", "western"} and m.get("url"):
+                    prefill_media.append({
+                        "id": m.get("id"),
+                        "category": m.get("category"),
+                        "url": m.get("url"),
+                        "public_id": m.get("public_id"),
+                        "resource_type": m.get("resource_type") or "image",
+                        "content_type": m.get("content_type") or "image/jpeg",
+                        "original_filename": m.get("original_filename"),
+                        "size": m.get("size") or 0,
+                        "created_at": m.get("created_at") or _now(),
+                    })
+            
+            # Intro video prefill: fetch the latest finalized submission for that email
+            latest_sub = await db.submissions.find_one(
+                {
+                    "talent_email": email,
+                    "status": {"$in": ["submitted", "updated"]},
+                    "media.category": {"$in": ["intro_video", "video"]}
+                },
+                sort=[("submitted_at", -1), ("created_at", -1)]
+            )
+            if latest_sub:
+                for m in (latest_sub.get("media") or []):
+                    if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                        prefill_media.append({
+                            "id": m.get("id"),
+                            "category": "intro_video",
+                            "url": m.get("url"),
+                            "public_id": m.get("public_id"),
+                            "resource_type": m.get("resource_type") or "video",
+                            "content_type": m.get("content_type") or "video/mp4",
+                            "original_filename": m.get("original_filename"),
+                            "size": m.get("size") or 0,
+                            "created_at": m.get("created_at") or _now(),
+                        })
+                        break
 
     submitted_age_override_val = None
     override_active = fd.get("overrideAge") or fd.get("override_age")
@@ -198,7 +286,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "field_visibility": {**DEFAULT_FIELD_VISIBILITY},
         "submitted_age_override": submitted_age_override_val,
         "effective_age": effective_age_val,
-        "media": [],
+        "media": prefill_media,
         "status": "draft",
         "decision": "pending",
         "created_at": _now(),

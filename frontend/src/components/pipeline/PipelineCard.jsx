@@ -407,7 +407,7 @@ const PipelineCard = memo(function PipelineCard({
         "bg-white",
         "shadow-[0_1px_2px_rgba(0,0,0,0.04)]",
         "border",
-        "min-h-[120px]", // Minimum height — allows shorter cards to be compact
+        "min-h-[105px] md:min-h-[120px]", // Minimum height — allows shorter cards to be compact
         isSelected
             ? "border-black/20 ring-1 ring-black/10"
             : "border-black/[0.08]",
@@ -492,7 +492,7 @@ const PipelineCard = memo(function PipelineCard({
             className={shellClass}
             aria-label={`Talent: ${displayName}`}
         >
-                <div className="p-4 space-y-2.5">
+                <div className="p-3 md:p-4 space-y-2 md:space-y-2.5">
                 {/* Row 1: Identity block — Avatar + Name/Handle + workflow chips inline */}
                 <div className="flex items-start gap-3">
                     {/* Avatar — full opacity anchors identity */}

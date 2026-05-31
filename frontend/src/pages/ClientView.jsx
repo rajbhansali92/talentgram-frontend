@@ -27,6 +27,7 @@ import {
     Clock,
     Check,
     Share2,
+    ArrowRight,
 } from "lucide-react";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
@@ -1080,11 +1081,8 @@ function TalentDetail({
     const intro = mediaAll.find((m) => m.category === "video") || null;
     const takes = mediaAll.filter((m) => m.category === "take");
     const [idx, setIdx] = useState(0);
-    const [busyAction, setBusyAction] = useState(null);
     const overlayRef = useRef(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
-    /** Prevents post-unmount state updates inside quickAction's 350ms timeout. */
-    const mountedRef = useRef(true);
     /**
      * Mirrors viewerAction in a ref so the keyboard handler can read the latest
      * action without being listed as a dependency (which caused handler re-registration
@@ -1095,12 +1093,6 @@ function TalentDetail({
     useEffect(() => {
         viewerActionRef.current = viewerAction;
     }, [viewerAction]);
-
-    // Cleanup: mark unmounted so quickAction's deferred setTimeout cannot fire setState
-    useEffect(() => {
-        mountedRef.current = true;
-        return () => { mountedRef.current = false; };
-    }, []);
 
     // Reset gallery image index on talent navigation — prevents broken images when
     // navigating from a talent with many images to one with fewer (AUDIT: MED-01).
@@ -1240,24 +1232,6 @@ function TalentDetail({
         };
     }, [goNextTalent, goPrevTalent, onClose, isSharePreview]);
 
-    const quickAction = useCallback(async (key) => {
-        if (busyAction) return;
-        setBusyAction(key);
-        if (typeof navigator !== "undefined" && navigator.vibrate) {
-            try { navigator.vibrate?.(10); } catch (e) { console.error(e); }
-        }
-        try {
-            await setAction(talent.id, key);
-            setTimeout(() => {
-                if (hasNextTalent) goNextTalent();
-                // Guard: component may be unmounted by the time this timeout fires
-                // (goNextTalent navigates away, unmounting TalentDetail immediately).
-                if (mountedRef.current) setBusyAction(null);
-            }, 350);
-        } catch {
-            if (mountedRef.current) setBusyAction(null);
-        }
-    }, [busyAction, setAction, talent.id, hasNextTalent, goNextTalent]);
 
     const download = useCallback(async (m) => {
         await logDownload(talent.id, m.id);
@@ -1278,10 +1252,63 @@ function TalentDetail({
             data-testid="talent-detail-overlay"
         >
             <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
-                <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+                {/* Mobile Top Sticky Header */}
+                <div className="md:hidden sticky top-0 z-30 bg-white border-b border-black/[0.04] px-4 py-3 flex items-center justify-between shrink-0 shadow-sm">
+                    <div className="min-w-0 flex-1 pr-4">
+                        <h2 className="font-display text-base font-semibold text-[#111111] truncate">
+                            {privatizeName(talent.name)}
+                        </h2>
+                        <div className="text-[10px] text-[#8A8A8A] font-mono tracking-wide mt-0.5 truncate flex items-center gap-1.5 flex-wrap">
+                            {vis.age && talent.age && <span>{talent.age} yrs</span>}
+                            {vis.height && talent.height && (
+                                <>
+                                    <span className="opacity-35">•</span>
+                                    <span>{talent.height}</span>
+                                </>
+                            )}
+                            {vis.location && talent.location && (
+                                <>
+                                    <span className="opacity-35">•</span>
+                                    <span>{talent.location}</span>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <span className={`inline-flex items-center text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${
+                            viewerAction?.action === "shortlist"
+                                ? "bg-[#B89B5E]/10 text-[#B89B5E] border-[#B89B5E]/20"
+                                : viewerAction?.action === "interested"
+                                ? "bg-green-50 text-green-700 border-green-200"
+                                : viewerAction?.action === "not_for_this"
+                                ? "bg-red-50 text-red-700 border-red-200"
+                                : viewerAction?.action === "not_sure"
+                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                : "bg-black/5 text-black/60 border-black/10"
+                        }`}>
+                            {{
+                                shortlist: "Shortlist",
+                                interested: "Interested",
+                                not_for_this: "Reject",
+                                not_sure: "Hold",
+                            }[viewerAction?.action] || "Pending"}
+                        </span>
+                        {!isSharePreview && (
+                            <button
+                                onClick={onClose}
+                                className="p-1 hover:bg-black/5 rounded-full text-black/60 hover:text-black transition-colors"
+                                data-testid="mobile-detail-close-btn"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <div className="flex-1 flex flex-col md:flex-row overflow-y-auto md:overflow-hidden">
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-[#FCFBF8] overflow-y-auto min-h-0">
+                    <div className="w-full md:w-[58%] lg:w-[60%] bg-[#FCFBF8] overflow-y-visible md:overflow-y-auto min-h-0">
                         <div className="p-4 md:p-8">
                             {vis.takes !== false && takes.length > 0 && (
                                 <div className="mb-10">
@@ -1405,7 +1432,7 @@ function TalentDetail({
 
                     {/* Right Column - Details (scrollable with soft shadow) */}
                     {/* min-h-0: required for iOS Safari scroll fix in flex context */}
-                    <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
+                    <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-visible md:overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
                         {/* pb-[130px] gives clearance above the fixed mobile bottom action bar + home indicator */}
                         <div className="p-6 md:p-8 pb-[130px] md:pb-8">
                             <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
@@ -1573,28 +1600,36 @@ function TalentDetail({
 
             {/* Mobile bottom bar */}
             {!isSharePreview && (
-                <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 border-t border-black/[0.04] px-4 py-3" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
-                    <div className="grid grid-cols-3 gap-2">
-                        <button type="button" onClick={() => quickAction("shortlist")} disabled={Boolean(busyAction)} data-testid="quick-shortlist-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "shortlist" ? "bg-[#B89B5E] text-white border-[#B89B5E]" : "border-black/[0.08] text-[#111111] hover:border-black/20"}`}>
-                            {busyAction === "shortlist" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className={`w-4 h-4 ${viewerAction?.action === "shortlist" ? "fill-current" : ""}`} />}
-                            Shortlist
-                        </button>
-                        <button type="button" onClick={() => quickAction("not_sure")} disabled={Boolean(busyAction)} data-testid="quick-hold-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_sure" ? "bg-black/5 text-black border-black/20" : "border-black/[0.08] text-[#4A4A4A] hover:border-black/20"}`}>
-                            {busyAction === "not_sure" ? <Loader2 className="w-4 h-4 animate-spin" /> : <HelpCircle className="w-4 h-4" />}
-                            Hold
-                        </button>
-                        <button type="button" onClick={() => quickAction("not_for_this")} disabled={Boolean(busyAction)} data-testid="quick-reject-btn" className={`min-h-[52px] flex flex-col items-center justify-center gap-0.5 rounded-xl border text-[11px] tracking-[0.08em] uppercase active:scale-[0.97] transition-colors duration-150 ${viewerAction?.action === "not_for_this" ? "bg-[#9E4A4A] text-white border-[#9E4A4A]" : "border-black/[0.08] text-[#4A4A4A] hover:border-[#9E4A4A]/50 hover:text-[#9E4A4A]"}`}>
-                            {busyAction === "not_for_this" ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
-                            Reject
+                <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 border-t border-black/[0.04] px-3 py-2 shadow-[0_-4px_16px_rgba(0,0,0,0.04)]" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.5rem + env(safe-area-inset-bottom))" }}>
+                    <div className="grid grid-cols-5 gap-1">
+                        {["shortlist", "not_sure", "interested", "not_for_this"].map((key) => {
+                            const a = ACTIONS.find((x) => x.key === key);
+                            if (!a) return null;
+                            const active = viewerAction?.action === a.key;
+                            return (
+                                <button
+                                    key={a.key}
+                                    type="button"
+                                    onClick={() => setAction(talent.id, active ? null : a.key)}
+                                    data-testid={`quick-${a.key === "not_for_this" ? "reject" : a.key === "not_sure" ? "hold" : a.key}-btn`}
+                                    className={`min-h-[50px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[9px] tracking-wide uppercase active:scale-[0.97] transition-all duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.06] text-[#111111] bg-black/[0.01]"}`}
+                                >
+                                    <a.icon className="w-3.5 h-3.5" style={{ color: active ? "#fff" : a.color }} />
+                                    <span>{a.key === "not_for_this" ? "Reject" : a.key === "not_sure" ? "Hold" : a.label}</span>
+                                </button>
+                            );
+                        })}
+                        <button
+                            type="button"
+                            onClick={goNextTalent}
+                            disabled={!hasNextTalent}
+                            className="min-h-[50px] flex flex-col items-center justify-center gap-0.5 rounded-lg border border-black/[0.06] text-[#111111] bg-black/[0.02] text-[9px] tracking-wide uppercase active:scale-[0.97] transition-all duration-150 disabled:opacity-30 disabled:pointer-events-none"
+                            data-testid="quick-next-btn"
+                        >
+                            <ArrowRight className="w-3.5 h-3.5 text-black/60" />
+                            <span>Next</span>
                         </button>
                     </div>
-                    {list.length > 1 && (
-                        <div className="flex items-center justify-between mt-2 text-[10px] font-mono tracking-[0.08em] text-[#8A8A8A]">
-                            <button type="button" onClick={goPrevTalent} disabled={!hasPrevTalent} data-testid="quick-prev-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Previous talent">← swipe right · prev</button>
-                            <span>{currentTalentIdx + 1} of {list.length}</span>
-                            <button type="button" onClick={goNextTalent} disabled={!hasNextTalent} data-testid="quick-next-btn" className="px-2 py-1 disabled:opacity-30 active:scale-[0.95] transition-transform" aria-label="Next talent">next · swipe left →</button>
-                        </div>
-                    )}
                 </div>
             )}
         </div>

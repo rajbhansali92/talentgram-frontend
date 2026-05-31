@@ -50,6 +50,9 @@ import {
     Shield,
     ArrowRight,
     Lock,
+    Phone,
+    MessageSquare,
+    User,
 } from "lucide-react";
 
 const COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"];
@@ -1027,7 +1030,7 @@ export default function ProjectEdit() {
                             ) : (
                                 <>
                                     <div
-                                        className="px-6 py-3 border-b border-black/[0.08] flex items-center gap-2 flex-wrap"
+                                        className="px-4 md:px-6 py-3 border-b border-black/[0.08] flex items-center gap-1.5 flex-wrap"
                                         data-testid="submission-filters"
                                     >
                                         <button
@@ -1181,20 +1184,21 @@ export default function ProjectEdit() {
 
 const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, onDecision, onDelete }) {
     const s = submission;
+    const [expanded, setExpanded] = useState(false);
     const meta = {
-        pending: { icon: Clock, label: "Pending", color: "text-black/60" },
-        approved: { icon: Check, label: "Approved", color: "text-green-600" },
+        pending: { icon: Clock, label: "Pending", color: "text-black/60", bg: "bg-black/5" },
+        approved: { icon: Check, label: "Approved", color: "text-green-600", bg: "bg-green-50 text-green-700 border-green-200" },
         rejected: {
             icon: XCircle,
             label: "Rejected",
             color: "text-red-600",
+            bg: "bg-red-50 text-red-700 border-red-200",
         },
-        hold: { icon: PauseCircle, label: "Hold", color: "text-[#c9a961]" },
+        hold: { icon: PauseCircle, label: "Hold", color: "text-[#c9a961]", bg: "bg-amber-50 text-amber-700 border-amber-200" },
     }[s.decision || "pending"];
     const isUpdated = s.status === "updated";
     const mediaCounts = {
-        intro: (s.media || []).filter((m) => m.category === "intro_video")
-             .length,
+        intro: (s.media || []).filter((m) => m.category === "intro_video" || m.category === "video").length,
         takes: (s.media || []).filter(
             (m) =>
                 m.category === "take" ||
@@ -1203,95 +1207,255 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                 m.category === "take_3",
         ).length,
         images: (s.media || []).filter(
-            (m) => m.category === "image" || m.category === "indian" || m.category === "western",
+            (m) => m.category === "image" || m.category === "indian" || m.category === "western" || m.category === "portfolio",
         ).length,
     };
+
+    const cover =
+        (s.media || []).find((m) => m.id === s.cover_media_id) ||
+        (s.media || []).find(
+            (m) =>
+                m.category === "profile" ||
+                m.category === "headshot" ||
+                m.category === "portfolio" ||
+                m.category === "image" ||
+                m.category === "indian" ||
+                m.category === "western",
+        );
+
+    const heightVal = s.talent_height || s.form_data?.height || s.height || "—";
+    const ageVal = s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—";
+
     return (
-        <div
-            className="px-6 py-4 flex items-center justify-between gap-4 flex-wrap hover:bg-black/[0.015] transition-colors"
-            data-testid={`submission-row-${s.id}`}
-        >
-            <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-display text-lg text-black/90">
-                        {s.talent_name}
-                    </span>
-                    <span
-                        className={`inline-flex items-center gap-1 text-[10px] tracking-widest uppercase ${meta.color}`}
-                    >
-                        <meta.icon className="w-3 h-3" /> {meta.label}
-                    </span>
-                    {isUpdated && (
+        <div data-testid={`submission-row-${s.id}`}>
+            {/* Desktop Row: Hidden on Mobile */}
+            <div
+                className="hidden md:flex px-6 py-4 items-center justify-between gap-4 flex-wrap hover:bg-black/[0.015] transition-colors"
+            >
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-display text-lg text-black/90">
+                            {s.talent_name}
+                        </span>
                         <span
-                            className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-sm"
-                            data-testid={`updated-badge-${s.id}`}
-                            title="Talent updated this submission after the previous decision"
+                            className={`inline-flex items-center gap-1 text-[10px] tracking-widest uppercase ${meta.color}`}
                         >
-                            Updated
+                            <meta.icon className="w-3 h-3" /> {meta.label}
                         </span>
-                    )}
-                    {s.status === "draft" && (
-                        <span className="text-[10px] tracking-widest uppercase text-black/35">
-                            · Draft
-                        </span>
-                    )}
+                        {isUpdated && (
+                            <span
+                                className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-sm"
+                                data-testid={`updated-badge-${s.id}`}
+                                title="Talent updated this submission after the previous decision"
+                            >
+                                Updated
+                            </span>
+                        )}
+                        {s.status === "draft" && (
+                            <span className="text-[10px] tracking-widest uppercase text-black/35">
+                                · Draft
+                            </span>
+                        )}
+                    </div>
+                    <div className="text-xs text-black/45 tg-mono mt-1 truncate flex items-center gap-1.5 flex-wrap">
+                        <span>{s.talent_email}</span>
+                        {s.talent_phone && <span>· {s.talent_phone}</span>}
+                        {s.effective_age !== undefined && s.effective_age !== null && <span>· {s.effective_age} yrs</span>}
+                        {s.submitted_age_override !== undefined && s.submitted_age_override !== null && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-mono font-medium bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wider">
+                                Override
+                            </span>
+                        )}
+                    </div>
+                    <div className="text-[11px] text-black/45 mt-2">
+                        {mediaCounts.intro ? "1 intro video · " : "no intro · "}
+                        {mediaCounts.takes} takes · {mediaCounts.images} images
+                    </div>
                 </div>
-                <div className="text-xs text-black/45 tg-mono mt-1 truncate flex items-center gap-1.5 flex-wrap">
-                    <span>{s.talent_email}</span>
-                    {s.talent_phone && <span>· {s.talent_phone}</span>}
-                    {s.effective_age !== undefined && s.effective_age !== null && <span>· {s.effective_age} yrs</span>}
-                    {s.submitted_age_override !== undefined && s.submitted_age_override !== null && (
-                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-mono font-medium bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wider">
-                            Override
-                        </span>
+                <div className="flex gap-1 flex-wrap">
+                    <button
+                        onClick={onOpen}
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
+                        data-testid={`review-submission-${s.id}`}
+                    >
+                        Review
+                    </button>
+                    <button
+                        onClick={() => onDecision("approved")}
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70 transition-colors"
+                        data-testid={`approve-${s.id}`}
+                        title="Approve"
+                    >
+                        <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                        onClick={() => onDecision("hold")}
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm text-black/70 transition-colors"
+                        data-testid={`hold-${s.id}`}
+                        title="Hold"
+                    >
+                        <PauseCircle className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                        onClick={() => onDecision("rejected")}
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70 transition-colors"
+                        data-testid={`reject-${s.id}`}
+                        title="Reject"
+                    >
+                        <XCircle className="w-3.5 h-3.5" />
+                    </button>
+                    {onDelete && (
+                        <button
+                            onClick={onDelete}
+                            className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/40 text-black/50 rounded-sm transition-colors"
+                            title="Delete"
+                        >
+                            <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                     )}
-                </div>
-                <div className="text-[11px] text-black/45 mt-2">
-                    {mediaCounts.intro ? "1 intro video · " : "no intro · "}
-                    {mediaCounts.takes} takes · {mediaCounts.images} images
                 </div>
             </div>
-            <div className="flex gap-1 flex-wrap">
-                <button
-                    onClick={onOpen}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
-                    data-testid={`review-submission-${s.id}`}
-                >
-                    Review
-                </button>
-                <button
-                    onClick={() => onDecision("approved")}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70 transition-colors"
-                    data-testid={`approve-${s.id}`}
-                    title="Approve"
-                >
-                    <Check className="w-3.5 h-3.5" />
-                </button>
-                <button
-                    onClick={() => onDecision("hold")}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm text-black/70 transition-colors"
-                    data-testid={`hold-${s.id}`}
-                    title="Hold"
-                >
-                    <PauseCircle className="w-3.5 h-3.5" />
-                </button>
-                <button
-                    onClick={() => onDecision("rejected")}
-                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70 transition-colors"
-                    data-testid={`reject-${s.id}`}
-                    title="Reject"
-                >
-                    <XCircle className="w-3.5 h-3.5" />
-                </button>
-                {onDelete && (
+
+            {/* Mobile Premium Card: Hidden on Desktop */}
+            <div className="md:hidden p-4 border-b border-black/[0.06] bg-white space-y-3">
+                {/* Row 1: Profile image, Name, Age, Height, Current stage badge */}
+                <div className="flex items-center gap-3">
+                    <div className="w-12 h-16 rounded-md overflow-hidden bg-black/[0.03] border border-black/[0.06] shrink-0 flex items-center justify-center">
+                        {cover ? (
+                            <img
+                                src={cover.url}
+                                alt={s.talent_name}
+                                className="w-full h-full object-cover"
+                            />
+                        ) : (
+                            <User className="w-5 h-5 text-black/20" />
+                        )}
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="font-display text-sm font-semibold text-black/90 truncate">
+                                {s.talent_name}
+                            </span>
+                            <span
+                                className={`inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${meta.bg ? meta.bg : "border-black/[0.08] text-black/60 bg-black/[0.02]"}`}
+                            >
+                                {meta.label}
+                            </span>
+                        </div>
+                        <div className="text-xs text-black/55 flex items-center gap-2">
+                            <span>Age: <strong className="text-black/80">{ageVal}</strong></span>
+                            <span className="text-black/20">|</span>
+                            <span>Height: <strong className="text-black/80">{heightVal}</strong></span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Row 2: Call, WhatsApp, Review */}
+                <div className="grid grid-cols-3 gap-2">
+                    {s.talent_phone ? (
+                        <a
+                            href={`tel:${s.talent_phone}`}
+                            className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-black/[0.08] rounded-md text-xs font-semibold text-black/70 active:bg-black/5 transition-colors"
+                        >
+                            <Phone className="w-3.5 h-3.5 text-black/50" />
+                            <span>Call</span>
+                        </a>
+                    ) : (
+                        <span className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-black/[0.04] rounded-md text-xs text-black/30 bg-black/[0.01] cursor-not-allowed">
+                            <Phone className="w-3.5 h-3.5 opacity-30" />
+                            <span>Call</span>
+                        </span>
+                    )}
+
+                    {s.talent_phone ? (
+                        <a
+                            href={`https://wa.me/${s.talent_phone.replace(/\D/g, "")}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-[#25D366]/35 rounded-md text-xs font-semibold text-[#25D366] bg-[#25D366]/5 active:bg-[#25D366]/10 transition-colors"
+                        >
+                            <MessageSquare className="w-3.5 h-3.5 text-[#25D366]" />
+                            <span>WhatsApp</span>
+                        </a>
+                    ) : (
+                        <span className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-black/[0.04] rounded-md text-xs text-black/30 bg-black/[0.01] cursor-not-allowed">
+                            <MessageSquare className="w-3.5 h-3.5 opacity-30" />
+                            <span>WhatsApp</span>
+                        </span>
+                    )}
+
                     <button
-                        onClick={onDelete}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/40 text-black/50 rounded-sm transition-colors"
-                        title="Delete"
+                        onClick={onOpen}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold active:scale-[0.98] transition-transform"
+                        data-testid={`review-submission-mobile-${s.id}`}
                     >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <FileText className="w-3.5 h-3.5 text-white/80" />
+                        <span>Review</span>
                     </button>
-                )}
+                </div>
+
+                {/* Row 3: Expand Details */}
+                <div className="border-t border-black/[0.04] pt-2">
+                    <button
+                        type="button"
+                        onClick={() => setExpanded(!expanded)}
+                        className="w-full flex items-center justify-between py-1.5 text-xs text-black/45 hover:text-black transition-colors"
+                    >
+                        <span>{expanded ? "Hide details" : "Expand details"}</span>
+                        <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+                    </button>
+
+                    {expanded && (
+                        <div className="mt-3 space-y-3 pb-2 text-xs text-black/70 animate-fade-in">
+                            <div className="space-y-1">
+                                <p className="text-[10px] text-black/40 uppercase tracking-wider font-mono">Contact Details</p>
+                                <p className="font-mono text-black/80">{s.talent_email}</p>
+                                {s.talent_phone && <p className="text-black/80">{s.talent_phone}</p>}
+                            </div>
+
+                            <div className="space-y-1">
+                                <p className="text-[10px] text-black/40 uppercase tracking-wider font-mono">Audition Summary</p>
+                                <p className="text-black/80">
+                                    {mediaCounts.intro ? "1 intro video" : "no intro video"} · {mediaCounts.takes} takes · {mediaCounts.images} images
+                                </p>
+                            </div>
+
+                            {/* Mobile Decision Buttons inside collapsed drawer */}
+                            <div className="pt-2 border-t border-black/[0.04] flex items-center gap-2 flex-wrap">
+                                <button
+                                    onClick={() => onDecision("approved")}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-2 border rounded-md text-xs font-semibold transition-colors ${s.decision === "approved" ? "bg-green-600 text-white border-green-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                >
+                                    <Check className="w-3.5 h-3.5" />
+                                    <span>Approve</span>
+                                </button>
+                                <button
+                                    onClick={() => onDecision("hold")}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-2 border rounded-md text-xs font-semibold transition-colors ${s.decision === "hold" ? "bg-[#c9a961] text-white border-[#c9a961]" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                >
+                                    <PauseCircle className="w-3.5 h-3.5" />
+                                    <span>Hold</span>
+                                </button>
+                                <button
+                                    onClick={() => onDecision("rejected")}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-2 border rounded-md text-xs font-semibold transition-colors ${s.decision === "rejected" ? "bg-red-600 text-white border-red-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                >
+                                    <XCircle className="w-3.5 h-3.5" />
+                                    <span>Reject</span>
+                                </button>
+                                {onDelete && (
+                                    <button
+                                        onClick={onDelete}
+                                        className="p-2 border border-red-200 text-red-600 rounded-md active:bg-red-50"
+                                        title="Delete Submission"
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
             </div>
         </div>
     );

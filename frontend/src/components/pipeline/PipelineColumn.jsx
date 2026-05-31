@@ -274,7 +274,7 @@ const PipelineColumn = memo(function PipelineColumn({
             />
 
             {/* Sticky header with intelligence metrics (with premium soft header tint) */}
-            <div className={`sticky top-0 z-20 px-4 py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[68px] flex flex-col justify-center`}>
+            <div className={`sticky top-0 z-20 px-3 md:px-4 py-2 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[56px] md:h-[68px] flex flex-col justify-center`}>
                 {/* Primary header row */}
                 <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="min-w-0 flex items-center gap-2">

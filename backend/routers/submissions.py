@@ -139,6 +139,30 @@ async def prefill_for_email(email: str, request: Request):
                 }
                 break
 
+    if not latest_intro:
+        latest_app = await db.applications.find_one(
+            {
+                "talent_email": email,
+                "media.category": {"$in": ["intro_video", "video"]}
+            },
+            sort=[("created_at", -1)]
+        )
+        if latest_app:
+            for m in (latest_app.get("media") or []):
+                if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                    latest_intro = {
+                        "id": m.get("id"),
+                        "category": "intro_video",
+                        "url": m.get("url"),
+                        "public_id": m.get("public_id"),
+                        "resource_type": m.get("resource_type") or "video",
+                        "content_type": m.get("content_type") or "video/mp4",
+                        "original_filename": m.get("original_filename"),
+                        "size": m.get("size") or 0,
+                        "created_at": m.get("created_at") or _now(),
+                    }
+                    break
+
     return {
         "first_name": first,
         "last_name": last,
@@ -246,10 +270,11 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
                 },
                 sort=[("submitted_at", -1), ("created_at", -1)]
             )
+            latest_intro = None
             if latest_sub:
                 for m in (latest_sub.get("media") or []):
                     if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                        prefill_media.append({
+                        latest_intro = {
                             "id": m.get("id"),
                             "category": "intro_video",
                             "url": m.get("url"),
@@ -259,8 +284,35 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
                             "original_filename": m.get("original_filename"),
                             "size": m.get("size") or 0,
                             "created_at": m.get("created_at") or _now(),
-                        })
+                        }
                         break
+            
+            if not latest_intro:
+                latest_app = await db.applications.find_one(
+                    {
+                        "talent_email": email,
+                        "media.category": {"$in": ["intro_video", "video"]}
+                    },
+                    sort=[("created_at", -1)]
+                )
+                if latest_app:
+                    for m in (latest_app.get("media") or []):
+                        if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                            latest_intro = {
+                                "id": m.get("id"),
+                                "category": "intro_video",
+                                "url": m.get("url"),
+                                "public_id": m.get("public_id"),
+                                "resource_type": m.get("resource_type") or "video",
+                                "content_type": m.get("content_type") or "video/mp4",
+                                "original_filename": m.get("original_filename"),
+                                "size": m.get("size") or 0,
+                                "created_at": m.get("created_at") or _now(),
+                            }
+                            break
+            
+            if latest_intro:
+                prefill_media.append(latest_intro)
 
     submitted_age_override_val = None
     override_active = fd.get("overrideAge") or fd.get("override_age")

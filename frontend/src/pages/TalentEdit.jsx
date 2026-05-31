@@ -255,11 +255,15 @@ export default function TalentEdit() {
             });
             
             const results = await Promise.all(uploadPromises);
+            const latestTalent = results[results.length - 1];
             
-            const newMedia = results.flatMap(result => result.media || []);
-            updateTalent({ 
-                media: [...(talent.media || []), ...newMedia]
-            });
+            if (latestTalent) {
+                updateTalent({ 
+                    media: latestTalent.media || [],
+                    cover_media_id: latestTalent.cover_media_id ?? talent.cover_media_id,
+                    cover_url: latestTalent.cover_url ?? talent.cover_url,
+                });
+            }
             
             toast.success(`${validFiles.length} upload(s) added`);
         } catch (e) {

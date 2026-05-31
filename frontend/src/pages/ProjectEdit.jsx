@@ -1757,6 +1757,101 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         </div>
                     </div>
 
+                    {/* Persistent Client Sync Status & Decision Header */}
+                    <div className="sticky top-[10px] z-40 mb-10 flex flex-col gap-3 bg-white/95 backdrop-blur-md border border-black/[0.08] rounded-xl px-4 md:px-6 py-4 shadow-lg transition-all duration-300 mobile-sticky-bar" data-testid="client-sync-toolbar">
+                        {/* Status Note input - visible in Admin mode only */}
+                        {!isPreviewMode && (
+                            <div className="w-full">
+                                <input
+                                    type="text"
+                                    value={decisionNote}
+                                    onChange={(e) => setDecisionNote(e.target.value)}
+                                    placeholder="Add a decision note or internal recruiter comment (optional)..."
+                                    className="w-full text-xs px-3.5 py-2 border border-black/[0.08] focus:border-black/45 rounded-lg outline-none bg-black/[0.02] focus:bg-white transition-all text-black/85 shadow-inner"
+                                />
+                            </div>
+                        )}
+
+                        <div className="flex items-center justify-between gap-4 flex-wrap w-full">
+                            <div className="flex items-center gap-3">
+                                {hasUnsavedChanges ? (
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                                        <span className="text-xs text-amber-700 font-semibold tg-mono uppercase tracking-wider">Unsaved Curations</span>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
+                                        <span className="text-xs text-green-700 font-semibold tg-mono uppercase tracking-wider">Synced to Client Link</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-2 flex-wrap items-center justify-end">
+                                {/* Save Button */}
+                                {hasUnsavedChanges && !isPreviewMode && (
+                                    <button
+                                        onClick={save}
+                                        disabled={saving}
+                                        data-testid="sticky-save-btn"
+                                        className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold shadow-sm transition-all"
+                                    >
+                                        {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                        Save Curations
+                                    </button>
+                                )}
+
+                                {isPreviewMode && (
+                                    <button
+                                        onClick={() => setIsPreviewMode(false)}
+                                        className="inline-flex items-center gap-1.5 px-4 py-2 border border-black/10 hover:border-black/35 rounded-md text-xs text-black/75 hover:text-black font-semibold transition-all bg-white shadow-sm"
+                                    >
+                                        Back to Editor
+                                    </button>
+                                )}
+
+                                {!isPreviewMode && (
+                                    <>
+                                        <span className="w-[1px] h-6 bg-black/10 shrink-0 mx-1 hidden md:inline" />
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("approved", decisionNote);
+                                                onClose();
+                                            }}
+                                            data-testid="review-approve-btn"
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-md text-xs font-bold transition-all shadow-sm"
+                                        >
+                                            <Check className="w-3.5 h-3.5" /> Approve
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("hold", decisionNote);
+                                                onClose();
+                                            }}
+                                            data-testid="review-hold-btn"
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-md text-xs font-bold transition-all bg-white shadow-sm"
+                                        >
+                                            <PauseCircle className="w-3.5 h-3.5" /> Hold
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                                onDecision("rejected", decisionNote);
+                                                onClose();
+                                            }}
+                                            data-testid="review-reject-btn"
+                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
+                                        >
+                                            <XCircle className="w-3.5 h-3.5" /> Reject
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
                     {!isPreviewMode && (
                         <div className="flex flex-wrap items-center gap-2 mb-8">
                             <button
@@ -2464,132 +2559,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                         </section>
                     )}
 
-                    {/* Premium Sticky review toolbar */}
-                    <div className="sticky bottom-4 flex flex-col gap-3 bg-white/95 backdrop-blur-md border border-black/[0.08] rounded-xl px-4 md:px-6 py-4 shadow-lg z-40 transition-all duration-300 mobile-sticky-bar">
-                        
-                        {/* Status Note input - visible in Admin mode only */}
-                        {!isPreviewMode && (
-                            <div className="w-full">
-                                <input
-                                    type="text"
-                                    value={decisionNote}
-                                    onChange={(e) => setDecisionNote(e.target.value)}
-                                    placeholder="Add a decision note or internal recruiter comment (optional)..."
-                                    className="w-full text-xs px-3.5 py-2 border border-black/[0.08] focus:border-black/45 rounded-lg outline-none bg-black/[0.02] focus:bg-white transition-all text-black/85 shadow-inner"
-                                />
-                            </div>
-                        )}
 
-                        <div className="flex items-center justify-between gap-4 flex-wrap w-full">
-                            <div className="flex items-center gap-3">
-                                {hasUnsavedChanges ? (
-                                    <div className="flex items-center gap-2">
-                                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
-                                        <span className="text-xs text-amber-700 font-semibold tg-mono uppercase tracking-wider">Unsaved Curations</span>
-                                    </div>
-                                ) : (
-                                    <div className="flex items-center gap-2">
-                                        <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
-                                        <span className="text-xs text-green-700 font-semibold tg-mono uppercase tracking-wider">Synced to Client Link</span>
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className="flex gap-2 flex-wrap items-center justify-end">
-                                {/* Save Button */}
-                                {hasUnsavedChanges && !isPreviewMode && (
-                                    <button
-                                        onClick={save}
-                                        disabled={saving}
-                                        data-testid="sticky-save-btn"
-                                        className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold shadow-sm transition-all"
-                                    >
-                                        {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                                        Save Curations
-                                    </button>
-                                )}
-
-                                {isPreviewMode && (
-                                    <button
-                                        onClick={() => setIsPreviewMode(false)}
-                                        className="inline-flex items-center gap-1.5 px-4 py-2 border border-black/10 hover:border-black/35 rounded-md text-xs text-black/75 hover:text-black font-semibold transition-all bg-white shadow-sm"
-                                    >
-                                        Back to Editor
-                                    </button>
-                                )}
-
-                                {!isPreviewMode && (
-                                    <>
-                                        <span className="w-[1px] h-6 bg-black/10 shrink-0 mx-1 hidden md:inline" />
-
-                                        <button
-                                            onClick={() => {
-                                                onDecision("approved", decisionNote);
-                                                onClose();
-                                            }}
-                                            data-testid="review-approve-btn"
-                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-md text-xs font-bold transition-all shadow-sm"
-                                        >
-                                            <Check className="w-3.5 h-3.5" /> Approve
-                                        </button>
-
-                                        <button
-                                            onClick={() => {
-                                                onDecision("shortlisted", decisionNote);
-                                                onClose();
-                                            }}
-                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-bold transition-all shadow-sm"
-                                        >
-                                            <Star className="w-3.5 h-3.5 fill-white" /> Shortlist
-                                        </button>
-
-                                        <button
-                                            onClick={() => {
-                                                onDecision("ask_to_test", decisionNote);
-                                                onClose();
-                                            }}
-                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-indigo-600/40 text-indigo-600 hover:bg-indigo-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
-                                        >
-                                            <HelpCircle className="w-3.5 h-3.5" /> Ask To Test
-                                        </button>
-
-                                        <button
-                                            onClick={() => {
-                                                onDecision("hold", decisionNote);
-                                                onClose();
-                                            }}
-                                            data-testid="review-hold-btn"
-                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-[#c9a961]/40 text-[#c9a961] hover:bg-[#c9a961]/10 rounded-md text-xs font-bold transition-all bg-white shadow-sm"
-                                        >
-                                            <PauseCircle className="w-3.5 h-3.5" /> Hold
-                                        </button>
-
-                                        <button
-                                            onClick={() => {
-                                                onDecision("does_not_work_for_this", decisionNote);
-                                                onClose();
-                                            }}
-                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-slate-400/40 text-slate-600 hover:bg-slate-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
-                                            title="Valuable talent, but not suitable for this specific project role."
-                                        >
-                                            <FolderMinus className="w-3.5 h-3.5" /> Not For Project
-                                        </button>
-
-                                        <button
-                                            onClick={() => {
-                                                onDecision("rejected", decisionNote);
-                                                onClose();
-                                            }}
-                                            data-testid="review-reject-btn"
-                                            className="inline-flex items-center gap-1.5 px-3 py-2.5 border border-red-600/60 text-red-600 hover:bg-red-50 rounded-md text-xs font-semibold transition-all bg-white shadow-sm"
-                                        >
-                                            <XCircle className="w-3.5 h-3.5" /> Reject
-                                        </button>
-                                    </>
-                                )}
-                            </div>
-                        </div>
-                    </div>
 
                     {/* Curation History Sidebar Drawer */}
                     {showHistory && (
@@ -2651,18 +2621,12 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                 opacity: 100 !important;
                             }
                             .mobile-sticky-bar {
-                                position: fixed !important;
-                                bottom: 0 !important;
-                                left: 0 !important;
-                                right: 0 !important;
-                                border-radius: 0 !important;
-                                margin: 0 !important;
-                                border-left: 0 !important;
-                                border-right: 0 !important;
-                                border-bottom: 0 !important;
-                                z-index: 100 !important;
+                                position: sticky !important;
+                                top: 10px !important;
+                                z-index: 40 !important;
                                 background-color: rgba(255, 255, 255, 0.98) !important;
-                                box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12) !important;
+                                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08) !important;
+                                border-radius: 0.75rem !important;
                             }
                         }
                     `}</style>

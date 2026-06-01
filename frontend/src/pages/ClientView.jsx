@@ -252,6 +252,16 @@ export default function ClientView() {
     const [email, setEmail] = useState("");
     const [loading, setLoading] = useState(false);
 
+    const [savedReviewer, setSavedReviewer] = useState(() => {
+        try {
+            const saved = localStorage.getItem(`client_view_${slug}`);
+            return saved ? JSON.parse(saved) : null;
+        } catch (e) {
+            return null;
+        }
+    });
+    const [showWelcomeBack, setShowWelcomeBack] = useState(!!savedReviewer);
+
     const [data, setData] = useState(null);
     const [activeTalent, setActiveTalent] = useState(null);
     const [commentDrafts, setCommentDrafts] = useState({});
@@ -428,8 +438,10 @@ export default function ClientView() {
         };
     }, [data?.link?.brand_name, data?.link?.title]);
 
-    const identify = async (e) => {
-        e.preventDefault();
+    const identify = async (e, optName, optEmail) => {
+        if (e) e.preventDefault();
+        const activeName = optName || name;
+        const activeEmail = optEmail || email;
         // Synchronous in-flight guard: prevents double-submission on rapid taps
         // (state-based `loading` flag is async and doesn't block a second call immediately).
         if (identifyInFlightRef.current) return;
@@ -439,15 +451,32 @@ export default function ClientView() {
             const response = await axios.post(
                 `${API}/public/links/${slug}/identify`,
                 {
-                    name: name,
-                    email: email,
+                    name: activeName,
+                    email: activeEmail,
                 },
             );
             if (response.data.token) {
                 saveViewerToken(slug, response.data.token);
+                
+                // Decode token to extract viewer_id (reviewId)
+                let reviewId = "";
+                try {
+                    const payloadPart = response.data.token.split('.')[1];
+                    const decoded = JSON.parse(atob(payloadPart.replace(/-/g, '+').replace(/_/g, '/')));
+                    reviewId = decoded.viewer_id || "";
+                } catch (err) {
+                    console.error("Token decoding error:", err);
+                }
+
+                localStorage.setItem(`client_view_${slug}`, JSON.stringify({
+                    name: activeName,
+                    email: activeEmail,
+                    reviewId: reviewId
+                }));
+
                 setIdentified(true);
                 toast.success(
-                    `Welcome, ${(name || "Guest").split(" ")[0]}`
+                    `Welcome, ${(activeName || "Guest").split(" ")[0]}`
                 );
             } else {
                 throw new Error("No token received");
@@ -692,55 +721,106 @@ export default function ClientView() {
                     </div>
 
                     <div className="w-full border border-black/[0.06] rounded-2xl p-8 md:p-10 bg-white">
-                        <form
-                            onSubmit={identify}
-                            data-testid="identity-gate-form"
-                        >
-                            <p className="eyebrow mb-2 tracking-[0.12em] text-[#5C5C5C]">Curated Portfolio</p>
-                            <h1 className="font-display text-2xl tracking-wide mb-4 text-[#111111]">
-                                A private review awaits you.
-                            </h1>
-                            <p className="text-[#8A8A8A] text-sm mb-8 leading-relaxed">
-                                Please share your name and email to continue. This
-                                helps us follow up on your selections.
-                            </p>
-                            <label className="block mb-5">
-                                <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
-                                    Your Name
-                                </span>
-                                <input
-                                    value={name}
-                                    onChange={(e) => setName(e.target.value)}
-                                    required
-                                    data-testid="identity-name-input"
-                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-base text-[#111111] placeholder:text-black/25 transition-colors duration-150"
-                                />
-                            </label>
-                            <label className="block mb-8">
-                                <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
-                                    Email
-                                </span>
-                                <input
-                                    type="email"
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    required
-                                    data-testid="identity-email-input"
-                                    className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-base text-[#111111] placeholder:text-black/25 transition-colors duration-150"
-                                />
-                            </label>
-                            <button
-                                type="submit"
-                                disabled={loading}
-                                data-testid="identity-submit-btn"
-                                className="w-full bg-[#1A1A1A] text-white py-3.5 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150 inline-flex items-center justify-center gap-2 tracking-[0.04em]"
+                        {showWelcomeBack && savedReviewer ? (
+                            <div className="text-center">
+                                <p className="eyebrow mb-2 tracking-[0.12em] text-[#5C5C5C] uppercase text-[11px]">Welcome Back</p>
+                                <h1 className="font-display text-2xl tracking-wide mb-6 text-[#111111]">
+                                    Is this you?
+                                </h1>
+                                
+                                <div className="mb-8 p-4 bg-black/[0.02] rounded-xl text-left border border-black/[0.04]">
+                                    <div className="mb-3">
+                                        <span className="text-[10px] text-[#8A8A8A] tracking-[0.08em] uppercase block">
+                                            Name
+                                        </span>
+                                        <span className="text-base font-medium text-[#111111]">{savedReviewer.name}</span>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] text-[#8A8A8A] tracking-[0.08em] uppercase block">
+                                            Email
+                                        </span>
+                                        <span className="text-base font-medium text-[#111111]">{savedReviewer.email}</span>
+                                    </div>
+                                </div>
+                                
+                                <button
+                                    onClick={() => identify(null, savedReviewer.name, savedReviewer.email)}
+                                    disabled={loading}
+                                    data-testid="identity-continue-btn"
+                                    className="w-full bg-[#1A1A1A] text-white py-3.5 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150 inline-flex items-center justify-center gap-2 tracking-[0.04em] mb-4"
+                                >
+                                    {loading && (
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                    )}
+                                    Continue Review
+                                </button>
+                                
+                                <button
+                                    onClick={() => {
+                                        localStorage.removeItem(`client_view_${slug}`);
+                                        setSavedReviewer(null);
+                                        setShowWelcomeBack(false);
+                                        setName("");
+                                        setEmail("");
+                                    }}
+                                    disabled={loading}
+                                    data-testid="identity-not-you-btn"
+                                    className="w-full bg-transparent text-[#8A8A8A] hover:text-[#111111] py-2 text-xs font-medium transition-colors duration-150 tracking-[0.04em]"
+                                >
+                                    Not You?
+                                </button>
+                            </div>
+                        ) : (
+                            <form
+                                onSubmit={identify}
+                                data-testid="identity-gate-form"
                             >
-                                {loading && (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                )}
-                                Enter Review
-                            </button>
-                        </form>
+                                <p className="eyebrow mb-2 tracking-[0.12em] text-[#5C5C5C]">Curated Portfolio</p>
+                                <h1 className="font-display text-2xl tracking-wide mb-4 text-[#111111]">
+                                    A private review awaits you.
+                                </h1>
+                                <p className="text-[#8A8A8A] text-sm mb-8 leading-relaxed">
+                                    Please share your name and email to continue. This
+                                    helps us follow up on your selections.
+                                </p>
+                                <label className="block mb-5">
+                                    <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
+                                        Your Name
+                                    </span>
+                                    <input
+                                        value={name}
+                                        onChange={(e) => setName(e.target.value)}
+                                        required
+                                        data-testid="identity-name-input"
+                                        className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-base text-[#111111] placeholder:text-black/25 transition-colors duration-150"
+                                    />
+                                </label>
+                                <label className="block mb-8">
+                                    <span className="text-[11px] text-[#8A8A8A] tracking-[0.08em] uppercase">
+                                        Email
+                                    </span>
+                                    <input
+                                        type="email"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        required
+                                        data-testid="identity-email-input"
+                                        className="mt-2 w-full bg-transparent border-b border-black/[0.06] focus:border-black/25 outline-none py-2 text-base text-[#111111] placeholder:text-black/25 transition-colors duration-150"
+                                    />
+                                </label>
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    data-testid="identity-submit-btn"
+                                    className="w-full bg-[#1A1A1A] text-white py-3.5 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150 inline-flex items-center justify-center gap-2 tracking-[0.04em]"
+                                >
+                                    {loading && (
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                    )}
+                                    Enter Review
+                                </button>
+                            </form>
+                        )}
                     </div>
                 </div>
             </div>

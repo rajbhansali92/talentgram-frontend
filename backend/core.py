@@ -1625,13 +1625,21 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
 
     No-op when:
       - submission has no `talent_email` (anonymous draft)
-      - media category is not in SYNC_TO_GLOBAL_CATEGORIES
+      - media category is not in whitelisted categories
       - the same source-id has already been mirrored (idempotent)
       - no talent record exists for that email yet (will sync on next upload)
     """
+    cat_mapping = {
+        "image": "portfolio",
+        "indian": "indian",
+        "western": "western",
+        "video": "video",
+        "intro_video": "video"
+    }
     cat = media.get("category")
-    if cat not in SYNC_TO_GLOBAL_CATEGORIES:
+    if cat not in cat_mapping:
         return
+    mapped_cat = cat_mapping[cat]
     email = (submission.get("talent_email") or "").lower().strip()
     if not email:
         return
@@ -1657,7 +1665,7 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     # generated to keep talent.media ids unique across mirror sources.
     mirror = {
         "id": str(uuid.uuid4()),
-        "category": cat,
+        "category": mapped_cat,
         "url": url,
         "public_id": pub_id,
         "resource_type": media.get("resource_type"),

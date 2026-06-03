@@ -172,12 +172,30 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
                         }
 
                         if (talent.budget?.status === "accept") {
+                            const offeredBudget = (() => {
+                                const tLines = (tProjBudget?.talent_budget || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
+                                if (tLines.length > 0) {
+                                    const tBudgetLine = tLines.find(l => (l.label || "").toLowerCase().includes("budget")) || tLines[0];
+                                    if (tBudgetLine && tBudgetLine.value) {
+                                        return tBudgetLine.value;
+                                    }
+                                }
+                                if (tProjBudget?.budget_per_day) {
+                                    const bpd = tProjBudget.budget_per_day.trim();
+                                    if (bpd.toLowerCase().includes("/ day") || bpd.toLowerCase().includes("/day")) {
+                                        return bpd;
+                                    }
+                                    return `${bpd} / day`;
+                                }
+                                return originalBudgetValue;
+                            })();
+
                             return (
                                 <div className="space-y-1.5 text-sm text-[#111111]" data-testid="budget-agreed">
-                                    {originalBudgetValue && (
-                                        <p className="flex justify-between gap-4">
-                                            <span className="text-[#4A4A4A]">Original Budget</span>
-                                            <span className="text-[#5C5C5C] font-mono">{originalBudgetValue}</span>
+                                    {offeredBudget && (
+                                        <p className="flex justify-between gap-4 pb-1.5">
+                                            <span className="text-[#4A4A4A] font-medium">Agreed Budget</span>
+                                            <span className="font-semibold text-[#5A7D5A] font-mono">{offeredBudget}</span>
                                         </p>
                                     )}
                                     <p className="flex justify-between gap-4 border-t border-black/[0.03] pt-1.5">

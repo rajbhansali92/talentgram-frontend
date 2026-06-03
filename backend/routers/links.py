@@ -635,7 +635,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     if seen_pids:
         proj_docs = await db.projects.find(
             {"id": {"$in": seen_pids}},
-            {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1},
+            {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1, "talent_budget": 1, "budget_per_day": 1},
         ).to_list(500)
         project_meta_by_id = {p["id"]: p for p in proj_docs}
     if visibility.get("budget"):
@@ -652,11 +652,13 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
                 if not proj:
                     continue
                 lines = proj.get("client_budget") or []
-                if lines:
+                if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
                     project_budget.append({
                         "project_id": pid,
                         "brand_name": proj.get("brand_name"),
                         "lines": lines,
+                        "talent_budget": proj.get("talent_budget") or [],
+                        "budget_per_day": proj.get("budget_per_day"),
                     })
     if visibility.get("availability", True):
         for pid in seen_pids:

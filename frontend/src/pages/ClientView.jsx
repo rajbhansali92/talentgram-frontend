@@ -1353,7 +1353,7 @@ function TalentDetail({
             a.click();
             a.remove();
         }
-    }, [logDownload, talent.id]);
+    }, [logDownload, talent.id, talent.name]);
 
     return (
         <div

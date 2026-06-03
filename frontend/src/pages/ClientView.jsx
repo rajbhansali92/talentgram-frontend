@@ -74,9 +74,13 @@ const ACTIONS = [
 
 const TABS = [
     { key: "pending_action", label: "Pending Action", icon: Clock },
-    { key: "new", label: "New", icon: Sparkles },
     { key: "viewed", label: "Viewed", icon: Eye },
-    { key: "shortlisted", label: "Shortlisted", icon: Heart },
+    { key: "ask_for_test", label: "Ask for Test", icon: ClipboardCheck },
+    { key: "interested", label: "Audition Approved", icon: ThumbsUp },
+    { key: "not_for_this", label: "Does Not Work For This Project", icon: XCircle },
+    { key: "shortlist", label: "Shortlist", icon: Star },
+    { key: "lock", label: "Lock", icon: Lock },
+    { key: "not_sure", label: "Unsure", icon: HelpCircle },
 ];
 
 // Helper to parse FastAPI/Pydantic validation errors safely
@@ -897,10 +901,14 @@ export default function ClientView() {
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
     };
     const buckets = {
-        pending_action: talents.filter((t) => !reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
-        new: talents.filter((t) => isNew(t.id)),
-        viewed: talents.filter((t) => reviewedIds.has(t.id)),
-        shortlisted: talents.filter((t) => isShortlisted(t.id)),
+        pending_action: talents.filter((t) => !viewerActions[t.id]?.action),
+        viewed: talents.filter((t) => reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
+        ask_for_test: talents.filter((t) => viewerActions[t.id]?.action === "ask_for_test"),
+        interested: talents.filter((t) => viewerActions[t.id]?.action === "interested"),
+        not_for_this: talents.filter((t) => viewerActions[t.id]?.action === "not_for_this"),
+        shortlist: talents.filter((t) => viewerActions[t.id]?.action === "shortlist"),
+        lock: talents.filter((t) => viewerActions[t.id]?.action === "lock"),
+        not_sure: talents.filter((t) => viewerActions[t.id]?.action === "not_sure"),
     };
     const filteredTalents = buckets[activeTab] || buckets.pending_action || talents;
     const reviewedCount = talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action).length;
@@ -978,18 +986,7 @@ export default function ClientView() {
                         </div>
                     );
                 })()}
-                <div className="hidden md:flex mb-10 items-center justify-between flex-wrap gap-4">
-                    <div>
-                        <p className="eyebrow tracking-[0.12em] mb-2 text-[#8A8A8A]">{talents.length} Talents</p>
-                        <h2 className="font-display text-3xl md:text-4xl tracking-wide text-[#111111]">
-                            Pick your winners.
-                        </h2>
-                    </div>
-                    <p className="text-xs text-[#8A8A8A] max-w-sm leading-relaxed">
-                        Tap any card to view the full portfolio. Actions and
-                        comments are saved instantly.
-                    </p>
-                </div>
+
 
                 <div
                     className="mb-8 hidden md:flex items-center gap-5"
@@ -1010,37 +1007,42 @@ export default function ClientView() {
                     </div>
                 </div>
 
-                <div
-                    className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 flex items-center gap-3 overflow-x-auto md:flex-wrap whitespace-nowrap border-b border-black/[0.04] pb-4"
-                    style={{ scrollbarWidth: "none" }}
-                    data-testid="client-view-tabs"
-                >
-                    {TABS.map((tab) => {
-                        const count = buckets[tab.key].length;
-                        const active = activeTab === tab.key;
-                        return (
-                            <button
-                                key={tab.key}
-                                type="button"
-                                onClick={() => setActiveTab(tab.key)}
-                                data-testid={`client-tab-${tab.key}`}
-                                className={`inline-flex items-center gap-2 px-4 md:px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
-                                    active
-                                        ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
-                                        : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
-                                }`}
-                            >
-                                <tab.icon className="w-3.5 h-3.5" />
-                                {tab.label}
-                                <span
-                                    className={`font-mono text-[10px] ${active ? "text-white/60" : "text-[#8A8A8A]"}`}
-                                >
-                                    {count}
-                                </span>
-                            </button>
-                        );
-                    })}
-                </div>
+                {(() => {
+                    const visibleTabs = TABS.filter(t => t.key !== "ask_for_test" || link.requires_test === true);
+                    return (
+                        <div
+                            className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 flex items-center gap-3 overflow-x-auto md:flex-wrap whitespace-nowrap border-b border-black/[0.04] pb-4"
+                            style={{ scrollbarWidth: "none" }}
+                            data-testid="client-view-tabs"
+                        >
+                            {visibleTabs.map((tab) => {
+                                const count = buckets[tab.key]?.length || 0;
+                                const active = activeTab === tab.key;
+                                return (
+                                    <button
+                                        key={tab.key}
+                                        type="button"
+                                        onClick={() => setActiveTab(tab.key)}
+                                        data-testid={`client-tab-${tab.key}`}
+                                        className={`inline-flex items-center gap-2 px-4 md:px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
+                                            active
+                                                ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
+                                                : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
+                                        }`}
+                                    >
+                                        <tab.icon className="w-3.5 h-3.5" />
+                                        {tab.label}
+                                        <span
+                                            className={`font-mono text-[10px] ${active ? "text-white/60" : "text-[#8A8A8A]"}`}
+                                        >
+                                            {count}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    );
+                })()}
 
                 {projectBudget.length > 0 && (
                     <section
@@ -1089,12 +1091,14 @@ export default function ClientView() {
                             className="col-span-full text-center py-20 text-[#8A8A8A] text-sm"
                             data-testid="client-tab-empty"
                         >
-                            {activeTab === "new" && "Nothing new since your last visit."}
-                            {activeTab === "shortlisted" &&
-                                "No shortlists yet — open a card and click Shortlist to add one."}
-                            {activeTab === "viewed" && "You haven't reviewed any talents yet."}
-                            {activeTab === "pending_action" &&
-                                "You've reviewed everyone — nice work."}
+                            {activeTab === "pending_action" && "You've reviewed everyone — nice work."}
+                            {activeTab === "viewed" && "No viewed talents."}
+                            {activeTab === "ask_for_test" && "No test requests."}
+                            {activeTab === "interested" && "No approved auditions."}
+                            {activeTab === "not_for_this" && "No rejected talents."}
+                            {activeTab === "shortlist" && "No shortlists."}
+                            {activeTab === "lock" && "No locked talents."}
+                            {activeTab === "not_sure" && "No unsure talents."}
                         </div>
                     ) : (
                         filteredTalents.map((t) => (

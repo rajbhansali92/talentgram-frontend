@@ -1316,13 +1316,43 @@ function TalentDetail({
     const download = useCallback(async (m) => {
         await logDownload(talent.id, m.id);
         const url = IMAGE_URL(m);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = m.original_filename || "file";
-        a.target = "_blank";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        const filename = m.original_filename || `${privatizeName(talent.name)}_${m.category || "media"}`;
+        
+        try {
+            // First try fetching the file directly to download via blob (respecting custom filename)
+            const response = await fetch(url, { mode: "cors" });
+            if (!response.ok) throw new Error("Network response was not ok");
+            const blob = await response.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            
+            const a = document.createElement("a");
+            a.href = blobUrl;
+            const ext = url.split(".").pop().split("?")[0] || "";
+            a.download = filename.endsWith(`.${ext}`) ? filename : `${filename}.${ext}`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            
+            // Clean up the object URL
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+        } catch (err) {
+            console.warn("CORS fetch failed, falling back to Cloudinary fl_attachment download:", err);
+            // Fallback: Rewrite Cloudinary URL to force attachment headers
+            let downloadUrl = url;
+            if (url.includes("/upload/")) {
+                const ext = url.split(".").pop().split("?")[0] || "";
+                const cleanName = filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
+                const flag = cleanName ? `fl_attachment:${cleanName}` : "fl_attachment";
+                downloadUrl = url.replace("/upload/", `/upload/${flag}/`);
+            }
+            
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.target = "_blank";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
     }, [logDownload, talent.id]);
 
     return (

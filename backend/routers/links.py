@@ -1058,6 +1058,135 @@ async def get_share_preview(share_id: str):
     }
 
 
+def _get_video_download_url(url: str) -> str:
+    if not url:
+        return url
+    clean_url = url
+    if "/upload/" in clean_url:
+        parts = clean_url.split("/upload/")
+        before = parts[0]
+        after = parts[1]
+        segments = after.split("/")
+        transformations = segments[0]
+        import re
+        if transformations and not re.match(r"^v\d+$", transformations):
+            trans_list = transformations.split(",")
+            new_trans = [t for t in trans_list if not t.startswith("f_") and not t.startswith("sp_")]
+            new_trans.append("f_mp4")
+            segments[0] = ",".join(new_trans)
+            after = "/".join(segments)
+        else:
+            after = f"f_mp4/{after}"
+        clean_url = f"{before}/upload/{after}"
+    
+    main_path = clean_url.split("?")[0].split("#")[0]
+    query = clean_url[len(main_path):]
+    if "." in main_path.split("/")[-1]:
+        base_path, ext = main_path.rsplit(".", 1)
+        if ext.lower() != "mp4":
+            clean_url = f"{base_path}.mp4{query}"
+    else:
+        clean_url = f"{main_path}.mp4{query}"
+    return clean_url
+
+def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], client_status: Optional[str]) -> bytes:
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Title
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_text_color(26, 26, 26)
+    pdf.cell(0, 15, "Talent Profile Details", ln=True, align="C")
+    pdf.ln(5)
+    
+    # Metadata sections
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(138, 138, 138)
+    pdf.cell(0, 6, "GENERAL INFORMATION", ln=True)
+    pdf.set_draw_color(220, 220, 220)
+    pdf.line(pdf.get_x(), pdf.get_y(), pdf.get_x() + 190, pdf.get_y())
+    pdf.ln(4)
+    
+    pdf.set_text_color(17, 17, 17)
+    fields = [
+        ("Name", talent_doc.get("name") or "Unnamed"),
+        ("Age", str(talent_doc.get("age") or "—")),
+        ("Height", talent_doc.get("height") or "—"),
+        ("Location", talent_doc.get("location") or "—"),
+    ]
+    
+    # Availability
+    avail = talent_doc.get("availability")
+    if avail and isinstance(avail, dict):
+        avail_status = avail.get("status") or ""
+        avail_label = "Available" if avail_status == "yes" else "Not Available" if avail_status == "no" else avail_status.capitalize()
+        if avail.get("note"):
+            avail_label += f" — {avail.get('note')}"
+        fields.append(("Availability", avail_label))
+    else:
+        fields.append(("Availability", "—"))
+        
+    # Budget
+    budget = talent_doc.get("budget")
+    if budget and isinstance(budget, dict):
+        bstatus = budget.get("status") or ""
+        if bstatus == "accept":
+            fields.append(("Budget", f"Agreed Budget ({agreed_val or 'Project Budget'})"))
+        elif bstatus == "custom":
+            fields.append(("Budget", f"Counter Budget: {budget.get('value') or '—'}"))
+        else:
+            fields.append(("Budget", bstatus.capitalize() or "—"))
+    else:
+        fields.append(("Budget", "—"))
+        
+    # Status
+    action_labels = {
+        "ask_for_test": "Ask for Test",
+        "interested": "Audition Approved",
+        "not_for_this": "Does Not Work For This Project",
+        "shortlist": "Shortlist",
+        "lock": "Lock",
+        "not_sure": "Unsure"
+    }
+    status_label = action_labels.get(client_status, "Pending Action")
+    fields.append(("Status", status_label))
+    
+    if talent_doc.get("competitive_brand"):
+        fields.append(("Competitive Brand", talent_doc["competitive_brand"]))
+    if talent_doc.get("instagram_handle"):
+        fields.append(("Instagram", f"@{talent_doc['instagram_handle']}"))
+        if talent_doc.get("instagram_followers"):
+            fields.append(("Instagram Followers", talent_doc["instagram_followers"]))
+            
+    for label, val in fields:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(50, 7, f"{label}", ln=False)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 7, val)
+        pdf.ln(1)
+        
+    custom_answers = talent_doc.get("custom_answers") or []
+    if custom_answers:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(138, 138, 138)
+        pdf.cell(0, 6, "ADDITIONAL QUESTIONS", ln=True)
+        pdf.line(pdf.get_x(), pdf.get_y(), pdf.get_x() + 190, pdf.get_y())
+        pdf.ln(4)
+        
+        pdf.set_text_color(17, 17, 17)
+        for qa in custom_answers:
+            q = qa.get("question") or ""
+            a = qa.get("answer") or ""
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.multi_cell(0, 6, f"Question: {q}")
+            pdf.set_font("Helvetica", "", 10)
+            pdf.multi_cell(0, 6, f"Answer: {a}")
+            pdf.ln(2)
+            
+    return pdf.output()
+
 @router.get("/public/links/{slug}/download/talent/{talent_id}")
 async def download_talent_zip(
     slug: str,
@@ -1126,15 +1255,64 @@ async def download_talent_zip(
         filtered_talent = _filter_talent_for_client(talent_doc, link.get("visibility", {}))
 
     media_list = filtered_talent.get("media", [])
-    if not media_list:
-        raise HTTPException(404, "No downloadable media for this talent")
+    
+    # 1. Fetch current project budget
+    pid = talent_doc.get("project_id") or link.get("auto_project_id")
+    project_doc = await db.projects.find_one({"id": pid}) if pid else None
+    
+    agreed_val = None
+    if project_doc:
+        t_lines = project_doc.get("talent_budget") or []
+        if t_lines:
+            tb_line = next((l for l in t_lines if "budget" in (l.get("label") or "").lower()), t_lines[0])
+            if tb_line:
+                agreed_val = tb_line.get("value")
+        if not agreed_val and project_doc.get("budget_per_day"):
+            bpd = project_doc.get("budget_per_day").strip()
+            if "day" in bpd.lower():
+                agreed_val = bpd
+            else:
+                agreed_val = f"{bpd} / day"
+        if not agreed_val and project_doc.get("client_budget"):
+            c_lines = project_doc.get("client_budget") or []
+            if c_lines:
+                cb_line = next((l for l in c_lines if "budget" in (l.get("label") or "").lower()), c_lines[0])
+                if cb_line:
+                    agreed_val = cb_line.get("value")
+
+    # Get client review action status
+    action_doc = await db.link_actions.find_one({
+        "link_id": link["id"],
+        "viewer_email": viewer.get("email"),
+        "talent_id": talent_id,
+    })
+    client_status = action_doc.get("action") if action_doc else None
+
+    # Generate PDF details file
+    pdf_bytes = _generate_talent_details_pdf(filtered_talent, agreed_val, client_status)
 
     zip_items = []
-    counts = {}
-    for m in media_list:
-        cat = m.get("category") or "media"
-        counts[cat] = counts.get(cat, 0) + 1
-        fn = get_safe_filename(filtered_talent.get("name") or "Talent", m, counts[cat])
+    
+    # Pack intro videos (mp4 format)
+    intros = [m for m in media_list if m.get("category") == "video"]
+    for i, m in enumerate(intros):
+        fn = "Introduction.mp4" if len(intros) == 1 else f"Introduction_{i+1}.mp4"
+        zip_items.append({"filename": fn, "url": _get_video_download_url(m["url"])})
+
+    # Pack audition takes (mp4 format)
+    takes = [m for m in media_list if m.get("category") == "take"]
+    for i, m in enumerate(takes):
+        fn = f"Take_{i+1}.mp4"
+        zip_items.append({"filename": fn, "url": _get_video_download_url(m["url"])})
+
+    # Pack portfolio images
+    import os
+    images = [m for m in media_list if m.get("category") in ("portfolio", "indian", "western")]
+    for i, m in enumerate(images):
+        _, ext = os.path.splitext(m["url"].split("?")[0])
+        if not ext or ext.lower() not in (".jpg", ".jpeg", ".png"):
+            ext = ".jpg"
+        fn = f"Portfolio_{i+1}{ext}"
         zip_items.append({"filename": fn, "url": m["url"]})
 
     async def event_generator():
@@ -1142,6 +1320,16 @@ async def download_talent_zip(
         read_offset = 0
         async with httpx.AsyncClient() as client:
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                # Add dynamic PDF details first
+                zf.writestr("Talent_Details.pdf", pdf_bytes)
+                buffer.seek(0, io.SEEK_END)
+                current_pos = buffer.tell()
+                if current_pos > read_offset:
+                    buffer.seek(read_offset)
+                    yield_chunk = buffer.read(current_pos - read_offset)
+                    read_offset = current_pos
+                    yield yield_chunk
+
                 for item in zip_items:
                     filename = item["filename"]
                     url = item["url"]
@@ -1167,8 +1355,8 @@ async def download_talent_zip(
                 buffer.seek(read_offset)
                 yield buffer.read(current_pos - read_offset)
 
-    safe_name = privatize_name(filtered_talent.get("name")).replace(".", "").strip()
-    zip_filename = f"{safe_name}_Portfolio.zip"
+    safe_name = privatize_name(filtered_talent.get("name")).replace(".", "").replace(" ", "_").strip()
+    zip_filename = f"{safe_name}_Package.zip"
     return StreamingResponse(
         event_generator(),
         media_type="application/zip",

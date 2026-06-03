@@ -1227,6 +1227,39 @@ function TalentDetail({
     const overlayRef = useRef(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
+    const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
+
+    const handleDownloadPackage = async () => {
+        setIsDownloadingPackage(true);
+        try {
+            const token = getViewerToken(slug);
+            const response = await axios.get(
+                `${API}/public/links/${slug}/download/talent/${talent.id}`,
+                {
+                    params: token ? { token } : {},
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    responseType: "blob"
+                }
+            );
+            
+            const blob = new Blob([response.data], { type: "application/zip" });
+            const url = window.URL.createObjectURL(blob);
+            const linkElement = document.createElement("a");
+            linkElement.href = url;
+            
+            const cleanName = (talent.name || "Talent").trim().replace(/\./g, "").replace(/\s+/g, "_");
+            linkElement.setAttribute("download", `${cleanName}_Package.zip`);
+            document.body.appendChild(linkElement);
+            linkElement.click();
+            linkElement.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error("Error downloading package:", err);
+            alert("Failed to download talent package. Please try again.");
+        } finally {
+            setIsDownloadingPackage(false);
+        }
+    };
     /**
      * Mirrors viewerAction in a ref so the keyboard handler can read the latest
      * action without being listed as a dependency (which caused handler re-registration
@@ -1490,6 +1523,29 @@ function TalentDetail({
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
                     <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-visible md:overflow-y-auto min-h-0 pb-10 md:pb-0">
+                        {/* Mobile Download Talent Package Button */}
+                        {vis.download && (
+                            <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04]">
+                                <button
+                                    onClick={handleDownloadPackage}
+                                    disabled={isDownloadingPackage}
+                                    className="w-full h-11 bg-[#1A1A1A] hover:bg-[#111111] disabled:bg-black/40 disabled:cursor-not-allowed text-white rounded-xl flex items-center justify-center gap-2 text-xs font-semibold tracking-wider transition-all duration-150 shadow-sm"
+                                    data-testid="detail-download-package-btn-mobile"
+                                >
+                                    {isDownloadingPackage ? (
+                                        <>
+                                            <Loader2 className="w-4 h-4 animate-spin text-white" />
+                                            <span>Preparing Talent Package...</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Download className="w-4 h-4 text-white" />
+                                            <span>Download Talent Package</span>
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        )}
                         {/* Mobile Details Accordion */}
                         <div className="md:hidden border-b border-black/[0.04]">
                             <button
@@ -1778,6 +1834,27 @@ function TalentDetail({
                         {/* pb-[130px] gives clearance above the fixed mobile bottom action bar + home indicator */}
                         <div className="p-6 md:p-8 pb-[130px] md:pb-8">
                             <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
+                                {vis.download && !isSharePreview && (
+                                    <button
+                                        onClick={handleDownloadPackage}
+                                        disabled={isDownloadingPackage}
+                                        className="h-11 px-4 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center gap-2 bg-white/90 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111] disabled:opacity-50 disabled:cursor-not-allowed"
+                                        title="Download Talent Package"
+                                        data-testid="detail-download-package-btn"
+                                    >
+                                        {isDownloadingPackage ? (
+                                            <>
+                                                <Loader2 className="w-4 h-4 animate-spin text-black" />
+                                                <span>Preparing...</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Download className="w-4 h-4 text-[#8A8A8A]" />
+                                                <span>Download Talent Package</span>
+                                            </>
+                                        )}
+                                    </button>
+                                )}
                                 {!isSharePreview && (
                                     <button
                                         onClick={() => onShare(talent.id)}

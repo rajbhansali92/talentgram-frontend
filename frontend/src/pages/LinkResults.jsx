@@ -13,26 +13,38 @@ import {
     HelpCircle,
     Download,
     Settings,
+    Lock,
+    ClipboardCheck,
 } from "lucide-react";
 
 const ACTION_META = {
-    shortlist: {
-        label: "Shortlisted",
-        icon: Star,
+    ask_for_test: {
+        label: "Ask for Test",
+        icon: ClipboardCheck,
         color: "text-amber-600",
     },
     interested: {
-        label: "Interested",
+        label: "Audition Approved",
         icon: ThumbsUp,
         color: "text-green-600",
     },
     not_for_this: {
-        label: "Not for this",
+        label: "Does Not Work For This Project",
         icon: XCircle,
         color: "text-red-600",
     },
+    shortlist: {
+        label: "Shortlist",
+        icon: Star,
+        color: "text-amber-600",
+    },
+    lock: {
+        label: "Lock",
+        icon: Lock,
+        color: "text-indigo-600",
+    },
     not_sure: {
-        label: "Not sure",
+        label: "Unsure",
         icon: HelpCircle,
         color: "text-black/45",
     },
@@ -133,6 +145,29 @@ export default function LinkResults() {
     const viewers = data?.viewers || [];
     const downloads = data?.downloads || [];
     const actions = data?.actions || [];
+
+    const actionCountsByTalent = {};
+    if (data && data.actions) {
+        data.actions.forEach((a) => {
+            const tid = a.talent_id;
+            const act = a.action;
+            if (tid && act) {
+                if (!actionCountsByTalent[tid]) {
+                    actionCountsByTalent[tid] = {
+                        ask_for_test: 0,
+                        interested: 0,
+                        not_for_this: 0,
+                        shortlist: 0,
+                        lock: 0,
+                        not_sure: 0
+                    };
+                }
+                if (actionCountsByTalent[tid][act] !== undefined) {
+                    actionCountsByTalent[tid][act]++;
+                }
+            }
+        });
+    }
 
     const analytics = data?.link?.analytics || {};
     const trackingViews = analytics.total_views !== undefined ? analytics.total_views : (data?.view_count || data?.link?.view_count || 0);
@@ -301,9 +336,12 @@ export default function LinkResults() {
                                         >
                                             <div className="flex items-start justify-between flex-wrap gap-4">
                                                 <div>
-                                                    <h3 className="font-display text-lg text-black/85">
-                                                        {t?.name || s.talent_id}
+                                                    <h3 className="font-display text-lg text-black/85 font-medium">
+                                                        {t?.name || "Unnamed Talent"}
                                                     </h3>
+                                                    <div className="text-[10px] text-black/35 font-mono">
+                                                        {s.talent_id}
+                                                    </div>
                                                     <div className="text-[11px] text-black/45 mt-1">
                                                         {t?.source === "submission" ? "Audition submission" : "Talent"}
                                                     </div>
@@ -320,7 +358,7 @@ export default function LinkResults() {
                                                                 className={`w-3.5 h-3.5 ${m.color}`}
                                                             />
                                                             <span className="font-mono text-black/70">
-                                                                {s[k] || 0}
+                                                                {actionCountsByTalent[s.talent_id]?.[k] || 0}
                                                             </span>
                                                             <span className="text-black/45">
                                                                 {m.label}

@@ -28,6 +28,9 @@ import {
     Check,
     Share2,
     ArrowRight,
+    ChevronDown,
+    Lock,
+    ClipboardCheck,
 } from "lucide-react";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
@@ -60,12 +63,13 @@ function availabilityLabel(av) {
     return null;
 }
 
-// Refined actions with desaturated, editorial gold accent
 const ACTIONS = [
-    { key: "shortlist", label: "Shortlist", icon: Star, color: "#B89B5E" },
-    { key: "interested", label: "Interested", icon: ThumbsUp, color: "#5A7D5A" },
-    { key: "not_for_this", label: "Not for this", icon: XCircle, color: "#9E4A4A" },
-    { key: "not_sure", label: "Not sure", icon: HelpCircle, color: "#6B7280" },
+    { key: "ask_for_test", label: "Ask for Test", icon: ClipboardCheck },
+    { key: "interested", label: "Audition Approved", icon: ThumbsUp },
+    { key: "not_for_this", label: "Does Not Work For This Project", icon: XCircle },
+    { key: "shortlist", label: "Shortlist", icon: Star },
+    { key: "lock", label: "Lock", icon: Lock },
+    { key: "not_sure", label: "Unsure", icon: HelpCircle },
 ];
 
 const TABS = [
@@ -1179,6 +1183,8 @@ function TalentDetail({
     isSharePreview = false,
 }) {
     const vis = link.visibility || {};
+    const project = link || {};
+    const visibleActions = ACTIONS.filter(a => a.key !== "ask_for_test" || project.requires_test === true);
     const mediaAll = talent.media || [];
     const portfolioOn = vis.portfolio !== false;
     const indianOn = portfolioOn && (vis.indian_images ?? true);
@@ -1199,6 +1205,7 @@ function TalentDetail({
     const [idx, setIdx] = useState(0);
     const overlayRef = useRef(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
     /**
      * Mirrors viewerAction in a ref so the keyboard handler can read the latest
      * action without being listed as a dependency (which caused handler re-registration
@@ -1210,10 +1217,11 @@ function TalentDetail({
         viewerActionRef.current = viewerAction;
     }, [viewerAction]);
 
-    // Reset gallery image index on talent navigation — prevents broken images when
+    // Reset gallery image index and details accordion on talent navigation — prevents broken images when
     // navigating from a talent with many images to one with fewer (AUDIT: MED-01).
     useEffect(() => {
         setIdx(0);
+        setIsDetailsExpanded(false);
     }, [talent.id]);
 
     useEffect(() => {
@@ -1461,6 +1469,79 @@ function TalentDetail({
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
                     <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-visible md:overflow-y-auto min-h-0 pb-10 md:pb-0">
+                        {/* Mobile Details Accordion */}
+                        <div className="md:hidden border-b border-black/[0.04]">
+                            <button
+                                type="button"
+                                onClick={() => setIsDetailsExpanded(!isDetailsExpanded)}
+                                className="w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-black/70 bg-white hover:bg-black/[0.01] transition-colors"
+                            >
+                                <span>Talent Details</span>
+                                <ChevronDown className={`w-4 h-4 text-black/40 transition-transform duration-200 ${isDetailsExpanded ? "rotate-180" : ""}`} />
+                            </button>
+                            {isDetailsExpanded && (
+                                <div className="px-4 pb-6 pt-2 bg-white space-y-6 text-sm">
+                                    <div className="grid grid-cols-2 gap-y-5">
+                                        {vis.age && talent.age && (
+                                            <InfoRow label="Age" value={talent.age} />
+                                        )}
+                                        {vis.height && talent.height && (
+                                            <InfoRow label="Height" value={talent.height} />
+                                        )}
+                                        {vis.location && talent.location && (
+                                            <InfoRow label="Location" value={talent.location} />
+                                        )}
+                                        {vis.ethnicity && talent.ethnicity && (
+                                            <InfoRow label="Ethnicity" value={talent.ethnicity} />
+                                        )}
+                                        {vis.instagram_followers && talent.instagram_followers && (
+                                            <InfoRow label="Followers" value={talent.instagram_followers} />
+                                        )}
+                                    </div>
+                                    
+                                    <AvailabilityBudgetSection 
+                                        talent={talent}
+                                        projectShootDates={projectShootDates}
+                                        projectBudget={projectBudget}
+                                        vis={vis}
+                                    />
+
+                                    {(talent.custom_answers || []).length > 0 && (
+                                        <div className="bg-white p-5 space-y-3 rounded-xl border border-black/[0.04] shadow-sm">
+                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Additional Details</p>
+                                            {talent.custom_answers.map((qa, i) => (
+                                                <div key={`${qa.question}-${i}`} data-testid={`custom-qa-mobile-${i}`}>
+                                                    <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-1">{qa.question}</p>
+                                                    <p className="text-sm text-[#111111] whitespace-pre-wrap leading-relaxed">{qa.answer}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    <div className="flex gap-3 flex-wrap">
+                                        {vis.instagram && talent.instagram_handle && (
+                                            <a href={`https://instagram.com/${talent.instagram_handle.replace("@", "")}`} target="_blank" rel="noopener noreferrer" data-testid="client-instagram-link-mobile" className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.06] hover:border-black/20 rounded-full text-xs transition-colors duration-150 text-[#111111] bg-white/50">
+                                                <Instagram className="w-3.5 h-3.5" /> {talent.instagram_handle}
+                                            </a>
+                                        )}
+                                    </div>
+
+                                    {vis.work_links && (talent.work_links || []).length > 0 && (
+                                        <div>
+                                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
+                                            <div className="space-y-2">
+                                                {talent.work_links.map((w) => (
+                                                    <a key={w} href={w} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
+                                                        <ExternalLink className="w-3 h-3 shrink-0" />
+                                                        <span className="truncate">{w}</span>
+                                                    </a>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                         <div className="p-4 md:p-8">
                             {vis.takes !== false && takes.length > 0 && (
                                 <div className="mb-10">
@@ -1601,12 +1682,78 @@ function TalentDetail({
                                     ))}
                                 </div>
                             )}
+
+                            {/* Mobile-only Decisions, Comments and Feedback */}
+                            {!isSharePreview && (
+                                <div className="md:hidden border-t border-black/[0.06] pt-6 mt-6 space-y-6">
+                                    <div>
+                                        <div className="flex items-center justify-between mb-4">
+                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Your Decision</p>
+                                            <button
+                                                onClick={() => onMarkReviewed(talent.id)}
+                                                disabled={isReviewed}
+                                                className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-full text-xs font-medium transition-colors duration-150 ${
+                                                    isReviewed
+                                                        ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
+                                                        : "border-black/[0.08] hover:border-black/20 text-[#4A4A4A]"
+                                                }`}
+                                                data-testid="mark-reviewed-btn-mobile"
+                                            >
+                                                <Check className="w-3.5 h-3.5" />
+                                                {isReviewed ? "Reviewed" : "Mark Reviewed"}
+                                            </button>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2 mb-6">
+                                            {visibleActions.map((a) => {
+                                                const active = viewerAction?.action === a.key;
+                                                return (
+                                                    <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}-mobile`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-black/[0.08] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
+                                                        <a.icon className={`w-3.5 h-3.5 ${active ? "opacity-90" : "opacity-40"}`} />
+                                                        {a.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
+                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
+                                        </div>
+                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
+                                        <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                    </div>
+
+                                    {talent.submission_id && talent.project_id && (
+                                        <div className="pt-6 border-t border-black/[0.06]">
+                                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Voice Note Feedback</p>
+                                            <VoiceRecorder
+                                                onSend={(blob) => saveVoiceNote(talent.id, blob)}
+                                                sending={sendingVoice}
+                                            />
+                                        </div>
+                                    )}
+
+                                    {nextUnreviewed && (
+                                        <div className="pt-6 border-t border-black/[0.06]">
+                                            <button
+                                                onClick={() => onNavigate(nextUnreviewed)}
+                                                className="w-full flex items-center justify-center gap-2 px-4 py-3.5 bg-[#1A1A1A] hover:bg-[#2A2A2A] text-white rounded-xl text-sm font-medium transition-colors duration-150 shadow-sm"
+                                                data-testid="next-unreviewed-btn-mobile"
+                                            >
+                                                Next Unreviewed Talent →
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
 
                     {/* Right Column - Details (scrollable with soft shadow) */}
                     {/* min-h-0: required for iOS Safari scroll fix in flex context */}
-                    <div className="w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-visible md:overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
+                    <div className="hidden md:block w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-visible md:overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
                         {/* pb-[130px] gives clearance above the fixed mobile bottom action bar + home indicator */}
                         <div className="p-6 md:p-8 pb-[130px] md:pb-8">
                             <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
@@ -1714,11 +1861,11 @@ function TalentDetail({
                                         </button>
                                     </div>
                                     <div className="grid grid-cols-2 gap-2 mb-6">
-                                        {ACTIONS.map((a) => {
+                                        {visibleActions.map((a) => {
                                             const active = viewerAction?.action === a.key;
                                             return (
-                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center gap-2 px-4 py-3 border rounded-xl text-sm transition-colors duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.08] hover:border-black/20 text-[#111111]"}`}>
-                                                    <a.icon className="w-4 h-4" style={{ color: active ? "#fff" : a.color }} />
+                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-black/[0.08] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
+                                                    <a.icon className={`w-3.5 h-3.5 ${active ? "opacity-90" : "opacity-40"}`} />
                                                     {a.label}
                                                 </button>
                                             );
@@ -1772,40 +1919,6 @@ function TalentDetail({
                     </div>
                 </div>
 
-            {/* Mobile bottom bar */}
-            {!isSharePreview && (
-                <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 border-t border-black/[0.04] px-3 py-2 shadow-[0_-4px_16px_rgba(0,0,0,0.04)]" data-testid="detail-bottom-bar" style={{ paddingBottom: "calc(0.5rem + env(safe-area-inset-bottom))" }}>
-                    <div className="grid grid-cols-5 gap-1">
-                        {["shortlist", "not_sure", "interested", "not_for_this"].map((key) => {
-                            const a = ACTIONS.find((x) => x.key === key);
-                            if (!a) return null;
-                            const active = viewerAction?.action === a.key;
-                            return (
-                                <button
-                                    key={a.key}
-                                    type="button"
-                                    onClick={() => setAction(talent.id, active ? null : a.key)}
-                                    data-testid={`quick-${a.key === "not_for_this" ? "reject" : a.key === "not_sure" ? "hold" : a.key}-btn`}
-                                    className={`min-h-[50px] flex flex-col items-center justify-center gap-0.5 rounded-lg border text-[9px] tracking-wide uppercase active:scale-[0.97] transition-all duration-150 ${active ? "bg-[#1A1A1A] text-white border-[#1A1A1A]" : "border-black/[0.06] text-[#111111] bg-black/[0.01]"}`}
-                                >
-                                    <a.icon className="w-3.5 h-3.5" style={{ color: active ? "#fff" : a.color }} />
-                                    <span>{a.key === "not_for_this" ? "Reject" : a.key === "not_sure" ? "Hold" : a.label}</span>
-                                </button>
-                            );
-                        })}
-                        <button
-                            type="button"
-                            onClick={goNextTalent}
-                            disabled={!hasNextTalent}
-                            className="min-h-[50px] flex flex-col items-center justify-center gap-0.5 rounded-lg border border-black/[0.06] text-[#111111] bg-black/[0.02] text-[9px] tracking-wide uppercase active:scale-[0.97] transition-all duration-150 disabled:opacity-30 disabled:pointer-events-none"
-                            data-testid="quick-next-btn"
-                        >
-                            <ArrowRight className="w-3.5 h-3.5 text-black/60" />
-                            <span>Next</span>
-                        </button>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

@@ -311,6 +311,13 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
 
     t_ids = link.get("talent_ids", []) or []
     s_ids = link.get("submission_ids", []) or []
+    if link.get("auto_pull") and link.get("auto_project_id"):
+        auto_pid = link["auto_project_id"]
+        auto_subs = await db.submissions.find(
+            {"project_id": auto_pid, "decision": "approved"},
+            {"id": 1}
+        ).to_list(5000)
+        s_ids = list(set(s_ids + [s["id"] for s in auto_subs]))
     ordered_ids = t_ids + s_ids
 
     # P2-F: Run viewers, actions summary, and downloads concurrently.

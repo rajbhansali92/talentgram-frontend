@@ -107,7 +107,7 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
     if (!showAvail && !showBudget && !talent.competitive_brand) return null;
     
     return (
-        <div className="mb-8 bg-[#FCFBF8] p-5 space-y-4 rounded-xl shadow-sm">
+        <div className="mb-8 bg-white p-5 space-y-4 rounded-xl shadow-sm">
             {showAvail && (
                 <div data-testid="client-availability">
                     <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-2">Availability</p>
@@ -667,14 +667,14 @@ export default function ClientView() {
     if (shareId) {
         if (loadingShare) {
             return (
-                <div className="min-h-screen bg-[#FCFBF8] flex items-center justify-center">
+                <div className="min-h-screen bg-white flex items-center justify-center">
                     <Loader2 className="w-8 h-8 animate-spin text-[#B89B5E]" />
                 </div>
             );
         }
         if (shareError) {
             return (
-                <div className="min-h-screen bg-[#FCFBF8] flex flex-col items-center justify-center p-6 text-center">
+                <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 text-center">
                     <XCircle className="w-12 h-12 text-[#9E4A4A] mb-4" />
                     <h2 className="text-xl font-display text-[#111111] mb-2 font-semibold">Shared Preview Expired</h2>
                     <p className="text-sm text-gray-500 max-w-sm leading-relaxed">{shareError}</p>
@@ -1004,7 +1004,7 @@ export default function ClientView() {
 
                 {projectBudget.length > 0 && (
                     <section
-                        className="mb-12 bg-[#FCFBF8] p-6 md:p-8 rounded-2xl shadow-[0_2px_8px_-4px_rgba(0,0,0,0.02)]"
+                        className="mb-12 bg-white p-6 md:p-8 rounded-2xl shadow-[0_2px_8px_-4px_rgba(0,0,0,0.02)]"
                         data-testid="project-budget-block"
                     >
                         <p className="eyebrow tracking-[0.12em] mb-5 text-[#5C5C5C]">Project Budget</p>
@@ -1388,7 +1388,7 @@ function TalentDetail({
                 <div className="flex-1 flex flex-col md:flex-row overflow-y-auto md:overflow-hidden">
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-[#FCFBF8] overflow-y-visible md:overflow-y-auto min-h-0">
+                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-visible md:overflow-y-auto min-h-0 pb-10 md:pb-0">
                         <div className="p-4 md:p-8">
                             {vis.takes !== false && takes.length > 0 && (
                                 <div className="mb-10">
@@ -1415,14 +1415,25 @@ function TalentDetail({
                                                         </span>
                                                     )}
                                                 </p>
-                                                <LazyVideoPlayer
-                                                    src={t.url}
-                                                    poster={posterUrl(t)}
-                                                    label={t.label || `Take ${i + 1}`}
-                                                    className="w-full"
-                                                    mediaId={t.id}
-                                                    slug={slug}
-                                                />
+                                                <div className="relative">
+                                                    <LazyVideoPlayer
+                                                        src={t.url}
+                                                        poster={posterUrl(t)}
+                                                        label={t.label || `Take ${i + 1}`}
+                                                        className="w-full"
+                                                        mediaId={t.id}
+                                                        slug={slug}
+                                                    />
+                                                    {vis.download && (
+                                                        <button
+                                                            onClick={() => download(t)}
+                                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10"
+                                                            data-testid={`download-take-btn-${i}`}
+                                                        >
+                                                            <Download className="w-4 h-4 text-black" />
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
@@ -1432,14 +1443,25 @@ function TalentDetail({
                              {vis.intro_video && intro && (
                                  <div className="mb-10">
                                      <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Introduction</p>
-                                     <LazyVideoPlayer
-                                         src={intro.url}
-                                         poster={posterUrl(intro)}
-                                         label="Introduction Video"
-                                         className="w-full"
-                                         mediaId={intro.id}
-                                         slug={slug}
-                                     />
+                                     <div className="relative">
+                                         <LazyVideoPlayer
+                                             src={intro.url}
+                                             poster={posterUrl(intro)}
+                                             label="Introduction Video"
+                                             className="w-full"
+                                             mediaId={intro.id}
+                                             slug={slug}
+                                         />
+                                         {vis.download && (
+                                             <button
+                                                 onClick={() => download(intro)}
+                                                 className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10"
+                                                 data-testid="download-intro-btn"
+                                             >
+                                                 <Download className="w-4 h-4 text-black" />
+                                             </button>
+                                         )}
+                                     </div>
                                  </div>
                              )}
 
@@ -1448,7 +1470,7 @@ function TalentDetail({
                             )}
                             {images.length > 0 ? (
                                 <div className="relative bg-white rounded-xl overflow-hidden shadow-sm">
-                                    <div className="aspect-[3/4] md:max-h-[78vh]">
+                                    <div className="aspect-[3/4] md:max-h-[78vh] mx-auto">
                                         <img
                                             src={IMAGE_URL(images[idx])}
                                             alt={privatizeName(talent.name)}
@@ -1485,7 +1507,7 @@ function TalentDetail({
                                     )}
                                 </div>
                             ) : (
-                                <div className="aspect-[3/4] md:max-h-[78vh] bg-[#FCFBF8] rounded-xl flex items-center justify-center text-[#8A8A8A] shadow-sm">
+                                <div className="aspect-[3/4] md:max-h-[78vh] bg-white rounded-xl flex items-center justify-center text-[#8A8A8A] shadow-sm">
                                     No portfolio
                                 </div>
                             )}
@@ -1568,7 +1590,7 @@ function TalentDetail({
                             />
 
                             {(talent.custom_answers || []).length > 0 && (
-                                <div className="mb-8 bg-[#FCFBF8] p-5 space-y-3 rounded-xl shadow-sm">
+                                <div className="mb-8 bg-white p-5 space-y-3 rounded-xl shadow-sm">
                                     <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Additional Details</p>
                                     {talent.custom_answers.map((qa, i) => (
                                         <div key={`${qa.question}-${i}`} data-testid={`custom-qa-${i}`}>
@@ -1653,7 +1675,7 @@ function TalentDetail({
                             )}
 
                             {isSharePreview && (
-                                <div className="mt-8 p-5 bg-[#FCFBF8] border border-black/[0.04] rounded-2xl flex flex-col items-center text-center">
+                                <div className="mt-8 p-5 bg-white border border-black/[0.04] rounded-2xl flex flex-col items-center text-center">
                                     <span className="inline-block px-2.5 py-1 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#B89B5E]/8 text-[#B89B5E] font-medium mb-3">
                                         Shared Audition Showcase
                                     </span>

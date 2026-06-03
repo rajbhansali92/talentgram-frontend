@@ -237,6 +237,42 @@ function getSessionId() {
     }
 }
 
+function getVideoDownloadUrl(url) {
+    if (!url) return url;
+    let cleanUrl = url;
+    if (cleanUrl.includes("/upload/")) {
+        const parts = cleanUrl.split("/upload/");
+        const before = parts[0];
+        let after = parts[1];
+        const segments = after.split("/");
+        const transformations = segments[0];
+        if (transformations && !transformations.match(/^v\d+$/)) {
+            let newTrans = transformations
+                .split(",")
+                .filter(t => !t.startsWith("f_") && !t.startsWith("sp_"))
+                .join(",");
+            newTrans = newTrans ? `${newTrans},f_mp4` : "f_mp4";
+            segments[0] = newTrans;
+            after = segments.join("/");
+        } else {
+            after = `f_mp4/${after}`;
+        }
+        cleanUrl = `${before}/upload/${after}`;
+    }
+    const mainPath = cleanUrl.split("?")[0].split("#")[0];
+    const query = cleanUrl.substring(mainPath.length);
+    const lastDotIdx = mainPath.lastIndexOf(".");
+    if (lastDotIdx !== -1 && lastDotIdx > mainPath.lastIndexOf("/")) {
+        const ext = mainPath.substring(lastDotIdx + 1);
+        if (ext.toLowerCase() !== "mp4") {
+            cleanUrl = mainPath.substring(0, lastDotIdx) + ".mp4" + query;
+        }
+    } else {
+        cleanUrl = mainPath + ".mp4" + query;
+    }
+    return cleanUrl;
+}
+
 export default function ClientView() {
     const { slug } = useParams();
     const queryParams = new URLSearchParams(window.location.search);
@@ -1315,8 +1351,16 @@ function TalentDetail({
 
     const download = useCallback(async (m) => {
         await logDownload(talent.id, m.id);
-        const url = IMAGE_URL(m);
-        const filename = m.original_filename || `${privatizeName(talent.name)}_${m.category || "media"}`;
+        const rawUrl = IMAGE_URL(m);
+        const isVideo = m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take");
+        const url = isVideo ? getVideoDownloadUrl(rawUrl) : rawUrl;
+        
+        const ext = isVideo ? "mp4" : (url.split(".").pop().split("?")[0] || "");
+        let baseName = m.original_filename || `${privatizeName(talent.name)}_${m.category || "media"}`;
+        if (baseName.includes(".")) {
+            baseName = baseName.replace(/\.[^/.]+$/, "");
+        }
+        const filename = `${baseName}.${ext}`;
         
         try {
             // First try fetching the file directly to download via blob (respecting custom filename)
@@ -1327,8 +1371,7 @@ function TalentDetail({
             
             const a = document.createElement("a");
             a.href = blobUrl;
-            const ext = url.split(".").pop().split("?")[0] || "";
-            a.download = filename.endsWith(`.${ext}`) ? filename : `${filename}.${ext}`;
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
@@ -1340,8 +1383,7 @@ function TalentDetail({
             // Fallback: Rewrite Cloudinary URL to force attachment headers
             let downloadUrl = url;
             if (url.includes("/upload/")) {
-                const ext = url.split(".").pop().split("?")[0] || "";
-                const cleanName = filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
+                const cleanName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");
                 const flag = cleanName ? `fl_attachment:${cleanName}` : "fl_attachment";
                 downloadUrl = url.replace("/upload/", `/upload/${flag}/`);
             }

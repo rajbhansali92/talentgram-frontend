@@ -125,13 +125,16 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
                     {(() => {
                         const lbl = availabilityLabel(talent.availability);
                         if (!lbl) return null;
-                        const tone = lbl === "Available" ? "bg-[#5A7D5A]/8 text-[#5A7D5A]" : lbl === "Not Available" ? "bg-[#9E4A4A]/8 text-[#9E4A4A]" : "bg-[#B89B5E]/8 text-[#B89B5E]";
+                        const colorClass = lbl === "Available" ? "text-[#5A7D5A]" : lbl === "Not Available" ? "text-[#9E4A4A]" : "text-[#B89B5E]";
                         return (
-                            <p className="text-sm">
-                                <span className="text-[#8A8A8A] mr-2 text-[10px] font-mono tracking-[0.08em] uppercase">Status</span>
-                                <span className={`inline-block px-2 py-0.5 mr-2 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full ${tone}`} data-testid="client-availability-status">{lbl}</span>
-                                {talent.availability?.note && <span className="text-[#4A4A4A]">{talent.availability.note}</span>}
-                            </p>
+                            <div className="text-sm">
+                                <p className="flex justify-end">
+                                    <span className={`font-semibold font-mono ${colorClass}`} data-testid="client-availability-status">{lbl}</span>
+                                </p>
+                                {talent.availability?.note && (
+                                    <p className="text-xs text-[#8A8A8A] text-right mt-1">{talent.availability.note}</p>
+                                )}
+                            </div>
                         );
                     })()}
                 </div>
@@ -193,15 +196,11 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
                             return (
                                 <div className="space-y-1.5 text-sm text-[#111111]" data-testid="budget-agreed">
                                     {offeredBudget && (
-                                        <p className="flex justify-between gap-4 pb-1.5">
+                                        <p className="flex justify-between gap-4">
                                             <span className="text-[#4A4A4A] font-medium">Agreed Budget</span>
                                             <span className="font-semibold text-[#5A7D5A] font-mono">{offeredBudget}</span>
                                         </p>
                                     )}
-                                    <p className="flex justify-between gap-4 border-t border-black/[0.03] pt-1.5">
-                                        <span className="text-[#4A4A4A]">Status</span>
-                                        <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#5A7D5A]/8 text-[#5A7D5A] font-medium">Agreed</span>
-                                    </p>
                                     {lines.filter(l => l !== budgetLine).map((ln) => (
                                         <p key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4 text-xs text-[#8A8A8A] mt-1">
                                             <span>{ln.label}</span>

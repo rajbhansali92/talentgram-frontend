@@ -1,4 +1,5 @@
 import React, { memo, useState } from "react";
+import { createPortal } from "react-dom";
 import { STATUS_FOCUS_OPTIONS, TRISTATE_OPTIONS } from "./constants";
 
 const PORTFOLIO_OPTIONS = [
@@ -59,13 +60,19 @@ const PipelineFilters = memo(function PipelineFilters({
 
     React.useEffect(() => {
         if (!isMobileDrawerOpen) return;
+        const originalStyle = window.getComputedStyle(document.body).overflow;
+        document.body.style.overflow = "hidden";
+        
         const handleGlobalKeyDown = (e) => {
             if (e.key === 'Escape') {
                 onMobileDrawerOpenChange?.(false);
             }
         };
         window.addEventListener('keydown', handleGlobalKeyDown);
-        return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+        return () => {
+            window.removeEventListener('keydown', handleGlobalKeyDown);
+            document.body.style.overflow = originalStyle;
+        };
     }, [isMobileDrawerOpen, onMobileDrawerOpenChange]);
 
     return (
@@ -241,8 +248,8 @@ const PipelineFilters = memo(function PipelineFilters({
             </div>
 
             {/* Mobile Filter Drawer Overlay bottom sheet */}
-            {isMobileDrawerOpen && (
-                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs md:hidden flex items-end">
+            {isMobileDrawerOpen && createPortal(
+                <div className="fixed inset-0 z-[100] bg-black/25 backdrop-blur-xs md:hidden flex items-end">
                     <div className="absolute inset-0" onClick={() => onMobileDrawerOpenChange?.(false)} />
                     <div className="relative w-full bg-white rounded-t-3xl pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 shadow-2xl animate-in slide-in-from-bottom duration-200 z-10 max-h-[85vh] flex flex-col overflow-hidden">
                         <div className="w-12 h-1 bg-slate-200 rounded-full mx-auto mb-4 flex-shrink-0" />
@@ -352,7 +359,8 @@ const PipelineFilters = memo(function PipelineFilters({
                             </div>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </div>
     );

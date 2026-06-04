@@ -191,7 +191,7 @@ const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
 
 const FieldInput = ({ label, value, onChange, required, placeholder, testId, autoFocus }) => (
     <label className="block">
-        <div className="text-xs font-semibold text-slate-600 mb-1.5 flex justify-between">
+        <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono flex justify-between select-none">
             <span>{label}</span>
             {required && <span className="text-[#9E4A4A]">* Required</span>}
         </div>
@@ -203,7 +203,7 @@ const FieldInput = ({ label, value, onChange, required, placeholder, testId, aut
             required={required}
             autoFocus={autoFocus}
             data-testid={testId}
-            className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors shadow-inner"
+            className="mt-1.5 w-full bg-slate-50/40 rounded-xl border border-slate-200/80 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[15px] sm:text-sm text-slate-900 placeholder:text-slate-400 transition-all duration-200 shadow-sm"
         />
     </label>
 );
@@ -430,11 +430,11 @@ export default function MarketingHub() {
                             <div
                                 key={st.id}
                                 onClick={() => { setFilterType(st.id); setFocusedIndex(-1); }}
-                                className={`cursor-pointer bg-white border ${active ? st.activeBg : `border-slate-200 ${st.color}`} rounded-2xl p-5 transition-all duration-200 hover:shadow-sm`}
+                                className={`cursor-pointer bg-white border ${active ? st.activeBg : `border-slate-200 ${st.color}`} rounded-2xl p-3.5 sm:p-5 transition-all duration-200 hover:shadow-sm`}
                             >
-                                <div className="text-2xl font-light text-slate-950 mb-1">{st.count}</div>
+                                <div className="text-xl sm:text-2xl font-bold text-slate-950 mb-0.5">{st.count}</div>
                                 <div className="text-[11px] font-semibold text-slate-800 tracking-tight">{st.label}</div>
-                                <div className="text-[10px] text-slate-400 font-light mt-0.5">{st.desc}</div>
+                                <div className="text-[9.5px] text-slate-500 font-medium mt-0.5 leading-snug">{st.desc}</div>
                             </div>
                         );
                     })}
@@ -529,34 +529,34 @@ export default function MarketingHub() {
                                 key={c.id}
                                 onClick={() => { setActiveClient(c); setFocusedIndex(i); }}
                                 data-testid={`marketing-client-row-${c.id}`}
-                                className={`group bg-white border rounded-2xl p-5 sm:p-6 cursor-pointer transition-all duration-200 hover:shadow-md ${
+                                className={`group bg-white border rounded-2xl p-4 sm:p-5 cursor-pointer transition-all duration-200 hover:shadow-md ${
                                     isFocused 
                                         ? "border-slate-900 ring-1 ring-slate-950 bg-slate-50/20" 
                                         : "border-slate-200 hover:border-slate-300"
                                 }`}
                             >
-                                <div className="flex items-start gap-4 sm:gap-6">
+                                <div className="flex items-start gap-3 sm:gap-5">
                                     {/* Glassmorphic Initial Avatar */}
-                                    <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center font-display text-lg font-light text-slate-800 shrink-0 shadow-sm">
+                                    <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center font-display text-base sm:text-lg font-medium text-slate-800 shrink-0 shadow-sm">
                                         {initial}
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-3 mb-2 flex-wrap">
-                                            <h3 className="text-lg sm:text-xl leading-tight font-medium text-slate-900">
+                                        <div className="flex items-center gap-2.5 mb-1.5 flex-wrap">
+                                            <h3 className="text-base sm:text-lg leading-tight font-semibold text-slate-900">
                                                 {c.name}
                                             </h3>
-                                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold uppercase tracking-wider border ${health.color}`}>
-                                                <HealthIcon className="w-3 h-3" />
+                                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[9px] font-bold uppercase tracking-wider border ${health.color}`}>
+                                                <HealthIcon className="w-2.5 h-2.5" />
                                                 {health.label}
                                             </span>
                                             {c.value && (
-                                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-[#B89B5E]/6 border border-[#B89B5E]/15 rounded-lg text-[10px] font-mono font-bold text-[#B89B5E]">
+                                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-[#B89B5E]/6 border border-[#B89B5E]/15 rounded-lg text-[9px] font-mono font-bold text-[#B89B5E]">
                                                     {formatCurrency(c.value)}
                                                 </span>
                                             )}
                                         </div>
 
-                                        <div className="flex flex-wrap gap-4 text-xs mb-3 text-slate-500">
+                                        <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-xs mb-2.5 text-slate-600">
                                             {c.company_name && (
                                                 <div className="flex items-center gap-1">
                                                     <Building2 className="w-3.5 h-3.5 text-slate-400" />
@@ -566,7 +566,7 @@ export default function MarketingHub() {
                                             {c.email && (
                                                 <div className="flex items-center gap-1 font-mono">
                                                     <Mail className="w-3.5 h-3.5 text-slate-400" />
-                                                    <span>{c.email}</span>
+                                                    <span className="break-all">{c.email}</span>
                                                 </div>
                                             )}
                                             {c.phone_number && (
@@ -579,33 +579,33 @@ export default function MarketingHub() {
 
                                         {/* Tags rendering */}
                                         {c.tags && c.tags.length > 0 && (
-                                            <div className="flex gap-1.5 flex-wrap mb-3.5">
+                                            <div className="flex gap-1.5 flex-wrap mb-3 font-mono">
                                                 {c.tags.map(t => (
-                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-slate-200/80 rounded-md text-[10px] font-mono text-slate-500">
+                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-slate-200/80 rounded-md text-[10px] text-slate-500">
                                                         #{t}
                                                     </span>
                                                 ))}
                                             </div>
                                         )}
 
-                                        <div className="flex flex-wrap gap-4 text-[10px] text-slate-400 font-mono">
+                                        <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-[10px] text-slate-500 font-mono">
                                             <div className="flex items-center gap-1">
-                                                <Calendar className="w-3.5 h-3.5" />
+                                                <Calendar className="w-3.5 h-3.5 text-slate-400" />
                                                 <span>Contact: {formatDate(c.last_contacted_date)}</span>
                                             </div>
                                             <div className="flex items-center gap-1">
-                                                <TrendingUp className="w-3.5 h-3.5 text-slate-300" />
+                                                <TrendingUp className="w-3.5 h-3.5 text-slate-400" />
                                                 <span>{momentum}</span>
                                             </div>
                                             {c.interaction_count > 0 && (
                                                 <div className="flex items-center gap-1">
-                                                    <MessageSquare className="w-3.5 h-3.5" />
+                                                    <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
                                                     <span>{c.interaction_count} log{c.interaction_count !== 1 ? 's' : ''}</span>
                                                 </div>
                                             )}
                                         </div>
                                     </div>
-                                    <div className="shrink-0 flex items-center h-12">
+                                    <div className="shrink-0 flex items-center h-10 sm:h-12">
                                         <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
                                     </div>
                                 </div>
@@ -1011,78 +1011,99 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                                         <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">Relationship Scorecard</h3>
                                     </div>
                                     
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                                        <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4">
-                                            <div className="text-[10px] font-mono text-slate-400 uppercase mb-1">Status Class</div>
-                                            <div className="flex items-center gap-1.5">
+                                    {/* Action Deck Bar (Prominent Apple/Linear-style Contact actions) */}
+                                    <div className="grid grid-cols-3 gap-2.5 bg-slate-50 border border-slate-200/60 rounded-2xl p-2.5">
+                                        {client.phone_number ? (
+                                            <a
+                                                href={`tel:${client.phone_number}`}
+                                                className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                            >
+                                                <Phone className="w-4 h-4 text-slate-600" />
+                                                <span>Call</span>
+                                            </a>
+                                        ) : (
+                                            <span className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-100 bg-slate-100/50 rounded-xl text-[11px] font-semibold text-slate-400 opacity-60 cursor-not-allowed select-none">
+                                                <Phone className="w-4 h-4 text-slate-300" />
+                                                <span>No Phone</span>
+                                            </span>
+                                        )}
+                                        {client.email ? (
+                                            <a
+                                                href={`mailto:${client.email}`}
+                                                className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                            >
+                                                <Mail className="w-4 h-4 text-slate-600" />
+                                                <span>Email</span>
+                                            </a>
+                                        ) : (
+                                            <span className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-100 bg-slate-100/50 rounded-xl text-[11px] font-semibold text-slate-400 opacity-60 cursor-not-allowed select-none">
+                                                <Mail className="w-4 h-4 text-slate-300" />
+                                                <span>No Email</span>
+                                            </span>
+                                        )}
+                                        {client.phone_number ? (
+                                            <button
+                                                type="button"
+                                                onClick={handleShare}
+                                                className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#B89B5E]/30 bg-white hover:bg-[#B89B5E]/5 rounded-xl text-[11px] font-semibold text-[#B89B5E] shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                            >
+                                                <MessageSquare className="w-4 h-4 text-[#B89B5E]" />
+                                                <span>WhatsApp</span>
+                                            </button>
+                                        ) : (
+                                            <span className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-100 bg-slate-100/50 rounded-xl text-[11px] font-semibold text-slate-400 opacity-60 cursor-not-allowed select-none">
+                                                <MessageSquare className="w-4 h-4 text-slate-300" />
+                                                <span>No WhatsApp</span>
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    {/* Mini Scorecard row */}
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
+                                            <div className="text-[10px] font-semibold font-mono text-slate-400 uppercase mb-1">Status</div>
+                                            <div className="flex items-center justify-center">
                                                 {health && (
-                                                    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-semibold uppercase tracking-wider border ${health.color}`}>
+                                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider border ${health.color}`}>
                                                         {health.label}
                                                     </span>
                                                 )}
                                             </div>
                                         </div>
-                                        <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4">
-                                            <div className="text-[10px] font-mono text-slate-400 uppercase mb-1">Total Logs</div>
-                                            <div className="text-sm font-semibold text-slate-800">{client.interaction_count || 0} touchpoints</div>
+                                        <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
+                                            <div className="text-[10px] font-semibold font-mono text-slate-400 uppercase mb-1">Logs</div>
+                                            <div className="text-xs font-semibold text-slate-800">{client.interaction_count || 0} times</div>
                                         </div>
-                                        {client.value && (
-                                            <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4">
-                                                <div className="text-[10px] font-mono text-slate-400 uppercase mb-1">Deal Value</div>
-                                                <div className="text-sm font-mono font-bold text-[#B89B5E]">{formatCurrency(client.value)}</div>
+                                        <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
+                                            <div className="text-[10px] font-semibold font-mono text-slate-400 uppercase mb-1">Value</div>
+                                            <div className="text-xs font-mono font-bold text-[#B89B5E]">
+                                                {client.value ? formatCurrency(client.value) : "—"}
                                             </div>
-                                        )}
+                                        </div>
                                     </div>
 
-                                    {/* Action Deck Bar */}
-                                    <div className="flex gap-2 flex-wrap bg-slate-50 border border-slate-200/50 rounded-2xl p-4">
-                                        {client.phone_number && (
-                                            <a
-                                                href={`tel:${client.phone_number}`}
-                                                className="inline-flex items-center gap-1.5 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 rounded-xl text-xs font-semibold text-slate-700 shadow-sm transition-colors"
-                                            >
-                                                <Phone className="w-3.5 h-3.5" /> Call Client
-                                            </a>
-                                        )}
-                                        {client.email && (
-                                            <a
-                                                href={`mailto:${client.email}`}
-                                                className="inline-flex items-center gap-1.5 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 rounded-xl text-xs font-semibold text-slate-700 shadow-sm transition-colors"
-                                            >
-                                                <Mail className="w-3.5 h-3.5" /> Email Client
-                                            </a>
-                                        )}
-                                        {client.phone_number && (
-                                            <button
-                                                onClick={handleShare}
-                                                className="inline-flex items-center gap-1.5 px-4 py-2 border border-[#B89B5E]/30 bg-white hover:bg-slate-50 rounded-xl text-xs font-semibold text-[#B89B5E] shadow-sm transition-all"
-                                            >
-                                                <Share2 className="w-3.5 h-3.5" /> WhatsApp Outreach
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    <div className="bg-slate-50/50 border border-slate-100 rounded-2xl p-4 space-y-2 text-xs">
-                                        <div className="flex justify-between border-b border-slate-100 pb-2">
-                                            <span className="text-slate-400">Email Address</span>
-                                            <span className="font-mono text-slate-700 font-medium">{client.email || "—"}</span>
+                                    {/* Relationship card details */}
+                                    <div className="bg-slate-50/30 border border-slate-200/60 rounded-2xl p-4 space-y-2.5 text-xs">
+                                        <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
+                                            <span className="text-slate-500 font-medium">Email Address</span>
+                                            <span className="font-mono text-slate-800 font-semibold break-all">{client.email || "—"}</span>
                                         </div>
-                                        <div className="flex justify-between border-b border-slate-100 pb-2">
-                                            <span className="text-slate-400">Phone Number</span>
-                                            <span className="font-mono text-slate-700 font-medium">{client.phone_number || "—"}</span>
+                                        <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
+                                            <span className="text-slate-500 font-medium">Phone Number</span>
+                                            <span className="font-mono text-slate-800 font-semibold">{client.phone_number || "—"}</span>
                                         </div>
-                                        <div className="flex justify-between border-b border-slate-100 pb-2">
-                                            <span className="text-slate-400">Tags Registered</span>
-                                            <span className="font-mono text-slate-600">
+                                        <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
+                                            <span className="text-slate-500 font-medium">Tags Registered</span>
+                                            <span className="font-mono text-slate-600 font-medium">
                                                 {client.tags && client.tags.length > 0 ? client.tags.map(t => `#${t}`).join(" ") : "—"}
                                             </span>
                                         </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-400">Last touchpoint date</span>
-                                            <span className="text-slate-700 font-medium">
+                                        <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
+                                            <span className="text-slate-500 font-medium">Last Contacted</span>
+                                            <span className="text-slate-800 font-semibold">
                                                 {formatDateTime(client.last_contacted_date)}
                                                 {daysSince !== null && (
-                                                    <span className="ml-1 text-slate-400 text-[10px]">({daysSince} days ago)</span>
+                                                    <span className="ml-1.5 text-slate-400 text-[10px] font-mono">({daysSince}d ago)</span>
                                                 )}
                                             </span>
                                         </div>

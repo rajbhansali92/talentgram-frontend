@@ -274,7 +274,7 @@ function PipelineBoard({ projectId, projectName }) {
 
     return (
         <div 
-            className="min-h-screen bg-[#f5f5f3] px-5 py-5 pb-24 overflow-x-hidden"
+            className="min-h-screen bg-[#f5f5f3] pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] pb-[max(6rem,env(safe-area-inset-bottom))] pt-5 overflow-x-hidden"
             data-testid="project-pipeline"
         >
             <div className="max-w-[1680px] mx-auto">

@@ -53,7 +53,7 @@ export function BoardRow({ children, testid }) {
                 overflow-y-visible md:overflow-x-auto tg-pipeline-scroll
                 items-stretch md:items-start
                 snap-none md:snap-x md:snap-proximity md:snap-none
-                -mx-2 px-2
+                md:-mx-2 md:px-2
             "
             style={{
                 scrollBehavior: "smooth",

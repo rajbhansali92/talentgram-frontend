@@ -520,8 +520,7 @@ export default function AdminLayout() {
           />
         </aside>
 
-        {/* MOBILE TOP BAR */}
-        <div className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-black/[0.06] bg-white px-4 py-3 flex items-center justify-between">
+        <div className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-black/[0.06] bg-white pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
               onClick={openDrawer}

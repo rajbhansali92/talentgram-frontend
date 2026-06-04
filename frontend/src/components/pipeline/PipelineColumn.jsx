@@ -277,7 +277,7 @@ const PipelineColumn = memo(function PipelineColumn({
             {/* Sticky header with intelligence metrics (with premium soft header tint) */}
             <div 
                 onClick={(e) => onToggleCollapse?.(stage)}
-                className={`sticky top-0 z-20 px-4.5 md:px-5 py-2.5 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[60px] md:h-[68px] flex flex-col justify-center cursor-pointer select-none`}
+                className={`sticky top-0 z-20 px-4 md:px-5 py-2.5 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[60px] md:h-[68px] flex flex-col justify-center cursor-pointer select-none`}
             >
                 {/* Primary header row */}
                 <div className="flex items-center justify-between gap-3 mb-2">

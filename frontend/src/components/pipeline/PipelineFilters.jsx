@@ -57,6 +57,17 @@ const PipelineFilters = memo(function PipelineFilters({
         hasIg && hasIg !== "any",
     ].filter(Boolean).length;
 
+    React.useEffect(() => {
+        if (!isMobileDrawerOpen) return;
+        const handleGlobalKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                onMobileDrawerOpenChange?.(false);
+            }
+        };
+        window.addEventListener('keydown', handleGlobalKeyDown);
+        return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+    }, [isMobileDrawerOpen, onMobileDrawerOpenChange]);
+
     return (
         <div data-testid="pipeline-control-bar" className="sticky top-3 z-30 mb-6">
             {/* Desktop View */}
@@ -214,7 +225,7 @@ const PipelineFilters = memo(function PipelineFilters({
                 </div>
                 <button
                     type="button"
-                    onClick={() => onMobileDrawerOpenChange?.(true)}
+                    onClick={() => onMobileDrawerOpenChange?.(!isMobileDrawerOpen)}
                     className="px-4 py-2 border border-black/[0.08] rounded-xl bg-white flex items-center gap-2 text-[13px] font-semibold text-slate-700 min-h-[44px] active:scale-[0.98] transition-all shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
                 >
                     <svg className="w-4 h-4 text-black/55" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -233,21 +244,34 @@ const PipelineFilters = memo(function PipelineFilters({
             {isMobileDrawerOpen && (
                 <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs md:hidden flex items-end">
                     <div className="absolute inset-0" onClick={() => onMobileDrawerOpenChange?.(false)} />
-                    <div className="relative w-full bg-white rounded-t-3xl p-5 shadow-2xl animate-in slide-in-from-bottom duration-200 z-10 max-h-[85vh] overflow-y-auto">
-                        <div className="w-12 h-1 bg-slate-250 rounded-full mx-auto mb-4" />
-                        <div className="flex justify-between items-center mb-5 pb-3 border-b border-black/[0.05]">
-                            <div>
-                                <h3 className="font-bold text-sm text-slate-800 tracking-wide uppercase font-mono">Filters</h3>
-                                <span className="text-[10px] text-slate-400 font-mono">
-                                    {showingCount ? `${filteredCount.toLocaleString()}/${totalCount.toLocaleString()} matched` : `${totalCount.toLocaleString()} total`}
-                                </span>
+                    <div className="relative w-full bg-white rounded-t-3xl pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 shadow-2xl animate-in slide-in-from-bottom duration-200 z-10 max-h-[85vh] flex flex-col overflow-hidden">
+                        <div className="w-12 h-1 bg-slate-200 rounded-full mx-auto mb-4 flex-shrink-0" />
+                        
+                        <div className="flex justify-between items-center mb-5 pb-3 border-b border-black/[0.05] flex-shrink-0">
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => onMobileDrawerOpenChange?.(false)}
+                                    className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 focus:outline-none min-w-[36px] min-h-[36px] flex items-center justify-center bg-black/[0.02] hover:bg-black/[0.05]"
+                                    aria-label="Close filters"
+                                >
+                                    <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                                <div>
+                                    <h3 className="font-bold text-sm text-slate-800 tracking-wide uppercase font-mono">Filters</h3>
+                                    <span className="text-[10px] text-slate-400 font-mono">
+                                        {showingCount ? `${filteredCount.toLocaleString()}/${totalCount.toLocaleString()} matched` : `${totalCount.toLocaleString()} total`}
+                                    </span>
+                                </div>
                             </div>
                             <div className="flex items-center gap-3">
                                 {filtersActive && (
                                     <button
                                         type="button"
                                         onClick={onClearAll}
-                                        className="text-xs text-rose-500 font-semibold uppercase tracking-wider"
+                                        className="text-xs text-rose-500 font-semibold uppercase tracking-wider min-h-[36px]"
                                     >
                                         Clear All
                                     </button>
@@ -262,7 +286,7 @@ const PipelineFilters = memo(function PipelineFilters({
                             </div>
                         </div>
 
-                        <div className="space-y-6 pb-6">
+                        <div className="flex-1 overflow-y-auto overscroll-contain tg-pipeline-scroll space-y-6 pb-6 pr-1">
                             {/* Status Section */}
                             <div className="space-y-2">
                                 <span className="text-[9px] font-semibold tracking-widest uppercase text-black/40 font-mono block">Status</span>

@@ -1127,64 +1127,105 @@ export default function SubmissionPage() {
                 <div className="absolute bottom-0 -right-40 w-80 h-80 rounded-full bg-slate-200/40 mix-blend-multiply animate-blob animation-delay-2000" />
             </div>
 
-            <header className="sticky top-0 z-30 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
-                <div className="max-w-3xl mx-auto px-5 py-5 flex items-center justify-between">
-                    <Logo size="sm" />
+            <header className="relative w-full pt-10 pb-8 px-5 border-b border-slate-200/60 bg-white/40">
+                <div className="absolute top-5 right-5 z-40">
                     <ThemeToggle size="sm" />
                 </div>
-                {/* Mobile-only 3-step indicator. Desktop renders the full
-                    form vertically (this bar is hidden via md:hidden).
-                    Email-first gate: hidden until the talent has tabbed
-                    out of the email field and chosen Use/Edit (or no match). */}
-                {emailGateUnlocked && (
-                <div
-                    className="md:hidden bg-white/60 backdrop-blur-sm border-t border-slate-200/40"
-                    data-testid="wizard-stepbar"
-                >
-                    <div className="max-w-3xl mx-auto px-5 py-4 flex items-center gap-3">
-                        {[1, 2, 3].map((n, i) => {
-                            const labels = ["Profile", "Brief", "Uploads"];
-                            const reached = mobileStep >= n;
-                            const active = mobileStep === n;
-                            return (
-                                <button
-                                    key={n}
-                                    type="button"
-                                    onClick={() => goToStep(n)}
-                                    data-testid={`wizard-step-${n}`}
-                                    className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-80" : "opacity-50"}`}
-                                >
-                                    <span
-                                        className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-slate-700 border border-slate-300" : "border border-slate-300 text-slate-500"}`}
-                                    >
-                                        {reached && !active ? <Check className="w-3 h-3" /> : n}
-                                    </span>
-                                    <span className={`text-[11px] tracking-wider uppercase font-medium ${active ? "text-slate-900" : "text-slate-500"}`}>
-                                        {labels[i]}
-                                    </span>
-                                </button>
-                            );
-                        })}
+                <div className="max-w-2xl mx-auto flex flex-col items-center text-center">
+                    {/* Centered Logo */}
+                    <div className="mb-4">
+                        <Logo size={64} className="mx-auto" />
                     </div>
-                    <div className="h-0.5 bg-slate-200/60">
-                        <div
-                            className="h-full bg-slate-800 transition-all duration-300"
-                            style={{ width: `${(mobileStep - 1) * 50}%` }}
-                            data-testid="wizard-progress-bar"
-                        />
+
+                    {/* Clickable Instagram icon */}
+                    <div className="mb-4">
+                        <a
+                            href="https://www.instagram.com/talentgram.agency/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center justify-center p-2 rounded-full text-slate-800 hover:bg-slate-100 transition-all duration-200 cursor-pointer group"
+                            title="Follow us on Instagram"
+                        >
+                            <svg
+                                className="w-5 h-5 transition-colors duration-200 hover:text-[#E1306C] md:group-hover:text-[#E1306C]"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            >
+                                <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                                <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                                <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                            </svg>
+                        </a>
+                    </div>
+
+                    {/* Trust and Credibility Copy */}
+                    <div className="max-w-md mx-auto">
+                        <p className="text-[13px] font-semibold text-slate-700 tracking-tight leading-relaxed">
+                            Complete your profile and upload your audition materials.
+                        </p>
+                        <p className="text-[11px] text-slate-400 font-medium leading-relaxed mt-1">
+                            Your submission will be reviewed by the Talentgram casting team.
+                        </p>
                     </div>
                 </div>
+
+                {/* Mobile-only 3-step indicator below the centered branding */}
+                {emailGateUnlocked && (
+                    <div
+                        className="md:hidden mt-6 max-w-2xl mx-auto border-t border-slate-200/40 pt-4"
+                        data-testid="wizard-stepbar"
+                    >
+                        <div className="flex items-center gap-3">
+                            {[1, 2, 3].map((n, i) => {
+                                const labels = ["Profile", "Brief", "Uploads"];
+                                const reached = mobileStep >= n;
+                                const active = mobileStep === n;
+                                return (
+                                    <button
+                                        key={n}
+                                        type="button"
+                                        onClick={() => goToStep(n)}
+                                        data-testid={`wizard-step-${n}`}
+                                        className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-80" : "opacity-50"}`}
+                                    >
+                                        <span
+                                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-slate-700 border border-slate-300" : "border border-slate-300 text-slate-500"}`}
+                                        >
+                                            {reached && !active ? <Check className="w-3 h-3" /> : n}
+                                        </span>
+                                        <span className={`text-[11px] tracking-wider uppercase font-medium ${active ? "text-slate-900" : "text-slate-500"}`}>
+                                            {labels[i]}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <div className="h-0.5 bg-slate-200/60 mt-3">
+                            <div
+                                className="h-full bg-slate-800 transition-all duration-300"
+                                style={{ width: `${(mobileStep - 1) * 50}%` }}
+                                data-testid="wizard-progress-bar"
+                            />
+                        </div>
+                    </div>
                 )}
             </header>
 
-            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-8 md:py-16">
+            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-10 sm:mb-16 bg-white/60 rounded-3xl p-5 sm:p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
+                <section className="mb-8 bg-white/60 rounded-3xl p-5 sm:p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
-                        <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
-                            Talentgram × {project.brand_name}
-                        </h1>
+                        <div className="flex flex-col gap-1">
+                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400">PROJECT</p>
+                            <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
+                                Talentgram × {project.brand_name}
+                            </h1>
+                        </div>
                         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                             <span>Draft Auto-Saved</span>

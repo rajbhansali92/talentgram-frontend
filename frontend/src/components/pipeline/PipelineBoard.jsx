@@ -86,6 +86,7 @@ function PipelineBoard({ projectId, projectName }) {
 
     // Stage focus state
     const [focusedStageId, setFocusedStageId] = useState(null);
+    const [isFollowUpExpanded, setIsFollowUpExpanded] = useState(false);
 
     // Section collapse states
     const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
@@ -356,7 +357,7 @@ function PipelineBoard({ projectId, projectName }) {
                             </div>
                         )}
 
-                        {!hasZeroAfterFilter && !showOnlyFollowUp && mainStages.length > 0 && (
+                        {!hasZeroAfterFilter && !isFollowUpExpanded && !showOnlyFollowUp && mainStages.length > 0 && (
                             <BoardSection
                                 eyebrow="Pipeline"
                                 helper={`${MAIN_FLOW_STAGES.length} stages`}
@@ -383,11 +384,14 @@ function PipelineBoard({ projectId, projectName }) {
                                     refresh={fetchPipeline}
                                     focusedStageId={focusedStageId}
                                     onFocus={setFocusedStageId}
+                                    isExpanded={isFollowUpExpanded}
+                                    onToggleExpand={() => setIsFollowUpExpanded(!isFollowUpExpanded)}
+                                    {...columnCommons}
                                 />
                             </div>
                         )}
 
-                        {!hasZeroAfterFilter && !showOnlyFollowUp && outcomeStages.length > 0 && (
+                        {!hasZeroAfterFilter && !isFollowUpExpanded && !showOnlyFollowUp && outcomeStages.length > 0 && (
                             <BoardSection eyebrow="Outcomes" muted>
                                 <BoardRow testid="pipeline-outcomes">
                                     {outcomeStages.map((stage) => (
@@ -403,7 +407,7 @@ function PipelineBoard({ projectId, projectName }) {
                             </BoardSection>
                         )}
 
-                        {!hasZeroAfterFilter && !showOnlyFollowUp && independentStages.length > 0 && (
+                        {!hasZeroAfterFilter && !isFollowUpExpanded && !showOnlyFollowUp && independentStages.length > 0 && (
                             <BoardSection eyebrow="Pitch" divider>
                                 <BoardRow testid="pipeline-pitch">
                                     {independentStages.map((stage) => (

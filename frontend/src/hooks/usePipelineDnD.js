@@ -32,6 +32,8 @@ export function usePipelineDnD({
 
             if (!droppedId || !targetStage) return;
 
+            const actualStage = targetStage === "follow_up" ? "ask_to_test" : targetStage;
+
             let snapshot = null;
             let toastUndo = null;
 
@@ -44,15 +46,15 @@ export function usePipelineDnD({
 
                 const current = normaliseStage(row.stage);
 
-                if (current === targetStage) return prev;
+                if (current === actualStage) return prev;
 
                 toastUndo = `Moving ${
                     row.talent_name || "talent"
-                } → ${getStageLabel(targetStage)}`;
+                } → ${getStageLabel(actualStage)}`;
 
                 return prev.map((r) =>
                     r.id === droppedId
-                        ? { ...r, stage: targetStage }
+                        ? { ...r, stage: actualStage }
                         : r
                 );
             });
@@ -64,12 +66,12 @@ export function usePipelineDnD({
                     `/projects/${projectId}/pipeline/move`,
                     {
                         ids: [droppedId],
-                        stage: targetStage,
+                        stage: actualStage,
                     }
                 );
 
                 toast.success(
-                    `Moved to ${getStageLabel(targetStage)}`
+                    `Moved to ${getStageLabel(actualStage)}`
                 );
 
                 refresh();

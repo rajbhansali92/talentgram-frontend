@@ -1061,43 +1061,6 @@ export default function ClientView() {
                     );
                 })()}
 
-                {projectBudget.length > 0 && (
-                    <section
-                        className="mb-12 bg-white p-6 md:p-8 rounded-2xl shadow-[0_2px_8px_-4px_rgba(0,0,0,0.02)]"
-                        data-testid="project-budget-block"
-                    >
-                        <p className="eyebrow tracking-[0.12em] mb-5 text-[#5C5C5C]">Project Budget</p>
-                        <div className="grid gap-8 md:grid-cols-2">
-                            {projectBudget.map((grp, gi) => (
-                                <div
-                                    key={grp.project_id || `grp-${gi}`}
-                                    className="space-y-3"
-                                    data-testid={`project-budget-group-${gi}`}
-                                >
-                                    {grp.brand_name && projectBudget.length > 1 && (
-                                        <div className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-1">
-                                            {grp.brand_name}
-                                        </div>
-                                    )}
-                                    {(grp.lines || []).map((row, ri) => (
-                                        <div
-                                            key={`${row.label || ""}-${ri}`}
-                                            className="flex items-center justify-between gap-4 border-b border-black/[0.03] pb-2 text-sm"
-                                            data-testid={`project-budget-line-${gi}-${ri}`}
-                                        >
-                                            <span className="text-[#5C5C5C]">
-                                                {row.label || "—"}
-                                            </span>
-                                            <span className="font-mono text-[#111111]">
-                                                {row.value || "—"}
-                                            </span>
-                                        </div>
-                                    ))}
-                                </div>
-                            ))}
-                        </div>
-                    </section>
-                )}
 
                 <div
                     className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 md:gap-7"

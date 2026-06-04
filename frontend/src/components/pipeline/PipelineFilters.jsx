@@ -40,8 +40,9 @@ const PipelineFilters = memo(function PipelineFilters({
     onClearAll,
     totalCount,
     filteredCount,
+    isMobileDrawerOpen = false,
+    onMobileDrawerOpenChange,
 }) {
-    const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
     const showingCount = filteredCount !== totalCount;
 
     const handleKeyDown = (e) => {
@@ -210,10 +211,9 @@ const PipelineFilters = memo(function PipelineFilters({
                             ×
                         </button>
                     )}
-                </div>
-                <button
+                          <button
                     type="button"
-                    onClick={() => setIsMobileDrawerOpen(true)}
+                    onClick={() => onMobileDrawerOpenChange?.(true)}
                     className="px-4 py-2 border border-black/[0.08] rounded-xl bg-white flex items-center gap-2 text-[13px] font-semibold text-slate-700 min-h-[44px] active:scale-[0.98] transition-all shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
                 >
                     <svg className="w-4 h-4 text-black/55" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -231,7 +231,7 @@ const PipelineFilters = memo(function PipelineFilters({
             {/* Mobile Filter Drawer Overlay bottom sheet */}
             {isMobileDrawerOpen && (
                 <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs md:hidden flex items-end">
-                    <div className="absolute inset-0" onClick={() => setIsMobileDrawerOpen(false)} />
+                    <div className="absolute inset-0" onClick={() => onMobileDrawerOpenChange?.(false)} />
                     <div className="relative w-full bg-white rounded-t-3xl p-5 shadow-2xl animate-in slide-in-from-bottom duration-200 z-10 max-h-[85vh] overflow-y-auto">
                         <div className="w-12 h-1 bg-slate-250 rounded-full mx-auto mb-4" />
                         <div className="flex justify-between items-center mb-5 pb-3 border-b border-black/[0.05]">
@@ -253,7 +253,7 @@ const PipelineFilters = memo(function PipelineFilters({
                                 )}
                                 <button
                                     type="button"
-                                    onClick={() => setIsMobileDrawerOpen(false)}
+                                    onClick={() => onMobileDrawerOpenChange?.(false)}
                                     className="px-4 py-2 bg-neutral-900 text-white rounded-xl text-xs font-semibold active:scale-[0.97] transition-all min-h-[38px] flex items-center justify-center"
                                 >
                                     Done

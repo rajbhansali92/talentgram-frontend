@@ -184,10 +184,10 @@ const PipelineColumn = memo(function PipelineColumn({
 
     const widthClasses = useMemo(() => {
         if (isFocused) return "w-full min-w-0 flex-1";
-        if (columnWidth === 300) return "w-[300px] min-w-[300px] max-w-[300px]";
-        if (columnWidth === 350) return "w-[350px] min-w-[350px] max-w-[350px]";
-        if (columnWidth === 400) return "w-[400px] min-w-[400px] max-w-[400px]";
-        return "w-[300px] min-w-[300px] max-w-[300px]";
+        if (columnWidth === 300) return "w-full md:w-[300px] md:min-w-[300px] md:max-w-[300px]";
+        if (columnWidth === 350) return "w-full md:w-[350px] md:min-w-[350px] md:max-w-[350px]";
+        if (columnWidth === 400) return "w-full md:w-[400px] md:min-w-[400px] md:max-w-[400px]";
+        return "w-full md:w-[300px] md:min-w-[300px] md:max-w-[300px]";
     }, [columnWidth, isFocused]);
 
     // 3. Derived variables (non-hook calculations - MUST be before useCallback that depends on them)
@@ -259,7 +259,7 @@ const PipelineColumn = memo(function PipelineColumn({
             role="region"
             aria-label={columnLabel}
             className={`
-                relative w-full md:w-auto shrink-0 md:${widthClasses}
+                relative shrink-0 ${widthClasses}
                 rounded-lg overflow-visible
                 bg-white
                 shadow-[0_1px_2px_rgba(0,0,0,0.04)]

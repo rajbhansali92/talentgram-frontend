@@ -96,6 +96,7 @@ function PipelineBoard({ projectId, projectName }) {
     const [isMobile, setIsMobile] = useState(false);
     const [mobileExpandedStages, setMobileExpandedStages] = useState({});
     const [collapsedStages, setCollapsedStages] = useState({});
+    const [isFilterOpen, setIsFilterOpen] = useState(false);
 
     React.useEffect(() => {
         const checkMobile = () => {
@@ -373,17 +374,19 @@ function PipelineBoard({ projectId, projectName }) {
                                     onOpenTalentBrowser={() => setShowTalentBrowser(true)}
                                 />
                             </div>
-                            <div className="border-t border-black/[0.04] px-4 py-3">
-                                <QuickAddTalents
-                                    searchQuery={searchQuery}
-                                    onSearchQueryChange={setSearchQuery}
-                                    searchLoading={searchLoading}
-                                    searchResults={searchResults}
-                                    selectedTalents={selectedTalents}
-                                    onToggleTalent={toggleTalentSelect}
-                                    onAddSelected={addSelectedToPipeline}
-                                />
-                            </div>
+                            {!isFilterOpen && (
+                                <div className="border-t border-black/[0.04] px-4 py-3">
+                                    <QuickAddTalents
+                                        searchQuery={searchQuery}
+                                        onSearchQueryChange={setSearchQuery}
+                                        searchLoading={searchLoading}
+                                        searchResults={searchResults}
+                                        selectedTalents={selectedTalents}
+                                        onToggleTalent={toggleTalentSelect}
+                                        onAddSelected={addSelectedToPipeline}
+                                    />
+                                </div>
+                            )}
                             <div className="border-t border-black/[0.04] px-4 py-3">
                                 <PipelineFilters
                                     search={search}
@@ -398,6 +401,8 @@ function PipelineBoard({ projectId, projectName }) {
                                     onClearAll={clearAllFilters}
                                     totalCount={data.length}
                                     filteredCount={filteredData.length}
+                                    isMobileDrawerOpen={isFilterOpen}
+                                    onMobileDrawerOpenChange={setIsFilterOpen}
                                 />
                             </div>
                         </div>

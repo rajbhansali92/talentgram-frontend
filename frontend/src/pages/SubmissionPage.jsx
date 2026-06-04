@@ -98,7 +98,7 @@ const formatMediaTimestamp = (m) => {
     }
 };
 
-export default function SubmissionPage() {
+function SubmissionPage() {
     const { slug } = useParams();
     const [project, setProject] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -2501,7 +2501,7 @@ export default function SubmissionPage() {
                                         <button
                                             type="button"
                                             onClick={() => cameraImagesRef.current?.click()}
-                                            disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                            disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
                                             data-testid="add-image-camera-btn"
                                             className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                         >
@@ -2510,7 +2510,7 @@ export default function SubmissionPage() {
                                         <button
                                             type="button"
                                             onClick={() => imagesRef.current?.click()}
-                                            disabled={uploading === "image" || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                            disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
                                             data-testid="add-image-library-btn"
                                             className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                         >
@@ -3479,4 +3479,65 @@ function timeAgo(iso) {
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
+}
+
+class SubmissionErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        return { hasError: true, error };
+    }
+
+    componentDidCatch(error, errorInfo) {
+        console.error("SubmissionPage crashed:", error, errorInfo);
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return (
+                <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4 py-12 sm:px-6 lg:px-8">
+                    <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-3xl border border-slate-200 shadow-sm text-center">
+                        <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 7.5h.008v.008H12v-.008Z" />
+                            </svg>
+                        </div>
+                        <h2 className="text-xl font-semibold text-slate-950 tracking-tight">Something went wrong</h2>
+                        <p className="mt-2 text-sm text-slate-500 leading-relaxed">
+                            An unexpected error occurred while loading this page. Don't worry, your progress has not been lost. Please try reloading.
+                        </p>
+                        <div className="mt-6 flex flex-col gap-2">
+                            <button
+                                onClick={() => window.location.reload()}
+                                className="w-full bg-slate-900 text-white py-3 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] transition-all duration-200"
+                            >
+                                Reload Page
+                            </button>
+                            <button
+                                onClick={() => {
+                                    localStorage.clear();
+                                    window.location.reload();
+                                }}
+                                className="w-full text-slate-500 py-3 rounded-full text-[12px] font-medium hover:text-slate-700 transition-all duration-200"
+                            >
+                                Clear Cache & Reload
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
+
+export default function SubmissionPageWithErrorBoundary(props) {
+    return (
+        <SubmissionErrorBoundary>
+            <SubmissionPage {...props} />
+        </SubmissionErrorBoundary>
+    );
 }

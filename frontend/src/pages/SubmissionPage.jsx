@@ -1881,20 +1881,21 @@ function SubmissionPage() {
                                     <div
                                         data-testid="availability-block"
                                         data-step="2"
+                                        className="mb-6"
                                     >
-                                        <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">
-                                            Availability{" "}
-                                            <span className="text-rose-500">*</span>
-                                        </p>
-                                        <p className="text-[12px] text-slate-600 mb-3 leading-relaxed">Tell us whether you are available for shoot and travel dates.</p>
-                                        {project.shoot_dates && (
-                                            <p className="text-[12px] text-slate-500 mb-5 leading-relaxed">
-                                                {project.shoot_dates}
-                                                {" — "}Costume trial and rehearsal dates
-                                                (if any) will be informed.
+                                        <div className="bg-white/70 border border-slate-200/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                                            <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-2">
+                                                Availability
                                             </p>
-                                        )}
-                                        <div className="grid grid-cols-2 gap-2 mb-4">
+                                            {project.shoot_dates ? (
+                                                <p className="text-[15px] font-medium text-slate-800 whitespace-pre-line leading-relaxed">
+                                                    {project.shoot_dates}
+                                                </p>
+                                            ) : (
+                                                <p className="text-[15px] font-medium text-slate-500">Dates to be confirmed</p>
+                                            )}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3 mb-4">
                                             {AVAILABILITY_OPTIONS.map((opt) => {
                                                 const active =
                                                     form.availability.status === opt.key;
@@ -1913,13 +1914,13 @@ function SubmissionPage() {
                                                             setTimeout(saveForm, 0);
                                                         }}
                                                         data-testid={`avail-${opt.key}-btn`}
-                                                        className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                        className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                             active
-                                                                ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                                : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                                ? "bg-slate-950 text-white border-slate-950 shadow-sm"
+                                                                : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
                                                         }`}
                                                     >
-                                                        {opt.label}
+                                                        {opt.key === "yes" ? "Available" : "Not Available"}
                                                     </button>
                                                 );
                                             })}
@@ -1945,132 +1946,120 @@ function SubmissionPage() {
                                         )}
                                     </div>
 
-                                    {/* BUDGET — decision block */}
-                                    <div
-                                        data-testid="budget-block"
-                                        data-step="2"
-                                    >
-                                        <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">
-                                            Budget{" "}
-                                            <span className="text-rose-500">*</span>
-                                        </p>
-                                        <p className="text-[12px] text-slate-600 mb-4 leading-relaxed">Share your expected compensation if requested for this project.</p>
-                                        {project.commission_percent && (
-                                            <div
-                                                className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                                data-testid="commission-card"
-                                            >
-                                                <span className="text-[11px] tracking-[0.2em] uppercase font-mono text-slate-500">
+                                    {/* COMMISSION — card */}
+                                    {project.commission_percent && (
+                                        <div
+                                            data-testid="commission-block"
+                                            className="mb-6"
+                                        >
+                                            <div className="bg-white/70 border border-slate-200/80 rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="commission-card">
+                                                <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-1.5">
                                                     Commission
-                                                </span>
-                                                <span className="font-display text-2xl text-slate-800">
+                                                </p>
+                                                <p className="text-[22px] font-bold text-slate-950">
                                                     {project.commission_percent}
-                                                </span>
+                                                </p>
                                             </div>
-                                        )}
-                                        {(project.talent_budget || []).length > 0 && (
-                                            <div
-                                                className="bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                                data-testid="talent-budget-hint"
-                                            >
-                                                <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-3">
-                                                    Offered Budget
-                                                </div>
-                                                <div className="space-y-2">
-                                                    {project.talent_budget.map((row, i) => (
-                                                        <div
-                                                            key={`${row.label || ""}-${i}`}
-                                                            className="flex items-center justify-between gap-3 text-[13px]"
-                                                            data-testid={`talent-budget-line-${i}`}
-                                                        >
-                                                            <span className="text-slate-500">
-                                                                {row.label || "—"}
-                                                            </span>
-                                                            <span className="font-mono text-slate-700">
-                                                                {row.value || "—"}
-                                                            </span>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                        {project.budget_per_day && (
-                                            <div
-                                                className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                                data-testid="project-budget-card"
-                                            >
-                                                <span className="text-[11px] tracking-[0.2em] uppercase font-mono text-slate-500">
-                                                    Project Budget
-                                                </span>
-                                                <span className="font-display text-2xl font-bold text-slate-950">
-                                                    {project.budget_per_day} / Day
-                                                </span>
-                                            </div>
-                                        )}
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setForm({
-                                                        ...form,
-                                                        budget: {
-                                                            status: "accept",
-                                                            value: "",
-                                                        },
-                                                    });
-                                                    setTimeout(saveForm, 0);
-                                                }}
-                                                data-testid="budget-accept-btn"
-                                                className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
-                                                    form.budget.status === "accept"
-                                                        ? "bg-slate-950 text-white border-slate-950 shadow-sm"
-                                                        : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
-                                                }`}
-                                            >
-                                                Accept
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setForm({
-                                                        ...form,
-                                                        budget: {
-                                                            ...form.budget,
-                                                            status: "custom",
-                                                        },
-                                                    });
-                                                    setTimeout(saveForm, 0);
-                                                }}
-                                                data-testid="budget-custom-btn"
-                                                className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
-                                                    form.budget.status === "custom"
-                                                        ? "bg-slate-950 text-white border-slate-950 shadow-sm"
-                                                        : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
-                                                }`}
-                                            >
-                                                Propose Own
-                                            </button>
                                         </div>
-                                        {form.budget.status === "custom" && (
-                                            <input
-                                                type="text"
-                                                value={form.budget.value}
-                                                onChange={(e) =>
-                                                    setForm({
-                                                        ...form,
-                                                        budget: {
-                                                            ...form.budget,
-                                                            value: e.target.value,
-                                                        },
-                                                    })
-                                                }
-                                                onBlur={saveForm}
-                                                placeholder="Enter your expected budget per day"
-                                                data-testid="budget-value-input"
-                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                            />
-                                        )}
-                                    </div>
+                                    )}
+
+                                    {/* BUDGET — decision block */}
+                                    {(project.budget_per_day || (project.talent_budget || []).length > 0) && (
+                                        <div
+                                            data-testid="budget-block"
+                                            data-step="2"
+                                            className="mb-6"
+                                        >
+                                            <div className="bg-white/70 border border-slate-200/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="project-budget-card">
+                                                <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-2">
+                                                    Project Budget
+                                                </p>
+                                                {project.budget_per_day && (
+                                                    <p className="text-[22px] font-bold text-slate-950">
+                                                        {project.budget_per_day}
+                                                    </p>
+                                                )}
+                                                {(project.talent_budget || []).length > 0 && (
+                                                    <div className={`space-y-3 ${project.budget_per_day ? "border-t border-slate-100 pt-4 mt-4" : ""}`}>
+                                                        {project.talent_budget.map((row, i) => (
+                                                            <div
+                                                                key={`${row.label || ""}-${i}`}
+                                                                className="flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-4 text-[15px] leading-relaxed text-slate-700 font-medium"
+                                                                data-testid={`talent-budget-line-${i}`}
+                                                            >
+                                                                <span className="text-slate-500 whitespace-pre-wrap">{row.label || "—"}</span>
+                                                                <span className="text-slate-950 font-semibold shrink-0">{row.value || "—"}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setForm({
+                                                            ...form,
+                                                            budget: {
+                                                                status: "accept",
+                                                                value: "",
+                                                            },
+                                                        });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                    data-testid="budget-accept-btn"
+                                                    className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
+                                                        form.budget.status === "accept"
+                                                            ? "bg-slate-950 text-white border-slate-955 shadow-sm"
+                                                            : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
+                                                    }`}
+                                                >
+                                                    Accept Budget
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setForm({
+                                                            ...form,
+                                                            budget: {
+                                                                ...form.budget,
+                                                                status: "custom",
+                                                            },
+                                                        });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                    data-testid="budget-custom-btn"
+                                                    className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
+                                                        form.budget.status === "custom"
+                                                            ? "bg-slate-955 text-white border-slate-955 shadow-sm"
+                                                            : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
+                                                    }`}
+                                                >
+                                                    Propose Own
+                                                </button>
+                                            </div>
+                                            {form.budget.status === "custom" && (
+                                                <input
+                                                    type="text"
+                                                    value={form.budget.value}
+                                                    onChange={(e) =>
+                                                        setForm({
+                                                            ...form,
+                                                            budget: {
+                                                                ...form.budget,
+                                                                value: e.target.value,
+                                                            },
+                                                        })
+                                                    }
+                                                    onBlur={saveForm}
+                                                    placeholder="Enter your expected budget per day"
+                                                    data-testid="budget-value-input"
+                                                    className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                />
+                                            )}
+                                        </div>
+                                    )}
 
                                     {project.medium_usage && (
                                         <div className="border-t border-slate-100 pt-8" data-step="2">

@@ -1323,105 +1323,115 @@ async def download_talent_zip(
         fn = f"Portfolio_{i+1}{ext}"
         zip_items.append({"filename": fn, "url": m["url"]})
 
-    async def event_generator():
-        buffer = io.BytesIO()
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            try:
-                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    # Add dynamic PDF details first
-                    zf.writestr("Talent_Details.pdf", pdf_bytes)
+    buffer = io.BytesIO()
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                # Add dynamic PDF details first
+                zf.writestr("Talent_Details.pdf", pdf_bytes)
 
-                    # Intro video download
-                    try:
-                        for item in zip_items:
-                            if "Introduction" not in item["filename"]:
-                                continue
-                            filename = item["filename"]
-                            url = item["url"]
-                            logger.info(f"Downloading file: {filename} from {url}")
-                            async with client.stream("GET", url) as response:
-                                logger.info(f"Intro Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                if response.status_code == 200:
-                                    with zf.open(filename, "w") as dest:
-                                        async for chunk in response.iter_bytes(chunk_size=65536):
-                                            dest.write(chunk)
-                                else:
-                                    logger.warning(f"Intro download returned status {response.status_code} for {url}")
-                        logger.info("INTRO VIDEO DOWNLOADED")
-                    except Exception as e:
-                        logger.exception("FAILED AT INTRO VIDEO DOWNLOAD")
-                        raise
+                # Intro video download
+                try:
+                    for item in zip_items:
+                        if "Introduction" not in item["filename"]:
+                            continue
+                        filename = item["filename"]
+                        url = item["url"]
+                        logger.info(f"Downloading file: {filename} from {url}")
+                        async with client.stream("GET", url) as response:
+                            logger.info(f"Intro Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                            if response.status_code == 200:
+                                with zf.open(filename, "w") as dest:
+                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                        dest.write(chunk)
+                            else:
+                                logger.warning(f"Intro download returned status {response.status_code} for {url}")
+                    logger.info("INTRO VIDEO DOWNLOADED")
+                except Exception as e:
+                    logger.exception("FAILED AT INTRO VIDEO DOWNLOAD")
+                    raise
 
-                    # Audition videos download
-                    try:
-                        for item in zip_items:
-                            if "Take_" not in item["filename"]:
-                                continue
-                            filename = item["filename"]
-                            url = item["url"]
-                            logger.info(f"Downloading file: {filename} from {url}")
-                            async with client.stream("GET", url) as response:
-                                logger.info(f"Audition Take Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                if response.status_code == 200:
-                                    with zf.open(filename, "w") as dest:
-                                        async for chunk in response.iter_bytes(chunk_size=65536):
-                                            dest.write(chunk)
-                                else:
-                                    logger.warning(f"Audition Take download returned status {response.status_code} for {url}")
-                        logger.info("AUDITION VIDEOS DOWNLOADED")
-                    except Exception as e:
-                        logger.exception("FAILED AT AUDITION VIDEOS DOWNLOAD")
-                        raise
+                # Audition videos download
+                try:
+                    for item in zip_items:
+                        if "Take_" not in item["filename"]:
+                            continue
+                        filename = item["filename"]
+                        url = item["url"]
+                        logger.info(f"Downloading file: {filename} from {url}")
+                        async with client.stream("GET", url) as response:
+                            logger.info(f"Audition Take Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                            if response.status_code == 200:
+                                with zf.open(filename, "w") as dest:
+                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                        dest.write(chunk)
+                            else:
+                                logger.warning(f"Audition Take download returned status {response.status_code} for {url}")
+                    logger.info("AUDITION VIDEOS DOWNLOADED")
+                except Exception as e:
+                    logger.exception("FAILED AT AUDITION VIDEOS DOWNLOAD")
+                    raise
 
-                    # Portfolio images download
-                    try:
-                        for item in zip_items:
-                            if "Portfolio_" not in item["filename"]:
-                                continue
-                            filename = item["filename"]
-                            url = item["url"]
-                            logger.info(f"Downloading file: {filename} from {url}")
-                            async with client.stream("GET", url) as response:
-                                logger.info(f"Portfolio Image Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                if response.status_code == 200:
-                                    with zf.open(filename, "w") as dest:
-                                        async for chunk in response.iter_bytes(chunk_size=65536):
-                                            dest.write(chunk)
-                                else:
-                                    logger.warning(f"Portfolio Image download returned status {response.status_code} for {url}")
-                        logger.info("PORTFOLIO IMAGES DOWNLOADED")
-                    except Exception as e:
-                        logger.exception("FAILED AT PORTFOLIO IMAGES DOWNLOAD")
-                        raise
+                # Portfolio images download
+                try:
+                    for item in zip_items:
+                        if "Portfolio_" not in item["filename"]:
+                            continue
+                        filename = item["filename"]
+                        url = item["url"]
+                        logger.info(f"Downloading file: {filename} from {url}")
+                        async with client.stream("GET", url) as response:
+                            logger.info(f"Portfolio Image Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                            if response.status_code == 200:
+                                with zf.open(filename, "w") as dest:
+                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                        dest.write(chunk)
+                            else:
+                                logger.warning(f"Portfolio Image download returned status {response.status_code} for {url}")
+                    logger.info("PORTFOLIO IMAGES DOWNLOADED")
+                except Exception as e:
+                    logger.exception("FAILED AT PORTFOLIO IMAGES DOWNLOAD")
+                    raise
 
-                # Close the zipfile block to finalize the central directory structure
-                logger.info("ZIP CREATED")
-                
-                # Seek to end to find the final size, then seek to beginning for streaming
-                buffer.seek(0, io.SEEK_END)
-                zip_size = buffer.tell()
-                buffer.seek(0)
-                
-                # Read the filenames contained inside the ZIP to log them
-                with zipfile.ZipFile(buffer, "r") as zf_read:
-                    namelist = zf_read.namelist()
-                buffer.seek(0)
-                
-                logger.info(f"ZIP SIZE = {zip_size} bytes")
-                logger.info(f"FILES IN ZIP = {namelist}")
+            logger.info("ZIP CREATED")
+        except Exception as e:
+            logger.exception("FAILED AT ZIP CREATION")
+            raise HTTPException(status_code=500, detail=f"FAILED AT ZIP CREATION: {str(e)}")
 
-            except Exception as e:
-                logger.exception("FAILED AT ZIP CREATION")
-                raise
+    # Seek to end to find the final size, then seek to beginning for streaming
+    buffer.seek(0, io.SEEK_END)
+    zip_size = buffer.tell()
+    buffer.seek(0)
 
-            # Stream the finalized buffer
-            chunk_size = 1024 * 1024  # 1MB chunks
-            while True:
-                chunk = buffer.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-            logger.info("ZIP RESPONSE RETURNED")
+    # Read the filenames and metadata contained inside the ZIP to log them
+    with zipfile.ZipFile(buffer, "r") as zf_read:
+        infolist = zf_read.infolist()
+        namelist = zf_read.namelist()
+    buffer.seek(0)
+
+    logger.info(f"ZIP SIZE = {zip_size} bytes")
+    logger.info(f"FILE COUNT = {len(infolist)}")
+    for info in infolist:
+        logger.info(f"FILE NAME = {info.filename}, FILE SIZE = {info.file_size} bytes")
+
+    # Verify if zip size < 10 KB or no media was added (only PDF details)
+    has_media = any(info.filename != "Talent_Details.pdf" for info in infolist)
+    if zip_size < 10240 or not has_media:
+        logger.error(f"ZIP integrity check failed. Size: {zip_size} bytes, Files: {namelist}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"ZIP integrity check failed. Final archive is corrupt or empty (Size: {zip_size} bytes, Files: {namelist})"
+        )
+
+    # Stream the finalized buffer
+    def event_generator():
+        chunk_size = 1024 * 1024  # 1MB chunks
+        while True:
+            chunk = buffer.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+        logger.info("ZIP RESPONSE RETURNED")
 
     safe_name = privatize_name(filtered_talent.get("name")).replace(".", "").replace(" ", "_").strip()
     zip_filename = f"{safe_name}_Package.zip"
@@ -1518,56 +1528,64 @@ async def download_campaign_bundle_zip(
     if not zip_items:
         raise HTTPException(404, "No downloadable media for this campaign")
 
-    async def event_generator():
-        buffer = io.BytesIO()
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            try:
-                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for item in zip_items:
-                        filename = item["filename"]
-                        url = item["url"]
-                        try:
-                            logger.info(f"Downloading file: {filename} from {url}")
-                            async with client.stream("GET", url) as response:
-                                logger.info(f"Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                if response.status_code == 200:
-                                    with zf.open(filename, "w") as dest:
-                                        async for chunk in response.iter_bytes(chunk_size=65536):
-                                            dest.write(chunk)
-                                else:
-                                    logger.warning(f"Download returned status {response.status_code} for {url}")
-                        except Exception as e:
-                            logger.exception(f"Error zipping {filename} from {url}")
-                            raise
-                
-                # Close the zipfile block to finalize the central directory structure
-                logger.info("ZIP CREATED")
-                
-                # Seek to end to find the final size, then seek to beginning for streaming
-                buffer.seek(0, io.SEEK_END)
-                zip_size = buffer.tell()
-                buffer.seek(0)
-                
-                # Read the filenames contained inside the ZIP to log them
-                with zipfile.ZipFile(buffer, "r") as zf_read:
-                    namelist = zf_read.namelist()
-                buffer.seek(0)
-                
-                logger.info(f"ZIP SIZE = {zip_size} bytes")
-                logger.info(f"FILES IN ZIP = {namelist}")
+    buffer = io.BytesIO()
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in zip_items:
+                    filename = item["filename"]
+                    url = item["url"]
+                    try:
+                        logger.info(f"Downloading file: {filename} from {url}")
+                        async with client.stream("GET", url) as response:
+                            logger.info(f"Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                            if response.status_code == 200:
+                                with zf.open(filename, "w") as dest:
+                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                        dest.write(chunk)
+                            else:
+                                logger.warning(f"Download returned status {response.status_code} for {url}")
+                    except Exception as e:
+                        logger.exception(f"Error zipping {filename} from {url}")
+                        raise
+            
+            logger.info("ZIP CREATED")
+        except Exception as e:
+            logger.exception("FAILED AT ZIP CREATION")
+            raise HTTPException(status_code=500, detail=f"FAILED AT ZIP CREATION: {str(e)}")
 
-            except Exception as e:
-                logger.exception("FAILED AT ZIP CREATION")
-                raise
+    # Seek to end to find the final size, then seek to beginning for streaming
+    buffer.seek(0, io.SEEK_END)
+    zip_size = buffer.tell()
+    buffer.seek(0)
 
-            # Stream the finalized buffer
-            chunk_size = 1024 * 1024  # 1MB chunks
-            while True:
-                chunk = buffer.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-            logger.info("ZIP RESPONSE RETURNED")
+    # Read the filenames and metadata contained inside the ZIP to log them
+    with zipfile.ZipFile(buffer, "r") as zf_read:
+        infolist = zf_read.infolist()
+        namelist = zf_read.namelist()
+    buffer.seek(0)
+
+    logger.info(f"ZIP SIZE = {zip_size} bytes")
+    logger.info(f"FILE COUNT = {len(infolist)}")
+    for info in infolist:
+        logger.info(f"FILE NAME = {info.filename}, FILE SIZE = {info.file_size} bytes")
+
+    if zip_size < 10240 or len(infolist) == 0:
+        logger.error(f"ZIP integrity check failed. Size: {zip_size} bytes, Files: {namelist}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"ZIP integrity check failed. Final archive is corrupt or empty (Size: {zip_size} bytes, Files: {namelist})"
+        )
+
+    # Stream the finalized buffer
+    def event_generator():
+        chunk_size = 1024 * 1024  # 1MB chunks
+        while True:
+            chunk = buffer.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+        logger.info("ZIP RESPONSE RETURNED")
 
     campaign_name = "".join(c for c in link.get("title", "Campaign") if c.isalnum() or c in (" ", "-", "_")).strip()
     zip_filename = f"{campaign_name}_Campaign_Bundle.zip"

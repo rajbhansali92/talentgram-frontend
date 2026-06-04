@@ -259,12 +259,12 @@ const PipelineColumn = memo(function PipelineColumn({
             role="region"
             aria-label={columnLabel}
             className={`
-                relative shrink-0 ${widthClasses}
+                relative w-full md:w-auto shrink-0 md:${widthClasses}
                 rounded-lg overflow-visible
                 bg-white
                 shadow-[0_1px_2px_rgba(0,0,0,0.04)]
                 border border-black/[0.08] transition-all duration-200
-                ${isCollapsed ? "h-auto" : "h-full"}
+                ${isCollapsed ? "h-auto" : "h-auto md:h-full"}
                 ${isDragOver ? "ring-1 ring-black/[0.06] border-black/[0.10] bg-black/[0.01]" : ""}
             `}
         >
@@ -275,12 +275,18 @@ const PipelineColumn = memo(function PipelineColumn({
             />
 
             {/* Sticky header with intelligence metrics (with premium soft header tint) */}
-            <div className={`sticky top-0 z-20 px-3 md:px-4 py-2 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[56px] md:h-[68px] flex flex-col justify-center`}>
+            <div 
+                onClick={(e) => onToggleCollapse?.(stage)}
+                className={`sticky top-0 z-20 px-3 md:px-4 py-2 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[56px] md:h-[68px] flex flex-col justify-center cursor-pointer select-none`}
+            >
                 {/* Primary header row */}
                 <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="min-w-0 flex items-center gap-2">
                         <button
-                            onClick={() => onToggleCollapse?.(stage)}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onToggleCollapse?.(stage);
+                            }}
                             className="text-black/40 hover:text-black/70 transition-colors p-0.5 -ml-1"
                             aria-label={isCollapsed ? "Expand column" : "Collapse column"}
                         >
@@ -304,7 +310,10 @@ const PipelineColumn = memo(function PipelineColumn({
                         {/* Focus mode button */}
                         {typeof onFocus === "function" && (
                             <button
-                                onClick={() => onFocus(isFocused ? null : stage)}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onFocus(isFocused ? null : stage);
+                                }}
                                 className="text-black/35 hover:text-black/60 transition-colors p-0.5"
                                 aria-label={isFocused ? `Exit focus on ${getStageLabel(stage)} column` : `Focus on ${getStageLabel(stage)} column`}
                                 title={isFocused ? "Exit focus mode" : "Focus mode"}

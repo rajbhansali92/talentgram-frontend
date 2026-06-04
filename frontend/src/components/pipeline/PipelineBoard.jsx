@@ -92,6 +92,34 @@ function PipelineBoard({ projectId, projectName }) {
     const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
     const [filtersCollapsed, setFiltersCollapsed] = useState(false);
 
+    // Responsive mobile & accordion states
+    const [isMobile, setIsMobile] = useState(false);
+    const [mobileExpandedStages, setMobileExpandedStages] = useState({});
+    const [collapsedStages, setCollapsedStages] = useState({});
+
+    React.useEffect(() => {
+        const checkMobile = () => {
+            setIsMobile(window.innerWidth < 768);
+        };
+        checkMobile();
+        window.addEventListener("resize", checkMobile);
+        return () => window.removeEventListener("resize", checkMobile);
+    }, []);
+
+    const handleToggleCollapse = useCallback((stage) => {
+        if (window.innerWidth < 768) {
+            setMobileExpandedStages((prev) => ({
+                ...prev,
+                [stage]: !prev[stage],
+            }));
+        } else {
+            setCollapsedStages((prev) => ({
+                ...prev,
+                [stage]: !prev[stage],
+            }));
+        }
+    }, []);
+
     const mainStages = useMemo(() => 
         MAIN_FLOW_STAGES.filter((s) => !hiddenStages.has(s) && (!focusedStageId || focusedStageId === s)),
         [hiddenStages, focusedStageId]
@@ -257,7 +285,7 @@ function PipelineBoard({ projectId, projectName }) {
                             <div className="text-xs text-black/40 mt-0.5">Project · {displayProjectName}</div>
                         </div>
                         {/* Restrained operational summary indicators - monochrome with toggles */}
-                        <div className="flex items-center gap-6 text-xs flex-wrap">
+                        <div className="hidden md:flex items-center gap-6 text-xs flex-wrap">
                             <div className="flex gap-5">
                                 <div className="flex items-center gap-1.5">
                                     <span className="w-1.5 h-1.5 rounded-full bg-black/30"></span>
@@ -302,6 +330,32 @@ function PipelineBoard({ projectId, projectName }) {
                                     <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${toolbarCollapsed ? "-rotate-90" : ""}`} />
                                 </button>
                             </div>
+                        </div>
+                    </div>
+
+                    {/* Mobile Swipeable Metrics Snap Row */}
+                    <div 
+                        className="flex md:hidden overflow-x-auto gap-3 pb-3 -mx-5 px-5 snap-x scrollbar-none mt-3"
+                        style={{
+                            WebkitOverflowScrolling: "touch",
+                            scrollSnapType: "x mandatory",
+                        }}
+                    >
+                        <div className="snap-start shrink-0 min-w-[140px] bg-white border border-black/[0.06] rounded-xl p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                            <div className="text-[10px] uppercase tracking-wider text-black/40">Active</div>
+                            <div className="text-xl font-bold text-black/85 mt-1">{activeCount}</div>
+                        </div>
+                        <div className="snap-start shrink-0 min-w-[140px] bg-white border border-black/[0.06] rounded-xl p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                            <div className="text-[10px] uppercase tracking-wider text-black/40">Shortlisted</div>
+                            <div className="text-xl font-bold text-black/85 mt-1">{shortlistedCount}</div>
+                        </div>
+                        <div className="snap-start shrink-0 min-w-[140px] bg-white border border-black/[0.06] rounded-xl p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                            <div className="text-[10px] uppercase tracking-wider text-black/40">Approved</div>
+                            <div className="text-xl font-bold text-black/85 mt-1">{approvedCount}</div>
+                        </div>
+                        <div className="snap-start shrink-0 min-w-[140px] bg-white border border-black/[0.06] rounded-xl p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                            <div className="text-[10px] uppercase tracking-wider text-black/40">Pending Tests</div>
+                            <div className="text-xl font-bold text-black/85 mt-1">{pendingTestsCount}</div>
                         </div>
                     </div>
                 </div>
@@ -370,6 +424,8 @@ function PipelineBoard({ projectId, projectName }) {
                                             stage={stage}
                                             items={itemsForStage(stage)}
                                             isFocused={focusedStageId === stage}
+                                            isCollapsed={isMobile ? !mobileExpandedStages[stage] : !!collapsedStages[stage]}
+                                            onToggleCollapse={handleToggleCollapse}
                                             {...columnCommons}
                                         />
                                     ))}
@@ -401,6 +457,8 @@ function PipelineBoard({ projectId, projectName }) {
                                             stage={stage}
                                             items={itemsForStage(stage)}
                                             isFocused={focusedStageId === stage}
+                                            isCollapsed={isMobile ? !mobileExpandedStages[stage] : !!collapsedStages[stage]}
+                                            onToggleCollapse={handleToggleCollapse}
                                             {...columnCommons}
                                         />
                                     ))}
@@ -417,6 +475,8 @@ function PipelineBoard({ projectId, projectName }) {
                                             stage={stage}
                                             items={itemsForStage(stage)}
                                             isFocused={focusedStageId === stage}
+                                            isCollapsed={isMobile ? !mobileExpandedStages[stage] : !!collapsedStages[stage]}
+                                            onToggleCollapse={handleToggleCollapse}
                                             {...columnCommons}
                                         />
                                     ))}

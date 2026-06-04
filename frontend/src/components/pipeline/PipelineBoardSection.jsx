@@ -49,10 +49,10 @@ export function BoardRow({ children, testid }) {
             data-testid={testid}
             className="
                 relative
-                flex gap-4 pb-3
-                overflow-x-auto tg-pipeline-scroll
-                flex-nowrap items-start
-                snap-x snap-proximity md:snap-none
+                flex flex-col md:flex-row gap-4 pb-3
+                overflow-y-visible md:overflow-x-auto tg-pipeline-scroll
+                items-stretch md:items-start
+                snap-none md:snap-x md:snap-proximity md:snap-none
                 -mx-2 px-2
             "
             style={{
@@ -63,7 +63,7 @@ export function BoardRow({ children, testid }) {
             }}
         >
             {React.Children.map(children, (child, idx) => (
-                <div key={idx} className={`snap-start md:snap-none ${isSingleChild ? "w-full flex-1 min-w-0" : "shrink-0"}`}>
+                <div key={idx} className={`w-full md:w-auto snap-start md:snap-none ${isSingleChild ? "w-full flex-1 min-w-0" : "shrink-0 md:shrink-0"}`}>
                     {child}
                 </div>
             ))}

@@ -1645,7 +1645,6 @@ function TalentDetail({
                                     Copy Form
                                 </button>
                             </div>
-                        </div>
 
                             {isDetailsExpanded && (
                                 <div className="px-4 pb-6 pt-2 bg-white space-y-6 text-sm">

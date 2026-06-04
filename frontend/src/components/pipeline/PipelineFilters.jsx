@@ -211,7 +211,8 @@ const PipelineFilters = memo(function PipelineFilters({
                             ×
                         </button>
                     )}
-                          <button
+                </div>
+                <button
                     type="button"
                     onClick={() => onMobileDrawerOpenChange?.(true)}
                     className="px-4 py-2 border border-black/[0.08] rounded-xl bg-white flex items-center gap-2 text-[13px] font-semibold text-slate-700 min-h-[44px] active:scale-[0.98] transition-all shadow-[0_1px_2px_rgba(0,0,0,0.02)]"

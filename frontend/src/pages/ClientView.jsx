@@ -1355,6 +1355,44 @@ function TalentDetail({
             setIsDownloadingPackage(false);
         }
     };
+    const list = useMemo(() => (
+        Array.isArray(talents) ? talents : []
+    ), [talents]);
+
+    const nextUnreviewed = useMemo(() => {
+        const idx = list.findIndex((t) => t.id === talent.id);
+        if (idx === -1) return null;
+        for (let i = idx + 1; i < list.length; i++) {
+            const t = list[i];
+            const isRev = (reviewedIds && reviewedIds.has(t.id)) || (viewerActions && !!viewerActions[t.id]?.action);
+            if (!isRev) return t;
+        }
+        for (let i = 0; i < idx; i++) {
+            const t = list[i];
+            const isRev = (reviewedIds && reviewedIds.has(t.id)) || (viewerActions && !!viewerActions[t.id]?.action);
+            if (!isRev) return t;
+        }
+        return null;
+    }, [talent.id, list, reviewedIds, viewerActions]);
+
+    const currentTalentIdx = list.findIndex((t) => t.id === talent.id);
+    const hasPrevTalent = currentTalentIdx > 0;
+    const hasNextTalent = currentTalentIdx >= 0 && currentTalentIdx < list.length - 1;
+
+    const goPrevTalent = useCallback(() => {
+        if (hasPrevTalent && onNavigate) {
+            onNavigate(list[currentTalentIdx - 1]);
+        }
+    }, [hasPrevTalent, onNavigate, list, currentTalentIdx]);
+
+    const goNextTalent = useCallback(() => {
+        if (hasNextTalent && onNavigate) {
+            onNavigate(list[currentTalentIdx + 1]);
+        } else {
+            onClose();
+        }
+    }, [hasNextTalent, onNavigate, list, currentTalentIdx, onClose]);
+
     /**
      * Mirrors viewerAction in a ref so the keyboard handler can read the latest
      * action without being listed as a dependency (which caused handler re-registration
@@ -1423,44 +1461,6 @@ function TalentDetail({
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [talent.id, setAction, onClose, goPrevTalent, goNextTalent, isSharePreview]);
-
-    const list = useMemo(() => (
-        Array.isArray(talents) ? talents : []
-    ), [talents]);
-
-    const nextUnreviewed = useMemo(() => {
-        const idx = list.findIndex((t) => t.id === talent.id);
-        if (idx === -1) return null;
-        for (let i = idx + 1; i < list.length; i++) {
-            const t = list[i];
-            const isRev = (reviewedIds && reviewedIds.has(t.id)) || (viewerActions && !!viewerActions[t.id]?.action);
-            if (!isRev) return t;
-        }
-        for (let i = 0; i < idx; i++) {
-            const t = list[i];
-            const isRev = (reviewedIds && reviewedIds.has(t.id)) || (viewerActions && !!viewerActions[t.id]?.action);
-            if (!isRev) return t;
-        }
-        return null;
-    }, [talent.id, list, reviewedIds, viewerActions]);
-
-    const currentTalentIdx = list.findIndex((t) => t.id === talent.id);
-    const hasPrevTalent = currentTalentIdx > 0;
-    const hasNextTalent = currentTalentIdx >= 0 && currentTalentIdx < list.length - 1;
-
-    const goPrevTalent = useCallback(() => {
-        if (hasPrevTalent && onNavigate) {
-            onNavigate(list[currentTalentIdx - 1]);
-        }
-    }, [hasPrevTalent, onNavigate, list, currentTalentIdx]);
-
-    const goNextTalent = useCallback(() => {
-        if (hasNextTalent && onNavigate) {
-            onNavigate(list[currentTalentIdx + 1]);
-        } else {
-            onClose();
-        }
-    }, [hasNextTalent, onNavigate, list, currentTalentIdx, onClose]);
 
     // Touch swipe gesture handlers for gallery navigation (mobile jank fix - AUDIT: HIGH-01)
     useEffect(() => {

@@ -110,6 +110,7 @@ const getWhatsAppUrl = (phoneNumber) => {
 // ============================================================================
 
 const PipelineCard = memo(function PipelineCard({
+    projectId,
     item,
     refresh,
     bulkMode,
@@ -187,7 +188,7 @@ const PipelineCard = memo(function PipelineCard({
         }
         
         try {
-            await adminApi.patch("/pipeline/move", {
+            await adminApi.patch(`/projects/${projectId}/pipeline/move`, {
                 ids: [item.id],
                 stage,
             }, {
@@ -209,7 +210,7 @@ const PipelineCard = memo(function PipelineCard({
             setMoving(false);
             abortControllerRef.current = null;
         }
-    }, [item.id, refresh, displayName]);
+    }, [item.id, refresh, displayName, projectId]);
     
     // Quick actions with security improvements (ISSUE 6 - noopener)
     const quickActions = useMemo(() => ({

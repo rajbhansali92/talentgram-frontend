@@ -216,6 +216,7 @@ function PipelineBoard({ projectId, projectName }) {
     }
 
     const columnCommons = {
+        projectId,
         refresh: fetchPipeline,
         bulkMode,
         bulkIds,

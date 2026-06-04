@@ -5,6 +5,7 @@ import { EMPTY_BULK_SET, NOOP } from "./constants";
 import { Maximize2, Minimize2, ArrowLeft } from "lucide-react";
 
 function FollowUpLane({
+    projectId,
     items = [],
     refresh,
     focusedStageId,
@@ -73,6 +74,7 @@ function FollowUpLane({
                                 {items.map((item) => (
                                     <PipelineCard
                                         key={`follow-up-expanded-${item.id}`}
+                                        projectId={projectId}
                                         item={item}
                                         refresh={refresh}
                                         bulkMode={false}
@@ -135,6 +137,7 @@ function FollowUpLane({
                     <div className={isFocused ? "w-full" : "w-[340px]"}>
                         <PipelineColumn
                             stage="follow_up"
+                            projectId={projectId}
                             items={items}
                             refresh={refresh}
                             bulkMode={false}

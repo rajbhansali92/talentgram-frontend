@@ -273,7 +273,7 @@ function PipelineBoard({ projectId, projectName }) {
 
     return (
         <div 
-            className="min-h-screen bg-[#f5f5f3] px-5 py-5 pb-24"
+            className="min-h-screen bg-[#f5f5f3] px-5 py-5 pb-24 overflow-x-hidden"
             data-testid="project-pipeline"
         >
             <div className="max-w-[1680px] mx-auto">
@@ -335,7 +335,7 @@ function PipelineBoard({ projectId, projectName }) {
 
                     {/* Mobile Swipeable Metrics Snap Row */}
                     <div 
-                        className="flex md:hidden overflow-x-auto gap-3 pb-3 -mx-5 px-5 snap-x scrollbar-none mt-3"
+                        className="flex md:hidden overflow-x-auto gap-3 pb-3 -mx-5 px-5 snap-x snap-mandatory scrollbar-none mt-3"
                         style={{
                             WebkitOverflowScrolling: "touch",
                             scrollSnapType: "x mandatory",
@@ -362,7 +362,7 @@ function PipelineBoard({ projectId, projectName }) {
 
                 {/* Unified Control Deck with operational styling - sticky with backdrop */}
                 {!toolbarCollapsed && !filtersCollapsed && (
-                    <div className="sticky top-0 z-40 bg-[#f5f5f3]/90 backdrop-blur-sm -mx-5 px-5 pt-2 pb-2">
+                    <div className="sticky top-0 z-40 bg-[#f5f5f3]/90 backdrop-blur-sm md:-mx-5 md:px-5 mx-0 px-0 pt-2 pb-2">
                         <div className="bg-white border border-black/[0.06] rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                             <div className="px-4 py-3">
                                 <PipelineToolbar

@@ -230,7 +230,7 @@ const PipelineFilters = memo(function PipelineFilters({
 
             {/* Mobile Filter Drawer Overlay bottom sheet */}
             {isMobileDrawerOpen && (
-                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs md:hidden flex items-end">
+                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs md:hidden flex items-end">
                     <div className="absolute inset-0" onClick={() => setIsMobileDrawerOpen(false)} />
                     <div className="relative w-full bg-white rounded-t-3xl p-5 shadow-2xl animate-in slide-in-from-bottom duration-200 z-10 max-h-[85vh] overflow-y-auto">
                         <div className="w-12 h-1 bg-slate-250 rounded-full mx-auto mb-4" />

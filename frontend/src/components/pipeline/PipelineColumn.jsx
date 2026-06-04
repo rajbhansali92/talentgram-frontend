@@ -277,36 +277,36 @@ const PipelineColumn = memo(function PipelineColumn({
             {/* Sticky header with intelligence metrics (with premium soft header tint) */}
             <div 
                 onClick={(e) => onToggleCollapse?.(stage)}
-                className={`sticky top-0 z-20 px-3 md:px-4 py-2 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[56px] md:h-[68px] flex flex-col justify-center cursor-pointer select-none`}
+                className={`sticky top-0 z-20 px-4.5 md:px-5 py-2.5 md:py-3.5 border-b border-black/[0.06] rounded-t-lg transition-all duration-150 ${STAGE_HEADER_TINTS[stage] || "bg-white"} backdrop-blur-md shadow-sm h-[60px] md:h-[68px] flex flex-col justify-center cursor-pointer select-none`}
             >
                 {/* Primary header row */}
-                <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="min-w-0 flex items-center gap-2">
+                <div className="flex items-center justify-between gap-3 mb-2">
+                    <div className="min-w-0 flex items-center gap-3">
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
                                 onToggleCollapse?.(stage);
                             }}
-                            className="text-black/40 hover:text-black/70 transition-colors p-0.5 -ml-1"
+                            className="text-black/40 hover:text-black/70 transition-colors p-1"
                             aria-label={isCollapsed ? "Expand column" : "Collapse column"}
                         >
                             <ChevronDown 
                                 className={`w-3.5 h-3.5 transform transition-transform duration-150 ${isCollapsed ? "-rotate-90" : ""}`}
                             />
                         </button>
-                        <span className="text-[11px] tracking-[0.08em] uppercase text-black/70 font-semibold truncate">
+                        <span className="text-[11.5px] tracking-[0.08em] uppercase text-black/70 font-semibold truncate">
                             {getStageLabel(stage)}
                         </span>
                         {readOnly && (
                             <span 
-                                className="text-[8px] tracking-wide uppercase text-black/35 font-mono"
+                                className="text-[8px] tracking-wide uppercase text-black/35 font-mono ml-1"
                                 aria-label="Read only column"
                             >
                                 view
                             </span>
                         )}
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2">
                         {/* Focus mode button */}
                         {typeof onFocus === "function" && (
                             <button
@@ -380,7 +380,7 @@ const PipelineColumn = memo(function PipelineColumn({
                     {/* Card stream - using dynamic height to avoid viewport issues */}
                     <div
                         className={`
-                            px-2.5 pt-3.5 pb-2.5 space-y-3
+                            px-2.5 pt-3.5 pb-2.5 space-y-4
                             overflow-y-auto overflow-x-visible
                             bg-[#fafafa]
                             tg-pipeline-scroll

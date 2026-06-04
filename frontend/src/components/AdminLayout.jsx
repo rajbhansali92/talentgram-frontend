@@ -534,14 +534,6 @@ export default function AdminLayout() {
           </div>
           <div className="flex items-center gap-3">
             <NotificationBell />
-            <button
-              onClick={logout}
-              data-testid="admin-logout-mobile-btn"
-              className="text-xs font-medium text-black/50 hover:text-black transition-colors duration-200 px-2 py-1 rounded-sm"
-              aria-label="Sign out"
-            >
-              Sign out
-            </button>
           </div>
         </div>
 

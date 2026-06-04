@@ -1342,7 +1342,7 @@ async def download_talent_zip(
                             logger.info(f"Intro Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
                             if response.status_code == 200:
                                 with zf.open(filename, "w") as dest:
-                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                    async for chunk in response.aiter_bytes(chunk_size=65536):
                                         dest.write(chunk)
                             else:
                                 logger.warning(f"Intro download returned status {response.status_code} for {url}")
@@ -1363,7 +1363,7 @@ async def download_talent_zip(
                             logger.info(f"Audition Take Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
                             if response.status_code == 200:
                                 with zf.open(filename, "w") as dest:
-                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                    async for chunk in response.aiter_bytes(chunk_size=65536):
                                         dest.write(chunk)
                             else:
                                 logger.warning(f"Audition Take download returned status {response.status_code} for {url}")
@@ -1384,7 +1384,7 @@ async def download_talent_zip(
                             logger.info(f"Portfolio Image Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
                             if response.status_code == 200:
                                 with zf.open(filename, "w") as dest:
-                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                    async for chunk in response.aiter_bytes(chunk_size=65536):
                                         dest.write(chunk)
                             else:
                                 logger.warning(f"Portfolio Image download returned status {response.status_code} for {url}")
@@ -1541,7 +1541,7 @@ async def download_campaign_bundle_zip(
                             logger.info(f"Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
                             if response.status_code == 200:
                                 with zf.open(filename, "w") as dest:
-                                    async for chunk in response.iter_bytes(chunk_size=65536):
+                                    async for chunk in response.aiter_bytes(chunk_size=65536):
                                         dest.write(chunk)
                             else:
                                 logger.warning(f"Download returned status {response.status_code} for {url}")

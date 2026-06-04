@@ -1232,7 +1232,7 @@ function TalentDetail({
     const handleCopyForm = () => {
         try {
             const lines = [];
-            lines.push(`Name: ${talent.name || "Unnamed"}`);
+            lines.push(`Name: ${privatizeName(talent.name)}`);
             if (talent.age) lines.push(`Age: ${talent.age}`);
             if (talent.height) lines.push(`Height: ${talent.height}`);
             if (talent.location) lines.push(`Location: ${talent.location}`);
@@ -1598,11 +1598,10 @@ function TalentDetail({
                     </div>
                 </div>
 
-                <div className="flex-1 flex flex-col md:flex-row overflow-y-auto md:overflow-hidden">
+                <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
-                    {/* pb-36 provides clearance on mobile browsers for reachable voice notes section */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-visible md:overflow-y-auto min-h-0 pb-36 md:pb-0">
+                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-auto min-h-0 pb-10">
                         {/* Mobile Download Talent Folder Button */}
                         {vis.download && (
                             <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04]">
@@ -1922,7 +1921,7 @@ function TalentDetail({
                     {/* min-h-0: required for iOS Safari scroll fix in flex context */}
                     <div className="hidden md:block w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-visible md:overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
                         {/* pb-[130px] gives clearance above the fixed mobile bottom action bar + home indicator */}
-                        <div className="p-6 md:p-8 pb-[130px] md:pb-8">
+                        <div className="p-6 md:p-8 pt-20 md:pt-20 pb-[130px] md:pb-8">
                             <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
                                 {vis.download && !isSharePreview && (
                                     <button
@@ -1945,6 +1944,13 @@ function TalentDetail({
                                         )}
                                     </button>
                                 )}
+                                <button
+                                    onClick={handleCopyForm}
+                                    className="h-11 px-4 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center gap-2 bg-white/90 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111]"
+                                    data-testid="copy-form-btn-desktop"
+                                >
+                                    Copy Form
+                                </button>
                                 {!isSharePreview && (
                                     <button
                                         onClick={() => onShare(talent.id)}
@@ -1966,16 +1972,7 @@ function TalentDetail({
                                 )}
                             </div>
 
-                            <div className="flex items-center justify-between mb-3">
-                                <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Talent Details Form</p>
-                                <button
-                                    onClick={handleCopyForm}
-                                    className="text-[11px] px-2.5 py-1.5 border border-black/[0.08] hover:border-black/20 rounded-md transition-colors text-[#111111] bg-white font-medium shadow-sm flex items-center justify-center"
-                                    data-testid="copy-form-btn"
-                                >
-                                    Copy Form
-                                </button>
-                            </div>
+                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Talent Details Form</p>
                             <h2 className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-[#111111]">
                                 {privatizeName(talent.name)}
                             </h2>

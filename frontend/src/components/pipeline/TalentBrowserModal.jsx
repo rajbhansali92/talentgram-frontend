@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award } from "lucide-react";
+import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award, List, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 
@@ -277,7 +277,19 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     const [showMobileFilters, setShowMobileFilters] = useState(false);
     const [savedSearchName, setSavedSearchName] = useState("");
     const [showSaveSearch, setShowSaveSearch] = useState(false);
-    
+    const [viewMode, setViewMode] = useState(() => {
+        if (typeof window !== "undefined") {
+            return localStorage.getItem("talent-browser-view-mode") || "grid";
+        }
+        return "grid";
+    });
+    const [previewTalent, setPreviewTalent] = useState(null);
+
+    const handleViewModeChange = useCallback((mode) => {
+        setViewMode(mode);
+        localStorage.setItem("talent-browser-view-mode", mode);
+    }, []);
+
     // Selection state
     const [selected, setSelected] = useState(new Set());
     const [submitting, setSubmitting] = useState(false);
@@ -908,6 +920,34 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                     )}
                                 </button>
                                 
+                                {/* View Toggle (Grid / List) */}
+                                <div className="flex items-center bg-gray-50 border border-gray-200 rounded-lg p-0.5 shrink-0">
+                                    <button
+                                        type="button"
+                                        onClick={() => handleViewModeChange("grid")}
+                                        className={`p-1.5 rounded transition-all ${
+                                            viewMode === "grid"
+                                                ? "bg-white text-gray-900 shadow-sm border border-gray-205/30"
+                                                : "text-gray-500 hover:text-gray-700"
+                                        }`}
+                                        title="Grid View"
+                                    >
+                                        <LayoutGrid size={14} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleViewModeChange("list")}
+                                        className={`p-1.5 rounded transition-all ${
+                                            viewMode === "list"
+                                                ? "bg-white text-gray-900 shadow-sm border border-gray-205/30"
+                                                : "text-gray-500 hover:text-gray-700"
+                                        }`}
+                                        title="List View"
+                                    >
+                                        <List size={14} />
+                                    </button>
+                                </div>
+                                
                                 {/* Advanced filters toggle */}
                                 <button
                                     onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
@@ -978,31 +1018,9 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 )}
                                 
                                 <div className="space-y-2">
-                                    {/* Quick filter presets */}
-                                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                                        {SAVED_SEARCHES.map(preset => (
-                                            <button
-                                                key={preset.id}
-                                                type="button"
-                                                onClick={() => applySavedSearch(preset)}
-                                                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors whitespace-nowrap"
-                                            >
-                                                <preset.icon size={12} />
-                                                <span className="text-xs">{preset.label}</span>
-                                            </button>
-                                        ))}
-                                        <button
-                                            onClick={() => setShowSaveSearch(true)}
-                                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-gray-200 hover:bg-gray-50 transition-colors whitespace-nowrap"
-                                        >
-                                            <Bookmark size={12} className="text-gray-400" />
-                                            <span className="text-xs text-gray-600">Save search</span>
-                                        </button>
-                                    </div>
-
                                     {/* Popular Tags Row (dynamic chip filter sync) */}
                                     {frequentTags.length > 0 && (
-                                        <div className="flex items-center gap-1.5 flex-wrap pt-1.5 border-t border-gray-150">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
                                             <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Popular Tags:</span>
                                             {frequentTags.map(tag => {
                                                 const isSelected = filters.internalTags.includes(tag.id);
@@ -1073,35 +1091,61 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 <EmptyResults onReset={resetFilters} hasFilters={filtersActive} />
                             ) : (
                                 <div className="px-4 sm:px-6 py-4 sm:py-5">
-                                    <div
-                                        style={{
-                                            display: "grid",
-                                            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-                                            gap: `${config.gap}px`,
-                                        }}
-                                    >
-                                        {filteredTalents.map((talent, globalIndex) => {
-                                            const alreadyInPipeline = existingTalentIds.has(talent.id);
-                                            const isSelected = selected.has(talent.id);
-                                            const isFocused = globalIndex === focusedIndex;
-                                            
-                                            return (
-                                                <TalentCard
-                                                    key={talent.id}
-                                                    talent={talent}
-                                                    selected={isSelected}
-                                                    alreadyInPipeline={alreadyInPipeline}
-                                                    onToggle={toggleSelect}
-                                                    densityMode={densityMode}
-                                                    isFocused={isFocused}
-                                                    showIntelligence={filters.showIntelligence}
-                                                    isMobile={isMobile}
-                                                    globalIndex={globalIndex}
-                                                    registerRef={registerCardRef}
-                                                />
-                                            );
-                                        })}
-                                    </div>
+                                    {viewMode === "list" ? (
+                                        <div className="flex flex-col bg-white rounded-xl border border-gray-200 overflow-hidden divide-y divide-gray-100">
+                                            {filteredTalents.map((talent, globalIndex) => {
+                                                const alreadyInPipeline = existingTalentIds.has(talent.id);
+                                                const isSelected = selected.has(talent.id);
+                                                const isFocused = globalIndex === focusedIndex;
+                                                
+                                                return (
+                                                    <TalentListRow
+                                                        key={talent.id}
+                                                        talent={talent}
+                                                        selected={isSelected}
+                                                        alreadyInPipeline={alreadyInPipeline}
+                                                        onToggle={toggleSelect}
+                                                        onPreview={setPreviewTalent}
+                                                        isFocused={isFocused}
+                                                        showIntelligence={filters.showIntelligence}
+                                                        registerRef={registerCardRef}
+                                                        globalIndex={globalIndex}
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+                                                gap: `${config.gap}px`,
+                                            }}
+                                        >
+                                            {filteredTalents.map((talent, globalIndex) => {
+                                                const alreadyInPipeline = existingTalentIds.has(talent.id);
+                                                const isSelected = selected.has(talent.id);
+                                                const isFocused = globalIndex === focusedIndex;
+                                                
+                                                return (
+                                                    <TalentCard
+                                                        key={talent.id}
+                                                        talent={talent}
+                                                        selected={isSelected}
+                                                        alreadyInPipeline={alreadyInPipeline}
+                                                        onToggle={toggleSelect}
+                                                        onPreview={setPreviewTalent}
+                                                        densityMode={densityMode}
+                                                        isFocused={isFocused}
+                                                        showIntelligence={filters.showIntelligence}
+                                                        isMobile={isMobile}
+                                                        globalIndex={globalIndex}
+                                                        registerRef={registerCardRef}
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1155,9 +1199,270 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     </div>
                 </div>
             )}
+
+            {/* Sneak Preview / Quick View Drawer Portal */}
+            <TalentPreviewDrawer
+                talent={previewTalent}
+                onClose={() => setPreviewTalent(null)}
+                isMobile={isMobile}
+            />
         </ErrorBoundary>
     );
 }
+
+// ============================================================================
+// TALENT LIST ROW
+// ============================================================================
+
+const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onPreview, isFocused, showIntelligence, registerRef, globalIndex }) => {
+    const imageUrl = pickImage(talent);
+    const handleToggle = useCallback(() => {
+        onToggle(talent.id, alreadyInPipeline);
+    }, [onToggle, talent.id, alreadyInPipeline]);
+
+    return (
+        <div
+            ref={(el) => registerRef(globalIndex, el)}
+            className={`
+                flex items-center justify-between p-3 transition-all duration-200 border-b border-gray-100
+                ${alreadyInPipeline ? "opacity-60 bg-gray-50/50" : "hover:bg-gray-50/80 cursor-pointer"}
+                ${selected ? "bg-gray-100/60 font-medium" : "bg-white"}
+                ${isFocused && !alreadyInPipeline ? "ring-2 ring-blue-500" : ""}
+            `}
+            onClick={handleToggle}
+        >
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+                {/* Selection Checkbox */}
+                {!alreadyInPipeline ? (
+                    <div className={`w-4.5 h-4.5 rounded border transition-all flex items-center justify-center shrink-0 ${selected ? "bg-gray-900 border-gray-900" : "border-gray-300 bg-white"}`}>
+                        {selected && <Check size={10} className="text-white" strokeWidth={3} />}
+                    </div>
+                ) : (
+                    <div className="text-[10px] text-gray-400 font-mono shrink-0 w-4.5 text-center">In</div>
+                )}
+
+                {/* Profile Image */}
+                <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-100 shrink-0 relative">
+                    {imageUrl ? (
+                        <img src={imageUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-xs">?</div>
+                    )}
+                </div>
+
+                {/* Text details */}
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-gray-900 truncate">{talent.name}</span>
+                        {showIntelligence && talent.matchScore && (
+                            <span className="px-1.5 py-0.5 rounded bg-gray-100 text-[9px] font-mono text-gray-700 font-medium shrink-0">{talent.matchScore}% match</span>
+                        )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500 mt-0.5">
+                        {talent.age && <span>{talent.age} yrs</span>}
+                        {talent.height && <span>· {talent.height}</span>}
+                        {talent.location && <span className="truncate">· {talent.location.split(",")[0]}</span>}
+                        {talent.instagram_handle && (
+                            <span className="text-gray-400 truncate flex items-center gap-1">
+                                · <Instagram size={10} /> {talent.instagram_handle}
+                            </span>
+                        )}
+                    </div>
+                    {/* Tags */}
+                    {talent.tags && talent.tags.length > 0 && (
+                        <div className="flex items-center gap-1 flex-wrap mt-1">
+                            {talent.tags.slice(0, 3).map(tag => (
+                                <span key={tag.id} className="px-1.5 py-0.5 rounded bg-gray-50 border border-gray-150 text-[9px] text-gray-600 font-medium">
+                                    {tag.name}
+                                </span>
+                            ))}
+                            {talent.tags.length > 3 && (
+                                <span className="text-[9px] text-gray-400">+{talent.tags.length - 3}</span>
+                            )}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Actions (Preview) */}
+            <div className="flex items-center gap-2 shrink-0 ml-4">
+                <button
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onPreview?.(talent);
+                    }}
+                    className="p-2 rounded-lg text-gray-400 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                    title="Quick View"
+                >
+                    <Eye size={16} />
+                </button>
+            </div>
+        </div>
+    );
+});
+TalentListRow.displayName = "TalentListRow";
+
+// ============================================================================
+// TALENT SNEAK PREVIEW / QUICK VIEW
+// ============================================================================
+
+const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
+    if (!talent) return null;
+    
+    const imageUrl = pickImage(talent);
+    const media = talent.media || [];
+    const images = media.filter(m => m.category !== "video" && m.url && m.url !== imageUrl);
+    const video = media.find(m => m.category === "video" || m.content_type?.startsWith("video/"));
+    
+    const handleBackdropClick = (e) => {
+        if (e.target === e.currentTarget) onClose();
+    };
+
+    const drawerContent = (
+        <div className="flex flex-col h-full overflow-hidden bg-white">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0 bg-white sticky top-0 z-10">
+                <div>
+                    <span className="text-[10px] font-semibold tracking-wider text-gray-400 uppercase">Talent Preview</span>
+                    <h3 className="text-lg font-bold text-gray-900">{talent.name || "Unnamed Talent"}</h3>
+                </div>
+                <button
+                    onClick={onClose}
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                    <X size={18} />
+                </button>
+            </div>
+
+            {/* Scrollable details */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6 overscroll-contain">
+                {/* Hero Profile Image / Video preview */}
+                <div className="relative aspect-[3/4] w-full rounded-xl overflow-hidden bg-gray-50 border border-gray-200">
+                    {imageUrl ? (
+                        <img src={imageUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-300">No Image</div>
+                    )}
+                </div>
+
+                {/* Primary Stats */}
+                <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-xl p-4 border border-gray-150">
+                    <div>
+                        <span className="text-[10px] text-gray-400 uppercase font-medium">Age</span>
+                        <div className="text-sm font-semibold text-gray-800">{talent.age ? `${talent.age} years` : "—"}</div>
+                    </div>
+                    <div>
+                        <span className="text-[10px] text-gray-400 uppercase font-medium">Height</span>
+                        <div className="text-sm font-semibold text-gray-800">{talent.height || "—"}</div>
+                    </div>
+                    <div>
+                        <span className="text-[10px] text-gray-400 uppercase font-medium">Location</span>
+                        <div className="text-sm font-semibold text-gray-800">{talent.location || "—"}</div>
+                    </div>
+                    <div>
+                        <span className="text-[10px] text-gray-400 uppercase font-medium">Instagram</span>
+                        <div className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
+                            {talent.instagram_handle ? (
+                                <>
+                                    <Instagram size={12} className="text-gray-500" />
+                                    <span className="truncate">{talent.instagram_handle}</span>
+                                </>
+                            ) : "—"}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Categories */}
+                {talent.interested_in && talent.interested_in.length > 0 && (
+                    <div className="space-y-2">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Categories</h4>
+                        <div className="flex flex-wrap gap-1.5">
+                            {talent.interested_in.map(cat => (
+                                <span key={cat} className="px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 text-xs font-medium border border-gray-200">
+                                    {cat}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Dynamic Tags */}
+                {talent.tags && talent.tags.length > 0 && (
+                    <div className="space-y-2">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Talent Tags</h4>
+                        <div className="flex flex-wrap gap-1.5">
+                            {talent.tags.map(tag => (
+                                <span key={tag.id} className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200 text-xs text-gray-600 font-medium">
+                                    {tag.name}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Introduction Video */}
+                {video && (
+                    <div className="space-y-2">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Intro Video</h4>
+                        <div className="aspect-video w-full rounded-xl overflow-hidden bg-black border border-gray-200 shadow-inner">
+                            <video src={video.url} controls className="w-full h-full object-contain" />
+                        </div>
+                    </div>
+                )}
+
+                {/* Portfolio images */}
+                {images.length > 0 && (
+                    <div className="space-y-3">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Portfolio media ({images.length})</h4>
+                        <div className="grid grid-cols-2 gap-2">
+                            {images.map((img, idx) => (
+                                <div key={idx} className="relative aspect-[3/4] rounded-lg overflow-hidden bg-gray-50 border border-gray-200">
+                                    <img src={img.url} alt="" loading="lazy" className="w-full h-full object-cover hover:scale-105 transition-transform duration-200" />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* Availability status */}
+                <div className="space-y-2">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Availability</h4>
+                    <div className="flex items-center gap-2">
+                        <span className={`w-2.5 h-2.5 rounded-full ${talent.availability_status === "available" ? "bg-green-500" : "bg-amber-500"}`} />
+                        <span className="text-xs font-medium text-gray-700 uppercase tracking-wide">
+                            {talent.availability_status === "available" ? "Active / Available" : "Booked / Hold"}
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+
+    if (isMobile) {
+        return createPortal(
+            <div className="fixed inset-0 z-[150] bg-black/50 md:hidden flex items-end animate-fade-in" onClick={handleBackdropClick}>
+                <div className="relative w-full bg-white rounded-t-3xl shadow-2xl animate-in slide-in-from-bottom duration-300 max-h-[85vh] flex flex-col overflow-hidden">
+                    <div className="w-12 h-1 bg-slate-200 rounded-full mx-auto my-3 flex-shrink-0" />
+                    <div className="flex-1 overflow-y-auto">
+                        {drawerContent}
+                    </div>
+                </div>
+            </div>,
+            document.body
+        );
+    }
+
+    return createPortal(
+        <div className="fixed inset-0 z-[150] bg-black/20 hidden md:flex justify-end animate-fade-in" onClick={handleBackdropClick}>
+            <div className="w-96 h-full bg-white shadow-2xl animate-in slide-in-from-right duration-300 border-l border-gray-200 relative">
+                {drawerContent}
+            </div>
+        </div>,
+        document.body
+    );
+});
+TalentPreviewDrawer.displayName = "TalentPreviewDrawer";
 
 export default TalentBrowserModal;
 
@@ -1798,7 +2103,7 @@ const FilterChip = ({ label, onRemove }) => (
 // TALENT CARD
 // ============================================================================
 
-const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densityMode, isFocused, showIntelligence, isMobile, globalIndex, registerRef }) => {
+const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPreview, densityMode, isFocused, showIntelligence, isMobile, globalIndex, registerRef }) => {
     const imageUrl = pickImage(talent);
     const config = DENSITY_CONFIG[densityMode];
     const [imageLoaded, setImageLoaded] = useState(false);
@@ -1822,7 +2127,7 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
                 containIntrinsicSize: densityMode === "compact" ? "280px" : densityMode === "comfortable" ? "320px" : "380px",
             }}
             className={`
-                relative text-left rounded-xl overflow-hidden transition-all duration-200
+                relative text-left rounded-xl overflow-hidden transition-all duration-200 group
                 ${alreadyInPipeline ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:shadow-lg hover:-translate-y-0.5"}
                 ${selected ? "ring-[3px] ring-gray-900 shadow-md bg-gray-100/60" : "ring-1 ring-gray-200"}
                 ${isFocused && !alreadyInPipeline ? "ring-[3px] ring-blue-500 shadow-lg" : ""}
@@ -1845,6 +2150,38 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, densit
                     <div className="w-full h-full flex items-center justify-center bg-gray-100">
                         <ImageIcon className="w-8 h-8 text-gray-300" />
                     </div>
+                )}
+
+                {/* Desktop Hover Quick View Overlay */}
+                {!isMobile && (
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none sm:pointer-events-auto">
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onPreview?.(talent);
+                            }}
+                            className="px-3 py-1.5 bg-white text-gray-900 rounded-lg text-xs font-semibold hover:bg-gray-100 transition-colors shadow-md flex items-center gap-1.5 active:scale-95 transform"
+                        >
+                            <Eye size={12} />
+                            <span>Quick View</span>
+                        </button>
+                    </div>
+                )}
+
+                {/* Mobile eye button */}
+                {isMobile && (
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onPreview?.(talent);
+                        }}
+                        className="absolute bottom-2 left-2 w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm shadow flex items-center justify-center text-gray-700 active:scale-95 transition-all z-10 animate-fade-in"
+                        aria-label="Preview talent"
+                    >
+                        <Eye size={14} />
+                    </button>
                 )}
                 
                 {/* Intelligence Badges */}

@@ -1325,19 +1325,11 @@ async def download_talent_zip(
 
     async def event_generator():
         buffer = io.BytesIO()
-        read_offset = 0
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
                 with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                     # Add dynamic PDF details first
                     zf.writestr("Talent_Details.pdf", pdf_bytes)
-                    buffer.seek(0, io.SEEK_END)
-                    current_pos = buffer.tell()
-                    if current_pos > read_offset:
-                        buffer.seek(read_offset)
-                        yield_chunk = buffer.read(current_pos - read_offset)
-                        read_offset = current_pos
-                        yield yield_chunk
 
                     # Intro video download
                     try:
@@ -1347,19 +1339,14 @@ async def download_talent_zip(
                             filename = item["filename"]
                             url = item["url"]
                             logger.info(f"Downloading file: {filename} from {url}")
-                            with zf.open(filename, "w") as dest:
-                                async with client.stream("GET", url) as response:
-                                    logger.info(f"Intro Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                    if response.status_code == 200:
+                            async with client.stream("GET", url) as response:
+                                logger.info(f"Intro Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                                if response.status_code == 200:
+                                    with zf.open(filename, "w") as dest:
                                         async for chunk in response.iter_bytes(chunk_size=65536):
                                             dest.write(chunk)
-                                            buffer.seek(0, io.SEEK_END)
-                                            current_pos = buffer.tell()
-                                            if current_pos > read_offset:
-                                                buffer.seek(read_offset)
-                                                yield_chunk = buffer.read(current_pos - read_offset)
-                                                read_offset = current_pos
-                                                yield yield_chunk
+                                else:
+                                    logger.warning(f"Intro download returned status {response.status_code} for {url}")
                         logger.info("INTRO VIDEO DOWNLOADED")
                     except Exception as e:
                         logger.exception("FAILED AT INTRO VIDEO DOWNLOAD")
@@ -1373,19 +1360,14 @@ async def download_talent_zip(
                             filename = item["filename"]
                             url = item["url"]
                             logger.info(f"Downloading file: {filename} from {url}")
-                            with zf.open(filename, "w") as dest:
-                                async with client.stream("GET", url) as response:
-                                    logger.info(f"Audition Take Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                    if response.status_code == 200:
+                            async with client.stream("GET", url) as response:
+                                logger.info(f"Audition Take Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                                if response.status_code == 200:
+                                    with zf.open(filename, "w") as dest:
                                         async for chunk in response.iter_bytes(chunk_size=65536):
                                             dest.write(chunk)
-                                            buffer.seek(0, io.SEEK_END)
-                                            current_pos = buffer.tell()
-                                            if current_pos > read_offset:
-                                                buffer.seek(read_offset)
-                                                yield_chunk = buffer.read(current_pos - read_offset)
-                                                read_offset = current_pos
-                                                yield yield_chunk
+                                else:
+                                    logger.warning(f"Audition Take download returned status {response.status_code} for {url}")
                         logger.info("AUDITION VIDEOS DOWNLOADED")
                     except Exception as e:
                         logger.exception("FAILED AT AUDITION VIDEOS DOWNLOAD")
@@ -1399,35 +1381,46 @@ async def download_talent_zip(
                             filename = item["filename"]
                             url = item["url"]
                             logger.info(f"Downloading file: {filename} from {url}")
-                            with zf.open(filename, "w") as dest:
-                                async with client.stream("GET", url) as response:
-                                    logger.info(f"Portfolio Image Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                                    if response.status_code == 200:
+                            async with client.stream("GET", url) as response:
+                                logger.info(f"Portfolio Image Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                                if response.status_code == 200:
+                                    with zf.open(filename, "w") as dest:
                                         async for chunk in response.iter_bytes(chunk_size=65536):
                                             dest.write(chunk)
-                                            buffer.seek(0, io.SEEK_END)
-                                            current_pos = buffer.tell()
-                                            if current_pos > read_offset:
-                                                buffer.seek(read_offset)
-                                                yield_chunk = buffer.read(current_pos - read_offset)
-                                                read_offset = current_pos
-                                                yield yield_chunk
+                                else:
+                                    logger.warning(f"Portfolio Image download returned status {response.status_code} for {url}")
                         logger.info("PORTFOLIO IMAGES DOWNLOADED")
                     except Exception as e:
                         logger.exception("FAILED AT PORTFOLIO IMAGES DOWNLOAD")
                         raise
 
-                zf.close()
+                # Close the zipfile block to finalize the central directory structure
                 logger.info("ZIP CREATED")
+                
+                # Seek to end to find the final size, then seek to beginning for streaming
+                buffer.seek(0, io.SEEK_END)
+                zip_size = buffer.tell()
+                buffer.seek(0)
+                
+                # Read the filenames contained inside the ZIP to log them
+                with zipfile.ZipFile(buffer, "r") as zf_read:
+                    namelist = zf_read.namelist()
+                buffer.seek(0)
+                
+                logger.info(f"ZIP SIZE = {zip_size} bytes")
+                logger.info(f"FILES IN ZIP = {namelist}")
+
             except Exception as e:
                 logger.exception("FAILED AT ZIP CREATION")
                 raise
 
-            buffer.seek(0, io.SEEK_END)
-            current_pos = buffer.tell()
-            if current_pos > read_offset:
-                buffer.seek(read_offset)
-                yield buffer.read(current_pos - read_offset)
+            # Stream the finalized buffer
+            chunk_size = 1024 * 1024  # 1MB chunks
+            while True:
+                chunk = buffer.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
             logger.info("ZIP RESPONSE RETURNED")
 
     safe_name = privatize_name(filtered_talent.get("name")).replace(".", "").replace(" ", "_").strip()
@@ -1527,33 +1520,54 @@ async def download_campaign_bundle_zip(
 
     async def event_generator():
         buffer = io.BytesIO()
-        read_offset = 0
-        async with httpx.AsyncClient() as client:
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for item in zip_items:
-                    filename = item["filename"]
-                    url = item["url"]
-                    try:
-                        with zf.open(filename, "w") as dest:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            try:
+                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for item in zip_items:
+                        filename = item["filename"]
+                        url = item["url"]
+                        try:
+                            logger.info(f"Downloading file: {filename} from {url}")
                             async with client.stream("GET", url) as response:
+                                logger.info(f"Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
                                 if response.status_code == 200:
-                                    async for chunk in response.iter_bytes(chunk_size=65536):
-                                        dest.write(chunk)
-                                        buffer.seek(0, io.SEEK_END)
-                                        current_pos = buffer.tell()
-                                        if current_pos > read_offset:
-                                            buffer.seek(read_offset)
-                                            yield_chunk = buffer.read(current_pos - read_offset)
-                                            read_offset = current_pos
-                                            yield yield_chunk
-                    except Exception as e:
-                        logger.error(f"Error zipping {filename} from {url}: {e}")
-            zf.close()
-            buffer.seek(0, io.SEEK_END)
-            current_pos = buffer.tell()
-            if current_pos > read_offset:
-                buffer.seek(read_offset)
-                yield buffer.read(current_pos - read_offset)
+                                    with zf.open(filename, "w") as dest:
+                                        async for chunk in response.iter_bytes(chunk_size=65536):
+                                            dest.write(chunk)
+                                else:
+                                    logger.warning(f"Download returned status {response.status_code} for {url}")
+                        except Exception as e:
+                            logger.exception(f"Error zipping {filename} from {url}")
+                            raise
+                
+                # Close the zipfile block to finalize the central directory structure
+                logger.info("ZIP CREATED")
+                
+                # Seek to end to find the final size, then seek to beginning for streaming
+                buffer.seek(0, io.SEEK_END)
+                zip_size = buffer.tell()
+                buffer.seek(0)
+                
+                # Read the filenames contained inside the ZIP to log them
+                with zipfile.ZipFile(buffer, "r") as zf_read:
+                    namelist = zf_read.namelist()
+                buffer.seek(0)
+                
+                logger.info(f"ZIP SIZE = {zip_size} bytes")
+                logger.info(f"FILES IN ZIP = {namelist}")
+
+            except Exception as e:
+                logger.exception("FAILED AT ZIP CREATION")
+                raise
+
+            # Stream the finalized buffer
+            chunk_size = 1024 * 1024  # 1MB chunks
+            while True:
+                chunk = buffer.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+            logger.info("ZIP RESPONSE RETURNED")
 
     campaign_name = "".join(c for c in link.get("title", "Campaign") if c.isalnum() or c in (" ", "-", "_")).strip()
     zip_filename = f"{campaign_name}_Campaign_Bundle.zip"

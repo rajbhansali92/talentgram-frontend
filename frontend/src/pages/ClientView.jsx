@@ -936,20 +936,18 @@ export default function ClientView() {
     return (
         <div className="min-h-screen bg-white text-[#111111]" data-testid="client-view-page">
             <header className="sticky top-0 z-30 bg-white/95 border-b border-black/[0.04]">
-                <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-4 md:py-6">
-                    <div className="flex items-center justify-between gap-3">
+                <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-3 md:py-4">
+                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                            <p className="eyebrow hidden md:block tracking-[0.12em] text-[#8A8A8A]">Curated Review</p>
-                            <h1 className="font-display text-base md:text-xl tracking-wide mt-0 md:mt-1 truncate text-[#111111]">
+                            <Logo size={36} className="hidden md:block mb-3" />
+                            <Logo size={28} className="md:hidden mx-auto mb-2" />
+                            <p className="eyebrow hidden md:block tracking-[0.12em] text-[#8A8A8A]">CURATED REVIEW</p>
+                            <h1 className="font-display text-base md:text-lg tracking-wide mt-0.5 text-center md:text-left truncate text-[#111111]">
                                 {link.title}
                             </h1>
-                            <p className="text-[10px] md:hidden text-[#8A8A8A] font-mono tracking-[0.08em] mt-0.5 truncate">
-                                {viewer.name} · {seenCount}/{totalCount} reviewed
+                            <p className="text-xs text-[#8A8A8A] mt-1 text-center md:text-left font-sans">
+                                {viewer.name} &bull; {seenCount} / {totalCount} reviewed
                             </p>
-                        </div>
-                        <div className="hidden md:block text-right">
-                            <p className="text-xs text-[#8A8A8A]">Viewing as</p>
-                            <p className="text-sm font-medium text-[#111111]">{viewer.name}</p>
                         </div>
                     </div>
                     <div className="md:hidden mt-3 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
@@ -962,7 +960,7 @@ export default function ClientView() {
                 </div>
             </header>
 
-            <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-6 md:py-16">
+            <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-5 md:py-8">
                 {showResumeBanner && (() => {
                     // Guard: localStorage.getItem can throw in Safari private browsing
                     let lastId = null;
@@ -970,7 +968,7 @@ export default function ClientView() {
                     const lastTalent = lastId ? talents.find(t => t.id === lastId) : null;
                     if (!lastTalent) return null;
                     return (
-                        <div className="mb-8 animate-fade-in" data-testid="resume-review-banner">
+                        <div className="mb-6 animate-fade-in" data-testid="resume-review-banner">
                             <div className="bg-[#B89B5E]/5 border border-[#B89B5E]/15 rounded-xl p-4 flex items-center justify-between gap-4 backdrop-blur-sm shadow-[0_4px_12px_-6px_rgba(184,155,94,0.06)]">
                                 <div className="flex items-center gap-3">
                                     <Clock className="w-4 h-4 text-[#B89B5E]" />
@@ -1006,7 +1004,7 @@ export default function ClientView() {
 
 
                 <div
-                    className="mb-8 hidden md:flex items-center gap-5"
+                    className="mb-5 hidden md:flex items-center gap-5"
                     data-testid="review-progress"
                 >
                     <div className="flex-1 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
@@ -1015,12 +1013,6 @@ export default function ClientView() {
                             style={{ width: `${reviewedPct}%` }}
                             data-testid="review-progress-bar"
                         />
-                    </div>
-                    <div
-                        className="text-[11px] font-mono text-[#8A8A8A] tracking-[0.08em] shrink-0"
-                        data-testid="review-progress-label"
-                    >
-                        {seenCount} of {totalCount} reviewed
                     </div>
                 </div>
 

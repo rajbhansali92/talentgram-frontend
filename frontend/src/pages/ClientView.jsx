@@ -1255,7 +1255,16 @@ function TalentDetail({
             window.URL.revokeObjectURL(url);
         } catch (err) {
             console.error("Error downloading package:", err);
-            alert("Failed to download talent package. Please try again.");
+            if (err.response && err.response.data instanceof Blob) {
+                const reader = new FileReader();
+                reader.onload = function() {
+                    alert(`Failed to download talent package. Response: ${reader.result}`);
+                };
+                reader.readAsText(err.response.data);
+            } else {
+                const msg = err.response?.data?.detail || err.message || err;
+                alert(`Failed to download talent package. Error: ${JSON.stringify(msg)}`);
+            }
         } finally {
             setIsDownloadingPackage(false);
         }

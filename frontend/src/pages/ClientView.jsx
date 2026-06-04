@@ -1229,6 +1229,92 @@ function TalentDetail({
     const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
     const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
 
+    const handleCopyForm = () => {
+        try {
+            const lines = [];
+            lines.push(`Name: ${talent.name || "Unnamed"}`);
+            if (talent.age) lines.push(`Age: ${talent.age}`);
+            if (talent.height) lines.push(`Height: ${talent.height}`);
+            if (talent.location) lines.push(`Location: ${talent.location}`);
+            if (talent.ethnicity) lines.push(`Ethnicity: ${talent.ethnicity}`);
+            
+            // Availability status
+            const availLabel = availabilityLabel(talent.availability);
+            if (availLabel) {
+                let val = availLabel;
+                if (talent.availability?.note) {
+                    val += ` — ${talent.availability.note}`;
+                }
+                lines.push(`Availability: ${val}`);
+            }
+
+            // Budget status
+            if (talent.budget?.status) {
+                const bstatus = talent.budget.status;
+                if (bstatus === "custom" && talent.budget.value) {
+                    lines.push(`Budget: Counter Budget: ${talent.budget.value}`);
+                } else if (bstatus === "accept") {
+                    // Try to get original budget
+                    const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
+                    const offeredBudget = (() => {
+                        const tLines = (tProjBudget?.talent_budget || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
+                        if (tLines.length > 0) {
+                            const tBudgetLine = tLines.find(l => (l.label || "").toLowerCase().includes("budget")) || tLines[0];
+                            if (tBudgetLine && tBudgetLine.value) {
+                                return tBudgetLine.value;
+                            }
+                        }
+                        if (tProjBudget?.budget_per_day) {
+                            const bpd = tProjBudget.budget_per_day.trim();
+                            if (bpd.toLowerCase().includes("/ day") || bpd.toLowerCase().includes("/day")) {
+                                return bpd;
+                            }
+                            return `${bpd} / day`;
+                        }
+                        return null;
+                    })();
+                    lines.push(`Budget: Agreed Budget (${offeredBudget || "Project Budget"})`);
+                } else {
+                    lines.push(`Budget: ${bstatus.charAt(0).toUpperCase() + bstatus.slice(1)}`);
+                }
+            }
+
+            if (talent.competitive_brand) {
+                lines.push(`Competitive Brand: ${talent.competitive_brand}`);
+            }
+
+            if (talent.instagram_handle) {
+                lines.push(`Instagram: @${talent.instagram_handle.replace("@", "")}`);
+                if (talent.instagram_followers) {
+                    lines.push(`Instagram Followers: ${talent.instagram_followers}`);
+                }
+            }
+
+            if ((talent.custom_answers || []).length > 0) {
+                lines.push("");
+                lines.push("Additional Details:");
+                talent.custom_answers.forEach((qa) => {
+                    lines.push(`- ${qa.question}: ${qa.answer}`);
+                });
+            }
+
+            if ((talent.work_links || []).length > 0) {
+                lines.push("");
+                lines.push("Work Links:");
+                talent.work_links.forEach((w) => {
+                    lines.push(`- ${w}`);
+                });
+            }
+
+            const textToCopy = lines.join("\n");
+            navigator.clipboard.writeText(textToCopy);
+            toast.success("Talent details form copied to clipboard!");
+        } catch (err) {
+            console.error("Failed to copy form:", err);
+            toast.error("Failed to copy form. Please try again.");
+        }
+    };
+
     const handleDownloadPackage = async () => {
         setIsDownloadingPackage(true);
         try {
@@ -1258,12 +1344,12 @@ function TalentDetail({
             if (err.response && err.response.data instanceof Blob) {
                 const reader = new FileReader();
                 reader.onload = function() {
-                    alert(`Failed to download talent package. Response: ${reader.result}`);
+                    alert(`Failed to download talent folder. Response: ${reader.result}`);
                 };
                 reader.readAsText(err.response.data);
             } else {
                 const msg = err.response?.data?.detail || err.message || err;
-                alert(`Failed to download talent package. Error: ${JSON.stringify(msg)}`);
+                alert(`Failed to download talent folder. Error: ${JSON.stringify(msg)}`);
             }
         } finally {
             setIsDownloadingPackage(false);
@@ -1314,25 +1400,29 @@ function TalentDetail({
     // momentary keyboard dead-zone after each Shortlist/Reject press).
     useEffect(() => {
         const handleKeyDown = (e) => {
-            if (e.key === "Escape" && !isSharePreview) {
+            if (e.key === "Escape" && onClose) {
                 onClose();
-            } else if (e.key === "ArrowLeft") {
-                prev();
-            } else if (e.key === "ArrowRight") {
-                next();
-            } else if (e.key === "1" && !isSharePreview) {
-                setAction(talent.id, viewerActionRef.current?.action === "shortlist" ? null : "shortlist");
-            } else if (e.key === "2" && !isSharePreview) {
-                setAction(talent.id, viewerActionRef.current?.action === "not_sure" ? null : "not_sure");
-            } else if (e.key === "3" && !isSharePreview) {
-                setAction(talent.id, viewerActionRef.current?.action === "not_for_this" ? null : "not_for_this");
+                return;
+            }
+            if (isSharePreview) return;
+            const current = viewerActionRef.current;
+            if (e.key === "s" || e.key === "S") {
+                setAction(talent.id, current?.action === "shortlist" ? null : "shortlist");
+            } else if (e.key === "r" || e.key === "R") {
+                setAction(talent.id, current?.action === "not_for_this" ? null : "not_for_this");
+            } else if (e.key === "h" || e.key === "H") {
+                setAction(talent.id, current?.action === "not_sure" ? null : "not_sure");
+            } else if (e.key === "i" || e.key === "I") {
+                setAction(talent.id, current?.action === "interested" ? null : "interested");
+            } else if (e.key === "ArrowLeft" && goPrevTalent) {
+                goPrevTalent();
+            } else if (e.key === "ArrowRight" && goNextTalent) {
+                goNextTalent();
             }
         };
-        document.addEventListener("keydown", handleKeyDown);
-        return () => {
-            document.removeEventListener("keydown", handleKeyDown);
-        };
-    }, [onClose, prev, next, setAction, talent.id, isSharePreview]);
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [talent.id, setAction, onClose, goPrevTalent, goNextTalent, isSharePreview]);
 
     const list = useMemo(() => (
         Array.isArray(talents) ? talents : []
@@ -1372,43 +1462,37 @@ function TalentDetail({
         }
     }, [hasNextTalent, onNavigate, list, currentTalentIdx, onClose]);
 
+    // Touch swipe gesture handlers for gallery navigation (mobile jank fix - AUDIT: HIGH-01)
     useEffect(() => {
-        const node = overlayRef.current;
-        if (!node) return;
         let startX = 0;
         let startY = 0;
-        let movedX = 0;
-        let movedY = 0;
-        let active = false;
+        const node = overlayRef.current;
+        if (!node) return;
+
         const onTouchStart = (e) => {
-            if (e.touches.length !== 1) return;
-            const el = e.target.closest('[data-stop-swipe="1"]');
-            if (el) return;
-            active = true;
             startX = e.touches[0].clientX;
             startY = e.touches[0].clientY;
-            movedX = 0;
-            movedY = 0;
         };
+
         const onTouchMove = (e) => {
-            if (!active) return;
-            movedX = e.touches[0].clientX - startX;
-            movedY = e.touches[0].clientY - startY;
+            // No-op to satisfy Chrome/Safari passive event checks
         };
-        const onTouchEnd = () => {
-            if (!active) return;
-            active = false;
-            const ax = Math.abs(movedX);
-            const ay = Math.abs(movedY);
-            if (ax > 60 && ax > ay * 1.4) {
-                if (movedX < 0) goNextTalent();
-                else goPrevTalent();
-                return;
-            }
-            if (movedY > 110 && ay > ax * 1.4 && startY < 200 && !isSharePreview) {
-                onClose();
+
+        const onTouchEnd = (e) => {
+            // Don't trigger swipe on touchable sub-components like carousels/sliders (AUDIT: HIGH-01)
+            if (e.target.closest("[data-stop-swipe]")) return;
+            const diffX = e.changedTouches[0].clientX - startX;
+            const diffY = e.changedTouches[0].clientY - startY;
+
+            if (Math.abs(diffX) > 60 && Math.abs(diffY) < 40) {
+                if (diffX > 0 && goPrevTalent) {
+                    goPrevTalent();
+                } else if (diffX < 0 && goNextTalent) {
+                    goNextTalent();
+                }
             }
         };
+
         node.addEventListener("touchstart", onTouchStart, { passive: true });
         node.addEventListener("touchmove", onTouchMove, { passive: true });
         node.addEventListener("touchend", onTouchEnd, { passive: true });
@@ -1417,7 +1501,7 @@ function TalentDetail({
             node.removeEventListener("touchmove", onTouchMove);
             node.removeEventListener("touchend", onTouchEnd);
         };
-    }, [goNextTalent, goPrevTalent, onClose, isSharePreview]);
+    }, [goNextTalent, goPrevTalent]);
 
 
     const download = useCallback(async (m) => {
@@ -1475,27 +1559,13 @@ function TalentDetail({
             data-testid="talent-detail-overlay"
         >
             <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
+
                 {/* Mobile Top Sticky Header */}
                 <div className="md:hidden sticky top-0 z-30 bg-white border-b border-black/[0.04] px-4 py-3 flex items-center justify-between shrink-0 shadow-sm">
                     <div className="min-w-0 flex-1 pr-4">
                         <h2 className="font-display text-base font-semibold text-[#111111] truncate">
                             {privatizeName(talent.name)}
                         </h2>
-                        <div className="text-[10px] text-[#8A8A8A] font-mono tracking-wide mt-0.5 truncate flex items-center gap-1.5 flex-wrap">
-                            {vis.age && talent.age && <span>{talent.age} yrs</span>}
-                            {vis.height && talent.height && (
-                                <>
-                                    <span className="opacity-35">•</span>
-                                    <span>{talent.height}</span>
-                                </>
-                            )}
-                            {vis.location && talent.location && (
-                                <>
-                                    <span className="opacity-35">•</span>
-                                    <span>{talent.location}</span>
-                                </>
-                            )}
-                        </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                         <span className={`inline-flex items-center text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${
@@ -1531,8 +1601,9 @@ function TalentDetail({
                 <div className="flex-1 flex flex-col md:flex-row overflow-y-auto md:overflow-hidden">
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-visible md:overflow-y-auto min-h-0 pb-10 md:pb-0">
-                        {/* Mobile Download Talent Package Button */}
+                    {/* pb-36 provides clearance on mobile browsers for reachable voice notes section */}
+                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-visible md:overflow-y-auto min-h-0 pb-36 md:pb-0">
+                        {/* Mobile Download Talent Folder Button */}
                         {vis.download && (
                             <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04]">
                                 <button
@@ -1544,27 +1615,38 @@ function TalentDetail({
                                     {isDownloadingPackage ? (
                                         <>
                                             <Loader2 className="w-4 h-4 animate-spin text-white" />
-                                            <span>Preparing Talent Package...</span>
+                                            <span>Preparing Talent Folder...</span>
                                         </>
                                     ) : (
                                         <>
                                             <Download className="w-4 h-4 text-white" />
-                                            <span>Download Talent Package</span>
+                                            <span>Download Talent Folder</span>
                                         </>
                                     )}
                                 </button>
                             </div>
                         )}
                         {/* Mobile Details Accordion */}
-                        <div className="md:hidden border-b border-black/[0.04]">
-                            <button
-                                type="button"
-                                onClick={() => setIsDetailsExpanded(!isDetailsExpanded)}
-                                className="w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-black/70 bg-white hover:bg-black/[0.01] transition-colors"
-                            >
-                                <span>Talent Details</span>
-                                <ChevronDown className={`w-4 h-4 text-black/40 transition-transform duration-200 ${isDetailsExpanded ? "rotate-180" : ""}`} />
-                            </button>
+                        <div className="md:hidden border-b border-black/[0.04] bg-white">
+                            <div className="flex items-center justify-between px-4 py-2 border-b border-black/[0.02]">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsDetailsExpanded(!isDetailsExpanded)}
+                                    className="flex-1 text-left py-2.5 text-sm font-medium text-black/70 flex items-center justify-between"
+                                >
+                                    <span>Talent Details Form</span>
+                                    <ChevronDown className={`w-4 h-4 text-black/40 transition-transform duration-200 ${isDetailsExpanded ? "rotate-180" : ""}`} />
+                                </button>
+                                <button
+                                    onClick={handleCopyForm}
+                                    className="ml-3 text-[11px] px-2.5 py-1.5 border border-black/[0.08] hover:border-black/20 rounded-md transition-colors text-[#111111] bg-white font-medium shadow-sm flex items-center justify-center shrink-0"
+                                    data-testid="copy-form-btn-mobile"
+                                >
+                                    Copy Form
+                                </button>
+                            </div>
+                        </div>
+
                             {isDetailsExpanded && (
                                 <div className="px-4 pb-6 pt-2 bg-white space-y-6 text-sm">
                                     <div className="grid grid-cols-2 gap-y-5">
@@ -1848,7 +1930,7 @@ function TalentDetail({
                                         onClick={handleDownloadPackage}
                                         disabled={isDownloadingPackage}
                                         className="h-11 px-4 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center gap-2 bg-white/90 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111] disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title="Download Talent Package"
+                                        title="Download Talent Folder"
                                         data-testid="detail-download-package-btn"
                                     >
                                         {isDownloadingPackage ? (
@@ -1859,7 +1941,7 @@ function TalentDetail({
                                         ) : (
                                             <>
                                                 <Download className="w-4 h-4 text-[#8A8A8A]" />
-                                                <span>Download Talent Package</span>
+                                                <span>Download Talent Folder</span>
                                             </>
                                         )}
                                     </button>
@@ -1885,7 +1967,16 @@ function TalentDetail({
                                 )}
                             </div>
 
-                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Talent</p>
+                            <div className="flex items-center justify-between mb-3">
+                                <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Talent Details Form</p>
+                                <button
+                                    onClick={handleCopyForm}
+                                    className="text-[11px] px-2.5 py-1.5 border border-black/[0.08] hover:border-black/20 rounded-md transition-colors text-[#111111] bg-white font-medium shadow-sm flex items-center justify-center"
+                                    data-testid="copy-form-btn"
+                                >
+                                    Copy Form
+                                </button>
+                            </div>
                             <h2 className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-[#111111]">
                                 {privatizeName(talent.name)}
                             </h2>

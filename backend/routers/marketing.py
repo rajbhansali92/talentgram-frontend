@@ -50,6 +50,7 @@ class ClientCreate(BaseModel):
     tags: Optional[List[str]] = Field(default=None)
     stage: Optional[str] = Field(default="lead", max_length=40)
     value: Optional[float] = Field(default=None)
+    contact_type: Optional[str] = Field(default=None, max_length=100)
 
 
 class ClientUpdate(BaseModel):
@@ -60,6 +61,7 @@ class ClientUpdate(BaseModel):
     tags: Optional[List[str]] = Field(default=None)
     stage: Optional[str] = Field(default=None, max_length=40)
     value: Optional[float] = Field(default=None)
+    contact_type: Optional[str] = Field(default=None, max_length=100)
 
 
 class InteractionCreate(BaseModel):
@@ -102,6 +104,7 @@ def _serialise_client(doc: dict) -> dict:
         "tags": doc.get("tags") or [],
         "stage": doc.get("stage") or "lead",
         "value": doc.get("value"),
+        "contact_type": doc.get("contact_type"),
         "created_at": doc.get("created_at"),
         "last_contacted_date": doc.get("last_contacted_date"),
     }
@@ -138,6 +141,7 @@ async def create_client(
         "tags": [t.strip() for t in payload.tags if t.strip()] if payload.tags else [],
         "stage": (payload.stage or "lead").strip(),
         "value": payload.value,
+        "contact_type": (payload.contact_type or "").strip() or None,
         "created_at": now,
         "last_contacted_date": now,
     }
@@ -195,6 +199,8 @@ async def update_client(
         upd["stage"] = payload.stage.strip()
     if payload.value is not None:
         upd["value"] = payload.value
+    if payload.contact_type is not None:
+        upd["contact_type"] = payload.contact_type.strip() or None
 
     if upd:
         await db.clients.update_one({"_id": oid}, {"$set": upd})

@@ -19,8 +19,29 @@ import {
 import { 
     Plus, Loader2, Phone, Mail, Users as UsersIcon, MessageSquare, 
     Calendar, Building2, PhoneCall, Clock, TrendingUp, Users, Activity, 
-    ChevronRight, Sparkles, Zap, Target, AlertCircle, Edit2, Share2, DollarSign, X, Check
+    ChevronRight, Sparkles, Zap, Target, AlertCircle, Edit2, Share2, DollarSign, X, Check, ChevronDown
 } from "lucide-react";
+
+const CONTACT_TYPES = [
+    { value: "brand_manager", label: "Brand Manager", group: "Brand & Marketing" },
+    { value: "marketing_manager", label: "Marketing Manager", group: "Brand & Marketing" },
+    { value: "influencer_marketing", label: "Influencer Marketing Manager", group: "Brand & Marketing" },
+    { value: "creative_director", label: "Creative Director", group: "Brand & Marketing" },
+    { value: "agency_producer", label: "Agency Producer", group: "Brand & Marketing" },
+
+    { value: "casting_director", label: "Casting Director", group: "Casting" },
+    { value: "casting_assistant", label: "Casting Assistant", group: "Casting" },
+    { value: "casting_company", label: "Casting Company", group: "Casting" },
+
+    { value: "producer", label: "Producer", group: "Production" },
+    { value: "executive_producer", label: "Executive Producer", group: "Production" },
+    { value: "production_house", label: "Production House", group: "Production" },
+    { value: "line_producer", label: "Line Producer", group: "Production" },
+
+    { value: "talent_agency", label: "Talent Agency", group: "Agency" },
+    { value: "modeling_agency", label: "Modeling Agency", group: "Agency" },
+    { value: "casting_agency", label: "Casting Agency", group: "Agency" }
+];
 
 // ============================================================================
 // UTILITY FUNCTIONS - Centralized
@@ -220,6 +241,7 @@ export default function MarketingHub() {
     const [addOpen, setAddOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [filterType, setFilterType] = useState("all");
+    const [selectedContactType, setSelectedContactType] = useState("all");
     const [recentSearches, setRecentSearches] = useState([]);
     const [focusedIndex, setFocusedIndex] = useState(-1);
 
@@ -278,6 +300,10 @@ export default function MarketingHub() {
             
             if (!matchesSearch) return false;
             
+            if (selectedContactType !== "all" && client.contact_type !== selectedContactType) {
+                return false;
+            }
+            
             if (filterType === "recent") {
                 const days = getDaysSinceContact(client.last_contacted_date);
                 return days !== null && days <= 7 && client.stage !== "key_account";
@@ -295,7 +321,7 @@ export default function MarketingHub() {
             
             return true;
         });
-    }, [clients, searchQuery, filterType]);
+    }, [clients, searchQuery, filterType, selectedContactType]);
 
     // Derived Statistics Dashboard
     const stats = useMemo(() => {
@@ -309,6 +335,19 @@ export default function MarketingHub() {
         }).length;
         const keyAccounts = clients.filter(c => c.stage === "key_account").length;
         return { active, dormant, keyAccounts, total: clients.length };
+    }, [clients]);
+
+    const contactTypeCounts = useMemo(() => {
+        const counts = {};
+        CONTACT_TYPES.forEach(t => {
+            counts[t.value] = 0;
+        });
+        clients.forEach(c => {
+            if (c.contact_type && counts[c.contact_type] !== undefined) {
+                counts[c.contact_type]++;
+            }
+        });
+        return counts;
     }, [clients]);
 
     // Handle arrow keys and CMD+K keyboard focus shortcuts
@@ -380,11 +419,12 @@ export default function MarketingHub() {
 
     const clearFilters = useCallback(() => {
         setFilterType("all");
+        setSelectedContactType("all");
         setSearchQuery("");
         setFocusedIndex(-1);
     }, []);
 
-    const hasActiveFilters = filterType !== "all" || searchQuery;
+    const hasActiveFilters = filterType !== "all" || selectedContactType !== "all" || searchQuery;
 
     // Premium Editorial UI Header
     return (
@@ -495,7 +535,42 @@ export default function MarketingHub() {
                                 Clear History
                             </button>
                         </div>
-                    )}
+                    {/* Contact Type filters strip */}
+                    <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none pt-2 border-t border-slate-50">
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono shrink-0 select-none">Type:</span>
+                        <button
+                            type="button"
+                            onClick={() => { setSelectedContactType("all"); setFocusedIndex(-1); }}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1 border rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200 ${
+                                selectedContactType === "all"
+                                    ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                    : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
+                            }`}
+                        >
+                            All Types
+                        </button>
+                        {CONTACT_TYPES.map((t) => {
+                            const count = contactTypeCounts[t.value] || 0;
+                            const active = selectedContactType === t.value;
+                            return (
+                                <button
+                                    key={t.value}
+                                    type="button"
+                                    onClick={() => { setSelectedContactType(active ? "all" : t.value); setFocusedIndex(-1); }}
+                                    className={`inline-flex items-center gap-1.5 px-3 py-1 border rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200 ${
+                                        active
+                                            ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                            : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
+                                    }`}
+                                >
+                                    <span>{t.label}</span>
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold ${active ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500"}`}>
+                                        {count}
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
                 </div>
             </div>
 
@@ -643,6 +718,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
     const [stage, setStage] = useState("lead");
     const [value, setValue] = useState("");
     const [tags, setTags] = useState("");
+    const [contactType, setContactType] = useState("");
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
@@ -654,6 +730,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
             setStage("lead");
             setValue("");
             setTags("");
+            setContactType("");
             setSaving(false);
         }
     }, [open]);
@@ -675,7 +752,8 @@ function AddClientDialog({ open, onClose, onCreated }) {
                 email: email.trim() || null,
                 stage: stage,
                 value: valNum,
-                tags: tagsList
+                tags: tagsList,
+                contact_type: contactType || null
             });
             onCreated(data);
         } catch (err) {
@@ -739,11 +817,13 @@ function AddClientDialog({ open, onClose, onCreated }) {
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <label className="block">
-                            <div className="text-xs font-semibold text-slate-600 mb-1.5">Lifecycle Stage</div>
+                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                                <span>Lifecycle Stage</span>
+                            </div>
                             <select
                                 value={stage}
                                 onChange={(e) => setStage(e.target.value)}
-                                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
                             >
                                 <option value="lead">New Lead</option>
                                 <option value="active">Active partner</option>
@@ -759,13 +839,50 @@ function AddClientDialog({ open, onClose, onCreated }) {
                         />
                     </div>
 
-                    <FieldInput
-                        label="Relationship Tags (Comma-separated)"
-                        value={tags}
-                        onChange={setTags}
-                        placeholder="E.g. Producer, Mumbai, Hot Lead"
-                        testId="marketing-input-tags"
-                    />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <label className="block">
+                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                                <span>Contact Type</span>
+                            </div>
+                            <select
+                                value={contactType}
+                                onChange={(e) => setContactType(e.target.value)}
+                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                            >
+                                <option value="">Select Type (optional)</option>
+                                <optgroup label="Brand & Marketing">
+                                    <option value="brand_manager">Brand Manager</option>
+                                    <option value="marketing_manager">Marketing Manager</option>
+                                    <option value="influencer_marketing">Influencer Marketing Manager</option>
+                                    <option value="creative_director">Creative Director</option>
+                                    <option value="agency_producer">Agency Producer</option>
+                                </optgroup>
+                                <optgroup label="Casting">
+                                    <option value="casting_director">Casting Director</option>
+                                    <option value="casting_assistant">Casting Assistant</option>
+                                    <option value="casting_company">Casting Company</option>
+                                </optgroup>
+                                <optgroup label="Production">
+                                    <option value="producer">Producer</option>
+                                    <option value="executive_producer">Executive Producer</option>
+                                    <option value="production_house">Production House</option>
+                                    <option value="line_producer">Line Producer</option>
+                                </optgroup>
+                                <optgroup label="Agency">
+                                    <option value="talent_agency">Talent Agency</option>
+                                    <option value="modeling_agency">Modeling Agency</option>
+                                    <option value="casting_agency">Casting Agency</option>
+                                </optgroup>
+                            </select>
+                        </label>
+                        <FieldInput
+                            label="Relationship Tags (Comma-separated)"
+                            value={tags}
+                            onChange={setTags}
+                            placeholder="E.g. Producer, Mumbai"
+                            testId="marketing-input-tags"
+                        />
+                    </div>
 
                     <DialogFooter className="pt-4 border-t border-slate-100 gap-3">
                         <button
@@ -820,6 +937,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
     const [editStage, setEditStage] = useState("lead");
     const [editValue, setEditValue] = useState("");
     const [editTags, setEditTags] = useState("");
+    const [editContactType, setEditContactType] = useState("");
     const [updating, setUpdating] = useState(false);
 
     const loadInteractions = useCallback(async (cid) => {
@@ -853,6 +971,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
         setEditStage(client.stage || "lead");
         setEditValue(client.value !== undefined && client.value !== null ? String(client.value) : "");
         setEditTags((client.tags || []).join(", "));
+        setEditContactType(client.contact_type || "");
     }, [client, loadInteractions]);
 
     const submitInteraction = async (e) => {
@@ -894,7 +1013,8 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                 email: editEmail.trim() || null,
                 stage: editStage,
                 value: valNum,
-                tags: tagsList
+                tags: tagsList,
+                contact_type: editContactType || null
             });
             onClientUpdated(data);
             setIsEditing(false);
@@ -940,8 +1060,16 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                                 >
                                     {client.name}
                                 </SheetTitle>
-                                <SheetDescription className="text-slate-500 text-sm sm:text-base font-mono">
-                                    {client.company_name || "Independent Account"}
+                                <SheetDescription className="text-slate-500 text-sm sm:text-base font-mono flex items-center gap-2 flex-wrap">
+                                    <span>{client.company_name || "Independent Account"}</span>
+                                    {client.contact_type && (
+                                        <>
+                                            <span className="text-slate-300">•</span>
+                                            <span className="bg-amber-50 text-amber-800 border border-amber-200/50 px-2 py-0.5 rounded-full text-xs font-semibold font-sans tracking-normal uppercase">
+                                                {CONTACT_TYPES.find(t => t.value === client.contact_type)?.label || client.contact_type}
+                                            </span>
+                                        </>
+                                    )}
                                 </SheetDescription>
                             </SheetHeader>
                             <button
@@ -970,20 +1098,59 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                                     </div>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <label className="block">
-                                            <div className="text-xs font-semibold text-slate-600 mb-1.5">Lifecycle Stage</div>
+                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                                                <span>Lifecycle Stage</span>
+                                            </div>
                                             <select
                                                 value={editStage}
                                                 onChange={(e) => setEditStage(e.target.value)}
-                                                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none"
+                                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
                                             >
                                                 <option value="lead">New Lead</option>
                                                 <option value="active">Active partner</option>
                                                 <option value="key_account">Key Account (High Value)</option>
                                             </select>
                                         </label>
-                                        <FieldInput label="Deal Value (INR)" value={editValue} onChange={setEditValue} />
+                                        <label className="block">
+                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                                                <span>Contact Type</span>
+                                            </div>
+                                            <select
+                                                value={editContactType}
+                                                onChange={(e) => setEditContactType(e.target.value)}
+                                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                                            >
+                                                <option value="">Select Type (optional)</option>
+                                                <optgroup label="Brand & Marketing">
+                                                    <option value="brand_manager">Brand Manager</option>
+                                                    <option value="marketing_manager">Marketing Manager</option>
+                                                    <option value="influencer_marketing">Influencer Marketing Manager</option>
+                                                    <option value="creative_director">Creative Director</option>
+                                                    <option value="agency_producer">Agency Producer</option>
+                                                </optgroup>
+                                                <optgroup label="Casting">
+                                                    <option value="casting_director">Casting Director</option>
+                                                    <option value="casting_assistant">Casting Assistant</option>
+                                                    <option value="casting_company">Casting Company</option>
+                                                </optgroup>
+                                                <optgroup label="Production">
+                                                    <option value="producer">Producer</option>
+                                                    <option value="executive_producer">Executive Producer</option>
+                                                    <option value="production_house">Production House</option>
+                                                    <option value="line_producer">Line Producer</option>
+                                                </optgroup>
+                                                <optgroup label="Agency">
+                                                    <option value="talent_agency">Talent Agency</option>
+                                                    <option value="modeling_agency">Modeling Agency</option>
+                                                    <option value="casting_agency">Casting Agency</option>
+                                                </optgroup>
+                                            </select>
+                                        </label>
                                     </div>
-                                    <FieldInput label="Tags (comma-separated)" value={editTags} onChange={setEditTags} />
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <FieldInput label="Deal Value (INR)" value={editValue} onChange={setEditValue} />
+                                        <FieldInput label="Tags (comma-separated)" value={editTags} onChange={setEditTags} />
+                                    </div>
                                     
                                     <div className="flex gap-2.5 justify-end pt-2">
                                         <button

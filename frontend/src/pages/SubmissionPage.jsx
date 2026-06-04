@@ -1482,8 +1482,8 @@ function SubmissionPage() {
                         <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
                                 <div>
-                                    <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Your Profile</h3>
-                                    <p className="text-[11px] text-slate-400 mt-1">Please confirm your personal details exactly as they should appear for casting.</p>
+                                    <h3 className="text-base font-bold text-slate-900 tracking-tight">Your Profile</h3>
+                                    <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -1853,8 +1853,8 @@ function SubmissionPage() {
                         <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
                                 <div>
-                                    <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Project Questions</h3>
-                                    <p className="text-[11px] text-slate-400 mt-1">Please answer these project-specific questions and confirm your availability.</p>
+                                    <h3 className="text-base font-bold text-slate-900 tracking-tight">Project Questions</h3>
+                                    <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -1882,11 +1882,11 @@ function SubmissionPage() {
                                         data-testid="availability-block"
                                         data-step="2"
                                     >
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-1">
+                                        <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">
                                             Availability{" "}
                                             <span className="text-rose-500">*</span>
                                         </p>
-                                        <p className="text-[11.5px] text-slate-400 mb-3">Tell us whether you are available for shoot and travel dates.</p>
+                                        <p className="text-[12px] text-slate-600 mb-3 leading-relaxed">Tell us whether you are available for shoot and travel dates.</p>
                                         {project.shoot_dates && (
                                             <p className="text-[12px] text-slate-500 mb-5 leading-relaxed">
                                                 {project.shoot_dates}
@@ -1950,11 +1950,11 @@ function SubmissionPage() {
                                         data-testid="budget-block"
                                         data-step="2"
                                     >
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-1">
+                                        <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">
                                             Budget{" "}
                                             <span className="text-rose-500">*</span>
                                         </p>
-                                        <p className="text-[11.5px] text-slate-400 mb-4">Share your expected compensation if requested for this project.</p>
+                                        <p className="text-[12px] text-slate-600 mb-4 leading-relaxed">Share your expected compensation if requested for this project.</p>
                                         {project.commission_percent && (
                                             <div
                                                 className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
@@ -1994,6 +1994,19 @@ function SubmissionPage() {
                                                 </div>
                                             </div>
                                         )}
+                                        {project.budget_per_day && (
+                                            <div
+                                                className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                data-testid="project-budget-card"
+                                            >
+                                                <span className="text-[11px] tracking-[0.2em] uppercase font-mono text-slate-500">
+                                                    Project Budget
+                                                </span>
+                                                <span className="font-display text-2xl font-bold text-slate-950">
+                                                    {project.budget_per_day} / Day
+                                                </span>
+                                            </div>
+                                        )}
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
                                             <button
                                                 type="button"
@@ -2008,18 +2021,13 @@ function SubmissionPage() {
                                                     setTimeout(saveForm, 0);
                                                 }}
                                                 data-testid="budget-accept-btn"
-                                                className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                     form.budget.status === "accept"
-                                                        ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                        : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                        ? "bg-slate-950 text-white border-slate-950 shadow-sm"
+                                                        : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
                                                 }`}
                                             >
                                                 Accept
-                                                {project.budget_per_day && (
-                                                    <span className="block text-[11px] font-mono opacity-70 mt-1">
-                                                        {project.budget_per_day} / day
-                                                    </span>
-                                                )}
                                             </button>
                                             <button
                                                 type="button"
@@ -2034,16 +2042,13 @@ function SubmissionPage() {
                                                     setTimeout(saveForm, 0);
                                                 }}
                                                 data-testid="budget-custom-btn"
-                                                className={`px-4 py-3.5 rounded-full text-[13px] border transition-all duration-200 min-h-[52px] ${
+                                                className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                     form.budget.status === "custom"
-                                                        ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                        : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                        ? "bg-slate-950 text-white border-slate-950 shadow-sm"
+                                                        : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
                                                 }`}
                                             >
-                                                Not accepting
-                                                <span className="block text-[11px] font-mono opacity-70 mt-1">
-                                                    Propose your own
-                                                </span>
+                                                Propose Own
                                             </button>
                                         </div>
                                         {form.budget.status === "custom" && (
@@ -2112,8 +2117,8 @@ function SubmissionPage() {
                         <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
                                 <div>
-                                    <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Work Links</h3>
-                                    <p className="text-[11px] text-slate-400 mt-1">Add links to your professional websites or reels to showcase your previous work.</p>
+                                    <h3 className="text-base font-bold text-slate-900 tracking-tight">Work Links</h3>
+                                    <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -2182,11 +2187,11 @@ function SubmissionPage() {
                         <div className="bg-white rounded-3xl p-7 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                         <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
                             <div>
-                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-1">Uploads</p>
-                                <h2 className="font-display text-2xl tracking-tight text-slate-900 leading-[1.05]">
+                                <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">Uploads</p>
+                                <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">
                                     Show us your work.
                                 </h2>
-                                <p className="text-[11px] text-slate-400 mt-1">Upload the requested audition takes and portfolio images exactly as instructed.</p>
+                                <p className="text-[12px] text-slate-600 mt-1.5 leading-relaxed">Upload the requested audition takes and portfolio images exactly as instructed.</p>
                             </div>
                             <button
                                 type="button"
@@ -2931,7 +2936,7 @@ function PremiumFormField({
 
     return (
         <label className={`block ${wide ? "md:col-span-2" : ""}`}>
-            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+            <span className="text-[11px] text-slate-700 tracking-[0.08em] font-semibold uppercase font-mono">
                 {label}
             </span>
             <input
@@ -2961,10 +2966,10 @@ function PremiumFormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-slate-800 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-400 ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-slate-900 placeholder:text-slate-500 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-500 ${className}`}
             />
             {hint && (
-                <span className="block text-[10px] text-slate-400 mt-1 font-mono">
+                <span className="block text-[10.5px] text-slate-500 mt-1 font-mono">
                     {hint}
                 </span>
             )}

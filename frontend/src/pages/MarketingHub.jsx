@@ -535,6 +535,7 @@ export default function MarketingHub() {
                                 Clear History
                             </button>
                         </div>
+                    )}
                     {/* Contact Type filters strip */}
                     <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none pt-2 border-t border-slate-50">
                         <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono shrink-0 select-none">Type:</span>

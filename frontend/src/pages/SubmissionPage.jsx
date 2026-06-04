@@ -1151,6 +1151,44 @@ export default function SubmissionPage() {
                     )}
                 </section>
 
+                {/* SUBMISSION PROGRESS CHECKLIST */}
+                {emailGateUnlocked && (
+                    <section className="mb-10 bg-white rounded-3xl p-6 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-3">Submission Progress</p>
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                            {[
+                                { label: "Profile", completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.location?.trim()) },
+                                { label: "Measurements", completed: !!form.height },
+                                { label: "Portfolio", completed: allImages.length > 0 },
+                                { label: "Videos", completed: !!(intro || takes.length > 0) },
+                                { label: "Availability", completed: !!(form.availability?.status && (form.availability.status !== "no" || form.availability.note?.trim())) }
+                            ].map((item, idx) => (
+                                <div 
+                                    key={idx} 
+                                    className={`flex items-center gap-2.5 px-3 py-2.5 rounded-2xl border transition-all duration-300 ${
+                                        item.completed 
+                                            ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-800" 
+                                            : "bg-slate-50/50 border-slate-100 text-slate-400"
+                                    }`}
+                                >
+                                    <span className="shrink-0">
+                                        {item.completed ? (
+                                            <div className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-sm">
+                                                <Check className="w-3 h-3 stroke-[3]" />
+                                            </div>
+                                        ) : (
+                                            <div className="w-5 h-5 rounded-full border-2 border-slate-200 bg-white" />
+                                        )}
+                                    </span>
+                                    <span className="text-[12px] font-medium tracking-tight truncate">
+                                        {item.label}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                )}
+
                 {/* SECTION 2 — TALENT DETAILS FORM */}
                 <section
                     className="pt-4 mb-10 sm:mb-16"
@@ -1180,7 +1218,7 @@ export default function SubmissionPage() {
                                                 Continue your submission
                                             </label>
                                             <p className="text-xs text-slate-400 leading-normal">
-                                                Returning talents can log in and prefill saved details.
+                                                We use your email to recognise you and load any previously submitted details.
                                             </p>
                                         </div>
                                         <div className="flex flex-col sm:flex-row gap-3">
@@ -1210,7 +1248,7 @@ export default function SubmissionPage() {
                                             </button>
                                         </div>
                                         <p className="text-[10px] text-slate-400 font-mono mt-1">
-                                            New talents can continue with the same email.
+                                            We use your email to recognise you and load any previously submitted details.
                                         </p>
                                     </div>
                                 ) : (
@@ -1280,7 +1318,7 @@ export default function SubmissionPage() {
                                         wide
                                     />
                                     <p className="text-[11px] text-slate-400 mt-3 font-mono">
-                                        We use email to recognise you. Saved details are populated below.
+                                        We use your email to recognise you and load any previously submitted details.
                                     </p>
                                 </>
                             )}
@@ -1297,10 +1335,7 @@ export default function SubmissionPage() {
                             >
                                 <div className="min-w-0 flex-1">
                                     <p className="text-[13px] text-slate-800">
-                                        We found your profile.{" "}
-                                        <span className="text-slate-500">
-                                            Use saved details?
-                                        </span>
+                                        We found a profile previously submitted using this email.
                                     </p>
                                     <p className="text-[11px] text-slate-400 font-mono mt-1 truncate">
                                         {prefillSuggestion.data.first_name}{" "}
@@ -1309,24 +1344,30 @@ export default function SubmissionPage() {
                                         {prefillSuggestion.data.height ? ` · ${prefillSuggestion.data.height}` : ""}
                                     </p>
                                 </div>
-                                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto shrink-0">
-                                    <button
-                                        type="button"
-                                        onClick={applyPrefill}
-                                        data-testid="prefill-use-btn"
-                                        className="bg-slate-900 text-white px-5 py-2.5 text-[12px] rounded-full hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 w-full sm:w-auto"
-                                    >
-                                        <Check className="w-3.5 h-3.5" />
-                                        Use this
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setPrefillSuggestion(null)}
-                                        data-testid="prefill-dismiss-btn"
-                                        className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[12px] rounded-full inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50 w-full sm:w-auto"
-                                    >
-                                        Edit manually
-                                    </button>
+                                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 w-full md:w-auto shrink-0">
+                                    <div className="flex flex-col items-center gap-1 w-full sm:w-auto">
+                                        <button
+                                            type="button"
+                                            onClick={applyPrefill}
+                                            data-testid="prefill-use-btn"
+                                            className="bg-slate-900 text-white px-5 py-2.5 text-[12px] rounded-full hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 w-full sm:w-auto"
+                                        >
+                                            <Check className="w-3.5 h-3.5" />
+                                            Use this
+                                        </button>
+                                        <span className="text-[10px] text-slate-400 font-mono text-center">Load and reuse saved details</span>
+                                    </div>
+                                    <div className="flex flex-col items-center gap-1 w-full sm:w-auto">
+                                        <button
+                                            type="button"
+                                            onClick={() => setPrefillSuggestion(null)}
+                                            data-testid="prefill-dismiss-btn"
+                                            className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[12px] rounded-full inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50 w-full sm:w-auto"
+                                        >
+                                            Edit manually
+                                        </button>
+                                        <span className="text-[10px] text-slate-400 font-mono text-center">Update details before continuing</span>
+                                    </div>
                                 </div>
                             </div>
                         )}
@@ -1336,7 +1377,10 @@ export default function SubmissionPage() {
                         {/* Section 1: Your Profile */}
                         <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
-                                <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Your Profile</h3>
+                                <div>
+                                    <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Your Profile</h3>
+                                    <p className="text-[11px] text-slate-400 mt-1">Please confirm your personal details exactly as they should appear for casting.</p>
+                                </div>
                                 <button
                                     type="button"
                                     onClick={() =>
@@ -1401,6 +1445,7 @@ export default function SubmissionPage() {
                                             testid="form-dob"
                                             className="[color-scheme:light]"
                                             autoComplete="bday"
+                                            hint="We automatically calculate age from your date of birth."
                                         />
                                         
                                         {/* Project-specific age override checkbox and input */}
@@ -1450,7 +1495,7 @@ export default function SubmissionPage() {
                                                         className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                     />
                                                     <p className="text-[10px] text-slate-400 font-mono mt-1.5">
-                                                        This age override is isolated to this submission only and will not change your global profile.
+                                                        Only use this if you wish to be presented as a different age range for this project. This override is isolated to this submission only.
                                                     </p>
                                                 </div>
                                             )}
@@ -1473,6 +1518,10 @@ export default function SubmissionPage() {
                                                 data-testid="form-age-input"
                                                 className="mt-2 w-full bg-slate-100 rounded-2xl border border-slate-200 outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
+                                        </div>
+                                        <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-100">
+                                            <h4 className="text-xs font-semibold text-slate-700 tracking-wider uppercase font-mono">Measurements</h4>
+                                            <p className="text-[11px] text-slate-400 mt-1">Accurate measurements help casting teams shortlist appropriately.</p>
                                         </div>
                                         <div data-testid="form-height-field">
                                             <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
@@ -1504,6 +1553,9 @@ export default function SubmissionPage() {
                                                     </SelectContent>
                                                 </Select>
                                             </div>
+                                            <span className="block text-[10px] text-slate-400 mt-1 font-mono">
+                                                Enter your actual height without footwear.
+                                            </span>
                                         </div>
                                         <PremiumFormField
                                             label="Current Location *"
@@ -1624,6 +1676,7 @@ export default function SubmissionPage() {
                                             onBlur={saveForm}
                                             testid="form-instagram-handle"
                                             placeholder="@yourhandle"
+                                            hint="Optional, but helps casting teams review additional work."
                                         />
                                         <div data-testid="form-instagram-followers-field">
                                             <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
@@ -1695,7 +1748,10 @@ export default function SubmissionPage() {
                         {/* Section 2: Project Questions */}
                         <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
-                                <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Project Questions</h3>
+                                <div>
+                                    <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Project Questions</h3>
+                                    <p className="text-[11px] text-slate-400 mt-1">Please answer these project-specific questions and confirm your availability.</p>
+                                </div>
                                 <button
                                     type="button"
                                     onClick={() =>
@@ -1722,10 +1778,11 @@ export default function SubmissionPage() {
                                         data-testid="availability-block"
                                         data-step="2"
                                     >
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-3">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-1">
                                             Availability{" "}
                                             <span className="text-rose-500">*</span>
                                         </p>
+                                        <p className="text-[11.5px] text-slate-400 mb-3">Tell us whether you are available for shoot and travel dates.</p>
                                         {project.shoot_dates && (
                                             <p className="text-[12px] text-slate-500 mb-5 leading-relaxed">
                                                 {project.shoot_dates}
@@ -1789,10 +1846,11 @@ export default function SubmissionPage() {
                                         data-testid="budget-block"
                                         data-step="2"
                                     >
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-5">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-1">
                                             Budget{" "}
                                             <span className="text-rose-500">*</span>
                                         </p>
+                                        <p className="text-[11.5px] text-slate-400 mb-4">Share your expected compensation if requested for this project.</p>
                                         {project.commission_percent && (
                                             <div
                                                 className="flex items-center justify-between bg-white/60 border border-slate-200/80 rounded-2xl px-5 py-4 mb-6 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
@@ -1949,7 +2007,10 @@ export default function SubmissionPage() {
                         {/* Section 3: Work Links & Additional Material */}
                         <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
-                                <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Work Links</h3>
+                                <div>
+                                    <h3 className="text-sm font-semibold text-slate-800 tracking-wide">Work Links</h3>
+                                    <p className="text-[11px] text-slate-400 mt-1">Add links to your professional websites or reels to showcase your previous work.</p>
+                                </div>
                                 <button
                                     type="button"
                                     onClick={() =>
@@ -2020,6 +2081,7 @@ export default function SubmissionPage() {
                                 <h2 className="font-display text-2xl tracking-tight text-slate-900 leading-[1.05]">
                                     Show us your work.
                                 </h2>
+                                <p className="text-[11px] text-slate-400 mt-1">Upload the requested audition takes and portfolio images exactly as instructed.</p>
                             </div>
                             <button
                                 type="button"
@@ -2064,6 +2126,7 @@ export default function SubmissionPage() {
                                     cameraCapture="user"
                                     failed={Boolean(retryQueue["intro_video"]?.failed)}
                                     onRetry={() => retryUpload("intro_video")}
+                                    hint="Recommended duration: 20–60 seconds."
                                 />
 
                                 <div className="mb-10" data-testid="takes-section">
@@ -2129,12 +2192,15 @@ export default function SubmissionPage() {
                                             {images.length}/{MAX_IMAGES_PER_CATEGORY}
                                         </span>
                                     </div>
-                                    <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
+                                    <p className="text-[12px] leading-relaxed text-slate-500 mb-2">
                                         Optional (recommended). High-resolution
                                         portfolio images aligned with the brand's
                                         aesthetic improve your selection odds. Up to{" "}
                                         {MAX_IMAGES_PER_CATEGORY} per category
                                         (Indian / Western / general looks).
+                                    </p>
+                                    <p className="text-[11px] text-slate-400 font-mono mb-6">
+                                        Add your strongest and most recent professional images.
                                     </p>
 
                                     {/* Phase 2 — optional Indian look images */}
@@ -2276,6 +2342,9 @@ export default function SubmissionPage() {
                         )}
 
                         <div className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
+                            <p className="text-[12px] text-slate-500 text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
+                                Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
+                            </p>
                             <button
                                 onClick={finalize}
                                 disabled={finalizing || !readyToSubmit}
@@ -2610,6 +2679,7 @@ function PremiumUploadSlot({
     cameraCapture, // "user" | "environment" — shows a camera-first option on mobile
     onRetry,       // optional: shown when this slot has a failed retry queue entry
     failed,
+    hint,
 }) {
     const hasFile = Boolean(media);
     const cameraRef = useRef(null);
@@ -2634,6 +2704,11 @@ function PremiumUploadSlot({
             {!compact && note && (
                 <p className="text-[12px] leading-relaxed text-slate-500 mb-5">
                     {note}
+                </p>
+            )}
+            {!compact && hint && (
+                <p className="text-[11px] text-slate-400 font-mono mb-5">
+                    {hint}
                 </p>
             )}
             {hasFile ? (

@@ -158,6 +158,9 @@ function SubmissionPage() {
         workLinks: false,          // open by default
         uploads: false,            // open by default
     });
+    const [isGenericPortfolioCollapsed, setIsGenericPortfolioCollapsed] = useState(() => {
+        return typeof window !== "undefined" && window.innerWidth < 768;
+    });
     // Upload retry queue: per-slot pending file with attempt counter so a
     // transient network drop doesn't lose the file selection.
     const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
@@ -1888,9 +1891,18 @@ function SubmissionPage() {
                                                 Availability
                                             </p>
                                             {project.shoot_dates ? (
-                                                <p className="text-[15px] font-medium text-slate-800 whitespace-pre-line leading-relaxed">
-                                                    {project.shoot_dates}
-                                                </p>
+                                                <div className="space-y-2 mt-1">
+                                                    {project.shoot_dates.split("\n").map((line, idx) => {
+                                                        const trimmed = line.trim();
+                                                        if (!trimmed) return null;
+                                                        return (
+                                                            <div key={idx} className="flex items-start gap-2.5 text-[15px] font-medium text-slate-800">
+                                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0 mt-2.5" />
+                                                                <span>{trimmed}</span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
                                             ) : (
                                                 <p className="text-[15px] font-medium text-slate-500">Dates to be confirmed</p>
                                             )}
@@ -1956,7 +1968,7 @@ function SubmissionPage() {
                                                 <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-1.5">
                                                     Commission
                                                 </p>
-                                                <p className="text-[22px] font-bold text-slate-950">
+                                                <p className="text-[18px] font-semibold text-slate-800 leading-snug">
                                                     {project.commission_percent}
                                                 </p>
                                             </div>
@@ -1975,7 +1987,7 @@ function SubmissionPage() {
                                                     Project Budget
                                                 </p>
                                                 {project.budget_per_day && (
-                                                    <p className="text-[22px] font-bold text-slate-950">
+                                                    <p className="text-[18px] font-semibold text-slate-800 leading-snug">
                                                         {project.budget_per_day}
                                                     </p>
                                                 )}
@@ -2178,9 +2190,9 @@ function SubmissionPage() {
                             <div>
                                 <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">Uploads</p>
                                 <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">
-                                    Show us your work.
+                                    Show us your work
                                 </h2>
-                                <p className="text-[12px] text-slate-600 mt-1.5 leading-relaxed">Upload the requested audition takes and portfolio images exactly as instructed.</p>
+                                <p className="text-[13px] text-slate-600 mt-1.5 leading-relaxed">Upload audition takes and portfolio images.</p>
                             </div>
                             <button
                                 type="button"
@@ -2207,12 +2219,12 @@ function SubmissionPage() {
                                     className="text-[12px] text-slate-500 mb-10 font-mono"
                                     data-testid="uploads-optional-hint"
                                 >
-                                    Optional — but recommended to increase your selection chances.
+                                    Optional — but recommended.
                                 </p>
 
                                 <PremiumUploadSlot
                                     title="Introduction Video"
-                                    note="Optional (recommended). Your most recent professional introduction video (without contact info)."
+                                    note="Upload your recent professional introduction video (no contact info)."
                                     icon={Video}
                                     accept="video/*"
                                     inputRef={introRef}
@@ -2229,7 +2241,7 @@ function SubmissionPage() {
 
                                 <div className="mb-10" data-testid="takes-section">
                                     <div className="flex items-center justify-between mb-4">
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-500">
                                             Audition Takes{" "}
                                             <span className="text-slate-400">
                                                 (up to {MAX_TAKES})
@@ -2242,11 +2254,8 @@ function SubmissionPage() {
                                             {takes.length}/{MAX_TAKES}
                                         </span>
                                     </div>
-                                    <p className="text-[12px] leading-relaxed text-slate-500 mb-6">
-                                        Optional (recommended). Upload each take as a
-                                        separate video and label it (e.g., "Scene 1",
-                                        "Closeup emotional"). Talents with takes have
-                                        a stronger chance of selection.
+                                    <p className="text-[13px] leading-relaxed text-slate-600 mb-6">
+                                        Upload each take as a separate video and label it (e.g., "Scene 1").
                                     </p>
 
                                     {takes.map((t, i) => (
@@ -2314,7 +2323,7 @@ function SubmissionPage() {
 
                                 <div className="mb-8" data-testid="images-upload-section">
                                     <div className="flex items-center justify-between mb-3">
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-500">
                                             Images{" "}
                                             <span className="text-slate-400">
                                                 (optional)
@@ -2327,15 +2336,8 @@ function SubmissionPage() {
                                             {images.length}/{MAX_IMAGES_PER_CATEGORY}
                                         </span>
                                     </div>
-                                    <p className="text-[12px] leading-relaxed text-slate-500 mb-2">
-                                        Optional (recommended). High-resolution
-                                        portfolio images aligned with the brand's
-                                        aesthetic improve your selection odds. Up to{" "}
-                                        {MAX_IMAGES_PER_CATEGORY} per category
-                                        (Indian / Western / general looks).
-                                    </p>
-                                    <p className="text-[11px] text-slate-400 font-mono mb-6">
-                                        Add your strongest and most recent professional images.
+                                    <p className="text-[13px] leading-relaxed text-slate-600 mb-6">
+                                        Upload up to {MAX_IMAGES_PER_CATEGORY} images per category. Add your strongest recent professional looks.
                                     </p>
 
                                     {/* Phase 2 — optional Indian look images */}
@@ -2370,146 +2372,173 @@ function SubmissionPage() {
                                         testidPrefix="western"
                                     />
 
-                                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mt-4 mb-4" data-testid="generic-portfolio-label">
-                                        Portfolio (general)
-                                    </p>
-
-                                    <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-                                        {images.map((m) => (
-                                            <div
-                                                key={m.id}
-                                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
+                                    {/* Generic Portfolio collapsible group */}
+                                    <div className="mb-6 bg-slate-50/50 border border-slate-200/60 rounded-2xl p-4" data-testid="portfolio-group-generic">
+                                        <div
+                                            className="flex items-center justify-between cursor-pointer select-none"
+                                            onClick={() => setIsGenericPortfolioCollapsed(!isGenericPortfolioCollapsed)}
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-slate-700">Portfolio (general)</p>
+                                                <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-slate-600 px-2 py-0.5 rounded-full">
+                                                    {images.length}
+                                                </span>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                                title={isGenericPortfolioCollapsed ? "Expand" : "Collapse"}
                                             >
-                                                <img
-                                                    src={thumbnailUrl(m)}
-                                                    alt=""
-                                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 cursor-pointer"
-                                                    onClick={() => setActiveLightboxImage(m)}
+                                                <ChevronDown
+                                                    className={`h-3.5 w-3.5 transform transition-transform duration-200 ${
+                                                        isGenericPortfolioCollapsed ? "-rotate-90" : ""
+                                                    }`}
                                                 />
-                                                <div className="absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2">
+                                            </button>
+                                        </div>
+
+                                        {!isGenericPortfolioCollapsed && (
+                                            <div className="mt-4 animate-fadeIn">
+                                                <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
+                                                    {images.map((m) => (
+                                                        <div
+                                                            key={m.id}
+                                                            className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
+                                                        >
+                                                            <img
+                                                                src={thumbnailUrl(m)}
+                                                                alt=""
+                                                                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 cursor-pointer"
+                                                                onClick={() => setActiveLightboxImage(m)}
+                                                            />
+                                                            <div className="absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setActiveLightboxImage(m)}
+                                                                    className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                    title="Zoom"
+                                                                >
+                                                                    <Search className="w-3.5 h-3.5" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const inp = document.createElement("input");
+                                                                        inp.type = "file";
+                                                                        inp.accept = "image/*";
+                                                                        inp.onchange = (e) => {
+                                                                            if (e.target.files?.length) {
+                                                                                replaceMediaFile(m, e.target.files[0]);
+                                                                            }
+                                                                        };
+                                                                        inp.click();
+                                                                    }}
+                                                                    className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                    title="Replace"
+                                                                >
+                                                                    <Upload className="w-3.5 h-3.5" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => removeMedia(m.id)}
+                                                                    className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                    title="Delete"
+                                                                >
+                                                                    <Trash2 className="w-3.5 h-3.5" />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                    {Object.entries(activeUploads)
+                                                        .filter(([key, state]) => state.category === "image")
+                                                        .map(([key, state]) => (
+                                                            <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                                                                <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
+                                                                <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
+                                                                <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
+                                                                    {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                                                </span>
+                                                                {state.status === "failed" ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => retryUpload(key)}
+                                                                        className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                                                    >
+                                                                        Retry
+                                                                    </button>
+                                                                ) : (
+                                                                    <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
+                                                                        <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        ))
+                                                    }
+                                                    {images.length < MAX_IMAGES_PER_CATEGORY && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                imagesRef.current?.click()
+                                                            }
+                                                            data-testid="add-image-btn"
+                                                            className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                                        >
+                                                            <div className="relative flex flex-col items-center gap-1">
+                                                                <Camera className="w-5 h-5" />
+                                                                <span className="text-[10px] font-mono">
+                                                                    Add
+                                                                </span>
+                                                            </div>
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <input
+                                                    ref={imagesRef}
+                                                    type="file"
+                                                    accept="image/*"
+                                                    multiple
+                                                    className="hidden"
+                                                    onChange={(e) => {
+                                                        if (e.target.files?.length)
+                                                            uploadImages(e.target.files);
+                                                        e.target.value = "";
+                                                    }}
+                                                />
+                                                {/* Mobile-only camera-first action */}
+                                                <input
+                                                    ref={cameraImagesRef}
+                                                    type="file"
+                                                    accept="image/*"
+                                                    capture="environment"
+                                                    className="hidden"
+                                                    onChange={(e) => {
+                                                        if (e.target.files?.length)
+                                                            uploadImages(e.target.files);
+                                                        e.target.value = "";
+                                                    }}
+                                                />
+                                                <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
                                                     <button
                                                         type="button"
-                                                        onClick={() => setActiveLightboxImage(m)}
-                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                        title="Zoom"
+                                                        onClick={() => cameraImagesRef.current?.click()}
+                                                        disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                                        data-testid="add-image-camera-btn"
+                                                        className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                                     >
-                                                        <Search className="w-3.5 h-3.5" />
+                                                        <Camera className="w-3.5 h-3.5" /> Take photo
                                                     </button>
                                                     <button
                                                         type="button"
-                                                        onClick={() => {
-                                                            const inp = document.createElement("input");
-                                                            inp.type = "file";
-                                                            inp.accept = "image/*";
-                                                            inp.onchange = (e) => {
-                                                                if (e.target.files?.length) {
-                                                                    replaceMediaFile(m, e.target.files[0]);
-                                                                }
-                                                            };
-                                                            inp.click();
-                                                        }}
-                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                        title="Replace"
+                                                        onClick={() => imagesRef.current?.click()}
+                                                        disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                                        data-testid="add-image-library-btn"
+                                                        className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                                     >
-                                                        <Upload className="w-3.5 h-3.5" />
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => removeMedia(m.id)}
-                                                        className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                        title="Delete"
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                        <FolderOpen className="w-3.5 h-3.5" /> From library
                                                     </button>
                                                 </div>
                                             </div>
-                                        ))}
-                                        {Object.entries(activeUploads)
-                                            .filter(([key, state]) => state.category === "image")
-                                            .map(([key, state]) => (
-                                                <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                                                    <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
-                                                    <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
-                                                    <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
-                                                        {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
-                                                    </span>
-                                                    {state.status === "failed" ? (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => retryUpload(key)}
-                                                            className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
-                                                        >
-                                                            Retry
-                                                        </button>
-                                                    ) : (
-                                                        <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                                            <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse" : ""}`} style={{ width: `${state.pct}%` }} />
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            ))
-                                        }
-                                        {images.length < MAX_IMAGES_PER_CATEGORY && (
-                                            <button
-                                                onClick={() =>
-                                                    imagesRef.current?.click()
-                                                }
-                                                data-testid="add-image-btn"
-                                                className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
-                                            >
-                                                <div className="relative flex flex-col items-center gap-1">
-                                                    <Camera className="w-5 h-5" />
-                                                    <span className="text-[10px] font-mono">
-                                                        Add
-                                                    </span>
-                                                </div>
-                                            </button>
                                         )}
-                                    </div>
-                                    <input
-                                        ref={imagesRef}
-                                        type="file"
-                                        accept="image/*"
-                                        multiple
-                                        className="hidden"
-                                        onChange={(e) => {
-                                            if (e.target.files?.length)
-                                                uploadImages(e.target.files);
-                                            e.target.value = "";
-                                        }}
-                                    />
-                                    {/* Mobile-only camera-first action */}
-                                    <input
-                                        ref={cameraImagesRef}
-                                        type="file"
-                                        accept="image/*"
-                                        capture="environment"
-                                        className="hidden"
-                                        onChange={(e) => {
-                                            if (e.target.files?.length)
-                                                uploadImages(e.target.files);
-                                            e.target.value = "";
-                                        }}
-                                    />
-                                    <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
-                                        <button
-                                            type="button"
-                                            onClick={() => cameraImagesRef.current?.click()}
-                                            disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
-                                            data-testid="add-image-camera-btn"
-                                            className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                        >
-                                            <Camera className="w-3.5 h-3.5" /> Take photo
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => imagesRef.current?.click()}
-                                            disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
-                                            data-testid="add-image-library-btn"
-                                            className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                        >
-                                            <FolderOpen className="w-3.5 h-3.5" /> From library
-                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -2740,79 +2769,105 @@ function PremiumPortfolioGroup({
     testidPrefix,
 }) {
     const reachedCap = allImagesCount >= maxImages;
+    const [isCollapsed, setIsCollapsed] = useState(() => {
+        return typeof window !== "undefined" && window.innerWidth < 768;
+    });
     return (
-        <div className="mb-8" data-testid={`portfolio-group-${testidPrefix}`}>
-            <div className="flex items-center justify-between mb-2">
-                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-500">{label}</p>
-                <span className="text-[10px] font-mono text-slate-400">
-                    {items.length}
-                </span>
+        <div className="mb-6 bg-slate-50/50 border border-slate-200/60 rounded-2xl p-4" data-testid={`portfolio-group-${testidPrefix}`}>
+            <div
+                className="flex items-center justify-between cursor-pointer select-none"
+                onClick={() => setIsCollapsed(!isCollapsed)}
+            >
+                <div className="flex items-center gap-2">
+                    <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-slate-700">{label}</p>
+                    <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-slate-600 px-2 py-0.5 rounded-full">
+                        {items.length}
+                    </span>
+                </div>
+                <button
+                    type="button"
+                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                    title={isCollapsed ? "Expand" : "Collapse"}
+                >
+                    <ChevronDown
+                        className={`h-3.5 w-3.5 transform transition-transform duration-200 ${
+                            isCollapsed ? "-rotate-90" : ""
+                        }`}
+                    />
+                </button>
             </div>
-            {hint && (
-                <p className="text-[11px] text-slate-400 mb-4 font-mono">
-                    {hint}
-                </p>
-            )}
-            <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
-                {items.map((m) => (
-                    <div
-                        key={m.id}
-                        className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
-                        data-testid={`${testidPrefix}-image-${m.id}`}
-                    >
-                        <img
-                            src={thumbnailUrl(m)}
-                            alt=""
-                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                        />
-                        <button
-                            onClick={() => removeMedia(m.id)}
-                            data-testid={`${testidPrefix}-image-remove-${m.id}`}
-                            className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                            <X className="w-3 h-3 text-slate-700" />
-                        </button>
-                    </div>
-                ))}
-                {Object.entries(activeUploads)
-                    .filter(([key, state]) => state.category === category)
-                    .map(([key, state]) => (
-                        <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                            <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
-                            <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
-                            <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
-                                {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
-                            </span>
-                            {state.status === "failed" ? (
+            {!isCollapsed && (
+                <div className="mt-4 animate-fadeIn">
+                    {hint && (
+                        <p className="text-[12px] text-slate-600 mb-4 leading-relaxed">
+                            {hint}
+                        </p>
+                    )}
+                    <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
+                        {items.map((m) => (
+                            <div
+                                key={m.id}
+                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
+                                data-testid={`${testidPrefix}-image-${m.id}`}
+                            >
+                                <img
+                                    src={thumbnailUrl(m)}
+                                    alt=""
+                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                />
                                 <button
-                                    type="button"
-                                    onClick={() => onRetry && onRetry(key)}
-                                    className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        removeMedia(m.id);
+                                    }}
+                                    data-testid={`${testidPrefix}-image-remove-${m.id}`}
+                                    className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
                                 >
-                                    Retry
+                                    <X className="w-3.5 h-3.5 text-slate-700" />
                                 </button>
-                            ) : (
-                                <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                    <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse" : ""}`} style={{ width: `${state.pct}%` }} />
+                            </div>
+                        ))}
+                        {Object.entries(activeUploads)
+                            .filter(([key, state]) => state.category === category)
+                            .map(([key, state]) => (
+                                <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                                    <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
+                                    <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
+                                    <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
+                                        {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                    </span>
+                                    {state.status === "failed" ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => onRetry && onRetry(key)}
+                                            className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                        >
+                                            Retry
+                                        </button>
+                                    ) : (
+                                        <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
+                                            <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
+                                        </div>
+                                    )}
                                 </div>
-                            )}
-                        </div>
-                    ))
-                }
-                {!reachedCap && (
-                    <button
-                        type="button"
-                        onClick={() => inputRef.current?.click()}
-                        data-testid={`add-${testidPrefix}-image-btn`}
-                        className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
-                    >
-                        <div className="relative flex flex-col items-center gap-1">
-                            <Plus className="w-5 h-5" />
-                            <span className="text-[10px] font-mono">Add</span>
-                        </div>
-                    </button>
-                )}
-            </div>
+                            ))
+                        }
+                        {!reachedCap && (
+                            <button
+                                type="button"
+                                onClick={() => inputRef.current?.click()}
+                                data-testid={`add-${testidPrefix}-image-btn`}
+                                className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                            >
+                                <div className="relative flex flex-col items-center gap-1">
+                                    <Plus className="w-5 h-5" />
+                                    <span className="text-[10px] font-mono">Add</span>
+                                </div>
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
             <input
                 ref={inputRef}
                 type="file"
@@ -2988,6 +3043,10 @@ function PremiumUploadSlot({
     const cameraRef = useRef(null);
     const isVideo = (accept || "").includes("video");
     const isPending = uploadState && uploadState.status !== "completed";
+    const [isVideoCollapsed, setIsVideoCollapsed] = useState(() => {
+        return isVideo && hasFile && typeof window !== "undefined" && window.innerWidth < 768;
+    });
+
     return (
         <div className={compact ? "mb-4" : "mb-10"}>
             {!compact && (
@@ -3018,31 +3077,53 @@ function PremiumUploadSlot({
             {hasFile ? (
                 isVideo ? (
                     <div className="bg-white border border-slate-200 rounded-3xl p-4 flex flex-col gap-3 shadow-[0_4px_20px_rgba(15,23,42,0.03)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.05)] text-left">
-                        <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[240px]">
-                            <video
-                                src={media.url}
-                                poster={posterUrl(media) || thumbnailUrl(media)}
-                                controls
-                                playsInline
-                                preload="metadata"
-                                className="w-full max-h-[240px] object-contain rounded-2xl"
-                            />
-                            {media.duration && (
-                                <span className="absolute bottom-3 right-3 bg-black/75 backdrop-blur-sm text-white text-[10px] font-mono font-medium px-2 py-0.5 rounded-full shadow-sm">
-                                    {formatDuration(media.duration)}
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                            <div className="flex items-center gap-2">
+                                <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-slate-700">
+                                    <Video className="w-4 h-4" />
                                 </span>
-                            )}
+                                <div>
+                                    <h4 className="font-bold text-sm text-slate-800">{title || "Video"}</h4>
+                                    <p className="text-[11px] text-slate-500 truncate max-w-[180px] font-mono">{media.original_filename || "video_file"}</p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setIsVideoCollapsed(!isVideoCollapsed)}
+                                className="p-1.5 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                title={isVideoCollapsed ? "Expand preview" : "Collapse preview"}
+                            >
+                                <ChevronDown
+                                    className={`h-4 w-4 transform transition-transform duration-200 ${
+                                        isVideoCollapsed ? "-rotate-90" : ""
+                                    }`}
+                                />
+                            </button>
                         </div>
-                        <div className="flex flex-col gap-1.5 px-1">
-                            <h4 className="font-semibold text-sm text-slate-800">{title || "Video"}</h4>
-                            <div className="text-[11px] text-slate-400 font-mono flex flex-col gap-0.5">
-                                <span className="truncate">{media.original_filename || "video_file"}</span>
-                                {formatMediaTimestamp(media) && (
-                                    <span className="text-slate-500 font-medium mt-0.5">
-                                        Previously uploaded · Last updated: {formatMediaTimestamp(media)}
+
+                        {!isVideoCollapsed && (
+                            <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[240px] animate-fadeIn">
+                                <video
+                                    src={media.url}
+                                    poster={posterUrl(media) || thumbnailUrl(media)}
+                                    controls
+                                    playsInline
+                                    preload="metadata"
+                                    className="w-full max-h-[240px] object-contain rounded-2xl"
+                                />
+                                {media.duration && (
+                                    <span className="absolute bottom-3 right-3 bg-black/75 backdrop-blur-sm text-white text-[10px] font-mono font-medium px-2 py-0.5 rounded-full shadow-sm">
+                                        {formatDuration(media.duration)}
                                     </span>
                                 )}
                             </div>
+                        )}
+                        <div className="flex flex-col gap-1.5 px-1">
+                            {formatMediaTimestamp(media) && (
+                                <span className="text-[11px] text-slate-500 font-mono">
+                                    Previously uploaded · Last updated: {formatMediaTimestamp(media)}
+                                </span>
+                            )}
                         </div>
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                             {isPending ? (

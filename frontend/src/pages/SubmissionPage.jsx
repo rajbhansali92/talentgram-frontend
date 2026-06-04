@@ -140,8 +140,7 @@ export default function SubmissionPage() {
     const [starting, setStarting] = useState(false);
 
     const [submission, setSubmission] = useState(null);
-    const [uploading, setUploading] = useState(null);
-    const [uploadPct, setUploadPct] = useState(0);
+    const [activeUploads, setActiveUploads] = useState({});
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
@@ -749,8 +748,17 @@ export default function SubmissionPage() {
             }
         }
         const slotKey = label ? `${category}:${label}` : category;
-        setUploading(slotKey);
-        setUploadPct(0);
+        setActiveUploads((prev) => ({
+            ...prev,
+            [slotKey]: {
+                status: "uploading",
+                pct: 0,
+                fileName: file.name,
+                category,
+                label,
+                file
+            }
+        }));
         // Persist the pending file in retryQueue so reload + retry button work.
         setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size } }));
 
@@ -764,7 +772,7 @@ export default function SubmissionPage() {
                 const fd = new FormData();
                 fd.append("file", file);
                 fd.append("category", category);
-                if (label) fd.append("label", label);
+                if (label && category === "take") fd.append("label", label);
                 const { data } = await axios.post(
                     `${API}/public/submissions/${saved.id}/upload`,
                     fd,
@@ -776,7 +784,20 @@ export default function SubmissionPage() {
                         },
                         timeout: 0, // no per-request timeout — let mobile networks breathe
                         onUploadProgress: (e) => {
-                            if (e.total) setUploadPct(Math.round((e.loaded / e.total) * 100));
+                            if (e.total) {
+                                const pct = Math.round((e.loaded / e.total) * 100);
+                                setActiveUploads((prev) => {
+                                    if (!prev[slotKey]) return prev;
+                                    return {
+                                        ...prev,
+                                        [slotKey]: {
+                                            ...prev[slotKey],
+                                            status: pct >= 100 ? "processing" : "uploading",
+                                            pct
+                                        }
+                                    };
+                                });
+                            }
                         },
                     },
                 );
@@ -784,8 +805,23 @@ export default function SubmissionPage() {
                 setRetryQueue((q) => {
                     const n = { ...q }; delete n[slotKey]; return n;
                 });
-                setUploading(null);
-                setUploadPct(0);
+                setActiveUploads((prev) => ({
+                    ...prev,
+                    [slotKey]: {
+                        ...prev[slotKey],
+                        status: "completed",
+                        pct: 100
+                    }
+                }));
+                setTimeout(() => {
+                    setActiveUploads((prev) => {
+                        const next = { ...prev };
+                        if (next[slotKey]?.status === "completed") {
+                            delete next[slotKey];
+                        }
+                        return next;
+                    });
+                }, 3000);
                 if (attempt > 1) toast.success(`Recovered after ${attempt} attempts`);
                 return;
             } catch (err) {
@@ -807,8 +843,14 @@ export default function SubmissionPage() {
             ...q,
             [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file },
         }));
-        setUploading(null);
-        setUploadPct(0);
+        setActiveUploads((prev) => ({
+            ...prev,
+            [slotKey]: {
+                ...prev[slotKey],
+                status: "failed",
+                error: lastErr?.response?.data?.detail || "Upload failed"
+            }
+        }));
         toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
     };
 
@@ -891,43 +933,10 @@ export default function SubmissionPage() {
             toast.error(`"${unsupportedImage.name}" is not a supported image format. Please upload JPG, PNG, or WEBP.`);
             return;
         }
-        setUploading(imageCategory);
-        setUploadPct(0);
-        try {
-            let last = null;
-            const totalFiles = accepted.length;
-            for (let i = 0; i < accepted.length; i++) {
-                const f = accepted[i];
-                const fd = new FormData();
-                fd.append("file", f);
-                fd.append("category", imageCategory);
-                const { data } = await axios.post(
-                    `${API}/public/submissions/${saved.id}/upload`,
-                    fd,
-                    {
-                        ...authCfg,
-                        headers: {
-                            ...authCfg.headers,
-                            "Content-Type": "multipart/form-data",
-                        },
-                        onUploadProgress: (e) => {
-                            if (e.total) {
-                                const thisPct = (e.loaded / e.total) * 100;
-                                const overall = (i * 100 + thisPct) / totalFiles;
-                                setUploadPct(Math.round(overall));
-                            }
-                        },
-                    },
-                );
-                last = data;
-            }
-            if (last) setSubmission(last);
-        } catch (err) {
-            toast.error(err?.response?.data?.detail || "Upload failed");
-        } finally {
-            setUploading(null);
-            setUploadPct(0);
-        }
+
+        await Promise.all(
+            accepted.map((f) => uploadFile(f, imageCategory, f.name))
+        );
     };
 
     const removeMedia = async (mid) => {
@@ -947,9 +956,9 @@ export default function SubmissionPage() {
     };
 
     const replaceMediaFile = async (oldMedia, file) => {
-        // Upload the new file with same category and label
-        await uploadFile(file, oldMedia.category, oldMedia.label);
-        // Remove the old media
+        const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(oldMedia.category);
+        const label = oldMedia.category === "take" ? oldMedia.label : (!isVideoSlot ? file.name : null);
+        await uploadFile(file, oldMedia.category, label);
         await removeMedia(oldMedia.id);
     };
 
@@ -2214,8 +2223,7 @@ export default function SubmissionPage() {
                                     accept="video/*"
                                     inputRef={introRef}
                                     onPick={(f) => uploadFile(f[0], "intro_video")}
-                                    uploading={uploading === "intro_video"}
-                                    uploadPct={uploadPct}
+                                    uploadState={activeUploads["intro_video"]}
                                     media={intro}
                                     onRemove={(m) => removeMedia(m.id)}
                                     testid="upload-intro"
@@ -2258,14 +2266,50 @@ export default function SubmissionPage() {
                                             }
                                             onRemove={() => removeMedia(t.id)}
                                             onReplace={(file) => replaceMediaFile(t, file)}
+                                            uploadState={activeUploads[`take:${t.label}`]}
                                         />
                                     ))}
+
+                                    {Object.entries(activeUploads)
+                                        .filter(([key, state]) => state.category === "take" && !takes.some(t => t.label === state.label))
+                                        .map(([key, state]) => (
+                                            <div key={key} className="bg-white border border-slate-200 rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] text-left">
+                                                <div className="flex items-center justify-between">
+                                                    <div>
+                                                        <span className="text-[11px] font-mono text-amber-600/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
+                                                        <span className="text-sm font-semibold text-slate-800">{state.label}</span>
+                                                    </div>
+                                                    <span className="text-[10px] font-mono text-slate-400">
+                                                        {state.status === "uploading" ? `Uploading ${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                                    </span>
+                                                </div>
+                                                {state.status === "failed" ? (
+                                                    <div className="text-xs text-rose-500 font-mono mt-1 bg-rose-50/50 p-2.5 rounded-xl border border-rose-100 flex items-center justify-between gap-2">
+                                                        <span className="truncate">{state.error || "Upload failed"}</span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => retryUpload(key)}
+                                                            className="px-3 py-1 bg-white border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 active:scale-[0.97] transition-all duration-150 text-[10px]"
+                                                        >
+                                                            Retry
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden mt-1">
+                                                        <div
+                                                            className={`h-full bg-amber-500 transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`}
+                                                            style={{ width: `${state.pct}%` }}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))
+                                    }
 
                                     {canAddTake && (
                                         <PremiumAddTakeSlot
                                             number={takes.length + 1}
-                                            uploading={uploading}
-                                            uploadPct={uploadPct}
+                                            activeUploads={activeUploads}
                                             onPick={(file, label) =>
                                                 uploadFile(file, "take", label)
                                             }
@@ -2311,8 +2355,8 @@ export default function SubmissionPage() {
                                         inputRef={indianImagesRef}
                                         uploadImages={uploadImages}
                                         removeMedia={removeMedia}
-                                        uploading={uploading}
-                                        uploadPct={uploadPct}
+                                        activeUploads={activeUploads}
+                                        onRetry={retryUpload}
                                         testidPrefix="indian"
                                     />
 
@@ -2327,8 +2371,8 @@ export default function SubmissionPage() {
                                         inputRef={westernImagesRef}
                                         uploadImages={uploadImages}
                                         removeMedia={removeMedia}
-                                        uploading={uploading}
-                                        uploadPct={uploadPct}
+                                        activeUploads={activeUploads}
+                                        onRetry={retryUpload}
                                         testidPrefix="western"
                                     />
 
@@ -2386,37 +2430,45 @@ export default function SubmissionPage() {
                                                 </div>
                                             </div>
                                         ))}
+                                        {Object.entries(activeUploads)
+                                            .filter(([key, state]) => state.category === "image")
+                                            .map(([key, state]) => (
+                                                <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                                                    <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
+                                                    <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
+                                                    <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
+                                                        {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                                    </span>
+                                                    {state.status === "failed" ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => retryUpload(key)}
+                                                            className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                                        >
+                                                            Retry
+                                                        </button>
+                                                    ) : (
+                                                        <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
+                                                            <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse" : ""}`} style={{ width: `${state.pct}%` }} />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))
+                                        }
                                         {images.length < MAX_IMAGES_PER_CATEGORY && (
                                             <button
                                                 onClick={() =>
                                                     imagesRef.current?.click()
                                                 }
-                                                disabled={uploading === "image"}
                                                 data-testid="add-image-btn"
                                                 className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                                             >
-                                                {uploading === "image" && uploadPct > 0 && (
-                                                    <span
-                                                        aria-hidden
-                                                        className="absolute inset-y-0 left-0 bg-amber-200/30"
-                                                        style={{ width: `${uploadPct}%` }}
-                                                    />
-                                                )}
-                                                {uploading === "image" ? (
-                                                    <div className="relative flex flex-col items-center gap-1">
-                                                        <Loader2 className="w-5 h-5 animate-spin" />
-                                                        <span className="text-[10px] font-mono">
-                                                            {uploadPct ? `${uploadPct}%` : "…"}
-                                                        </span>
-                                                    </div>
-                                                ) : (
-                                                    <div className="relative flex flex-col items-center gap-1">
-                                                        <Camera className="w-5 h-5" />
-                                                        <span className="text-[10px] font-mono">
-                                                            Add
-                                                        </span>
-                                                    </div>
-                                                )}
+                                                <div className="relative flex flex-col items-center gap-1">
+                                                    <Camera className="w-5 h-5" />
+                                                    <span className="text-[10px] font-mono">
+                                                        Add
+                                                    </span>
+                                                </div>
                                             </button>
                                         )}
                                     </div>
@@ -2560,6 +2612,109 @@ export default function SubmissionPage() {
                     </div>
                 </div>
             )}
+            <FloatingUploadManager
+                activeUploads={activeUploads}
+                onRetry={retryUpload}
+                onDismiss={(key) => setActiveUploads((prev) => {
+                    const n = { ...prev };
+                    delete n[key];
+                    return n;
+                })}
+            />
+        </div>
+    );
+}
+
+function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
+    const items = Object.entries(activeUploads);
+    const [collapsed, setCollapsed] = useState(false);
+
+    if (items.length === 0) return null;
+
+    const activeCount = items.filter(([_, u]) => u.status === "uploading" || u.status === "processing").length;
+    const failedCount = items.filter(([_, u]) => u.status === "failed").length;
+
+    return (
+        <div className="fixed bottom-6 right-6 z-50 max-w-xs w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3 cursor-pointer" onClick={() => setCollapsed(!collapsed)}>
+                <div className="flex items-center gap-2">
+                    <div className="relative">
+                        <Upload className="w-4 h-4 text-amber-600 animate-pulse" />
+                        {activeCount > 0 && (
+                            <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                            </span>
+                        )}
+                    </div>
+                    <span className="font-semibold text-xs text-slate-800 font-mono tracking-wider uppercase">
+                        Uploads ({items.length})
+                    </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                    {failedCount > 0 && (
+                        <span className="text-[10px] font-mono font-bold text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded-md border border-rose-100 animate-pulse">
+                            {failedCount} Failed
+                        </span>
+                    )}
+                    <button
+                        type="button"
+                        className="text-slate-400 hover:text-slate-600 p-1"
+                    >
+                        <ChevronDown className={`w-4 h-4 transform transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`} />
+                    </button>
+                </div>
+            </div>
+
+            {!collapsed && (
+                <div className="space-y-3 max-h-60 overflow-y-auto pr-1">
+                    {items.map(([key, u]) => {
+                        const cleanLabel = u.category === "intro_video" ? "Intro Video" : (u.category === "take" ? u.label : `${u.category === "image" ? "Portfolio" : u.category === "indian" ? "Indian" : "Western"}: ${u.fileName}`);
+                        
+                        return (
+                            <div key={key} className="text-xs bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/80">
+                                <div className="flex items-center justify-between mb-1.5">
+                                    <span className="font-medium text-slate-700 truncate max-w-[160px]" title={cleanLabel}>
+                                        {cleanLabel}
+                                    </span>
+                                    <div className="flex items-center gap-1">
+                                        <span className={`font-mono text-[10px] font-semibold ${u.status === "failed" ? "text-rose-500" : u.status === "completed" ? "text-emerald-600" : "text-amber-600"}`}>
+                                            {u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed"}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => onDismiss(key)}
+                                            className="text-slate-400 hover:text-slate-600 p-0.5"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {u.status === "failed" ? (
+                                    <div className="flex items-center justify-between mt-1 gap-2">
+                                        <span className="text-[10px] text-rose-500 truncate max-w-[150px] font-mono">{u.error || "Upload failed"}</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => onRetry(key)}
+                                            className="text-[10px] font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full bg-white active:scale-95 transition-all"
+                                        >
+                                            Retry
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
+                                        <div
+                                            className={`h-full bg-amber-500 transition-all duration-300 ${u.status === "completed" ? "bg-emerald-500" : u.status === "processing" ? "bg-emerald-400 animate-pulse" : ""}`}
+                                            style={{ width: `${u.pct}%` }}
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
         </div>
     );
 }
@@ -2586,11 +2741,10 @@ function PremiumPortfolioGroup({
     inputRef,
     uploadImages,
     removeMedia,
-    uploading,
-    uploadPct,
+    activeUploads = {},
+    onRetry,
     testidPrefix,
 }) {
-    const isUploading = uploading === category;
     const reachedCap = allImagesCount >= maxImages;
     return (
         <div className="mb-8" data-testid={`portfolio-group-${testidPrefix}`}>
@@ -2626,34 +2780,42 @@ function PremiumPortfolioGroup({
                         </button>
                     </div>
                 ))}
+                {Object.entries(activeUploads)
+                    .filter(([key, state]) => state.category === category)
+                    .map(([key, state]) => (
+                        <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                            <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
+                            <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
+                            <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
+                                {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                            </span>
+                            {state.status === "failed" ? (
+                                <button
+                                    type="button"
+                                    onClick={() => onRetry && onRetry(key)}
+                                    className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                >
+                                    Retry
+                                </button>
+                            ) : (
+                                <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
+                                    <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse" : ""}`} style={{ width: `${state.pct}%` }} />
+                                </div>
+                            )}
+                        </div>
+                    ))
+                }
                 {!reachedCap && (
                     <button
                         type="button"
                         onClick={() => inputRef.current?.click()}
-                        disabled={isUploading}
                         data-testid={`add-${testidPrefix}-image-btn`}
-                        className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden disabled:opacity-50 bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                        className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                     >
-                        {isUploading && uploadPct > 0 && (
-                            <span
-                                aria-hidden
-                                className="absolute inset-y-0 left-0 bg-amber-200/30"
-                                style={{ width: `${uploadPct}%` }}
-                            />
-                        )}
-                        {isUploading ? (
-                            <div className="relative flex flex-col items-center gap-1">
-                                <Loader2 className="w-5 h-5 animate-spin" />
-                                <span className="text-[10px] font-mono">
-                                    {uploadPct ? `${uploadPct}%` : "…"}
-                                </span>
-                            </div>
-                        ) : (
-                            <div className="relative flex flex-col items-center gap-1">
-                                <Plus className="w-5 h-5" />
-                                <span className="text-[10px] font-mono">Add</span>
-                            </div>
-                        )}
+                        <div className="relative flex flex-col items-center gap-1">
+                            <Plus className="w-5 h-5" />
+                            <span className="text-[10px] font-mono">Add</span>
+                        </div>
                     </button>
                 )}
             </div>
@@ -2818,8 +2980,7 @@ function PremiumUploadSlot({
     accept,
     inputRef,
     onPick,
-    uploading,
-    uploadPct,
+    uploadState, // replacement state mapping
     media,
     onRemove,
     testid,
@@ -2832,6 +2993,7 @@ function PremiumUploadSlot({
     const hasFile = Boolean(media);
     const cameraRef = useRef(null);
     const isVideo = (accept || "").includes("video");
+    const isPending = uploadState && uploadState.status !== "completed";
     return (
         <div className={compact ? "mb-4" : "mb-10"}>
             {!compact && (
@@ -2889,22 +3051,35 @@ function PremiumUploadSlot({
                             </div>
                         </div>
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
-                            <button
-                                type="button"
-                                onClick={() => inputRef.current?.click()}
-                                className="flex-1 border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
-                            >
-                                <Upload className="w-3.5 h-3.5" />
-                                Replace
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => onRemove(media)}
-                                className="flex-1 border border-rose-200 hover:border-rose-300 text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
-                            >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                Delete
-                            </button>
+                            {isPending ? (
+                                <div className="w-full px-1">
+                                    <div className="flex items-center justify-between text-xs mb-1 font-mono text-slate-500">
+                                        <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
+                                    </div>
+                                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                        <div className={`h-full bg-amber-500 transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex items-center gap-2 w-full">
+                                    <button
+                                        type="button"
+                                        onClick={() => inputRef.current?.click()}
+                                        className="flex-1 border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                                    >
+                                        <Upload className="w-3.5 h-3.5" />
+                                        Replace
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => onRemove(media)}
+                                        className="flex-1 border border-rose-200 hover:border-rose-300 text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                        Delete
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ) : (
@@ -2946,7 +3121,7 @@ function PremiumUploadSlot({
                             <button
                                 type="button"
                                 onClick={() => cameraRef.current?.click()}
-                                disabled={uploading}
+                                disabled={isPending}
                                 data-testid={`${testid}-camera-btn`}
                                 className="border border-slate-200 hover:border-slate-300 p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
@@ -2956,7 +3131,7 @@ function PremiumUploadSlot({
                             <button
                                 type="button"
                                 onClick={() => inputRef.current?.click()}
-                                disabled={uploading}
+                                disabled={isPending}
                                 data-testid={`${testid}-library-btn`}
                                 className="border border-slate-200 hover:border-slate-300 p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
@@ -2967,18 +3142,18 @@ function PremiumUploadSlot({
                     )}
                     <button
                         onClick={() => inputRef.current?.click()}
-                        disabled={uploading}
+                        disabled={isPending}
                         data-testid={`${testid}-btn`}
                         className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-slate-200 hover:border-amber-200 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
                     >
-                        {uploading && typeof uploadPct === "number" && uploadPct > 0 && (
+                        {uploadState && uploadState.status !== "failed" && uploadState.pct > 0 && (
                             <span
                                 aria-hidden
                                 className="absolute inset-y-0 left-0 bg-amber-200/30 transition-[width] duration-300"
-                                style={{ width: `${uploadPct}%` }}
+                                style={{ width: `${uploadState.pct}%` }}
                             />
                         )}
-                        {uploading ? (
+                        {uploadState && uploadState.status !== "failed" ? (
                             <Loader2 className="w-4 h-4 animate-spin relative text-slate-600" />
                         ) : (
                             <Upload className="w-4 h-4 text-slate-500 relative" />
@@ -2992,12 +3167,12 @@ function PremiumUploadSlot({
                                     )}
                                 </span>
                                 <span className="text-slate-400 text-[11px]">
-                                    {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
+                                    {uploadState && uploadState.status === "processing" ? "Processing…" : (uploadState && uploadState.status === "uploading" ? `Uploading… ${uploadState.pct}%` : "Tap to upload")}
                                 </span>
                             </span>
                         ) : (
                             <span className="text-[13px] text-slate-600 relative">
-                                {uploading && uploadPct ? `Uploading… ${uploadPct}%` : "Tap to upload"}
+                                {uploadState && uploadState.status === "processing" ? "Processing…" : (uploadState && uploadState.status === "uploading" ? `Uploading… ${uploadState.pct}%` : "Tap to upload")}
                             </span>
                         )}
                     </button>
@@ -3044,7 +3219,7 @@ function PremiumUploadSlot({
 // --------------------------------------------------------------------------
 // Renamable take row (existing take) — supports inline label edit + remove
 // --------------------------------------------------------------------------
-function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace }) {
+function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace, uploadState }) {
     const [label, setLabel] = useState(media.label || `Take ${index}`);
     const [dirty, setDirty] = useState(false);
     const localInputRef = useRef(null);
@@ -3060,6 +3235,8 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
         if (val !== (media.label || "")) onRename(val);
         setDirty(false);
     };
+
+    const isPending = uploadState && uploadState.status !== "completed";
 
     return (
         <div
@@ -3089,8 +3266,8 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
                         <input
                             value={label}
                             onChange={(e) => {
-                                setLabel(e.target.value);
-                                setDirty(true);
+                                  setLabel(e.target.value);
+                                  setDirty(true);
                             }}
                             onBlur={save}
                             onKeyDown={(e) => {
@@ -3123,23 +3300,36 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
             </div>
 
             <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
-                <button
-                    type="button"
-                    onClick={() => localInputRef.current?.click()}
-                    className="flex-1 border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
-                >
-                    <Upload className="w-3.5 h-3.5" />
-                    Replace
-                </button>
-                <button
-                    type="button"
-                    onClick={onRemove}
-                    className="flex-1 border border-rose-200 hover:border-rose-300 text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
-                    data-testid={`take-remove-${index}`}
-                >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Delete
-                </button>
+                {isPending ? (
+                    <div className="w-full px-1">
+                        <div className="flex items-center justify-between text-xs mb-1 font-mono text-slate-500">
+                            <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
+                        </div>
+                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                            <div className={`h-full bg-amber-500 transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
+                        </div>
+                    </div>
+                ) : (
+                    <>
+                        <button
+                            type="button"
+                            onClick={() => localInputRef.current?.click()}
+                            className="flex-1 border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                        >
+                            <Upload className="w-3.5 h-3.5" />
+                            Replace
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onRemove}
+                            className="flex-1 border border-rose-200 hover:border-rose-300 text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                            data-testid={`take-remove-${index}`}
+                        >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Delete
+                        </button>
+                    </>
+                )}
             </div>
 
             <input
@@ -3160,10 +3350,9 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
 // Add-a-new-take slot — user picks a file, we upload with the label they type
 // (falls back to "Take N" if empty).
 // --------------------------------------------------------------------------
-function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, inputRef }) {
+function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
     const [label, setLabel] = useState("");
     const cameraRef = useRef(null);
-    const busy = uploading && uploading.startsWith("take");
     const fallback = `Take ${number}`;
     const triggerLib = () => inputRef.current?.click();
     const triggerCam = () => cameraRef.current?.click();
@@ -3173,13 +3362,6 @@ function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, in
             className="bg-gradient-to-b from-white to-slate-50/70 border border-slate-200 hover:border-amber-200 rounded-2xl p-3 relative overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 hover:-translate-y-[1px]"
             data-testid={`add-take-${number}`}
         >
-            {busy && typeof uploadPct === "number" && uploadPct > 0 && (
-                <span
-                    aria-hidden
-                    className="absolute inset-y-0 left-0 bg-amber-200/30 transition-all duration-300"
-                    style={{ width: `${uploadPct}%` }}
-                />
-            )}
             <div className="flex items-center gap-2 relative">
                 <input
                     value={label}
@@ -3192,12 +3374,11 @@ function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, in
                 <button
                     type="button"
                     onClick={triggerLib}
-                    disabled={busy}
                     className="hidden md:inline-flex relative text-[11px] px-4 py-2 border border-slate-200 hover:border-slate-300 rounded-full items-center gap-1 disabled:opacity-40 min-h-[44px] bg-white/60 text-slate-600 transition-all duration-200"
                     data-testid={`new-take-upload-${number}`}
                 >
-                    {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                    {busy && uploadPct ? `${uploadPct}%` : "Upload"}
+                    <Plus className="w-3 h-3" />
+                    {"Upload"}
                     {required && <span className="text-rose-500">*</span>}
                 </button>
             </div>
@@ -3206,7 +3387,6 @@ function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, in
                 <button
                     type="button"
                     onClick={triggerCam}
-                    disabled={busy}
                     className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                     data-testid={`new-take-camera-${number}`}
                 >
@@ -3215,7 +3395,6 @@ function PremiumAddTakeSlot({ number, required, uploading, uploadPct, onPick, in
                 <button
                     type="button"
                     onClick={triggerLib}
-                    disabled={busy}
                     className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                     data-testid={`new-take-library-${number}`}
                 >

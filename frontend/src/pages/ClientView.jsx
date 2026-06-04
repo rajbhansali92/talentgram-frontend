@@ -937,18 +937,15 @@ export default function ClientView() {
         <div className="min-h-screen bg-white text-[#111111]" data-testid="client-view-page">
             <header className="sticky top-0 z-30 bg-white/95 border-b border-black/[0.04]">
                 <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-3 md:py-4">
-                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                            <Logo size={36} className="hidden md:block mb-3" />
-                            <Logo size={28} className="md:hidden mx-auto mb-2" />
-                            <p className="eyebrow hidden md:block tracking-[0.12em] text-[#8A8A8A]">CURATED REVIEW</p>
-                            <h1 className="font-display text-base md:text-lg tracking-wide mt-0.5 text-center md:text-left truncate text-[#111111]">
-                                {link.title}
-                            </h1>
-                            <p className="text-xs text-[#8A8A8A] mt-1 text-center md:text-left font-sans">
-                                {viewer.name} &bull; {seenCount} / {totalCount} reviewed
-                            </p>
-                        </div>
+                    <div className="flex flex-col items-center justify-center text-center gap-1.5">
+                        <Logo size={36} className="hidden md:block mx-auto mb-2.5" />
+                        <Logo size={28} className="md:hidden mx-auto mb-2" />
+                        <h1 className="font-display text-base md:text-xl tracking-wide text-[#111111] max-w-2xl truncate">
+                            {link.title}
+                        </h1>
+                        <p className="text-xs text-[#8A8A8A] mt-1 font-sans">
+                            {viewer.name} &bull; {seenCount} / {totalCount} reviewed
+                        </p>
                     </div>
                     <div className="md:hidden mt-3 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
                         <div

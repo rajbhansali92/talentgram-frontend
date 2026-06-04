@@ -934,8 +934,8 @@ export default function ClientView() {
     const reviewedPct = totalCount === 0 ? 0 : Math.round((reviewedCount / totalCount) * 100);
 
     return (
-        <div className="min-h-screen bg-white text-[#111111]" data-testid="client-view-page">
-            <header className="sticky top-0 z-30 bg-white/95 border-b border-black/[0.04]">
+        <div className="h-[100dvh] flex flex-col bg-white text-[#111111] overflow-hidden" data-testid="client-view-page">
+            <header className="shrink-0 bg-white/95 border-b border-black/[0.04]">
                 <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-3 md:py-4">
                     <div className="flex flex-col items-center justify-center text-center gap-1.5">
                         <Logo size={36} className="hidden md:block mx-auto mb-2.5" />
@@ -957,7 +957,8 @@ export default function ClientView() {
                 </div>
             </header>
 
-            <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-5 md:py-8">
+            <div className={`flex-1 min-h-0 ${activeTalent ? "overflow-hidden" : "overflow-y-auto"}`}>
+                <div className="max-w-[1600px] mx-auto px-6 md:px-12 py-5 md:py-8">
                 {showResumeBanner && (() => {
                     // Guard: localStorage.getItem can throw in Safari private browsing
                     let lastId = null;
@@ -1085,6 +1086,7 @@ export default function ClientView() {
                         ))
                     )}
                 </div>
+            </div>
             </div>
 
             {activeTalent && (

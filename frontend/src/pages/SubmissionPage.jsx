@@ -162,6 +162,7 @@ export default function SubmissionPage() {
     const cameraImagesRef = useRef(); // mobile camera-first photo capture
     const indianImagesRef = useRef();
     const westernImagesRef = useRef();
+    const uploadsSectionRef = useRef();
 
     // Load project
     useEffect(() => {
@@ -331,11 +332,16 @@ export default function SubmissionPage() {
         return null;
     };
 
-    // Auto-scroll to top whenever step changes so the user always sees the
-    // step heading first instead of mid-form.
+    // Auto-scroll to top or uploads section whenever step changes.
     useEffect(() => {
         if (typeof window !== "undefined") {
-            window.scrollTo({ top: 0, behavior: "smooth" });
+            if (mobileStep === 3 && uploadsSectionRef.current) {
+                setTimeout(() => {
+                    uploadsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }, 100);
+            } else {
+                window.scrollTo({ top: 0, behavior: "smooth" });
+            }
         }
     }, [mobileStep]);
 
@@ -437,7 +443,8 @@ export default function SubmissionPage() {
             localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
             setSaved(next);
             setSubmission(data);
-            toast.success("Profile saved — let's add your audition takes");
+            setCollapsedSections((prev) => ({ ...prev, uploads: false }));
+            toast.success("✓ Details saved successfully. Next step: Upload your introduction video, audition takes and portfolio images.");
             return true;
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Could not save profile");
@@ -652,7 +659,8 @@ export default function SubmissionPage() {
             const ref = { id: data.id, token: data.token };
             localStorage.setItem(LS_KEY(slug), JSON.stringify(ref));
             setSaved(ref);
-            toast.success("Details saved. Now upload your audition.");
+            setCollapsedSections((prev) => ({ ...prev, uploads: false }));
+            toast.success("✓ Details saved successfully. Next step: Upload your introduction video, audition takes and portfolio images.");
         } catch (err) {
             toast.error(err?.response?.data?.detail || "Failed to start");
         } finally {
@@ -2081,6 +2089,7 @@ export default function SubmissionPage() {
                 {/* SECTION 3 — UPLOADS (gated on saved + email-first gate) */}
                 {emailGateUnlocked && saved && (
                     <section
+                        ref={uploadsSectionRef}
                         className="pt-4"
                         data-testid="uploads-section"
                         data-step="3"

@@ -203,7 +203,8 @@ export default function SubmissionPage() {
                     const { data } = await axios.get(
                         `${API}/public/prefill?email=${encodeURIComponent(formatted)}`,
                     );
-                    if (data && Object.keys(data).length > 0) {
+                    if (data && Object.keys(data).length > 0 && data.first_name) {
+                        populatePrefillData(data);
                         setPrefillSuggestion({ data });
                         setPrefillTried(true);
                     }
@@ -459,37 +460,7 @@ export default function SubmissionPage() {
     //
     // The user can re-trigger prefill by re-entering the email — we only
     // auto-trigger ONCE per email value.
-    const tryPrefill = async () => {
-        if (saved) return; // submission already started — too late
-        const email = (form.email || "").trim().toLowerCase();
-        if (!email || !email.includes("@")) return;
-        if (email === prefillEmail && prefillTried) return; // already tried
-        setPrefillEmail(email);
-        setPrefillTried(true);
-        try {
-            const { data } = await axios.get(
-                `${API}/public/prefill?email=${encodeURIComponent(email)}`,
-            );
-            if (!data || !data.first_name) {
-                // New talent — quietly unlock the rest of the form.
-                setPrefillSuggestion(null);
-                setEmailGateUnlocked(true);
-                return;
-            }
-            // Surface the prompt; rest of the form stays hidden until the
-            // user picks Use/Edit so we never silently overwrite.
-            setPrefillSuggestion({ data });
-        } catch {
-            // 429 (rate-limited) or network — fail silently AND unlock so
-            // the user isn't blocked behind a transient network error.
-            setEmailGateUnlocked(true);
-        }
-    };
-
-    // "Use this" — apply the suggested fields, but ONLY where the user
-    // hasn't already typed something. Never touches media or rich answers.
-    const applyPrefill = () => {
-        const data = prefillSuggestion?.data;
+    function populatePrefillData(data) {
         if (!data) return;
         setForm((f) => ({
             ...f,
@@ -511,9 +482,69 @@ export default function SubmissionPage() {
                     ? f.work_links
                     : (data.work_links || []),
         }));
+    }
+
+    const tryPrefill = async () => {
+        if (saved) return; // submission already started — too late
+        const email = (form.email || "").trim().toLowerCase();
+        if (!email || !email.includes("@")) return;
+        if (email === prefillEmail && prefillTried) return; // already tried
+        setPrefillEmail(email);
+        setPrefillTried(true);
+        try {
+            const { data } = await axios.get(
+                `${API}/public/prefill?email=${encodeURIComponent(email)}`,
+            );
+            if (!data || !data.first_name) {
+                // New talent — quietly unlock the rest of the form.
+                setPrefillSuggestion(null);
+                setEmailGateUnlocked(true);
+                return;
+            }
+            // Returning talent — auto-load and open form immediately
+            populatePrefillData(data);
+            setPrefillSuggestion({ data });
+            setEmailGateUnlocked(true);
+            toast.success(`Welcome back, ${data.first_name}`);
+        } catch {
+            // 429 (rate-limited) or network — fail silently AND unlock so
+            // the user isn't blocked behind a transient network error.
+            setEmailGateUnlocked(true);
+        }
+    };
+
+    const handleUseAnotherEmail = () => {
+        localStorage.removeItem("talentgram_portal_email");
+        setForm({
+            first_name: "",
+            last_name: "",
+            email: "",
+            phone: "",
+            dob: "",
+            age: "",
+            overrideAge: false,
+            submitted_age_override: "",
+            height: "",
+            location: "",
+            gender: "",
+            ethnicity: "",
+            instagram_handle: "",
+            instagram_followers: "",
+            bio: "",
+            work_links: [],
+            competitive_brand: "",
+            availability: { status: "", note: "" },
+            budget: { status: "", value: "" },
+            commission: project ? (project.commission_percent || "") : "",
+            custom_answers: {},
+        });
+        setPrefillEmail("");
+        setPrefillTried(false);
         setPrefillSuggestion(null);
-        setEmailGateUnlocked(true);
-        toast.success(`Welcome back, ${data.first_name}`);
+        setEmailGateUnlocked(false);
+        setGatewayRecognition(null);
+        setGatewayEmail("");
+        toast.info("Please enter your email to proceed.");
     };
 
     const handleInlineLookup = async (e) => {
@@ -561,7 +592,8 @@ export default function SubmissionPage() {
                 const { data } = await axios.get(
                     `${API}/public/prefill?email=${encodeURIComponent(formatted)}`,
                 );
-                if (data && Object.keys(data).length > 0) {
+                if (data && Object.keys(data).length > 0 && data.first_name) {
+                    populatePrefillData(data);
                     setPrefillSuggestion({ data });
                 }
             } catch (e) {
@@ -1329,46 +1361,25 @@ export default function SubmissionPage() {
                             user is in control: Use this OR Edit manually. */}
                         {prefillSuggestion && !saved && (
                             <div
-                                className="bg-amber-50/40 border border-amber-200/60 rounded-2xl p-5 flex flex-col md:flex-row md:items-center gap-4 justify-between"
-                                data-testid="prefill-suggestion-card"
-                                data-step="1"
+                                className="bg-emerald-50/40 border border-emerald-200/50 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-left animate-in fade-in slide-in-from-top-4 duration-250"
+                                data-testid="prefill-suggestion-banner"
                             >
-                                <div className="min-w-0 flex-1">
-                                    <p className="text-[13px] text-slate-800">
-                                        We found a profile previously submitted using this email.
-                                    </p>
-                                    <p className="text-[11px] text-slate-400 font-mono mt-1 truncate">
-                                        {prefillSuggestion.data.first_name}{" "}
-                                        {prefillSuggestion.data.last_name || ""}
-                                        {prefillSuggestion.data.location ? ` · ${prefillSuggestion.data.location}` : ""}
-                                        {prefillSuggestion.data.height ? ` · ${prefillSuggestion.data.height}` : ""}
-                                    </p>
-                                </div>
-                                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 w-full md:w-auto shrink-0">
-                                    <div className="flex flex-col items-center gap-1 w-full sm:w-auto">
-                                        <button
-                                            type="button"
-                                            onClick={applyPrefill}
-                                            data-testid="prefill-use-btn"
-                                            className="bg-slate-900 text-white px-5 py-2.5 text-[12px] rounded-full hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-md inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 w-full sm:w-auto"
-                                        >
-                                            <Check className="w-3.5 h-3.5" />
-                                            Use this
-                                        </button>
-                                        <span className="text-[10px] text-slate-400 font-mono text-center">Load and reuse saved details</span>
-                                    </div>
-                                    <div className="flex flex-col items-center gap-1 w-full sm:w-auto">
-                                        <button
-                                            type="button"
-                                            onClick={() => setPrefillSuggestion(null)}
-                                            data-testid="prefill-dismiss-btn"
-                                            className="border border-slate-200 text-slate-600 hover:border-slate-300 hover:-translate-y-[1px] px-5 py-2.5 text-[12px] rounded-full inline-flex items-center justify-center gap-1.5 min-h-[44px] active:scale-[0.97] transition-all duration-200 bg-white/50 w-full sm:w-auto"
-                                        >
-                                            Edit manually
-                                        </button>
-                                        <span className="text-[10px] text-slate-400 font-mono text-center">Update details before continuing</span>
+                                <div className="flex items-start gap-3">
+                                    <span className="shrink-0 w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center font-bold text-xs shadow-sm mt-0.5">✓</span>
+                                    <div>
+                                        <h4 className="font-semibold text-sm text-slate-800">Profile Found</h4>
+                                        <p className="text-xs text-slate-500 leading-relaxed mt-1">
+                                            We've loaded your previously submitted details. You can review and update any information before submitting.
+                                        </p>
                                     </div>
                                 </div>
+                                <button
+                                    type="button"
+                                    onClick={handleUseAnotherEmail}
+                                    className="border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-800 px-4 py-2 text-xs rounded-full inline-flex items-center justify-center min-h-[36px] bg-white transition-all active:scale-[0.98] shrink-0"
+                                >
+                                    Use Another Email
+                                </button>
                             </div>
                         )}
 

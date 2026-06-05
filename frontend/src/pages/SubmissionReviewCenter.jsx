@@ -118,6 +118,7 @@ export default function SubmissionReviewCenter() {
     const [filter, setFilter] = useState("all");
     const [searchQuery, setSearchQuery] = useState("");
     const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false);
+    const [isEndOfList, setIsEndOfList] = useState(false);
     
     // Curation / Decision states
     const [decisionNote, setDecisionNote] = useState("");
@@ -211,14 +212,26 @@ export default function SubmissionReviewCenter() {
                 decision,
                 note: decisionNote,
             });
-            toast.success(`Marked as ${decision}`);
+            
+            const toastMessages = {
+                approved: "Approved and moved to next submission",
+                hold: "Held and moved to next submission",
+                rejected: "Rejected and moved to next submission",
+            };
+            toast.success(toastMessages[decision] || `${decision} registered`);
             
             // Reload submission lists and update statuses locally
             const updatedList = submissions.map(s => s.id === selectedId ? { ...s, decision } : s);
             setSubmissions(updatedList);
 
-            // Move to next submission automatically if exists
-            handleNext();
+            // Move to next submission automatically if exists, otherwise show completion view
+            if (currentIndex === filteredSubmissions.length - 1) {
+                setIsEndOfList(true);
+            } else {
+                const nextIndex = currentIndex >= filteredSubmissions.length - 1 ? 0 : currentIndex + 1;
+                setSelectedId(filteredSubmissions[nextIndex].id);
+                setIsEndOfList(false);
+            }
         } catch (e) {
             toast.error("Failed to register decision");
         } finally {
@@ -297,16 +310,19 @@ export default function SubmissionReviewCenter() {
         if (filteredSubmissions.length <= 1) return;
         const newIndex = currentIndex <= 0 ? filteredSubmissions.length - 1 : currentIndex - 1;
         setSelectedId(filteredSubmissions[newIndex].id);
+        setIsEndOfList(false);
     };
 
     const handleNext = () => {
         if (filteredSubmissions.length <= 1) return;
         const newIndex = currentIndex >= filteredSubmissions.length - 1 ? 0 : currentIndex + 1;
         setSelectedId(filteredSubmissions[newIndex].id);
+        setIsEndOfList(false);
     };
 
     const handleSelectRow = (sid) => {
         setSelectedId(sid);
+        setIsEndOfList(false);
         setIsMobileDetailOpen(true);
     };
 
@@ -522,8 +538,65 @@ export default function SubmissionReviewCenter() {
                         </div>
                     </div>
 
-                    {/* Scrollable details view */}
-                    <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                    {isEndOfList ? (
+                        <div className="flex-1 flex flex-col items-center justify-center p-6 bg-white text-center">
+                            <div className="max-w-md w-full border border-black/[0.08] bg-[#fafaf9] rounded-xl p-8 shadow-sm space-y-6">
+                                <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mx-auto text-green-600 border border-green-200 animate-bounce">
+                                    <Check className="w-8 h-8" />
+                                </div>
+                                <div className="space-y-2">
+                                    <h2 className="text-xl font-display font-semibold text-black/90">All submissions reviewed</h2>
+                                    <p className="text-sm text-black/45">You have reached the end of the submission list.</p>
+                                </div>
+                                <div className="flex flex-col gap-2 pt-2">
+                                    <button
+                                        onClick={() => {
+                                            setIsEndOfList(false);
+                                            setIsMobileDetailOpen(false);
+                                        }}
+                                        className="w-full py-2.5 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold shadow-sm transition-all"
+                                    >
+                                        Return to list
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const approvedList = submissions.filter(s => s.decision === "approved");
+                                            if (approvedList.length > 0) {
+                                                setFilter("approved");
+                                                setSelectedId(approvedList[0].id);
+                                                setIsEndOfList(false);
+                                                setIsMobileDetailOpen(true);
+                                            } else {
+                                                toast.error("No approved submissions found");
+                                            }
+                                        }}
+                                        className="w-full py-2.5 border border-black/[0.08] hover:border-black/20 text-black/80 rounded-md text-xs font-semibold shadow-sm transition-all bg-white"
+                                    >
+                                        Review Approved
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const pendingList = submissions.filter(s => (s.decision || "pending") === "pending");
+                                            if (pendingList.length > 0) {
+                                                setFilter("pending");
+                                                setSelectedId(pendingList[0].id);
+                                                setIsEndOfList(false);
+                                                setIsMobileDetailOpen(true);
+                                            } else {
+                                                toast.error("No pending submissions found");
+                                            }
+                                        }}
+                                        className="w-full py-2.5 border border-black/[0.08] hover:border-black/20 text-black/80 rounded-md text-xs font-semibold shadow-sm transition-all bg-white"
+                                    >
+                                        Review Pending
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <>
+                            {/* Scrollable details view */}
+                            <div className="flex-1 overflow-y-auto p-6 space-y-8">
                         {loadingDetail ? (
                             <div className="h-64 flex flex-col items-center justify-center text-black/40 gap-3">
                                 <Loader2 className="w-8 h-8 animate-spin text-black/80" />
@@ -897,6 +970,8 @@ export default function SubmissionReviewCenter() {
                                 </div>
                             </div>
                         </footer>
+                    )}
+                        </>
                     )}
                 </main>
             </div>

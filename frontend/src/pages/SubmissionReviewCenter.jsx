@@ -143,6 +143,8 @@ export default function SubmissionReviewCenter() {
     const [searchQuery, setSearchQuery] = useState("");
     const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false);
     const [isEndOfList, setIsEndOfList] = useState(false);
+    const [savedProgressId, setSavedProgressId] = useState(null);
+    const [showResumePrompt, setShowResumePrompt] = useState(false);
     
     // Curation / Decision states
     const [decisionNote, setDecisionNote] = useState("");
@@ -186,12 +188,22 @@ export default function SubmissionReviewCenter() {
         try {
             const { data } = await adminApi.get(`/projects/${id}/submissions`);
             setSubmissions(data);
-            setSelectedId(prev => {
-                if (!prev && data.length > 0) {
-                    return data[0].id;
-                }
-                return prev;
-            });
+            
+            // Check if there is saved progress
+            const savedId = localStorage.getItem(`review_center_progress_${id}`);
+            const hasSaved = savedId && data.some(s => s.id === savedId);
+            
+            if (hasSaved) {
+                setSavedProgressId(savedId);
+                setShowResumePrompt(true);
+            } else {
+                setSelectedId(prev => {
+                    if (!prev && data.length > 0) {
+                        return data[0].id;
+                    }
+                    return prev;
+                });
+            }
         } catch (e) {
             toast.error("Failed to load submissions");
         } finally {
@@ -225,6 +237,13 @@ export default function SubmissionReviewCenter() {
             }
         };
         fetchDetail();
+    }, [selectedId, id]);
+
+    // Auto-save progress when selectedId changes
+    useEffect(() => {
+        if (selectedId && id) {
+            localStorage.setItem(`review_center_progress_${id}`, selectedId);
+        }
     }, [selectedId, id]);
 
     // Action handlers
@@ -553,7 +572,48 @@ export default function SubmissionReviewCenter() {
                 </aside>
 
                 {/* ── RIGHT PANEL (CURATED REVIEW PANEL) ── */}
-                <main className={`flex-1 flex flex-col bg-white overflow-hidden transition-all duration-300 ${!isMobileDetailOpen ? "hidden md:flex" : "flex"}`}>
+                <main className={`flex-1 flex flex-col bg-white overflow-hidden transition-all duration-300 ${!isMobileDetailOpen ? "hidden md:flex" : "flex"} relative`}>
+                    {showResumePrompt && (
+                        <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+                            <div className="max-w-sm w-full bg-white border border-black/[0.08] rounded-xl p-6 shadow-xl space-y-6 text-center animate-in fade-in zoom-in-95 duration-200">
+                                <div className="w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center mx-auto text-amber-600 border border-amber-200">
+                                    <Clock className="w-6 h-6 animate-pulse" />
+                                </div>
+                                <div className="space-y-1">
+                                    <h3 className="text-md font-display font-semibold text-black/95">Resume Review?</h3>
+                                    <p className="text-xs text-black/55">You have a saved review progress from your last session.</p>
+                                </div>
+                                <div className="flex flex-col gap-2">
+                                    <button
+                                        onClick={() => {
+                                            setSelectedId(savedProgressId);
+                                            setShowResumePrompt(false);
+                                            setIsEndOfList(false);
+                                            setIsMobileDetailOpen(true);
+                                            toast.info("Resumed review progress");
+                                        }}
+                                        className="w-full py-2 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold shadow-sm transition-all"
+                                    >
+                                        Resume Review
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            if (submissions.length > 0) {
+                                                setSelectedId(submissions[0].id);
+                                                localStorage.setItem(`review_center_progress_${id}`, submissions[0].id);
+                                            }
+                                            setShowResumePrompt(false);
+                                            setIsEndOfList(false);
+                                            toast.info("Started from beginning");
+                                        }}
+                                        className="w-full py-2 border border-black/[0.08] hover:border-black/20 text-black/80 rounded-md text-xs font-semibold shadow-sm transition-all bg-white"
+                                    >
+                                        Start From Beginning
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     
                     {/* Detail Panel Sub-header */}
                     <div className="px-6 py-3 border-b border-black/[0.08] bg-[#fafaf9] flex items-center justify-between gap-4 shrink-0">

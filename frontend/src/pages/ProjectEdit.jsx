@@ -1021,7 +1021,7 @@ export default function ProjectEdit() {
                     </div>
 
                     {!collapsedSections.submissions && (
-                        <div className="w-full overflow-x-auto">
+                        <div className="w-full">
                             {submissions.length === 0 ? (
                                 <div className="p-8 text-center text-black/40 text-sm">
                                     No submissions yet. Share the link above with
@@ -1029,6 +1029,36 @@ export default function ProjectEdit() {
                                 </div>
                             ) : (
                                 <>
+                                    {/* Summary Stats Row */}
+                                    <div className="px-4 md:px-6 py-4 bg-black/[0.01] border-b border-black/[0.08] grid grid-cols-3 sm:grid-cols-6 gap-4 select-none">
+                                        <div className="text-center sm:text-left">
+                                            <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Total</p>
+                                            <p className="text-lg font-bold text-black/90 mt-0.5">{submissions.length}</p>
+                                        </div>
+                                        <div className="text-center sm:text-left">
+                                            <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Pending</p>
+                                            <p className="text-lg font-bold text-amber-600 mt-0.5">{pendingCount}</p>
+                                        </div>
+                                        <div className="text-center sm:text-left">
+                                            <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Approved</p>
+                                            <p className="text-lg font-bold text-green-600 mt-0.5">{approvedCount}</p>
+                                        </div>
+                                        <div className="text-center sm:text-left">
+                                            <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Rejected</p>
+                                            <p className="text-lg font-bold text-red-600 mt-0.5">{rejectedCount}</p>
+                                        </div>
+                                        <div className="text-center sm:text-left">
+                                            <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Updated</p>
+                                            <p className="text-lg font-bold text-blue-600 mt-0.5">{updatedCount}</p>
+                                        </div>
+                                        <div className="text-center sm:text-left">
+                                            <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Hold</p>
+                                            <p className="text-lg font-bold text-purple-600 mt-0.5">
+                                                {submissions.filter((s) => s.decision === "hold").length}
+                                            </p>
+                                        </div>
+                                    </div>
+
                                     <div
                                         className="px-4 md:px-6 py-3 border-b border-black/[0.08] flex items-center gap-1.5 flex-wrap"
                                         data-testid="submission-filters"
@@ -1089,7 +1119,7 @@ export default function ProjectEdit() {
                                             </span>
                                         </button>
                                     </div>
-                                    <div className="divide-y divide-black/[0.06]">
+                                    <div className="max-h-[500px] overflow-y-auto divide-y divide-black/[0.06] border-b border-black/[0.06]">
                                         {filteredSubmissions.map((s) => (
                                             <SubmissionRow
                                                 key={s.id}
@@ -1194,9 +1224,21 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
             color: "text-red-600",
             bg: "bg-red-50 text-red-700 border-red-200",
         },
-        hold: { icon: PauseCircle, label: "Hold", color: "text-[#c9a961]", bg: "bg-amber-50 text-amber-700 border-amber-200" },
+        hold: { icon: PauseCircle, label: "Hold", color: "text-purple-600", bg: "bg-purple-50 text-purple-700 border-purple-200" },
     }[s.decision || "pending"];
+    
     const isUpdated = s.status === "updated";
+    
+    const borderColors = {
+        approved: "border-l-[4px] border-l-green-500",
+        rejected: "border-l-[4px] border-l-red-500",
+        hold: "border-l-[4px] border-l-purple-500",
+        updated: "border-l-[4px] border-l-blue-500",
+        pending: "border-l-[4px] border-l-amber-500",
+    };
+    const borderKey = isUpdated ? "updated" : (s.decision || "pending");
+    const borderClass = borderColors[borderKey];
+
     const mediaCounts = {
         intro: (s.media || []).filter((m) => m.category === "intro_video" || m.category === "video").length,
         takes: (s.media || []).filter(
@@ -1227,7 +1269,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
     const ageVal = s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—";
 
     return (
-        <div data-testid={`submission-row-${s.id}`}>
+        <div data-testid={`submission-row-${s.id}`} className={`${borderClass}`}>
             {/* Desktop Row: Hidden on Mobile */}
             <div
                 className="hidden md:flex px-6 py-4 items-center justify-between gap-4 flex-wrap hover:bg-black/[0.015] transition-colors"
@@ -1244,7 +1286,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                         </span>
                         {isUpdated && (
                             <span
-                                className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-sm"
+                                className="inline-flex items-center gap-1 text-[10px] tracking-widest uppercase text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded-sm"
                                 data-testid={`updated-badge-${s.id}`}
                                 title="Talent updated this submission after the previous decision"
                             >
@@ -1290,7 +1332,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                     </button>
                     <button
                         onClick={() => onDecision("hold")}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-[#c9a961] hover:text-[#c9a961] rounded-sm text-black/70 transition-colors"
+                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-purple-600 hover:text-purple-600 rounded-sm text-black/70 transition-colors"
                         data-testid={`hold-${s.id}`}
                         title="Hold"
                     >
@@ -1317,10 +1359,10 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
             </div>
 
             {/* Mobile Premium Card: Hidden on Desktop */}
-            <div className="md:hidden p-4 border-b border-black/[0.06] bg-white space-y-3">
+            <div className="md:hidden p-3 border-b border-black/[0.06] bg-white space-y-2.5">
                 {/* Row 1: Profile image, Name, Age, Height, Current stage badge */}
-                <div className="flex items-center gap-3">
-                    <div className="w-12 h-16 rounded-md overflow-hidden bg-black/[0.03] border border-black/[0.06] shrink-0 flex items-center justify-center">
+                <div className="flex items-start gap-2.5">
+                    <div className="w-10 h-14 rounded overflow-hidden bg-black/[0.03] border border-black/[0.06] shrink-0 flex items-center justify-center">
                         {cover ? (
                             <img
                                 src={cover.url}
@@ -1328,40 +1370,46 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                                 className="w-full h-full object-cover"
                             />
                         ) : (
-                            <User className="w-5 h-5 text-black/20" />
+                            <User className="w-4 h-4 text-black/20" />
                         )}
                     </div>
-                    <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="font-display text-sm font-semibold text-black/90 truncate">
+                    <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                            <span className="font-display text-sm font-bold text-black/90 truncate">
                                 {s.talent_name}
                             </span>
                             <span
-                                className={`inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${meta.bg ? meta.bg : "border-black/[0.08] text-black/60 bg-black/[0.02]"}`}
+                                className={`inline-flex items-center gap-0.5 text-[8.5px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${meta.bg ? meta.bg : "border-black/[0.08] text-black/60 bg-black/[0.02]"}`}
                             >
                                 {meta.label}
                             </span>
                         </div>
-                        <div className="text-xs text-black/55 flex items-center gap-2">
-                            <span>Age: <strong className="text-black/80">{ageVal}</strong></span>
-                            <span className="text-black/20">|</span>
-                            <span>Height: <strong className="text-black/80">{heightVal}</strong></span>
+                        <div className="text-[11px] text-black/55 mt-1 flex items-center gap-1.5 flex-wrap">
+                            <span>Age: <strong className="text-black/85">{ageVal}</strong></span>
+                            <span className="text-black/15">•</span>
+                            <span>Ht: <strong className="text-black/85">{heightVal}</strong></span>
+                            {isUpdated && (
+                                <>
+                                    <span className="text-black/15">•</span>
+                                    <span className="text-[8px] font-semibold text-blue-600 uppercase tracking-wider">Updated</span>
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>
 
-                {/* Row 2: Call, WhatsApp, Review */}
-                <div className="grid grid-cols-3 gap-2">
+                {/* Row 2: Call, WhatsApp, Review (Grid layout with high targets but compact margins) */}
+                <div className="grid grid-cols-3 gap-2 pt-0.5">
                     {s.talent_phone ? (
                         <a
                             href={`tel:${s.talent_phone}`}
-                            className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-black/[0.08] rounded-md text-xs font-semibold text-black/70 active:bg-black/5 transition-colors"
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 border border-black/[0.08] rounded text-xs font-semibold text-black/70 active:bg-black/5 transition-colors"
                         >
                             <Phone className="w-3.5 h-3.5 text-black/50" />
                             <span>Call</span>
                         </a>
                     ) : (
-                        <span className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-black/[0.04] rounded-md text-xs text-black/30 bg-black/[0.01] cursor-not-allowed">
+                        <span className="flex items-center justify-center gap-1.5 py-2 px-2.5 border border-black/[0.04] rounded text-xs text-black/30 bg-black/[0.01] cursor-not-allowed">
                             <Phone className="w-3.5 h-3.5 opacity-30" />
                             <span>Call</span>
                         </span>
@@ -1372,13 +1420,13 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                             href={`https://wa.me/${s.talent_phone.replace(/\D/g, "")}`}
                             target="_blank"
                             rel="noreferrer"
-                            className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-[#25D366]/35 rounded-md text-xs font-semibold text-[#25D366] bg-[#25D366]/5 active:bg-[#25D366]/10 transition-colors"
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 border border-[#25D366]/35 rounded text-xs font-semibold text-[#25D366] bg-[#25D366]/5 active:bg-[#25D366]/10 transition-colors"
                         >
                             <MessageSquare className="w-3.5 h-3.5 text-[#25D366]" />
                             <span>WhatsApp</span>
                         </a>
                     ) : (
-                        <span className="flex items-center justify-center gap-1.5 py-2.5 px-3 border border-black/[0.04] rounded-md text-xs text-black/30 bg-black/[0.01] cursor-not-allowed">
+                        <span className="flex items-center justify-center gap-1.5 py-2 px-2.5 border border-black/[0.04] rounded text-xs text-black/30 bg-black/[0.01] cursor-not-allowed">
                             <MessageSquare className="w-3.5 h-3.5 opacity-30" />
                             <span>WhatsApp</span>
                         </span>
@@ -1386,7 +1434,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
 
                     <button
                         onClick={onOpen}
-                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold active:scale-[0.98] transition-transform"
+                        className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-black hover:bg-black/90 text-white rounded text-xs font-semibold active:scale-[0.98] transition-transform"
                         data-testid={`review-submission-mobile-${s.id}`}
                     >
                         <FileText className="w-3.5 h-3.5 text-white/80" />
@@ -1395,50 +1443,50 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                 </div>
 
                 {/* Row 3: Expand Details */}
-                <div className="border-t border-black/[0.04] pt-2">
+                <div className="border-t border-black/[0.03] pt-1">
                     <button
                         type="button"
                         onClick={() => setExpanded(!expanded)}
-                        className="w-full flex items-center justify-between py-1.5 text-xs text-black/45 hover:text-black transition-colors"
+                        className="w-full flex items-center justify-between py-1 text-[11px] text-black/45 hover:text-black transition-colors"
                     >
                         <span>{expanded ? "Hide details" : "Expand details"}</span>
                         <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
                     </button>
 
                     {expanded && (
-                        <div className="mt-3 space-y-3 pb-2 text-xs text-black/70 animate-fade-in">
-                            <div className="space-y-1">
-                                <p className="text-[10px] text-black/40 uppercase tracking-wider font-mono">Contact Details</p>
+                        <div className="mt-2.5 space-y-2.5 pb-1 text-[11px] text-black/70 animate-fade-in">
+                            <div className="space-y-0.5">
+                                <p className="text-[9px] text-black/40 uppercase tracking-wider font-mono">Contact Details</p>
                                 <p className="font-mono text-black/80">{s.talent_email}</p>
                                 {s.talent_phone && <p className="text-black/80">{s.talent_phone}</p>}
                             </div>
 
-                            <div className="space-y-1">
-                                <p className="text-[10px] text-black/40 uppercase tracking-wider font-mono">Audition Summary</p>
+                            <div className="space-y-0.5">
+                                <p className="text-[9px] text-black/40 uppercase tracking-wider font-mono">Audition Summary</p>
                                 <p className="text-black/80">
                                     {mediaCounts.intro ? "1 intro video" : "no intro video"} · {mediaCounts.takes} takes · {mediaCounts.images} images
                                 </p>
                             </div>
 
                             {/* Mobile Decision Buttons inside collapsed drawer */}
-                            <div className="pt-2 border-t border-black/[0.04] flex items-center gap-2 flex-wrap">
+                            <div className="pt-2 border-t border-black/[0.03] flex items-center gap-2 flex-wrap">
                                 <button
                                     onClick={() => onDecision("approved")}
-                                    className={`flex-1 flex items-center justify-center gap-1 py-2 border rounded-md text-xs font-semibold transition-colors ${s.decision === "approved" ? "bg-green-600 text-white border-green-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "approved" ? "bg-green-600 text-white border-green-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
                                 >
                                     <Check className="w-3.5 h-3.5" />
                                     <span>Approve</span>
                                 </button>
                                 <button
                                     onClick={() => onDecision("hold")}
-                                    className={`flex-1 flex items-center justify-center gap-1 py-2 border rounded-md text-xs font-semibold transition-colors ${s.decision === "hold" ? "bg-[#c9a961] text-white border-[#c9a961]" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "hold" ? "bg-purple-600 text-white border-purple-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
                                 >
                                     <PauseCircle className="w-3.5 h-3.5" />
                                     <span>Hold</span>
                                 </button>
                                 <button
                                     onClick={() => onDecision("rejected")}
-                                    className={`flex-1 flex items-center justify-center gap-1 py-2 border rounded-md text-xs font-semibold transition-colors ${s.decision === "rejected" ? "bg-red-600 text-white border-red-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "rejected" ? "bg-red-600 text-white border-red-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
                                 >
                                     <XCircle className="w-3.5 h-3.5" />
                                     <span>Reject</span>
@@ -1446,7 +1494,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                                 {onDelete && (
                                     <button
                                         onClick={onDelete}
-                                        className="p-2 border border-red-200 text-red-600 rounded-md active:bg-red-50"
+                                        className="p-1.5 border border-red-200 text-red-600 rounded active:bg-red-50"
                                         title="Delete Submission"
                                     >
                                         <Trash2 className="w-3.5 h-3.5" />

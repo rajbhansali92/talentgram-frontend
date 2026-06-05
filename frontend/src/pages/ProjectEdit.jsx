@@ -1309,9 +1309,12 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                             </span>
                         )}
                     </div>
-                    <div className="text-[11px] text-black/45 mt-2">
-                        {mediaCounts.intro ? "1 intro video · " : "no intro · "}
-                        {mediaCounts.takes} takes · {mediaCounts.images} images
+                    <div className="text-[11px] text-black/45 mt-2 flex items-center gap-3">
+                        <span title="Intro Video">🎥 {mediaCounts.intro || 0} Intro</span>
+                        <span className="opacity-40">·</span>
+                        <span title="Audition Takes">🎬 {mediaCounts.takes || 0} Takes</span>
+                        <span className="opacity-40">·</span>
+                        <span title="Images">📷 {mediaCounts.images || 0} Images</span>
                     </div>
                 </div>
                 <div className="flex gap-1 flex-wrap">
@@ -1394,6 +1397,13 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                                     <span className="text-[8px] font-semibold text-blue-600 uppercase tracking-wider">Updated</span>
                                 </>
                             )}
+                        </div>
+                        <div className="text-[10px] text-black/55 mt-1.5 flex items-center gap-2 flex-wrap font-mono">
+                            <span>🎥 {mediaCounts.intro || 0} Intro</span>
+                            <span className="text-black/15">•</span>
+                            <span>🎬 {mediaCounts.takes || 0} Takes</span>
+                            <span className="text-black/15">•</span>
+                            <span>📷 {mediaCounts.images || 0} Images</span>
                         </div>
                     </div>
                 </div>

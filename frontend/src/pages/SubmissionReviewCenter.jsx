@@ -161,19 +161,22 @@ export default function SubmissionReviewCenter() {
         try {
             const { data } = await adminApi.get(`/projects/${id}/submissions`);
             setSubmissions(data);
-            if (data.length > 0 && !selectedId) {
-                setSelectedId(data[0].id);
-            }
+            setSelectedId(prev => {
+                if (!prev && data.length > 0) {
+                    return data[0].id;
+                }
+                return prev;
+            });
         } catch (e) {
             toast.error("Failed to load submissions");
         } finally {
             setLoadingSubmissions(false);
         }
-    }, [id, selectedId]);
+    }, [id]);
 
     useEffect(() => {
         loadSubmissions();
-    }, []);
+    }, [loadSubmissions]);
 
     // 3. Load selected submission details
     useEffect(() => {

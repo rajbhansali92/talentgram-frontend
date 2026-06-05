@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
-import { Search, Plus, Check, User } from "lucide-react";
+import { Search, Plus, Check, User, LayoutGrid, List } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -201,6 +201,195 @@ const TalentCard = React.memo(function TalentCard({
 });
 
 // ---------------------------------------------------------------------------
+// Single roster row — memoized to avoid re-renders on parent state changes
+// ---------------------------------------------------------------------------
+const TalentListRow = React.memo(function TalentListRow({
+    t,
+    checked,
+    isSelectionMode,
+    canBulkDelete,
+    onToggle,
+}) {
+    const handleToggle = useCallback(
+        (e) => {
+            e.stopPropagation();
+            onToggle(t.id);
+        },
+        [t.id, onToggle]
+    );
+
+    // Filter media arrays safely
+    const mediaList = t.media || [];
+    const imageCount = t.media_count !== undefined 
+        ? t.media_count 
+        : mediaList.filter(m => m.category !== "video").length;
+    const videoCount = mediaList.filter(m => m.category === "video" || m.content_type?.startsWith("video/")).length;
+
+    const formattedDate = useMemo(() => {
+        const dateStr = t.updated_at || t.created_at;
+        if (!dateStr) return "—";
+        try {
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) return "—";
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+        } catch {
+            return "—";
+        }
+    }, [t.updated_at, t.created_at]);
+
+    const handleWhatsApp = useCallback((e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (t.phone) {
+            const cleaned = t.phone.replace(/\D/g, '');
+            const url = `https://wa.me/${cleaned}`;
+            window.open(url, '_blank', 'noopener,noreferrer');
+        } else {
+            toast.error("No phone number available");
+        }
+    }, [t.phone]);
+
+    return (
+        <div
+            data-testid={`talent-row-${t.id}`}
+            onClick={isSelectionMode ? handleToggle : undefined}
+            className={[
+                "group relative rounded-xl border bg-white p-3.5 transition-all duration-300 ease-out flex items-center justify-between gap-4",
+                isSelectionMode ? "cursor-pointer" : "",
+                checked
+                    ? "border-black/45 ring-1 ring-black/25 shadow-sm"
+                    : "border-black/[0.07] hover:border-black/[0.18] hover:shadow-[0_4px_20px_rgb(0,0,0,0.02)]",
+            ].join(" ")}
+        >
+            {/* Left Section: Checkbox + Photo + Identity info */}
+            <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                {/* Selection checkbox */}
+                {canBulkDelete && (
+                    <button
+                        type="button"
+                        onClick={handleToggle}
+                        aria-label={checked ? "Deselect talent" : "Select talent"}
+                        data-testid={`talent-check-${t.id}`}
+                        className={[
+                            "w-5 h-5 rounded-md border flex items-center justify-center shrink-0",
+                            "transition-all duration-150",
+                            checked
+                                ? "bg-black border-black text-white opacity-100"
+                                : "bg-white border-black/20 text-transparent",
+                            isSelectionMode
+                                ? "opacity-100"
+                                : "opacity-0 group-hover:opacity-100 group-hover:border-black/35",
+                        ].join(" ")}
+                    >
+                        {checked && <Check className="w-3 h-3" strokeWidth={2.5} />}
+                    </button>
+                )}
+
+                {/* Profile Photo */}
+                <div className="w-11 h-11 rounded-lg overflow-hidden bg-black/[0.04] shrink-0 relative border border-black/[0.04]">
+                    <TalentThumb src={t.image_url} alt={t.name} />
+                </div>
+
+                {/* Info block */}
+                <div className="min-w-0 flex-1 grid grid-cols-1 md:grid-cols-12 gap-2 md:gap-4 items-center">
+                    {/* Name */}
+                    <div className="md:col-span-4 min-w-0">
+                        {!isSelectionMode ? (
+                            <Link
+                                to={`/admin/talents/${t.id}`}
+                                className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 hover:text-black hover:underline truncate block"
+                            >
+                                {t.name || "—"}
+                            </Link>
+                        ) : (
+                            <span className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 truncate block">
+                                {t.name || "—"}
+                            </span>
+                        )}
+                        {/* Mobile metadata summary */}
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400 mt-0.5 md:hidden">
+                            {t.gender && <span className="capitalize">{t.gender}</span>}
+                            {t.age && <span>· {t.age} yrs</span>}
+                            {t.height && <span>· {t.height}</span>}
+                            {t.location && <span className="truncate">· {t.location}</span>}
+                        </div>
+                    </div>
+
+                    {/* Desktop/Tablet Columns */}
+                    {/* Demographics */}
+                    <div className="hidden md:flex md:col-span-3 text-[12px] text-neutral-500 flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {t.gender && <span className="capitalize font-medium text-neutral-700">{t.gender}</span>}
+                        {t.age && <span>· {t.age} yrs</span>}
+                        {t.height && <span>· {t.height}</span>}
+                    </div>
+
+                    {/* Location */}
+                    <div className="hidden md:block md:col-span-2 text-[12px] text-neutral-500 truncate" title={t.location}>
+                        {t.location || "—"}
+                    </div>
+
+                    {/* Media Counts */}
+                    <div className="hidden md:flex md:col-span-1.5 items-center gap-3 text-[12px] text-neutral-500 shrink-0 font-medium">
+                        <span className="flex items-center gap-1">
+                            📷 {imageCount}
+                        </span>
+                        <span className="flex items-center gap-1">
+                            🎥 {videoCount}
+                        </span>
+                    </div>
+
+                    {/* Last Updated */}
+                    <div className="hidden md:block md:col-span-1.5 text-[11px] text-neutral-400 tracking-tight font-mono shrink-0">
+                        {formattedDate}
+                    </div>
+                </div>
+            </div>
+
+            {/* Right Section: Media icons for mobile + Actions */}
+            <div className="flex items-center gap-2 shrink-0">
+                {/* Mobile media counts */}
+                <div className="flex md:hidden items-center gap-2 text-[10px] text-neutral-400 mr-2 shrink-0 font-medium">
+                    <span>📷 {imageCount}</span>
+                    <span>🎥 {videoCount}</span>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-1">
+                    {!isSelectionMode && (
+                        <>
+                            <Link
+                                to={`/admin/talents/${t.id}`}
+                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
+                                title="View Talent Profile"
+                            >
+                                View
+                            </Link>
+                            <Link
+                                to={`/admin/talents/${t.id}/edit`}
+                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
+                                title="Edit Talent Profile"
+                            >
+                                Edit
+                            </Link>
+                            {t.phone && (
+                                <button
+                                    type="button"
+                                    onClick={handleWhatsApp}
+                                    className="inline-flex items-center justify-center border border-emerald-500/20 hover:border-emerald-500 bg-emerald-50 text-emerald-700 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
+                                    title="WhatsApp Connection"
+                                >
+                                    WhatsApp
+                                </button>
+                            )}
+                        </>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+});
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 export default function TalentList() {
@@ -213,6 +402,22 @@ export default function TalentList() {
     const [totalPages, setTotalPages] = useState(1);
     const [totalItems, setTotalItems] = useState(0);
     const canBulkDelete = isAdmin();
+
+    const [viewMode, setViewMode] = useState(() => {
+        try {
+            return localStorage.getItem("tg_talents_view") || "grid";
+        } catch {
+            return "grid";
+        }
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem("tg_talents_view", viewMode);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [viewMode]);
 
     const pageSize = 40;
 
@@ -346,19 +551,50 @@ export default function TalentList() {
                 </Link>
             </div>
 
-            {/* Search */}
-            <div className="mb-8 relative max-w-md">
-                <Search className="absolute left-0 top-3 w-4 h-4 text-black/30 pointer-events-none" />
-                <input
-                    type="text"
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="Search by name…"
-                    data-testid="talent-search-input"
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 text-sm text-black/85 placeholder:text-black/28 transition-colors duration-150"
-                />
+            {/* Search & View Toggle Container */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+                <div className="relative max-w-md w-full">
+                    <Search className="absolute left-0 top-3 w-4 h-4 text-black/30 pointer-events-none" />
+                    <input
+                        type="text"
+                        value={q}
+                        onChange={(e) => setQ(e.target.value)}
+                        placeholder="Search by name…"
+                        data-testid="talent-search-input"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 text-sm text-black/85 placeholder:text-black/28 transition-colors duration-150"
+                    />
+                </div>
+                {/* View Toggle Buttons */}
+                <div className="flex items-center bg-black/[0.03] border border-black/[0.06] rounded-lg p-0.5 shrink-0 self-start sm:self-auto" data-testid="view-toggle">
+                    <button
+                        type="button"
+                        onClick={() => setViewMode("grid")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md transition-all min-h-[44px] min-w-[44px] justify-center select-none ${
+                            viewMode === "grid"
+                                ? "bg-white text-black shadow-sm border border-black/[0.06]"
+                                : "text-black/55 hover:text-black/80"
+                        }`}
+                        title="Grid View"
+                    >
+                        <LayoutGrid size={13} />
+                        <span>Grid</span>
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setViewMode("list")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md transition-all min-h-[44px] min-w-[44px] justify-center select-none ${
+                            viewMode === "list"
+                                ? "bg-white text-black shadow-sm border border-black/[0.06]"
+                                : "text-black/55 hover:text-black/80"
+                        }`}
+                        title="List View"
+                    >
+                        <List size={13} />
+                        <span>List</span>
+                    </button>
+                </div>
             </div>
 
             {/* Grid */}
@@ -386,9 +622,25 @@ export default function TalentList() {
                         </Link>
                     )}
                 </div>
+            ) : viewMode === "list" ? (
+                <div
+                    className="flex flex-col gap-3 pb-20 animate-fade-in"
+                    data-testid="talents-list"
+                >
+                    {talents.map((t) => (
+                        <TalentListRow
+                            key={t.id}
+                            t={t}
+                            checked={selected.has(t.id)}
+                            isSelectionMode={isSelectionMode}
+                            canBulkDelete={canBulkDelete}
+                            onToggle={toggle}
+                        />
+                    ))}
+                </div>
             ) : (
                 <div
-                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-5 pb-20"
+                    className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-5 pb-20 animate-fade-in"
                     data-testid="talents-grid"
                 >
                     {talents.map((t) => (

@@ -241,10 +241,15 @@ export default function TalentList() {
         }
     }, []);
 
+    const qRef = useRef(q);
+    useEffect(() => {
+        qRef.current = q;
+    }, [q]);
+
     // Initial load
     useEffect(() => {
-        load(q, page);
-    }, [page]);
+        load(qRef.current, page);
+    }, [page, load]);
 
     // Debounced search — 250 ms (resets to page 1)
     useEffect(() => {
@@ -259,12 +264,12 @@ export default function TalentList() {
     useEffect(() => {
         const onVisible = () => {
             if (document.visibilityState === "visible") {
-                load(q, page);
+                load(qRef.current, page);
             }
         };
         document.addEventListener("visibilitychange", onVisible);
         return () => document.removeEventListener("visibilitychange", onVisible);
-    }, [load, q, page]);
+    }, [load, page]);
 
     // ── Selection ────────────────────────────────────────────────────────────
     const toggle = useCallback((id) => {

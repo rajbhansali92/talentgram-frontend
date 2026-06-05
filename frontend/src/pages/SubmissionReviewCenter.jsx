@@ -678,7 +678,8 @@ export default function SubmissionReviewCenter() {
                         ) : filteredSubmissions.length === 0 ? (
                             <div className="p-8 text-center text-black/35 text-xs">
                                 No submissions match filters.
-                                           ) : (
+                            </div>
+                        ) : (
                             <>
                                  {filteredSubmissions.slice(0, visibleCount).map((s, idx) => {
                                      const isSelected = s.id === selectedId;

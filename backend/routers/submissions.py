@@ -1133,6 +1133,86 @@ async def set_decision(
     sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
     if not sub:
         raise HTTPException(404, "Submission not found")
+
+    # Resolve talent_id if it is missing/null (fallback matching/creation logic)
+    resolved_talent_id = sub.get("talent_id")
+    if not resolved_talent_id:
+        email = (sub.get("talent_email") or "").lower().strip()
+        talent_doc = None
+        if email:
+            talent_doc = await db.talents.find_one(
+                {"$or": [
+                    {"email": email},
+                    {"source.talent_email": email},
+                ]},
+                {"_id": 0},
+            )
+        if not talent_doc:
+            # Build a minimal talent record from the submission's form_data.
+            form = sub.get("form_data") or {}
+            full_name = (
+                f"{(form.get('first_name') or '').strip()} "
+                f"{(form.get('last_name') or '').strip()}"
+            ).strip() or sub.get("talent_name") or "Unnamed"
+            age_val = None
+            if form.get("age") not in (None, ""):
+                try:
+                    age_val = int(form["age"])
+                except Exception:
+                    age_val = None
+            new_talent = {
+                "id": str(uuid.uuid4()),
+                "name": full_name,
+                "email": email or None,
+                "phone": (form.get("phone") or sub.get("talent_phone") or None),
+                "age": age_val,
+                "dob": (form.get("dob") or None),
+                "height": (form.get("height") or None),
+                "location": (form.get("location") or None),
+                "ethnicity": (form.get("ethnicity") or None),
+                "gender": (form.get("gender") or None),
+                "instagram_handle": (form.get("instagram_handle") or None),
+                "instagram_followers": (form.get("instagram_followers") or None),
+                "bio": (form.get("bio") or None),
+                "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
+                "notes": f"Auto-created from decision on submission {sid} for project {pid}",
+                "source": {
+                    "type": "audition_submission",
+                    "talent_email": email or None,
+                    "reference_id": sid,
+                },
+                "media": [],
+                "cover_media_id": None,
+                "created_at": _now(),
+                "created_by": "auto-decision-sync",
+            }
+            try:
+                await db.talents.insert_one(new_talent)
+                await update_talent_cover_cache(new_talent["id"])
+                talent_doc = new_talent
+            except DuplicateKeyError:
+                # Race: another finalized in parallel. Re-fetch
+                talent_doc = await db.talents.find_one(
+                    {"$or": [
+                        {"email": email},
+                        {"source.talent_email": email},
+                    ]},
+                    {"_id": 0},
+                )
+        if talent_doc:
+            resolved_talent_id = talent_doc["id"]
+            # Save resolved talent_id back to the submission document
+            await db.submissions.update_one(
+                {"id": sid, "project_id": pid},
+                {"$set": {"talent_id": resolved_talent_id}}
+            )
+            # Ensure pipeline row is present at ask_to_test (or default)
+            from routers.casting_pipeline import ensure_pipeline_from_finalized_submission
+            await ensure_pipeline_from_finalized_submission(
+                project_id=pid,
+                talent_id=resolved_talent_id,
+            )
+
     prev = sub.get("decision")
     
     # Status History Log transition
@@ -1175,18 +1255,18 @@ async def set_decision(
 
     # Fanout — only when the decision actually changes (avoid noise on idempotent calls)
     if prev != payload.decision:
-        # Re-fetch the submission AFTER the update so we have the freshest
-        # talent_id.
+        # Re-fetch the submission AFTER the update so we have the freshest talent_id.
         fresh_sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
         resolved_talent_id = (fresh_sub or sub).get("talent_id")
 
-        # Auto-sync casting pipeline: bump the matching pipeline row to the decision's canonical stage.
-        from routers.casting_pipeline import sync_pipeline_from_submission
-        await sync_pipeline_from_submission(
-            project_id=pid,
-            talent_id=resolved_talent_id,
-            decision=payload.decision,
-        )
+        if resolved_talent_id:
+            # Auto-sync casting pipeline: bump the matching pipeline row to the decision's canonical stage.
+            from routers.casting_pipeline import sync_pipeline_from_submission
+            await sync_pipeline_from_submission(
+                project_id=pid,
+                talent_id=resolved_talent_id,
+                decision=payload.decision,
+            )
 
         project = await db.projects.find_one({"id": pid}, {"_id": 0, "brand_name": 1})
         brand = (project or {}).get("brand_name") or "Project"
@@ -1199,6 +1279,7 @@ async def set_decision(
             payload={"submission_id": sid, "project_id": pid, "decision": payload.decision},
             actor_id=admin.get("id"),
         )
+
     return {"ok": True}
 
 

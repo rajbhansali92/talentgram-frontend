@@ -23,18 +23,37 @@ export default function MaterialModal({ project, onClose, onRemove }) {
     const videos = project?.video_links || [];
     const byCat = (c) => materials.filter((m) => m.category === c);
 
+    // Lock background scrolling on mount and listen for Escape key
+    React.useEffect(() => {
+        const originalStyle = window.getComputedStyle(document.body).overflow;
+        document.body.style.overflow = "hidden";
+        
+        const handleKeyDown = (e) => {
+            if (e.key === "Escape") onClose();
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        
+        return () => {
+            document.body.style.overflow = originalStyle;
+            window.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [onClose]);
+
     return (
         <div
-            className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xl overflow-y-auto"
+            className="fixed inset-0 z-50 bg-background/80 backdrop-blur-xl overflow-y-auto animate-in fade-in duration-200"
             data-testid="audition-material-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Audition Materials Viewer"
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-10 w-10 h-10 border border-border hover:border-foreground rounded-sm flex items-center justify-center bg-background/80 text-foreground"
-                aria-label="Close"
+                className="fixed top-5 right-5 z-10 w-11 h-11 border border-border hover:border-foreground rounded-sm flex items-center justify-center bg-background/80 text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                aria-label="Close Materials Viewer"
                 data-testid="material-modal-close-btn"
             >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
             </button>
             <div className="max-w-5xl mx-auto px-5 md:px-12 py-10 md:py-14 text-foreground">
                 <p className="eyebrow mb-3">Audition Material</p>
@@ -182,13 +201,14 @@ function Group({ title, items, onRemove, render, grid }) {
                         {onRemove && (
                             <button
                                 onClick={() => onRemove(m.id)}
+                                aria-label="Delete material"
                                 className={
                                     grid
-                                        ? "absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 bg-background/80 text-foreground hover:bg-[var(--tg-danger)] hover:text-white rounded-sm transition-all"
-                                        : "text-muted-foreground hover:text-[var(--tg-danger)]"
+                                        ? "absolute top-2 right-2 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 w-11 h-11 flex items-center justify-center bg-background/90 text-foreground hover:bg-red-600 hover:text-white rounded-sm transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                                        : "w-11 h-11 flex items-center justify-center text-muted-foreground hover:text-red-600 focus:outline-none focus:ring-2 focus:ring-red-500"
                                 }
                             >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <Trash2 className="w-4 h-4" />
                             </button>
                         )}
                     </div>

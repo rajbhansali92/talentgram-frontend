@@ -100,7 +100,6 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
     };
 
     const reset = () => {
-        if (previewUrl) URL.revokeObjectURL(previewUrl);
         setBlob(null);
         setPreviewUrl(null);
         setSeconds(0);
@@ -129,7 +128,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                     onClick={start}
                     disabled={disabled}
                     data-testid="voice-record-start"
-                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/20 rounded-sm text-sm transition-all disabled:opacity-40"
+                    className="inline-flex items-center gap-2 px-4 py-3 border border-black/[0.08] hover:border-black/20 rounded-sm text-sm transition-all disabled:opacity-40 min-h-[44px]"
                 >
                     <Mic className="w-4 h-4" />
                     Record voice note
@@ -141,9 +140,10 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                     <button
                         type="button"
                         onClick={stop}
-                        className="w-10 h-10 rounded-full bg-[#FF3B30] hover:bg-[#FF3B30]/90 text-white flex items-center justify-center"
+                        aria-label="Stop recording"
+                        className="w-11 h-11 rounded-full bg-[#FF3B30] hover:bg-[#FF3B30]/90 text-white flex items-center justify-center focus:outline-none focus:ring-2 focus:ring-red-500"
                     >
-                        <StopCircle className="w-4 h-4" />
+                        <StopCircle className="w-5 h-5" />
                     </button>
                     <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-[#FF3B30] animate-pulse" />
@@ -168,7 +168,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                             onClick={send}
                             disabled={sending}
                             data-testid="voice-send-btn"
-                            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white text-black hover:opacity-90 rounded-sm text-sm transition-all disabled:opacity-40 border border-black/[0.08]"
+                            className="inline-flex items-center gap-2 px-4 py-3 bg-white text-black hover:opacity-90 rounded-sm text-sm transition-all disabled:opacity-40 border border-black/[0.08] min-h-[44px]"
                         >
                             {sending ? (
                                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -182,7 +182,7 @@ export default function VoiceRecorder({ onSend, sending = false, disabled }) {
                             onClick={reset}
                             disabled={sending}
                             data-testid="voice-discard-btn"
-                            className="inline-flex items-center gap-2 px-3 py-2.5 border border-black/[0.08] hover:border-black/20 rounded-sm text-xs text-black/70 hover:text-black"
+                            className="inline-flex items-center gap-2 px-3 py-3 border border-black/[0.08] hover:border-black/20 rounded-sm text-xs text-black/70 hover:text-black min-h-[44px]"
                         >
                             <Trash2 className="w-3.5 h-3.5" />
                             Discard

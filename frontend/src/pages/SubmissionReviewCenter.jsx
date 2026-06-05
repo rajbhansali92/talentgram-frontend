@@ -54,6 +54,22 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
     const videoRef = useRef(null);
     const [isPlaying, setIsPlaying] = useState(false);
 
+    useEffect(() => {
+        setIsPlaying(false);
+        const video = videoRef.current;
+        return () => {
+            if (video) {
+                try {
+                    video.pause();
+                    video.removeAttribute("src");
+                    video.load();
+                } catch (e) {
+                    // ignore
+                }
+            }
+        };
+    }, [src]);
+
     const togglePlay = () => {
         if (!videoRef.current) return;
         if (isPlaying) {
@@ -141,6 +157,14 @@ export default function SubmissionReviewCenter() {
     const [loadingDetail, setLoadingDetail] = useState(false);
     const [filter, setFilter] = useState("all");
     const [searchQuery, setSearchQuery] = useState("");
+    const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+    
+    useEffect(() => {
+        const handler = setTimeout(() => {
+            setDebouncedSearchQuery(searchQuery);
+        }, 200);
+        return () => clearTimeout(handler);
+    }, [searchQuery]);
     const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false);
     const [isEndOfList, setIsEndOfList] = useState(false);
     const [savedProgressId, setSavedProgressId] = useState(null);
@@ -342,7 +366,7 @@ export default function SubmissionReviewCenter() {
     // Reset visible count when filters or sorting change
     useEffect(() => {
         setVisibleCount(50);
-    }, [filter, searchQuery, hasIntroFilter, hasTakesFilter, hasImagesFilter, completenessFilter, recentlyUpdatedFilter, sortBy, submissions]);
+    }, [filter, debouncedSearchQuery, hasIntroFilter, hasTakesFilter, hasImagesFilter, completenessFilter, recentlyUpdatedFilter, sortBy, submissions]);
 
     // Filtered lists
     const filteredSubmissions = useMemo(() => {
@@ -354,8 +378,8 @@ export default function SubmissionReviewCenter() {
                     if (filter !== "updated" && (s.decision || "pending") !== filter) return false;
                 }
                 // Search query
-                if (searchQuery.trim()) {
-                    const q = searchQuery.toLowerCase();
+                if (debouncedSearchQuery.trim()) {
+                    const q = debouncedSearchQuery.toLowerCase();
                     const nameMatch = (s.talent_name || "").toLowerCase().includes(q);
                     const emailMatch = (s.talent_email || "").toLowerCase().includes(q);
                     if (!nameMatch && !emailMatch) return false;
@@ -426,7 +450,7 @@ export default function SubmissionReviewCenter() {
                 }
                 return 0;
             });
-    }, [submissions, filter, searchQuery, hasIntroFilter, hasTakesFilter, hasImagesFilter, completenessFilter, recentlyUpdatedFilter, sortBy, project]);
+    }, [submissions, filter, debouncedSearchQuery, hasIntroFilter, hasTakesFilter, hasImagesFilter, completenessFilter, recentlyUpdatedFilter, sortBy, project]);
 
     // Navigation indexes
     const currentIndex = filteredSubmissions.findIndex(s => s.id === selectedId);

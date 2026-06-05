@@ -156,6 +156,27 @@ const PipelineColumn = memo(function PipelineColumn({
 
     // 1. useState hooks
     const [isDragOver, setIsDragOver] = useState(false);
+    const [visibleLimit, setVisibleLimit] = useState(20);
+    const sentinelRef = React.useRef(null);
+
+    React.useEffect(() => {
+        setVisibleLimit(20);
+    }, [items.length]);
+
+    React.useEffect(() => {
+        if (items.length <= visibleLimit) return;
+        const sentinel = sentinelRef.current;
+        if (!sentinel) return;
+
+        const observer = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting) {
+                setVisibleLimit((prev) => Math.min(prev + 20, items.length));
+            }
+        }, { root: sentinel.parentElement, rootMargin: "150px" });
+
+        observer.observe(sentinel);
+        return () => observer.disconnect();
+    }, [items.length, visibleLimit]);
 
     // 2. useMemo hooks
     const displayMetrics = useMemo(() => {
@@ -403,25 +424,33 @@ const PipelineColumn = memo(function PipelineColumn({
                                 ]}
                             />
                         ) : (
-                            // TODO: Replace with @tanstack/react-virtual when items.length > 100
-                            // For now, standard render with stable props
-                            items.map((item) => (
-                                <PipelineCard
-                                    key={`${stage}-${item.id}`}
-                                    projectId={projectId}
-                                    item={item}
-                                    refresh={refresh}
-                                    bulkMode={bulkMode && !readOnly}
-                                    isSelected={bulkIds.has(item.id)}
-                                    onToggleSelect={handleToggleSelect}
-                                    readOnly={readOnly}
-                                    dragSupported={dragSupported}
-                                    isDragging={dragId === item.id}
-                                    onDragStart={handleDragStart}
-                                    onDragEnd={handleDragEnd}
-                                    compact={compact}
-                                />
-                            ))
+                            <>
+                                {items.slice(0, visibleLimit).map((item) => (
+                                    <PipelineCard
+                                        key={`${stage}-${item.id}`}
+                                        projectId={projectId}
+                                        item={item}
+                                        refresh={refresh}
+                                        bulkMode={bulkMode && !readOnly}
+                                        isSelected={bulkIds.has(item.id)}
+                                        onToggleSelect={handleToggleSelect}
+                                        readOnly={readOnly}
+                                        dragSupported={dragSupported}
+                                        isDragging={dragId === item.id}
+                                        onDragStart={handleDragStart}
+                                        onDragEnd={handleDragEnd}
+                                        compact={compact}
+                                    />
+                                ))}
+                                {items.length > visibleLimit && (
+                                    <div
+                                        ref={sentinelRef}
+                                        className="h-8 flex items-center justify-center text-[10px] text-black/35 font-mono select-none"
+                                    >
+                                        Loading more candidates...
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
                 </>

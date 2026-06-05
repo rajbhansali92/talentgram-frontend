@@ -241,35 +241,36 @@ export default function TalentList() {
         }
     }, []);
 
-    const qRef = useRef(q);
-    useEffect(() => {
-        qRef.current = q;
-    }, [q]);
+    const [debouncedQ, setDebouncedQ] = useState(q);
 
-    // Initial load
-    useEffect(() => {
-        load(qRef.current, page);
-    }, [page, load]);
-
-    // Debounced search — 250 ms (resets to page 1)
+    // Debounce search input (250ms)
     useEffect(() => {
         const t = setTimeout(() => {
-            setPage(1);
-            load(q, 1);
+            setDebouncedQ(q);
         }, 250);
         return () => clearTimeout(t);
-    }, [q, load]);
+    }, [q]);
 
-    // Re-fetch when navigating back from detail page.
+    // Reset page to 1 when debounced query changes
+    useEffect(() => {
+        setPage(1);
+    }, [debouncedQ]);
+
+    // Trigger load when page or debounced query changes
+    useEffect(() => {
+        load(debouncedQ, page);
+    }, [page, debouncedQ, load]);
+
+    // Re-fetch when navigating back from detail page
     useEffect(() => {
         const onVisible = () => {
             if (document.visibilityState === "visible") {
-                load(qRef.current, page);
+                load(debouncedQ, page);
             }
         };
         document.addEventListener("visibilitychange", onVisible);
         return () => document.removeEventListener("visibilitychange", onVisible);
-    }, [load, page]);
+    }, [load, page, debouncedQ]);
 
     // ── Selection ────────────────────────────────────────────────────────────
     const toggle = useCallback((id) => {

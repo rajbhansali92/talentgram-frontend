@@ -19,6 +19,27 @@ function FollowUpLane({
     onCardDrop = NOOP,
 }) {
     const isFocused = focusedStageId === "follow_up";
+    const [visibleLimit, setVisibleLimit] = React.useState(24);
+    const sentinelRef = React.useRef(null);
+
+    React.useEffect(() => {
+        setVisibleLimit(24);
+    }, [items.length, isExpanded]);
+
+    React.useEffect(() => {
+        if (!isExpanded || items.length <= visibleLimit) return;
+        const sentinel = sentinelRef.current;
+        if (!sentinel) return;
+
+        const observer = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting) {
+                setVisibleLimit((prev) => Math.min(prev + 24, items.length));
+            }
+        }, { rootMargin: "150px" });
+
+        observer.observe(sentinel);
+        return () => observer.disconnect();
+    }, [items.length, visibleLimit, isExpanded]);
 
     if (isExpanded) {
         return (
@@ -70,24 +91,34 @@ function FollowUpLane({
                                 <p className="text-xs text-black/30 mt-1">No pending invitations or follow-ups at the moment.</p>
                             </div>
                         ) : (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                                {items.map((item) => (
-                                    <PipelineCard
-                                        key={`follow-up-expanded-${item.id}`}
-                                        projectId={projectId}
-                                        item={item}
-                                        refresh={refresh}
-                                        bulkMode={false}
-                                        isSelected={false}
-                                        onToggleSelect={NOOP}
-                                        readOnly={false}
-                                        dragSupported={dragSupported}
-                                        isDragging={dragId === item.id}
-                                        onDragStart={onCardDragStart}
-                                        onDragEnd={onCardDragEnd}
-                                    />
-                                ))}
-                            </div>
+                            <>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                                    {items.slice(0, visibleLimit).map((item) => (
+                                        <PipelineCard
+                                            key={`follow-up-expanded-${item.id}`}
+                                            projectId={projectId}
+                                            item={item}
+                                            refresh={refresh}
+                                            bulkMode={false}
+                                            isSelected={false}
+                                            onToggleSelect={NOOP}
+                                            readOnly={false}
+                                            dragSupported={dragSupported}
+                                            isDragging={dragId === item.id}
+                                            onDragStart={onCardDragStart}
+                                            onDragEnd={onCardDragEnd}
+                                        />
+                                    ))}
+                                </div>
+                                {items.length > visibleLimit && (
+                                    <div
+                                        ref={sentinelRef}
+                                        className="h-10 flex items-center justify-center text-[10px] text-black/35 font-mono select-none mt-4"
+                                    >
+                                        Loading more candidates...
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
                 </div>

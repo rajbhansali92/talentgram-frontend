@@ -9,6 +9,7 @@ import TalentList from "@/pages/TalentList";
 import TalentEdit from "@/pages/TalentEdit";
 import ProjectList from "@/pages/ProjectList";
 import ProjectEdit from "@/pages/ProjectEdit";
+import SubmissionReviewCenter from "@/pages/SubmissionReviewCenter";
 import LinkHistory from "@/pages/LinkHistory";
 import LinkGenerator from "@/pages/LinkGenerator";
 import LinkResults from "@/pages/LinkResults";
@@ -67,6 +68,7 @@ function App() {
                         <Route path="projects" element={<ProjectList />} />
                         <Route path="projects/new" element={<ProjectEdit />} />
                         <Route path="projects/:id" element={<ProjectEdit />} />
+                        <Route path="projects/:id/submissions" element={<SubmissionReviewCenter />} />
                         <Route path="links" element={<LinkHistory />} />
                         <Route path="links/new" element={<LinkGenerator />} />
                         <Route

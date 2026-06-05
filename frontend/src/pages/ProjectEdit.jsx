@@ -1010,14 +1010,23 @@ export default function ProjectEdit() {
                                 {submissions.length} total · {approvedCount} approved · {rejectedCount} rejected
                             </p>
                         </div>
-                        <button
-                            type="button"
-                            onClick={() => setCollapsedSections(prev => ({ ...prev, submissions: !prev.submissions }))}
-                            className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
-                            aria-label={collapsedSections.submissions ? "Expand submissions" : "Collapse submissions"}
-                        >
-                            <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissions ? "-rotate-90" : ""}`} />
-                        </button>
+                        <div className="flex items-center gap-2">
+                            <Link
+                                to={`/admin/projects/${id}/submissions`}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-black/35 hover:bg-black/[0.02] rounded-md text-xs text-black/75 hover:text-black font-semibold transition-all shadow-sm"
+                            >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                                Open Review Center
+                            </Link>
+                            <button
+                                type="button"
+                                onClick={() => setCollapsedSections(prev => ({ ...prev, submissions: !prev.submissions }))}
+                                className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                                aria-label={collapsedSections.submissions ? "Expand submissions" : "Collapse submissions"}
+                            >
+                                <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissions ? "-rotate-90" : ""}`} />
+                            </button>
+                        </div>
                     </div>
 
                     {!collapsedSections.submissions && (

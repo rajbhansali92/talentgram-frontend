@@ -146,6 +146,15 @@ export default function SubmissionReviewCenter() {
     const [savedProgressId, setSavedProgressId] = useState(null);
     const [showResumePrompt, setShowResumePrompt] = useState(false);
     
+    // Advanced Filters & Sorting states
+    const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+    const [hasIntroFilter, setHasIntroFilter] = useState(false);
+    const [hasTakesFilter, setHasTakesFilter] = useState(false);
+    const [hasImagesFilter, setHasImagesFilter] = useState(false);
+    const [completenessFilter, setCompletenessFilter] = useState("all");
+    const [recentlyUpdatedFilter, setRecentlyUpdatedFilter] = useState(false);
+    const [sortBy, setSortBy] = useState("newest");
+    
     // Curation / Decision states
     const [decisionNote, setDecisionNote] = useState("");
     const [form, setForm] = useState({});
@@ -330,21 +339,86 @@ export default function SubmissionReviewCenter() {
     };
 
     // Filtered lists
-    const filteredSubmissions = submissions.filter((s) => {
-        // Status tabs
-        if (filter !== "all") {
-            if (filter === "updated" && s.status !== "updated") return false;
-            if (filter !== "updated" && (s.decision || "pending") !== filter) return false;
-        }
-        // Search query
-        if (searchQuery.trim()) {
-            const q = searchQuery.toLowerCase();
-            const nameMatch = (s.talent_name || "").toLowerCase().includes(q);
-            const emailMatch = (s.talent_email || "").toLowerCase().includes(q);
-            return nameMatch || emailMatch;
-        }
-        return true;
-    });
+    const filteredSubmissions = submissions
+        .filter((s) => {
+            // Status tabs
+            if (filter !== "all") {
+                if (filter === "updated" && s.status !== "updated") return false;
+                if (filter !== "updated" && (s.decision || "pending") !== filter) return false;
+            }
+            // Search query
+            if (searchQuery.trim()) {
+                const q = searchQuery.toLowerCase();
+                const nameMatch = (s.talent_name || "").toLowerCase().includes(q);
+                const emailMatch = (s.talent_email || "").toLowerCase().includes(q);
+                if (!nameMatch && !emailMatch) return false;
+            }
+
+            // Has Intro Video
+            if (hasIntroFilter) {
+                const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
+                if (!hasIntro) return false;
+            }
+
+            // Has Audition Takes
+            if (hasTakesFilter) {
+                const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
+                if (takesCount === 0) return false;
+            }
+
+            // Has Images
+            if (hasImagesFilter) {
+                const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
+                if (imagesCount === 0) return false;
+            }
+
+            // Completeness: 'all', 'complete', 'incomplete'
+            if (completenessFilter !== "all") {
+                const comp = getCompleteness(s, project);
+                if (completenessFilter === "complete" && comp.status !== "Complete") return false;
+                if (completenessFilter === "incomplete" && comp.status === "Complete") return false;
+            }
+
+            // Recently Updated (updated in last 24 hours)
+            if (recentlyUpdatedFilter) {
+                const ts = s.submitted_at || s.created_at;
+                if (!ts) return false;
+                const diffMs = new Date() - new Date(ts);
+                const isRecent = diffMs < 24 * 60 * 60 * 1000;
+                if (!isRecent) return false;
+            }
+
+            return true;
+        })
+        .sort((a, b) => {
+            if (sortBy === "newest") {
+                return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+            }
+            if (sortBy === "oldest") {
+                return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+            }
+            if (sortBy === "recently_updated") {
+                const tA = a.submitted_at || a.created_at || 0;
+                const tB = b.submitted_at || b.created_at || 0;
+                return new Date(tB) - new Date(tA);
+            }
+            if (sortBy === "most_complete") {
+                const aMedia = a.media?.length || 0;
+                const bMedia = b.media?.length || 0;
+                return bMedia - aMedia;
+            }
+            if (sortBy === "age") {
+                const ageA = a.effective_age || 0;
+                const ageB = b.effective_age || 0;
+                return ageA - ageB;
+            }
+            if (sortBy === "location") {
+                const locA = (a.form_data?.location || "").toLowerCase();
+                const locB = (b.form_data?.location || "").toLowerCase();
+                return locA.localeCompare(locB);
+            }
+            return 0;
+        });
 
     // Navigation indexes
     const currentIndex = filteredSubmissions.findIndex(s => s.id === selectedId);
@@ -455,13 +529,116 @@ export default function SubmissionReviewCenter() {
                 <aside className={`w-full md:w-[350px] lg:w-[400px] border-r border-black/[0.08] bg-white flex flex-col shrink-0 overflow-hidden transition-all duration-300 ${isMobileDetailOpen ? "hidden md:flex" : "flex"}`}>
                     {/* Search & Filter Bar */}
                     <div className="p-4 border-b border-black/[0.06] space-y-3 bg-[#fafaf9]">
-                        <input
-                            type="search"
-                            placeholder="Search talent name or email..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full text-xs px-3 py-2 border border-black/[0.08] focus:border-black/40 rounded-lg outline-none bg-white transition-all text-black/85"
-                        />
+                        <div className="flex items-center gap-2">
+                            <input
+                                type="search"
+                                placeholder="Search name or email..."
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                className="flex-1 text-xs px-3 py-2 border border-black/[0.08] focus:border-black/40 rounded-lg outline-none bg-white transition-all text-black/85"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+                                className={`px-2.5 py-2 border rounded-lg text-xs font-semibold transition-all shrink-0 ${showAdvancedFilters ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.16] bg-white"}`}
+                                title="Toggle Advanced Filters"
+                            >
+                                ⚙️ Filters
+                            </button>
+                        </div>
+
+                        {showAdvancedFilters && (
+                            <div className="border border-black/[0.08] bg-white rounded-lg p-3 space-y-3.5 animate-in slide-in-from-top-2 duration-200">
+                                {/* Sort Dropdown */}
+                                <div className="space-y-1">
+                                    <label className="text-[9px] uppercase font-mono tracking-wider text-black/45 block">Sort By</label>
+                                    <select
+                                        value={sortBy}
+                                        onChange={(e) => setSortBy(e.target.value)}
+                                        className="w-full text-xs px-2.5 py-1.5 border border-black/[0.08] rounded-md outline-none bg-[#fafaf9] text-black/80"
+                                    >
+                                        <option value="newest">Newest First</option>
+                                        <option value="oldest">Oldest First</option>
+                                        <option value="recently_updated">Recently Updated First</option>
+                                        <option value="most_complete">Most Complete First</option>
+                                        <option value="age">Age (Youngest First)</option>
+                                        <option value="location">Location (A-Z)</option>
+                                    </select>
+                                </div>
+
+                                {/* Completeness Select */}
+                                <div className="space-y-1">
+                                    <label className="text-[9px] uppercase font-mono tracking-wider text-black/45 block">Completeness</label>
+                                    <select
+                                        value={completenessFilter}
+                                        onChange={(e) => setCompletenessFilter(e.target.value)}
+                                        className="w-full text-xs px-2.5 py-1.5 border border-black/[0.08] rounded-md outline-none bg-[#fafaf9] text-black/80"
+                                    >
+                                        <option value="all">All Completeness States</option>
+                                        <option value="complete">Complete Only</option>
+                                        <option value="incomplete">Incomplete Only</option>
+                                    </select>
+                                </div>
+
+                                {/* Boolean Toggles */}
+                                <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-black/[0.04]">
+                                    <label className="flex items-center gap-1.5 text-xs text-black/70 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={hasIntroFilter}
+                                            onChange={(e) => setHasIntroFilter(e.target.checked)}
+                                            className="rounded border-black/[0.15] text-black focus:ring-black w-3.5 h-3.5"
+                                        />
+                                        <span>Has Intro Video</span>
+                                    </label>
+                                    <label className="flex items-center gap-1.5 text-xs text-black/70 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={hasTakesFilter}
+                                            onChange={(e) => setHasTakesFilter(e.target.checked)}
+                                            className="rounded border-black/[0.15] text-black focus:ring-black w-3.5 h-3.5"
+                                        />
+                                        <span>Has Takes</span>
+                                    </label>
+                                    <label className="flex items-center gap-1.5 text-xs text-black/70 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={hasImagesFilter}
+                                            onChange={(e) => setHasImagesFilter(e.target.checked)}
+                                            className="rounded border-black/[0.15] text-black focus:ring-black w-3.5 h-3.5"
+                                        />
+                                        <span>Has Images</span>
+                                    </label>
+                                    <label className="flex items-center gap-1.5 text-xs text-black/70 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={recentlyUpdatedFilter}
+                                            onChange={(e) => setRecentlyUpdatedFilter(e.target.checked)}
+                                            className="rounded border-black/[0.15] text-black focus:ring-black w-3.5 h-3.5"
+                                        />
+                                        <span>Recently Updated</span>
+                                    </label>
+                                </div>
+
+                                {/* Reset button if any filter is active */}
+                                {(hasIntroFilter || hasTakesFilter || hasImagesFilter || completenessFilter !== "all" || recentlyUpdatedFilter || sortBy !== "newest") && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setHasIntroFilter(false);
+                                            setHasTakesFilter(false);
+                                            setHasImagesFilter(false);
+                                            setCompletenessFilter("all");
+                                            setRecentlyUpdatedFilter(false);
+                                            setSortBy("newest");
+                                        }}
+                                        className="w-full text-center text-[10px] uppercase tracking-wider font-mono text-red-500 hover:text-red-600 pt-1"
+                                    >
+                                        Clear Advanced Filters
+                                    </button>
+                                )}
+                            </div>
+                        )}
                         <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin">
                             {["all", "pending", "approved", "hold", "rejected", "updated"].map((tab) => (
                                 <button

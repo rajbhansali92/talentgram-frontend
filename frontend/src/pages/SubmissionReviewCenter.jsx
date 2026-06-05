@@ -101,6 +101,30 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
     );
 }
 
+function getCompleteness(s, project) {
+    const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
+    const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
+    const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
+    
+    const customAnswers = s.form_data?.custom_answers || {};
+    const totalQuestions = project?.custom_questions?.length || 0;
+    const answeredCount = Object.values(customAnswers).filter(val => val !== undefined && val !== null && val !== "").length;
+    const hasAllQuestions = totalQuestions === 0 || answeredCount >= totalQuestions;
+
+    const missing = [];
+    if (!hasIntro) missing.push("Intro Video");
+    if (imagesCount === 0) missing.push("Images");
+    if (!hasAllQuestions) missing.push("Questions");
+
+    if (missing.length === 0) {
+        return { status: "Complete", color: "bg-green-50 text-green-700 border-green-200" };
+    }
+    if (missing.length === 1) {
+        return { status: `Missing ${missing[0]}`, color: "bg-amber-50 text-amber-700 border-amber-200" };
+    }
+    return { status: "Incomplete Submission", color: "bg-red-50 text-red-700 border-red-200" };
+}
+
 export default function SubmissionReviewCenter() {
     const { id } = useParams();
     const navigate = useNavigate();
@@ -445,42 +469,85 @@ export default function SubmissionReviewCenter() {
                                 No submissions match filters.
                             </div>
                         ) : (
-                            filteredSubmissions.map((s, idx) => {
-                                const isSelected = s.id === selectedId;
-                                const isUpdated = s.status === "updated";
-                                const statusKey = isUpdated ? "updated" : (s.decision || "pending");
-                                const cardBorder = borderColors[statusKey] || "";
+                             filteredSubmissions.map((s, idx) => {
+                                 const isSelected = s.id === selectedId;
+                                 const isUpdated = s.status === "updated";
+                                 const statusKey = isUpdated ? "updated" : (s.decision || "pending");
+                                 const cardBorder = borderColors[statusKey] || "";
+                                 
+                                 const comp = getCompleteness(s, project);
 
-                                return (
-                                    <div
-                                        key={s.id}
-                                        onClick={() => handleSelectRow(s.id)}
-                                        className={`px-4 py-3 cursor-pointer transition-colors flex items-center justify-between gap-3 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
-                                    >
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex items-center gap-1.5 flex-wrap">
-                                                <span className="font-display font-semibold text-sm text-black/95">
-                                                    {s.talent_name}
-                                                </span>
-                                                {isUpdated && (
-                                                    <span className="text-[8px] bg-blue-100 text-blue-700 px-1 py-0.5 rounded font-mono uppercase tracking-wider">
-                                                        Updated
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="text-[10px] text-black/45 font-mono mt-0.5 truncate">
-                                                {s.talent_email}
-                                            </div>
-                                            <div className="text-[10px] text-black/55 mt-1.5 flex items-center gap-1.5">
-                                                <span>Age: {s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—"}</span>
-                                                <span className="opacity-30">•</span>
-                                                <span>{formatRelativeTime(s.submitted_at || s.created_at)}</span>
-                                            </div>
-                                        </div>
-                                        <ChevronRight className="w-3.5 h-3.5 text-black/30 shrink-0 md:hidden" />
-                                    </div>
-                                );
-                            })
+                                 const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
+                                 const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
+                                 const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
+
+                                 const customAnswers = s.form_data?.custom_answers || {};
+                                 const totalQuestions = project?.custom_questions?.length || 0;
+                                 const answeredCount = Object.values(customAnswers).filter(val => val !== undefined && val !== null && val !== "").length;
+
+                                 const isRecent = (() => {
+                                     const ts = s.submitted_at || s.created_at;
+                                     if (!ts) return false;
+                                     const diffMs = new Date() - new Date(ts);
+                                     return diffMs < 24 * 60 * 60 * 1000;
+                                 })();
+
+                                 return (
+                                     <div
+                                         key={s.id}
+                                         onClick={() => handleSelectRow(s.id)}
+                                         className={`px-4 py-3.5 cursor-pointer transition-colors flex flex-col gap-2 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
+                                     >
+                                         <div className="flex items-center justify-between gap-2">
+                                             <span className="font-display font-semibold text-sm text-black/95 truncate">
+                                                 {s.talent_name}
+                                             </span>
+                                             <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 ${comp.color}`}>
+                                                 {comp.status}
+                                             </span>
+                                         </div>
+                                         <div className="text-[10px] text-black/45 font-mono truncate">
+                                             {s.talent_email}
+                                         </div>
+                                         <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                                             {hasIntro ? (
+                                                 <span className="inline-flex items-center text-[9px] bg-neutral-100 text-neutral-700 px-1.5 py-0.5 rounded font-mono">
+                                                     🎥 Intro Video
+                                                 </span>
+                                             ) : (
+                                                 <span className="inline-flex items-center text-[9px] bg-neutral-50 text-neutral-400 px-1.5 py-0.5 rounded font-mono border border-dashed border-neutral-200">
+                                                     🎥 No Video
+                                                 </span>
+                                             )}
+
+                                             <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${takesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
+                                                 🎬 Audition Takes ({takesCount})
+                                             </span>
+
+                                             <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${imagesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
+                                                 📷 Images ({imagesCount})
+                                             </span>
+
+                                             {totalQuestions > 0 && (
+                                                 <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${answeredCount >= totalQuestions ? "bg-neutral-100 text-neutral-700" : "bg-amber-50 text-amber-600 border border-amber-200"}`}>
+                                                     📄 Qs ({answeredCount}/{totalQuestions})
+                                                 </span>
+                                             )}
+                                         </div>
+                                         <div className="text-[9px] text-black/55 flex items-center justify-between mt-1">
+                                             <span>Age: {s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—"}</span>
+                                             <div className="flex items-center gap-1">
+                                                 {isRecent && (
+                                                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" title="Recently updated" />
+                                                 )}
+                                                 <span className={isRecent ? "text-blue-600 font-semibold" : "text-black/45"}>
+                                                     🕒 {isRecent ? "Recently Updated" : "Last Updated"}: {formatRelativeTime(s.submitted_at || s.created_at)}
+                                                 </span>
+                                             </div>
+                                         </div>
+                                     </div>
+                                 );
+                             })
                         )}
                     </div>
                 </aside>

@@ -1065,7 +1065,6 @@ async def list_submissions(
     # NOTE: talent_name is stored at top-level (not inside form_data) — safe.
     _SUB_LIST_PROJ = {
         "_id": 0,
-        "form_data": 0,        # large nested object — not needed by list rows
         "field_visibility": 0, # internal toggle map — not rendered in list
     }
     cursor = db.submissions.find(query, _SUB_LIST_PROJ).sort("created_at", -1)

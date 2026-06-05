@@ -1228,7 +1228,7 @@ export default function TalentEdit() {
                                                     setLightboxCategory("video");
                                                     setLightboxIndex(0);
                                                 }}
-                                                className="relative w-full sm:w-64 aspect-video bg-black/5 border border-black/[0.08] rounded-xl overflow-hidden cursor-zoom-in group shrink-0"
+                                                className={`relative w-full sm:w-64 aspect-video border border-black/[0.08] rounded-xl overflow-hidden cursor-pointer hover:shadow-md transition-shadow group shrink-0 ${!(m.poster_url || m.thumbnail_url) ? "bg-black/5" : ""}`}
                                             >
                                                 {m.poster_url || m.thumbnail_url ? (
                                                     <img
@@ -1243,14 +1243,14 @@ export default function TalentEdit() {
                                                     </div>
                                                 )}
                                                 {/* Play overlay icon */}
-                                                <div className="absolute inset-0 flex items-center justify-center bg-black/10 group-hover:bg-black/35 transition-colors">
+                                                <div className="absolute inset-0 flex items-center justify-center bg-black/10 group-hover:bg-black/30 transition-colors">
                                                     <div className="w-10 h-10 rounded-full bg-white/95 flex items-center justify-center shadow-lg transition-transform group-hover:scale-110">
                                                         <Play className="w-4 h-4 fill-black text-black ml-0.5" />
                                                     </div>
                                                 </div>
                                                 {/* Duration badge */}
                                                 {m.duration && (
-                                                    <div className="absolute bottom-2.5 right-2.5 bg-black/75 backdrop-blur-sm text-[10px] text-white font-medium px-2 py-0.5 rounded shadow-sm">
+                                                    <div className="absolute top-2.5 right-2.5 bg-black/75 backdrop-blur-sm text-[10px] text-white font-medium px-2 py-0.5 rounded shadow-sm z-10">
                                                         {formatDuration(m.duration)}
                                                     </div>
                                                 )}

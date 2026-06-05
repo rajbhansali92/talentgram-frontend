@@ -413,6 +413,16 @@ def video_poster_url(public_id: Optional[str]) -> Optional[str]:
     if not public_id:
         return None
     if public_id.startswith(("http://", "https://")):
+        url = public_id
+        if "res.cloudinary.com" in url:
+            base, ext = os.path.splitext(url)
+            if "?" in ext:
+                ext = ext.split("?")[0]
+            jpg_url = base + ".jpg"
+            if "/video/upload/" in jpg_url:
+                # Add default width and quality transformations
+                jpg_url = jpg_url.replace("/video/upload/", "/video/upload/w_600,h_338,c_fill,q_auto/")
+            return jpg_url
         return None
     url, _ = cloudinary.utils.cloudinary_url(
         public_id,
@@ -1205,8 +1215,10 @@ def _public_media(m: dict) -> dict:
     }
     if m.get("label"):
         out["label"] = m["label"]
-    if is_video and m.get("public_id"):
-        out["poster_url"] = m.get("poster_url") or video_poster_url(m["public_id"])
+    if "duration" in m:
+        out["duration"] = m["duration"]
+    if is_video:
+        out["poster_url"] = m.get("poster_url") or video_poster_url(m.get("public_id")) or video_poster_url(url)
     
     # Curated media visibility and metadata flags
     for k in ["client_visible", "internal_only", "featured_for_client", "primary_take", "featured", "client_cover"]:

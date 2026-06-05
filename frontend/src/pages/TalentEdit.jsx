@@ -1210,9 +1210,11 @@ export default function TalentEdit() {
                                             }}
                                             className="relative group aspect-square bg-[#fafaf8] border border-black/[0.08] rounded-lg overflow-hidden cursor-zoom-in"
                                         >
-                                            {m.content_type?.startsWith("video") ? (
-                                                <div className="relative w-full h-full">
-                                                    {m.poster_url ? (
+                                            {(() => {
+                                                const isVideo = m.content_type?.startsWith("video") || m.category === "video" || m.resource_type === "video";
+                                                return isVideo ? (
+                                                    <div className="relative w-full h-full">
+                                                        {m.poster_url ? (
                                                         <img
                                                             src={m.poster_url}
                                                             alt="Video Preview"
@@ -1244,7 +1246,8 @@ export default function TalentEdit() {
                                                     loading="lazy" // ISSUE 11: Lazy loading
                                                     className="w-full h-full object-cover"
                                                 />
-                                            )}
+                                            );
+                                            })()}
                                             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/40 flex items-center justify-center gap-2">
                                                 {!cat.isVideo && (
                                                     <button
@@ -1382,7 +1385,8 @@ export default function TalentEdit() {
                             const currentItem = items[lightboxIndex];
                             if (!currentItem) return null;
 
-                            if (currentItem.content_type?.startsWith("video")) {
+                            const isVideo = currentItem.content_type?.startsWith("video") || currentItem.category === "video" || currentItem.resource_type === "video";
+                            if (isVideo) {
                                 return (
                                     <video
                                         src={currentItem.url}

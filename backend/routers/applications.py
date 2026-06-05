@@ -291,6 +291,7 @@ async def upload_application_media(
         "created_at": _now(),
         "scope": "application",
         "application_id": aid,
+        "duration": result.get("duration"),
         "thumbnail_url": media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image_uploaded else None,
         "poster_url": video_poster_url(result["public_id"]) if is_video_uploaded else None,
     }
@@ -517,6 +518,8 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
             "created_at": _now(),
             "scope": "talent_portfolio",
             "talent_id": tid,
+            "duration": m.get("duration"),
+            "poster_url": m.get("poster_url"),
         })
         if new_cat in ("portfolio", "indian", "western") and not cover_mid:
             cover_mid = mid

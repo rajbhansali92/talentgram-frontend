@@ -449,6 +449,7 @@ async def add_media(
         "created_at": _now(),
         "scope": "talent_portfolio",
         "talent_id": tid,
+        "duration": result.get("duration"),
         "thumbnail_url": media_url(result["public_id"], preset="roster", resource_type=result["resource_type"]) if is_image else None,
         "poster_url": video_poster_url(result["public_id"]) if is_video else None,
     }

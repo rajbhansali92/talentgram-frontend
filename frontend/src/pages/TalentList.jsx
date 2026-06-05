@@ -223,7 +223,7 @@ export default function TalentList() {
             const { data } = await adminApi.get("/talents", {
                 params: {
                     ...(qq ? { q: qq } : {}),
-                    page: pageNum,
+                    page: pageNum - 1,
                     size: pageSize,
                 },
             });

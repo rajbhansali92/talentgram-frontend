@@ -516,7 +516,14 @@ export default function SubmissionReviewCenter() {
                 <div className="flex items-center gap-3">
                     {submissions.length > 0 && (
                         <div className="px-4 py-1.5 bg-black text-white text-xs font-mono font-semibold uppercase tracking-wider rounded-sm shadow-sm animate-pulse-subtle">
-                            Reviewing {currentIndex + 1} of {filteredSubmissions.length}
+                            {isEndOfList
+                                ? "All Submissions Reviewed"
+                                : filteredSubmissions.length === 0
+                                ? "No matching submissions"
+                                : currentIndex !== -1
+                                ? `Reviewing ${currentIndex + 1} of ${filteredSubmissions.length}`
+                                : `Submissions (${filteredSubmissions.length})`
+                            }
                         </div>
                     )}
                 </div>
@@ -526,7 +533,7 @@ export default function SubmissionReviewCenter() {
             <div className="flex flex-1 overflow-hidden relative">
                 
                 {/* ── LEFT PANEL (SUBMISSION LIST) ── */}
-                <aside className={`w-full md:w-[350px] lg:w-[400px] border-r border-black/[0.08] bg-white flex flex-col shrink-0 overflow-hidden transition-all duration-300 ${isMobileDetailOpen ? "hidden md:flex" : "flex"}`}>
+                <aside className={`w-full md:w-[35%] border-r border-black/[0.08] bg-white flex flex-col shrink-0 overflow-hidden transition-all duration-300 ${isMobileDetailOpen ? "hidden md:flex" : "flex"}`}>
                     {/* Search & Filter Bar */}
                     <div className="p-4 border-b border-black/[0.06] space-y-3 bg-[#fafaf9]">
                         <div className="flex items-center gap-2">
@@ -694,13 +701,20 @@ export default function SubmissionReviewCenter() {
                                          onClick={() => handleSelectRow(s.id)}
                                          className={`px-4 py-3.5 cursor-pointer transition-colors flex flex-col gap-2 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
                                      >
-                                         <div className="flex items-center justify-between gap-2">
+                                         <div className="flex items-center justify-between gap-2 flex-wrap">
                                              <span className="font-display font-semibold text-sm text-black/95 truncate">
                                                  {s.talent_name}
                                              </span>
-                                             <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 ${comp.color}`}>
-                                                 {comp.status}
-                                             </span>
+                                             <div className="flex gap-1 shrink-0">
+                                                 {/* Primary: Decision status */}
+                                                 <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${statusBadges[s.decision || "pending"]}`}>
+                                                     {s.decision || "pending"}
+                                                 </span>
+                                                 {/* Secondary: Completeness */}
+                                                 <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${comp.color}`}>
+                                                     {comp.status}
+                                                 </span>
+                                             </div>
                                          </div>
                                          <div className="text-[10px] text-black/45 font-mono truncate">
                                              {s.talent_email}

@@ -607,6 +607,22 @@ def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
         if computed is not None:
             doc["age"] = computed
 
+    # Dynamic enrichment of individual media list items
+    enriched_media = []
+    for m in doc.get("media") or []:
+        resource_type = m.get("resource_type")
+        is_video = resource_type == "video" or m.get("category") == "video" or (m.get("content_type") or "").startswith("video/")
+        enriched_item = {**m}
+        if is_video:
+            url = m.get("url")
+            enriched_item["video_url"] = url
+            enriched_item["poster_url"] = m.get("poster_url") or video_poster_url(m.get("public_id")) or video_poster_url(url)
+            enriched_item["thumbnail_url"] = m.get("thumbnail_url") or enriched_item["poster_url"]
+            if "duration" not in enriched_item:
+                enriched_item["duration"] = None
+        enriched_media.append(enriched_item)
+    doc["media"] = enriched_media
+
     media_item = resolve_cover_media(doc)
     if media_item:
         url = media_item.get("url")

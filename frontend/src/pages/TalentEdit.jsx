@@ -1166,19 +1166,21 @@ export default function TalentEdit() {
                         >
                             <div className="flex items-center justify-between mb-6">
                                 <p className="eyebrow">{cat.label}</p>
-                                <button
-                                    onClick={() => fileRefs.current[cat.key]?.click()}
-                                    disabled={uploading === cat.key}
-                                    data-testid={`upload-${cat.key}-btn`}
-                                    className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors"
-                                >
-                                    {uploading === cat.key ? (
-                                        <Loader2 className="w-3 h-3 animate-spin" />
-                                    ) : (
-                                        <Upload className="w-3 h-3" />
-                                    )}
-                                    Upload
-                                </button>
+                                {cat.key !== "video" && (
+                                    <button
+                                        onClick={() => fileRefs.current[cat.key]?.click()}
+                                        disabled={uploading === cat.key}
+                                        data-testid={`upload-${cat.key}-btn`}
+                                        className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors"
+                                    >
+                                        {uploading === cat.key ? (
+                                            <Loader2 className="w-3 h-3 animate-spin" />
+                                        ) : (
+                                            <Upload className="w-3 h-3" />
+                                        )}
+                                        Upload
+                                    </button>
+                                )}
                                 <input
                                     ref={setFileRef(cat.key)}
                                     type="file"
@@ -1195,10 +1197,105 @@ export default function TalentEdit() {
                                     }}
                                 />
                             </div>
-                            {mediaBy(cat.key).length === 0 ? (
-                                <p className="text-black/40 text-sm">
-                                    No files
-                                </p>
+                            {cat.key === "video" ? (
+                                (() => {
+                                    const videoMedia = mediaBy("video");
+                                    if (videoMedia.length === 0) {
+                                        return (
+                                            <div 
+                                                onClick={() => fileRefs.current.video?.click()}
+                                                className="border-2 border-dashed border-black/[0.08] hover:border-black/35 rounded-xl p-8 text-center cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 min-h-[140px]"
+                                            >
+                                                <div className="w-10 h-10 rounded-full bg-black/5 flex items-center justify-center text-black/50">
+                                                    {uploading === "video" ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
+                                                </div>
+                                                <div>
+                                                    <p className="text-xs font-semibold text-black/70">Upload Audition / Intro Video</p>
+                                                    <p className="text-[10px] text-black/40 mt-1">Supports MP4, MOV, WEBM up to 25MB</p>
+                                                </div>
+                                            </div>
+                                        );
+                                    }
+                                    const m = videoMedia[0];
+                                    const formattedUploadDate = m.created_at 
+                                        ? new Date(m.created_at).toLocaleDateString("en-US", { day: 'numeric', month: 'short', year: 'numeric' })
+                                        : "Recently";
+                                    return (
+                                        <div className="flex flex-col sm:flex-row gap-6 items-start sm:items-center">
+                                            {/* Left: Thumbnail Card */}
+                                            <div 
+                                                onClick={() => {
+                                                    setLightboxCategory("video");
+                                                    setLightboxIndex(0);
+                                                }}
+                                                className="relative w-full sm:w-64 aspect-video bg-black/5 border border-black/[0.08] rounded-xl overflow-hidden cursor-zoom-in group shrink-0"
+                                            >
+                                                {m.poster_url || m.thumbnail_url ? (
+                                                    <img
+                                                        src={m.poster_url || m.thumbnail_url}
+                                                        alt="Video Preview"
+                                                        loading="lazy"
+                                                        className="w-full h-full object-cover"
+                                                    />
+                                                ) : (
+                                                    <div className="w-full h-full flex items-center justify-center bg-black/5">
+                                                        <Play className="w-8 h-8 text-black/40" />
+                                                    </div>
+                                                )}
+                                                {/* Play overlay icon */}
+                                                <div className="absolute inset-0 flex items-center justify-center bg-black/10 group-hover:bg-black/35 transition-colors">
+                                                    <div className="w-10 h-10 rounded-full bg-white/95 flex items-center justify-center shadow-lg transition-transform group-hover:scale-110">
+                                                        <Play className="w-4 h-4 fill-black text-black ml-0.5" />
+                                                    </div>
+                                                </div>
+                                                {/* Duration badge */}
+                                                {m.duration && (
+                                                    <div className="absolute bottom-2.5 right-2.5 bg-black/75 backdrop-blur-sm text-[10px] text-white font-medium px-2 py-0.5 rounded shadow-sm">
+                                                        {formatDuration(m.duration)}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Right: Info Block */}
+                                            <div className="flex-1 min-w-0">
+                                                <h3 className="font-semibold text-base text-black/85 leading-snug">Introduction Video</h3>
+                                                <div className="mt-2 space-y-1 text-xs text-black/50">
+                                                    <p><span className="font-medium text-black/40">Duration:</span> {m.duration ? formatDuration(m.duration) : "—"}</p>
+                                                    <p><span className="font-medium text-black/40">Uploaded:</span> {formattedUploadDate}</p>
+                                                </div>
+                                                <div className="mt-4 flex flex-wrap gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => fileRefs.current.video?.click()}
+                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-black/[0.16] rounded-lg text-xs font-medium text-black/70 hover:text-black transition-colors"
+                                                    >
+                                                        Replace
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setMediaToRemove(m.id);
+                                                            setConfirmRemoveOpen(true);
+                                                        }}
+                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-red-600/20 rounded-lg text-xs font-medium text-black/70 hover:border-red-600 hover:text-red-600 transition-colors"
+                                                    >
+                                                        Delete
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setLightboxCategory("video");
+                                                            setLightboxIndex(0);
+                                                        }}
+                                                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-black text-white hover:bg-black/90 rounded-lg text-xs font-medium transition-colors"
+                                                    >
+                                                        Preview
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })()
                             ) : (
                                 <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-3">
                                     {mediaBy(cat.key).map((m, idx) => (

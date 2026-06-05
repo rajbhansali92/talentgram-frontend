@@ -145,6 +145,7 @@ export default function SubmissionReviewCenter() {
     const [isEndOfList, setIsEndOfList] = useState(false);
     const [savedProgressId, setSavedProgressId] = useState(null);
     const [showResumePrompt, setShowResumePrompt] = useState(false);
+    const [visibleCount, setVisibleCount] = useState(50);
     
     // Advanced Filters & Sorting states
     const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
@@ -338,87 +339,94 @@ export default function SubmissionReviewCenter() {
         }
     };
 
+    // Reset visible count when filters or sorting change
+    useEffect(() => {
+        setVisibleCount(50);
+    }, [filter, searchQuery, hasIntroFilter, hasTakesFilter, hasImagesFilter, completenessFilter, recentlyUpdatedFilter, sortBy, submissions]);
+
     // Filtered lists
-    const filteredSubmissions = submissions
-        .filter((s) => {
-            // Status tabs
-            if (filter !== "all") {
-                if (filter === "updated" && s.status !== "updated") return false;
-                if (filter !== "updated" && (s.decision || "pending") !== filter) return false;
-            }
-            // Search query
-            if (searchQuery.trim()) {
-                const q = searchQuery.toLowerCase();
-                const nameMatch = (s.talent_name || "").toLowerCase().includes(q);
-                const emailMatch = (s.talent_email || "").toLowerCase().includes(q);
-                if (!nameMatch && !emailMatch) return false;
-            }
+    const filteredSubmissions = useMemo(() => {
+        return submissions
+            .filter((s) => {
+                // Status tabs
+                if (filter !== "all") {
+                    if (filter === "updated" && s.status !== "updated") return false;
+                    if (filter !== "updated" && (s.decision || "pending") !== filter) return false;
+                }
+                // Search query
+                if (searchQuery.trim()) {
+                    const q = searchQuery.toLowerCase();
+                    const nameMatch = (s.talent_name || "").toLowerCase().includes(q);
+                    const emailMatch = (s.talent_email || "").toLowerCase().includes(q);
+                    if (!nameMatch && !emailMatch) return false;
+                }
 
-            // Has Intro Video
-            if (hasIntroFilter) {
-                const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
-                if (!hasIntro) return false;
-            }
+                // Has Intro Video
+                if (hasIntroFilter) {
+                    const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
+                    if (!hasIntro) return false;
+                }
 
-            // Has Audition Takes
-            if (hasTakesFilter) {
-                const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
-                if (takesCount === 0) return false;
-            }
+                // Has Audition Takes
+                if (hasTakesFilter) {
+                    const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
+                    if (takesCount === 0) return false;
+                }
 
-            // Has Images
-            if (hasImagesFilter) {
-                const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
-                if (imagesCount === 0) return false;
-            }
+                // Has Images
+                if (hasImagesFilter) {
+                    const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
+                    if (imagesCount === 0) return false;
+                }
 
-            // Completeness: 'all', 'complete', 'incomplete'
-            if (completenessFilter !== "all") {
-                const comp = getCompleteness(s, project);
-                if (completenessFilter === "complete" && comp.status !== "Complete") return false;
-                if (completenessFilter === "incomplete" && comp.status === "Complete") return false;
-            }
+                // Completeness: 'all', 'complete', 'incomplete'
+                if (completenessFilter !== "all") {
+                    const comp = getCompleteness(s, project);
+                    if (completenessFilter === "complete" && comp.status !== "Complete") return false;
+                    if (completenessFilter === "incomplete" && comp.status === "Complete") return false;
+                }
 
-            // Recently Updated (updated in last 24 hours)
-            if (recentlyUpdatedFilter) {
-                const ts = s.submitted_at || s.created_at;
-                if (!ts) return false;
-                const diffMs = new Date() - new Date(ts);
-                const isRecent = diffMs < 24 * 60 * 60 * 1000;
-                if (!isRecent) return false;
-            }
+                // Recently Updated (updated in last 24 hours)
+                if (recentlyUpdatedFilter) {
+                    const ts = s.submitted_at || s.created_at;
+                    if (!ts) return false;
+                    const diffMs = new Date() - new Date(ts);
+                    const isRecent = diffMs < 24 * 60 * 60 * 1000;
+                    if (!isRecent) return false;
+                }
 
-            return true;
-        })
-        .sort((a, b) => {
-            if (sortBy === "newest") {
-                return new Date(b.created_at || 0) - new Date(a.created_at || 0);
-            }
-            if (sortBy === "oldest") {
-                return new Date(a.created_at || 0) - new Date(b.created_at || 0);
-            }
-            if (sortBy === "recently_updated") {
-                const tA = a.submitted_at || a.created_at || 0;
-                const tB = b.submitted_at || b.created_at || 0;
-                return new Date(tB) - new Date(tA);
-            }
-            if (sortBy === "most_complete") {
-                const aMedia = a.media?.length || 0;
-                const bMedia = b.media?.length || 0;
-                return bMedia - aMedia;
-            }
-            if (sortBy === "age") {
-                const ageA = a.effective_age || 0;
-                const ageB = b.effective_age || 0;
-                return ageA - ageB;
-            }
-            if (sortBy === "location") {
-                const locA = (a.form_data?.location || "").toLowerCase();
-                const locB = (b.form_data?.location || "").toLowerCase();
-                return locA.localeCompare(locB);
-            }
-            return 0;
-        });
+                return true;
+            })
+            .sort((a, b) => {
+                if (sortBy === "newest") {
+                    return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+                }
+                if (sortBy === "oldest") {
+                    return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+                }
+                if (sortBy === "recently_updated") {
+                    const tA = a.submitted_at || a.created_at || 0;
+                    const tB = b.submitted_at || b.created_at || 0;
+                    return new Date(tB) - new Date(tA);
+                }
+                if (sortBy === "most_complete") {
+                    const aMedia = a.media?.length || 0;
+                    const bMedia = b.media?.length || 0;
+                    return bMedia - aMedia;
+                }
+                if (sortBy === "age") {
+                    const ageA = a.effective_age || 0;
+                    const ageB = b.effective_age || 0;
+                    return ageA - ageB;
+                }
+                if (sortBy === "location") {
+                    const locA = (a.form_data?.location || "").toLowerCase();
+                    const locB = (b.form_data?.location || "").toLowerCase();
+                    return locA.localeCompare(locB);
+                }
+                return 0;
+            });
+    }, [submissions, filter, searchQuery, hasIntroFilter, hasTakesFilter, hasImagesFilter, completenessFilter, recentlyUpdatedFilter, sortBy, project]);
 
     // Navigation indexes
     const currentIndex = filteredSubmissions.findIndex(s => s.id === selectedId);
@@ -670,94 +678,106 @@ export default function SubmissionReviewCenter() {
                         ) : filteredSubmissions.length === 0 ? (
                             <div className="p-8 text-center text-black/35 text-xs">
                                 No submissions match filters.
-                            </div>
-                        ) : (
-                             filteredSubmissions.map((s, idx) => {
-                                 const isSelected = s.id === selectedId;
-                                 const isUpdated = s.status === "updated";
-                                 const statusKey = isUpdated ? "updated" : (s.decision || "pending");
-                                 const cardBorder = borderColors[statusKey] || "";
-                                 
-                                 const comp = getCompleteness(s, project);
+                                           ) : (
+                            <>
+                                 {filteredSubmissions.slice(0, visibleCount).map((s, idx) => {
+                                     const isSelected = s.id === selectedId;
+                                     const isUpdated = s.status === "updated";
+                                     const statusKey = isUpdated ? "updated" : (s.decision || "pending");
+                                     const cardBorder = borderColors[statusKey] || "";
+                                     
+                                     const comp = getCompleteness(s, project);
 
-                                 const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
-                                 const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
-                                 const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
+                                     const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
+                                     const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
+                                     const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
 
-                                 const customAnswers = s.form_data?.custom_answers || {};
-                                 const totalQuestions = project?.custom_questions?.length || 0;
-                                 const answeredCount = Object.values(customAnswers).filter(val => val !== undefined && val !== null && val !== "").length;
+                                     const customAnswers = s.form_data?.custom_answers || {};
+                                     const totalQuestions = project?.custom_questions?.length || 0;
+                                     const answeredCount = Object.values(customAnswers).filter(val => val !== undefined && val !== null && val !== "").length;
 
-                                 const isRecent = (() => {
-                                     const ts = s.submitted_at || s.created_at;
-                                     if (!ts) return false;
-                                     const diffMs = new Date() - new Date(ts);
-                                     return diffMs < 24 * 60 * 60 * 1000;
-                                 })();
+                                     const isRecent = (() => {
+                                         const ts = s.submitted_at || s.created_at;
+                                         if (!ts) return false;
+                                         const diffMs = new Date() - new Date(ts);
+                                         return diffMs < 24 * 60 * 60 * 1000;
+                                     })();
 
-                                 return (
-                                     <div
-                                         key={s.id}
-                                         onClick={() => handleSelectRow(s.id)}
-                                         className={`px-4 py-3.5 cursor-pointer transition-colors flex flex-col gap-2 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
-                                     >
-                                         <div className="flex items-center justify-between gap-2 flex-wrap">
-                                             <span className="font-display font-semibold text-sm text-black/95 truncate">
-                                                 {s.talent_name}
-                                             </span>
-                                             <div className="flex gap-1 shrink-0">
-                                                 {/* Primary: Decision status */}
-                                                 <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${statusBadges[s.decision || "pending"]}`}>
-                                                     {s.decision || "pending"}
+                                     return (
+                                         <div
+                                             key={s.id}
+                                             onClick={() => handleSelectRow(s.id)}
+                                             className={`px-4 py-3.5 cursor-pointer transition-colors flex flex-col gap-2 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
+                                         >
+                                             <div className="flex items-center justify-between gap-2 flex-wrap">
+                                                 <span className="font-display font-semibold text-sm text-black/95 truncate">
+                                                     {s.talent_name}
                                                  </span>
-                                                 {/* Secondary: Completeness */}
-                                                 <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${comp.color}`}>
-                                                     {comp.status}
-                                                 </span>
+                                                 <div className="flex gap-1 shrink-0">
+                                                     {/* Primary: Decision status */}
+                                                     <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${statusBadges[s.decision || "pending"]}`}>
+                                                         {s.decision || "pending"}
+                                                     </span>
+                                                     {/* Secondary: Completeness */}
+                                                     <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${comp.color}`}>
+                                                         {comp.status}
+                                                     </span>
+                                                 </div>
                                              </div>
-                                         </div>
-                                         <div className="text-[10px] text-black/45 font-mono truncate">
-                                             {s.talent_email}
-                                         </div>
-                                         <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                                             {hasIntro ? (
-                                                 <span className="inline-flex items-center text-[9px] bg-neutral-100 text-neutral-700 px-1.5 py-0.5 rounded font-mono">
-                                                     🎥 Intro Video
-                                                 </span>
-                                             ) : (
-                                                 <span className="inline-flex items-center text-[9px] bg-neutral-50 text-neutral-400 px-1.5 py-0.5 rounded font-mono border border-dashed border-neutral-200">
-                                                     🎥 No Video
-                                                 </span>
-                                             )}
-
-                                             <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${takesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
-                                                 🎬 Audition Takes ({takesCount})
-                                             </span>
-
-                                             <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${imagesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
-                                                 📷 Images ({imagesCount})
-                                             </span>
-
-                                             {totalQuestions > 0 && (
-                                                 <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${answeredCount >= totalQuestions ? "bg-neutral-100 text-neutral-700" : "bg-amber-50 text-amber-600 border border-amber-200"}`}>
-                                                     📄 Qs ({answeredCount}/{totalQuestions})
-                                                 </span>
-                                             )}
-                                         </div>
-                                         <div className="text-[9px] text-black/55 flex items-center justify-between mt-1">
-                                             <span>Age: {s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—"}</span>
-                                             <div className="flex items-center gap-1">
-                                                 {isRecent && (
-                                                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" title="Recently updated" />
+                                             <div className="text-[10px] text-black/45 font-mono truncate">
+                                                 {s.talent_email}
+                                             </div>
+                                             <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                                                 {hasIntro ? (
+                                                     <span className="inline-flex items-center text-[9px] bg-neutral-100 text-neutral-700 px-1.5 py-0.5 rounded font-mono">
+                                                         🎥 Intro Video
+                                                     </span>
+                                                 ) : (
+                                                     <span className="inline-flex items-center text-[9px] bg-neutral-50 text-neutral-400 px-1.5 py-0.5 rounded font-mono border border-dashed border-neutral-200">
+                                                         🎥 No Video
+                                                     </span>
                                                  )}
-                                                 <span className={isRecent ? "text-blue-600 font-semibold" : "text-black/45"}>
-                                                     🕒 {isRecent ? "Recently Updated" : "Last Updated"}: {formatRelativeTime(s.submitted_at || s.created_at)}
+
+                                                 <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${takesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
+                                                     🎬 Audition Takes ({takesCount})
                                                  </span>
+
+                                                 <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${imagesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
+                                                     📷 Images ({imagesCount})
+                                                 </span>
+
+                                                 {totalQuestions > 0 && (
+                                                     <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${answeredCount >= totalQuestions ? "bg-neutral-100 text-neutral-700" : "bg-amber-50 text-amber-600 border border-amber-200"}`}>
+                                                         📄 Qs ({answeredCount}/{totalQuestions})
+                                                     </span>
+                                                 )}
+                                             </div>
+                                             <div className="text-[9px] text-black/55 flex items-center justify-between mt-1">
+                                                 <span>Age: {s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—"}</span>
+                                                 <div className="flex items-center gap-1">
+                                                     {isRecent && (
+                                                         <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" title="Recently updated" />
+                                                     )}
+                                                     <span className={isRecent ? "text-blue-600 font-semibold" : "text-black/45"}>
+                                                         🕒 {isRecent ? "Recently Updated" : "Last Updated"}: {formatRelativeTime(s.submitted_at || s.created_at)}
+                                                     </span>
+                                                 </div>
                                              </div>
                                          </div>
+                                     );
+                                 })}
+                                 {filteredSubmissions.length > visibleCount && (
+                                     <div className="p-4 text-center">
+                                         <button
+                                             type="button"
+                                             onClick={() => setVisibleCount((prev) => prev + 50)}
+                                             className="px-4 py-2 border border-black/[0.08] hover:border-black/35 rounded-lg text-xs font-semibold shadow-sm transition-all bg-white select-none active:scale-[0.98]"
+                                         >
+                                             Load More (+50)
+                                         </button>
                                      </div>
-                                 );
-                             })
+                                 )}
+                            </>
                         )}
                     </div>
                 </aside>
@@ -1218,7 +1238,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {indianImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <img src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        <img src={m.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
                                                     </div>
                                                 ))}
                                             </div>
@@ -1238,7 +1258,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {westernImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <img src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        <img src={m.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
                                                     </div>
                                                 ))}
                                             </div>

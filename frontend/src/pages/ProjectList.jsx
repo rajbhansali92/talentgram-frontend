@@ -25,6 +25,12 @@ export default function ProjectList() {
         complete: true,
         locked: true,
     });
+    const [groupLimits, setGroupLimits] = useState({
+        ongoing: 24,
+        hold: 24,
+        complete: 24,
+        locked: 24,
+    });
 
     const canBulkDelete = isAdmin();
 
@@ -94,6 +100,9 @@ export default function ProjectList() {
     const renderGroup = (key, title, list) => {
         const isCollapsed = collapsedGroups[key];
         const count = list.length;
+        const limit = groupLimits[key] || 24;
+        const visibleList = list.slice(0, limit);
+        const hasMore = list.length > limit;
 
         return (
             <div key={key} className="mb-6" data-testid={`project-group-${key}`}>
@@ -124,62 +133,81 @@ export default function ProjectList() {
                             No {title.toLowerCase()}
                         </div>
                     ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-5 mb-4">
-                            {list.map((p) => {
-                                const checked = selected.has(p.id);
-                                const goesToDetail = !isSelectionMode;
-                                return (
-                                    <div
-                                        key={p.id}
-                                        data-testid={`project-card-${p.id}`}
-                                        className={`group relative border rounded-xl transition-colors duration-150 ${
-                                            checked 
-                                                ? "border-black/40 bg-white" 
-                                                : "border-black/[0.08] bg-white hover:border-black/[0.16]"
-                                        }`}
+                        <>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-5 mb-4">
+                                {visibleList.map((p) => {
+                                    const checked = selected.has(p.id);
+                                    const goesToDetail = !isSelectionMode;
+                                    return (
+                                        <div
+                                            key={p.id}
+                                            data-testid={`project-card-${p.id}`}
+                                            className={`group relative border rounded-xl transition-colors duration-150 ${
+                                                checked 
+                                                    ? "border-black/40 bg-white" 
+                                                    : "border-black/[0.08] bg-white hover:border-black/[0.16]"
+                                            }`}
+                                        >
+                                            {canBulkDelete && (
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        toggle(p.id);
+                                                    }}
+                                                    aria-label={
+                                                        checked ? "Deselect" : "Select"
+                                                    }
+                                                    data-testid={`project-check-${p.id}`}
+                                                    className={`absolute top-3 left-3 z-10 w-5 h-5 rounded-md border flex items-center justify-center transition-colors duration-150 ${
+                                                        checked 
+                                                            ? "bg-black border-black text-white" 
+                                                            : "bg-white border-black/[0.2] text-transparent group-hover:border-black/40"
+                                                    } ${isSelectionMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                                                >
+                                                    {checked && (
+                                                        <Check className="w-3 h-3" />
+                                                    )}
+                                                </button>
+                                            )}
+                                            {goesToDetail ? (
+                                                <Link
+                                                    to={`/admin/projects/${p.id}`}
+                                                    className="block p-5"
+                                                >
+                                                    <Inner p={p} />
+                                                </Link>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggle(p.id)}
+                                                    className="block w-full p-5 text-left"
+                                                >
+                                                    <Inner p={p} />
+                                                </button>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            {hasMore && (
+                                <div className="flex justify-center mt-6 mb-8">
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setGroupLimits((prev) => ({
+                                                ...prev,
+                                                [key]: prev[key] + 24
+                                            }));
+                                        }}
+                                        className="px-4 py-2 border border-black/[0.08] hover:border-black/35 rounded-lg text-xs font-semibold shadow-sm transition-all bg-white select-none active:scale-[0.98]"
                                     >
-                                        {canBulkDelete && (
-                                            <button
-                                                type="button"
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    toggle(p.id);
-                                                }}
-                                                aria-label={
-                                                    checked ? "Deselect" : "Select"
-                                                }
-                                                data-testid={`project-check-${p.id}`}
-                                                className={`absolute top-3 left-3 z-10 w-5 h-5 rounded-md border flex items-center justify-center transition-colors duration-150 ${
-                                                    checked 
-                                                        ? "bg-black border-black text-white" 
-                                                        : "bg-white border-black/[0.2] text-transparent group-hover:border-black/40"
-                                                } ${isSelectionMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
-                                            >
-                                                {checked && (
-                                                    <Check className="w-3 h-3" />
-                                                )}
-                                            </button>
-                                        )}
-                                        {goesToDetail ? (
-                                            <Link
-                                                to={`/admin/projects/${p.id}`}
-                                                className="block p-5"
-                                            >
-                                                <Inner p={p} />
-                                            </Link>
-                                        ) : (
-                                            <button
-                                                type="button"
-                                                onClick={() => toggle(p.id)}
-                                                className="block w-full p-5 text-left"
-                                            >
-                                                <Inner p={p} />
-                                            </button>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
+                                        Load More Projects (+24)
+                                    </button>
+                                </div>
+                            )}
+                        </>
                     )
                 )}
             </div>

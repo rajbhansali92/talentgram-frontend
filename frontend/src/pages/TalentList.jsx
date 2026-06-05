@@ -209,45 +209,62 @@ export default function TalentList() {
     const [loading, setLoading] = useState(true);
     const [selected, setSelected] = useState(new Set());
     const [confirmOpen, setConfirmOpen] = useState(false);
+    const [page, setPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const [totalItems, setTotalItems] = useState(0);
     const canBulkDelete = isAdmin();
 
+    const pageSize = 40;
+
     // ── Data fetching ────────────────────────────────────────────────────────
-    const load = useCallback(async (qq = "") => {
+    const load = useCallback(async (qq = "", pageNum = 1) => {
         setLoading(true);
         try {
             const { data } = await adminApi.get("/talents", {
-                params: qq ? { q: qq } : {},
+                params: {
+                    ...(qq ? { q: qq } : {}),
+                    page: pageNum,
+                    size: pageSize,
+                },
             });
-            setTalents(Array.isArray(data) ? data : data?.items ?? []);
+            if (Array.isArray(data)) {
+                setTalents(data);
+                setTotalPages(1);
+                setTotalItems(data.length);
+            } else {
+                setTalents(data?.items ?? []);
+                setTotalPages(data?.pages ?? 1);
+                setTotalItems(data?.total ?? 0);
+            }
         } finally {
             setLoading(false);
         }
     }, []);
 
+    // Initial load
     useEffect(() => {
-        load();
-    }, [load]);
+        load(q, page);
+    }, [page]);
 
-    // Debounced search — 250 ms
+    // Debounced search — 250 ms (resets to page 1)
     useEffect(() => {
-        const t = setTimeout(() => load(q), 250);
+        const t = setTimeout(() => {
+            setPage(1);
+            load(q, 1);
+        }, 250);
         return () => clearTimeout(t);
     }, [q, load]);
 
     // Re-fetch when navigating back from detail page.
-    // Cover changes made on TalentEdit are written to the DB immediately;
-    // this ensures the roster card reflects the updated cover_url without
-    // requiring a hard refresh. visibilitychange fires when the browser tab
-    // or page regains focus after being hidden (e.g. back navigation in SPA).
     useEffect(() => {
         const onVisible = () => {
             if (document.visibilityState === "visible") {
-                load(q);
+                load(q, page);
             }
         };
         document.addEventListener("visibilitychange", onVisible);
         return () => document.removeEventListener("visibilitychange", onVisible);
-    }, [load, q]);
+    }, [load, q, page]);
 
     // ── Selection ────────────────────────────────────────────────────────────
     const toggle = useCallback((id) => {
@@ -305,10 +322,11 @@ export default function TalentList() {
                     <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
                         Talents
                     </h1>
-                    {!loading && talents.length > 0 && (
+                    {!loading && totalItems > 0 && (
                         <p className="text-[11px] text-black/35 mt-2 tracking-wide uppercase">
-                            {talents.length} talent{talents.length !== 1 ? "s" : ""}
-                            {totalAssets > 0 && ` · ${totalAssets} assets`}
+                            {totalItems} talent{totalItems !== 1 ? "s" : ""}
+                            {totalPages > 1 && ` · Page ${page} of ${totalPages}`}
+                            {totalAssets > 0 && ` · ${totalAssets} assets on page`}
                         </p>
                     )}
                 </div>
@@ -377,6 +395,37 @@ export default function TalentList() {
                             onToggle={toggle}
                         />
                     ))}
+                </div>
+            )}
+
+            {/* Pagination Controls */}
+            {!loading && totalPages > 1 && (
+                <div className="flex items-center justify-center gap-4 mt-2 mb-12 animate-fadeIn" data-testid="talents-pagination">
+                    <button
+                        type="button"
+                        disabled={page === 1}
+                        onClick={() => {
+                            setPage((p) => Math.max(1, p - 1));
+                            window.scrollTo({ top: 0, behavior: "smooth" });
+                        }}
+                        className="px-4 py-2 border border-black/[0.08] bg-white hover:border-black/30 rounded-lg text-xs font-medium disabled:opacity-40 disabled:hover:border-black/[0.08] transition-colors select-none active:scale-[0.98]"
+                    >
+                        Previous
+                    </button>
+                    <span className="text-xs font-mono text-black/55">
+                        Page {page} of {totalPages}
+                    </span>
+                    <button
+                        type="button"
+                        disabled={page === totalPages}
+                        onClick={() => {
+                            setPage((p) => Math.min(totalPages, p + 1));
+                            window.scrollTo({ top: 0, behavior: "smooth" });
+                        }}
+                        className="px-4 py-2 border border-black/[0.08] bg-white hover:border-black/30 rounded-lg text-xs font-medium disabled:opacity-40 disabled:hover:border-black/[0.08] transition-colors select-none active:scale-[0.98]"
+                    >
+                        Next
+                    </button>
                 </div>
             )}
 

@@ -67,6 +67,46 @@ function calcAge(dob) {
     return age >= 0 && age <= 120 ? age : null;
 }
 
+const getLinkMeta = (url) => {
+    try {
+        const u = new URL(url);
+        let platform = "Website";
+        let icon = "🌐";
+        let color = "text-neutral-500 bg-neutral-50 border-neutral-100";
+        
+        if (u.hostname.includes("youtube.com") || u.hostname.includes("youtu.be")) {
+            platform = "YouTube";
+            icon = "🎥";
+            color = "text-red-600 bg-red-50 border-red-100";
+        } else if (u.hostname.includes("instagram.com")) {
+            platform = "Instagram";
+            icon = "📸";
+            color = "text-pink-600 bg-pink-50 border-pink-100";
+        } else if (u.hostname.includes("vimeo.com")) {
+            platform = "Vimeo";
+            icon = "🎬";
+            color = "text-blue-500 bg-blue-50 border-blue-100";
+        } else if (u.hostname.includes("tiktok.com")) {
+            platform = "TikTok";
+            icon = "🎵";
+            color = "text-black bg-neutral-100 border-neutral-200";
+        } else if (u.hostname.includes("facebook.com")) {
+            platform = "Facebook";
+            icon = "👥";
+            color = "text-blue-700 bg-blue-50 border-blue-100";
+        }
+        
+        // Clean path as campaign title preview
+        let title = u.pathname.split("/").filter(Boolean).pop() || "Campaign / Portfolio";
+        title = decodeURIComponent(title).replace(/[-_]/g, " ");
+        if (title.length > 30) title = title.substring(0, 30) + "...";
+        
+        return { platform, icon, color, title, domain: u.hostname };
+    } catch {
+        return { platform: "Link", icon: "🔗", color: "text-neutral-500 bg-neutral-50 border-neutral-100", title: url, domain: url };
+    }
+};
+
 function Field({ label, value, onChange, type = "text", ...rest }) {
     return (
         <label className="block">
@@ -103,6 +143,13 @@ export default function TalentEdit() {
     const [tagSaving, setTagSaving] = useState(false);
     const [globalTagDeleteTarget, setGlobalTagDeleteTarget] = useState(null); // {id, name}
     const [globalTagDeleteConfirmText, setGlobalTagDeleteConfirmText] = useState("");
+    const [originalTalent, setOriginalTalent] = useState(emptyTalent);
+    const [tagSearch, setTagSearch] = useState("");
+    const [isTagDropdownOpen, setIsTagDropdownOpen] = useState(false);
+
+    // Lightbox states
+    const [lightboxIndex, setLightboxIndex] = useState(null);
+    const [lightboxCategory, setLightboxCategory] = useState(null);
     
     // File refs
     const fileRefs = useRef({
@@ -120,12 +167,74 @@ export default function TalentEdit() {
         setTalent(prev => ({ ...prev, ...patch }));
     }, []);
 
+    const formatDuration = (sec) => {
+        if (!sec) return null;
+        const s = Math.floor(sec % 60);
+        const m = Math.floor(sec / 60);
+        return `${m}:${s < 10 ? '0' : ''}${s}`;
+    };
+
+    const touchStartX = useRef(0);
+    const touchEndX = useRef(0);
+
+    const handleTouchStart = (e) => {
+        touchStartX.current = e.targetTouches[0].clientX;
+        touchEndX.current = e.targetTouches[0].clientX;
+    };
+
+    const handleTouchMove = (e) => {
+        touchEndX.current = e.targetTouches[0].clientX;
+    };
+
+    const handleTouchEnd = () => {
+        if (lightboxIndex === null || lightboxCategory === null) return;
+        const diff = touchStartX.current - touchEndX.current;
+        const threshold = 50;
+        const items = (talent.media || []).filter(m => m.category === lightboxCategory);
+        if (diff > threshold) {
+            setLightboxIndex((prev) => (prev < items.length - 1 ? prev + 1 : 0));
+        } else if (diff < -threshold) {
+            setLightboxIndex((prev) => (prev > 0 ? prev - 1 : items.length - 1));
+        }
+    };
+
+    useEffect(() => {
+        if (lightboxIndex === null || lightboxCategory === null) return;
+
+        const handleKeyDown = (e) => {
+            const items = (talent.media || []).filter(m => m.category === lightboxCategory);
+            if (e.key === "ArrowRight") {
+                setLightboxIndex((prev) => (prev < items.length - 1 ? prev + 1 : 0));
+            } else if (e.key === "ArrowLeft") {
+                setLightboxIndex((prev) => (prev > 0 ? prev - 1 : items.length - 1));
+            } else if (e.key === "Escape") {
+                setLightboxIndex(null);
+                setLightboxCategory(null);
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [lightboxIndex, lightboxCategory, talent.media]);
+
+    useEffect(() => {
+        if (lightboxIndex !== null && lightboxCategory !== null) {
+            document.body.style.overflow = "hidden";
+        } else {
+            document.body.style.overflow = "";
+        }
+        return () => {
+            document.body.style.overflow = "";
+        };
+    }, [lightboxIndex, lightboxCategory]);
+
     useEffect(() => {
         if (!isEdit) return;
         (async () => {
             try {
                 const { data } = await adminApi.get(`/talents/${id}`);
                 setTalent({ ...emptyTalent, ...data });
+                setOriginalTalent({ ...emptyTalent, ...data });
             } catch {
                 toast.error("Failed to load talent");
             } finally {
@@ -161,6 +270,7 @@ export default function TalentEdit() {
             };
             if (isEdit) {
                 await adminApi.put(`/talents/${id}`, payload);
+                setOriginalTalent(payload);
                 toast.success("Saved");
             } else {
                 const { data } = await adminApi.post(`/talents`, payload);
@@ -333,7 +443,9 @@ export default function TalentEdit() {
         if (already) return;
         try {
             await adminApi.post(`/talents/${id}/tag/${tag.id}`);
-            updateTalent({ tags: [...(talent.tags || []), { id: tag.id, name: tag.name }] });
+            const updated = [...(talent.tags || []), { id: tag.id, name: tag.name }];
+            updateTalent({ tags: updated });
+            setOriginalTalent(prev => ({ ...prev, tags: updated }));
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to assign tag");
         }
@@ -358,7 +470,9 @@ export default function TalentEdit() {
             const already = (talent.tags || []).some(t => t.id === tag.id);
             if (!already) {
                 await adminApi.post(`/talents/${id}/tag/${tag.id}`);
-                updateTalent({ tags: [...(talent.tags || []), { id: tag.id, name: tag.name }] });
+                const updated = [...(talent.tags || []), { id: tag.id, name: tag.name }];
+                updateTalent({ tags: updated });
+                setOriginalTalent(prev => ({ ...prev, tags: updated }));
             }
             setTagInput("");
             toast.success(data.created ? `Tag "${name}" created` : `Tag "${name}" assigned`);
@@ -380,7 +494,9 @@ export default function TalentEdit() {
         }
         try {
             await adminApi.delete(`/talents/${id}/tag/${tagId}`);
-            updateTalent({ tags: (talent.tags || []).filter(t => t.id !== tagId) });
+            const updated = (talent.tags || []).filter(t => t.id !== tagId);
+            updateTalent({ tags: updated });
+            setOriginalTalent(prev => ({ ...prev, tags: updated }));
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to remove tag");
         }
@@ -404,12 +520,16 @@ export default function TalentEdit() {
     const mediaBy = (cat) =>
         (talent.media || []).filter((m) => m.category === cat);
 
+    const isDirty = useMemo(() => {
+        return JSON.stringify(talent) !== JSON.stringify(originalTalent);
+    }, [talent, originalTalent]);
+
     // Unsaved changes warning
     useEffect(() => {
         if (!isEdit || loading) return;
         
         const handleBeforeUnload = (e) => {
-            const hasChanges = JSON.stringify(talent) !== JSON.stringify(emptyTalent);
+            const hasChanges = JSON.stringify(talent) !== JSON.stringify(originalTalent);
             if (hasChanges) {
                 e.preventDefault();
                 e.returnValue = "You have unsaved changes. Are you sure you want to leave?";
@@ -419,7 +539,7 @@ export default function TalentEdit() {
         
         window.addEventListener("beforeunload", handleBeforeUnload);
         return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-    }, [talent, isEdit, loading]);
+    }, [talent, originalTalent, isEdit, loading]);
 
     // ISSUE 1: Fixed loading skeleton
     if (loading) {
@@ -696,24 +816,52 @@ export default function TalentEdit() {
                     <span className="text-[11px] text-black/45 tracking-widest uppercase">
                         Work Links (7–8)
                     </span>
-                    <div className="mt-2 space-y-2">
-                        {(talent.work_links || []).map((w, i) => (
-                            <div key={w} className="flex items-center gap-2">
-                                <span className="text-sm text-black/75 flex-1 truncate">
-                                    {w}
-                                </span>
-                                <button
-                                    onClick={() =>
-                                        updateTalent({
-                                            work_links: talent.work_links.filter((_, j) => j !== i),
-                                        })
-                                    }
-                                    className="text-black/40 hover:text-red-600 transition-colors"
-                                >
-                                    <X className="w-3.5 h-3.5" />
-                                </button>
-                            </div>
-                        ))}
+                    <div className="mt-2 space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="talent-work-links">
+                            {(talent.work_links || []).map((w, i) => {
+                                const meta = getLinkMeta(w);
+                                return (
+                                    <div key={w} className="flex items-center justify-between p-3 rounded-xl border border-black/[0.06] bg-neutral-50/50 hover:bg-neutral-50 transition-colors gap-3">
+                                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                                            <div className={`w-9 h-9 rounded-lg flex items-center justify-center border text-base shrink-0 ${meta.color}`}>
+                                                {meta.icon}
+                                            </div>
+                                            <div className="min-w-0 flex-1">
+                                                <p className="text-xs font-semibold text-neutral-800 truncate leading-snug">
+                                                    {meta.platform}
+                                                </p>
+                                                <p className="text-[10px] text-neutral-400 truncate leading-snug mt-0.5" title={w}>
+                                                    {meta.title}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="flex items-center gap-1 shrink-0">
+                                            <a
+                                                href={w}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-[10px] font-semibold bg-white border border-black/[0.08] hover:border-black/30 text-black px-2.5 py-1.5 rounded-lg transition-colors select-none"
+                                            >
+                                                Open
+                                            </a>
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    updateTalent({
+                                                        work_links: talent.work_links.filter((_, j) => j !== i),
+                                                    })
+                                                }
+                                                className="text-black/35 hover:text-red-600 p-2 transition-colors"
+                                                title="Remove Link"
+                                            >
+                                                <X className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
                         <div className="flex gap-2">
                             <input
                                 type="url"
@@ -723,8 +871,9 @@ export default function TalentEdit() {
                                 className="flex-1 bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
                             />
                             <button
+                                type="button"
                                 onClick={addWorkLink}
-                                className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors"
+                                className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors shrink-0"
                             >
                                 + Add link
                             </button>
@@ -786,92 +935,147 @@ export default function TalentEdit() {
                         Private casting labels. Only visible to the team.
                     </p>
 
-                    {/* Current tags on this talent */}
-                    <div className="flex flex-wrap gap-2 mb-4" data-testid="talent-current-tags">
-                        {(talent.tags || []).map((tag) => (
-                            <span
-                                key={tag.id}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/[0.06] border border-black/[0.08] text-[11px] text-black/70 group"
-                                data-testid={`talent-tag-${tag.id}`}
-                            >
-                                {tag.name}
-                                <button
-                                    type="button"
-                                    onClick={() => removeTagFromTalent(tag.id)}
-                                    className="text-black/30 hover:text-red-500 transition-colors"
-                                    title="Remove from this talent"
-                                    data-testid={`remove-tag-${tag.id}`}
+                    <div className="space-y-4">
+                        {/* Current tags on this talent */}
+                        <div className="flex flex-wrap gap-2" data-testid="talent-current-tags">
+                            {(talent.tags || []).map((tag) => (
+                                <span
+                                    key={tag.id}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/[0.05] border border-black/[0.06] text-[11px] text-black/75 hover:bg-black/[0.08] transition-colors"
+                                    data-testid={`talent-tag-${tag.id}`}
                                 >
-                                    <X className="w-3 h-3" />
-                                </button>
-                                {isAdminRole && (
+                                    {tag.name}
                                     <button
                                         type="button"
-                                        onClick={() => {
-                                            setGlobalTagDeleteTarget(tag);
-                                            setGlobalTagDeleteConfirmText("");
-                                        }}
-                                        className="text-black/20 hover:text-red-600 transition-colors ml-0.5"
-                                        title="Delete globally (admin only)"
-                                        data-testid={`delete-tag-global-${tag.id}`}
+                                        onClick={() => removeTagFromTalent(tag.id)}
+                                        className="text-black/30 hover:text-red-500 transition-colors"
+                                        title="Remove from this talent"
+                                        data-testid={`remove-tag-${tag.id}`}
                                     >
-                                        <AlertTriangle className="w-3 h-3" />
+                                        <X className="w-3 h-3" />
                                     </button>
+                                    {isAdminRole && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setGlobalTagDeleteTarget(tag);
+                                                setGlobalTagDeleteConfirmText("");
+                                            }}
+                                            className="text-black/20 hover:text-red-600 transition-colors ml-0.5"
+                                            title="Delete globally (admin only)"
+                                            data-testid={`delete-tag-global-${tag.id}`}
+                                        >
+                                            <AlertTriangle className="w-3 h-3" />
+                                        </button>
+                                    )}
+                                </span>
+                            ))}
+                            {(talent.tags || []).length === 0 && (
+                                <p className="text-xs text-black/30 italic">No tags assigned yet.</p>
+                            )}
+                        </div>
+
+                        {/* Searchable Tag Autocomplete */}
+                        {isEdit && (
+                            <div className="relative max-w-md">
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        value={tagSearch}
+                                        onChange={(e) => {
+                                            setTagSearch(e.target.value);
+                                            setIsTagDropdownOpen(true);
+                                        }}
+                                        onFocus={() => setIsTagDropdownOpen(true)}
+                                        placeholder="Search or create tags..."
+                                        maxLength={80}
+                                        data-testid="tag-input"
+                                        className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                    />
+                                    {tagSearch && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setTagSearch("")}
+                                            className="absolute right-1 top-2.5 text-black/30 hover:text-black"
+                                        >
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
+                                    )}
+                                </div>
+
+                                {isTagDropdownOpen && (
+                                    <>
+                                        <div 
+                                            className="fixed inset-0 z-10" 
+                                            onClick={() => setIsTagDropdownOpen(false)} 
+                                        />
+                                        <div className="absolute left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-black/[0.08] rounded-xl shadow-xl z-20 divide-y divide-black/[0.04] tg-scroll">
+                                            {(() => {
+                                                const filtered = allTags
+                                                    .filter(t => !(talent.tags || []).some(tt => tt.id === t.id))
+                                                    .filter(t => t.name.toLowerCase().includes(tagSearch.toLowerCase()));
+                                                    
+                                                return (
+                                                    <>
+                                                        {filtered.map(tag => (
+                                                            <button
+                                                                key={tag.id}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    assignTag(tag);
+                                                                    setTagSearch("");
+                                                                    setIsTagDropdownOpen(false);
+                                                                }}
+                                                                className="w-full text-left px-4 py-2.5 text-xs text-black/70 hover:bg-black/[0.03] hover:text-black transition-colors flex items-center justify-between"
+                                                            >
+                                                                <span>{tag.name}</span>
+                                                                <span className="text-[10px] text-black/35 font-medium">Add existing</span>
+                                                            </button>
+                                                        ))}
+                                                        {tagSearch.trim() && !allTags.some(t => t.name.toLowerCase() === tagSearch.trim().toLowerCase()) && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={async () => {
+                                                                    setTagSaving(true);
+                                                                    try {
+                                                                        const { data } = await adminApi.post("/tags", { name: tagSearch.trim() });
+                                                                        const newTag = data.tag;
+                                                                        if (data.created) {
+                                                                            setAllTags(prev => [...prev, newTag].sort((a, b) => a.name.localeCompare(b.name)));
+                                                                        }
+                                                                        await adminApi.post(`/talents/${id}/tag/${newTag.id}`);
+                                                                        const updated = [...(talent.tags || []), { id: newTag.id, name: newTag.name }];
+                                                                        updateTalent({ tags: updated });
+                                                                        setOriginalTalent(prev => ({ ...prev, tags: updated }));
+                                                                        toast.success(`Tag "${newTag.name}" created and assigned`);
+                                                                        setTagSearch("");
+                                                                        setIsTagDropdownOpen(false);
+                                                                    } catch (e) {
+                                                                        toast.error(e?.response?.data?.detail || "Failed to create tag");
+                                                                    } finally {
+                                                                        setTagSaving(false);
+                                                                    }
+                                                                }}
+                                                                className="w-full text-left px-4 py-2.5 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 transition-colors flex items-center justify-between"
+                                                            >
+                                                                <span>Create new: "{tagSearch.trim()}"</span>
+                                                                <Plus className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        )}
+                                                        {filtered.length === 0 && !tagSearch.trim() && (
+                                                            <div className="px-4 py-3 text-xs text-black/40 italic text-center">
+                                                                All existing tags assigned
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                    </>
                                 )}
-                            </span>
-                        ))}
-                        {(talent.tags || []).length === 0 && (
-                            <p className="text-xs text-black/30 italic">No tags assigned yet.</p>
+                            </div>
                         )}
                     </div>
-
-                    {/* Assign existing tags */}
-                    {allTags.filter(t => !(talent.tags || []).some(tt => tt.id === t.id)).length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mb-4">
-                            {allTags
-                                .filter(t => !(talent.tags || []).some(tt => tt.id === t.id))
-                                .map(tag => (
-                                    <button
-                                        key={tag.id}
-                                        type="button"
-                                        onClick={() => assignTag(tag)}
-                                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full border border-dashed border-black/[0.15] text-[11px] text-black/45 hover:border-black/40 hover:text-black/75 transition-colors"
-                                        data-testid={`add-existing-tag-${tag.id}`}
-                                    >
-                                        <Plus className="w-3 h-3" strokeWidth={1.5} />
-                                        {tag.name}
-                                    </button>
-                                ))}
-                        </div>
-                    )}
-
-                    {/* Create + assign new tag */}
-                    {isEdit && (
-                        <div className="flex gap-2 items-center">
-                            <input
-                                type="text"
-                                value={tagInput}
-                                onChange={(e) => setTagInput(e.target.value)}
-                                onKeyDown={(e) => {
-                                    if (e.key === "Enter") { e.preventDefault(); createAndAssignTag(); }
-                                }}
-                                placeholder="New tag name…"
-                                maxLength={80}
-                                data-testid="tag-input"
-                                className="flex-1 bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                            />
-                            <button
-                                type="button"
-                                onClick={createAndAssignTag}
-                                disabled={!tagInput.trim() || tagSaving}
-                                data-testid="tag-create-btn"
-                                className="inline-flex items-center gap-1.5 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors disabled:opacity-40"
-                            >
-                                {tagSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                                Create &amp; assign
-                            </button>
-                        </div>
-                    )}
                 </div>
             </section>
 
@@ -997,16 +1201,41 @@ export default function TalentEdit() {
                                 </p>
                             ) : (
                                 <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-3">
-                                    {mediaBy(cat.key).map((m) => (
+                                    {mediaBy(cat.key).map((m, idx) => (
                                         <div
                                             key={m.id}
-                                            className="relative group aspect-square bg-[#fafaf8] border border-black/[0.08] rounded-lg overflow-hidden"
+                                            onClick={() => {
+                                                setLightboxCategory(cat.key);
+                                                setLightboxIndex(idx);
+                                            }}
+                                            className="relative group aspect-square bg-[#fafaf8] border border-black/[0.08] rounded-lg overflow-hidden cursor-zoom-in"
                                         >
-                                            {m.content_type?.startsWith(
-                                                "video",
-                                            ) ? (
-                                                <div className="w-full h-full flex items-center justify-center">
-                                                    <Play className="w-8 h-8 text-black/60" />
+                                            {m.content_type?.startsWith("video") ? (
+                                                <div className="relative w-full h-full">
+                                                    {m.poster_url ? (
+                                                        <img
+                                                            src={m.poster_url}
+                                                            alt="Video Preview"
+                                                            loading="lazy"
+                                                            className="w-full h-full object-cover"
+                                                        />
+                                                    ) : (
+                                                        <div className="w-full h-full flex items-center justify-center bg-black/5">
+                                                            <Play className="w-6 h-6 text-black/40" />
+                                                        </div>
+                                                    )}
+                                                    {/* Play overlay icon */}
+                                                    <div className="absolute inset-0 flex items-center justify-center bg-black/10 group-hover:bg-black/30 transition-colors">
+                                                        <div className="w-9 h-9 rounded-full bg-white/95 flex items-center justify-center shadow-md transition-transform group-hover:scale-110">
+                                                            <Play className="w-3.5 h-3.5 fill-black text-black ml-0.5" />
+                                                        </div>
+                                                    </div>
+                                                    {/* Duration badge */}
+                                                    {m.duration && (
+                                                        <div className="absolute bottom-1.5 right-1.5 bg-black/70 backdrop-blur-sm text-[9px] text-white font-medium px-1.5 py-0.5 rounded shadow-sm">
+                                                            {formatDuration(m.duration)}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ) : (
                                                 <img
@@ -1019,7 +1248,10 @@ export default function TalentEdit() {
                                             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/40 flex items-center justify-center gap-2">
                                                 {!cat.isVideo && (
                                                     <button
-                                                        onClick={() => setCover(m.id)}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setCover(m.id);
+                                                        }}
                                                         title="Set cover"
                                                         className="p-1.5 bg-white/20 hover:bg-white/30 rounded-md transition-colors"
                                                     >
@@ -1029,7 +1261,8 @@ export default function TalentEdit() {
                                                     </button>
                                                 )}
                                                 <button
-                                                    onClick={() => {
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
                                                         setMediaToRemove(m.id);
                                                         setConfirmRemoveOpen(true);
                                                     }}
@@ -1081,6 +1314,123 @@ export default function TalentEdit() {
                 onCancel={() => setConfirmDeleteOpen(false)}
                 onConfirm={deleteTalent}
             />
+
+            {/* Sticky Save Changes Bar */}
+            {isDirty && (
+                <div className="fixed bottom-4 left-4 right-4 z-40 bg-white border border-black/[0.08] shadow-2xl rounded-xl p-4 flex flex-row items-center justify-between gap-4 max-w-sm md:max-w-none w-[calc(100vw-2rem)] md:w-auto md:fixed md:top-4 md:right-4 md:bottom-auto md:left-auto md:shadow-lg animate-in fade-in slide-in-from-bottom-5 duration-200">
+                    <div className="flex flex-col min-w-0 pr-2">
+                        <span className="text-xs font-semibold text-black/85">Unsaved Changes</span>
+                        <span className="text-[10px] text-black/45 truncate">You have modified this profile</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => setTalent(originalTalent)}
+                            className="px-3 py-2 text-xs border border-black/[0.08] hover:bg-black/5 rounded-lg text-black/60 transition-colors"
+                        >
+                            Discard
+                        </button>
+                        <button
+                            type="button"
+                            onClick={save}
+                            disabled={saving}
+                            className="inline-flex items-center gap-1.5 bg-black text-white px-4 py-2 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors"
+                        >
+                            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                            Save
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Fullscreen Lightbox */}
+            {lightboxIndex !== null && lightboxCategory !== null && (
+                <div
+                    className="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col items-center justify-between select-none"
+                    onClick={() => {
+                        setLightboxIndex(null);
+                        setLightboxCategory(null);
+                    }}
+                    onTouchStart={handleTouchStart}
+                    onTouchMove={handleTouchMove}
+                    onTouchEnd={handleTouchEnd}
+                >
+                    {/* Header */}
+                    <div className="w-full p-4 flex items-center justify-between text-white z-10">
+                        <span className="text-xs font-semibold tracking-wider uppercase opacity-65">
+                            {lightboxCategory.replace(/_/g, " ")} Look ({lightboxIndex + 1} / {mediaBy(lightboxCategory).length})
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setLightboxIndex(null);
+                                setLightboxCategory(null);
+                            }}
+                            className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+
+                    {/* Main Content */}
+                    <div
+                        className="relative flex-1 w-full flex items-center justify-center p-4"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {(() => {
+                            const items = mediaBy(lightboxCategory);
+                            const currentItem = items[lightboxIndex];
+                            if (!currentItem) return null;
+
+                            if (currentItem.content_type?.startsWith("video")) {
+                                return (
+                                    <video
+                                        src={currentItem.url}
+                                        controls
+                                        autoPlay
+                                        className="max-h-[75vh] max-w-[90vw] rounded-lg shadow-2xl"
+                                    />
+                                );
+                            } else {
+                                return (
+                                    <img
+                                        src={currentItem.url}
+                                        alt=""
+                                        className="max-h-[75vh] max-w-[90vw] object-contain rounded-lg shadow-2xl"
+                                    />
+                                );
+                            }
+                        })()}
+                    </div>
+
+                    {/* Navigation Bar */}
+                    <div className="w-full p-6 flex items-center justify-between max-w-md mx-auto text-white z-10">
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const items = mediaBy(lightboxCategory);
+                                setLightboxIndex((prev) => (prev > 0 ? prev - 1 : items.length - 1));
+                            }}
+                            className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm transition-colors"
+                        >
+                            Previous
+                        </button>
+                        <span className="text-xs opacity-50">Swipe to navigate / Arrows</span>
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const items = mediaBy(lightboxCategory);
+                                setLightboxIndex((prev) => (prev < items.length - 1 ? prev + 1 : 0));
+                            }}
+                            className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm transition-colors"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

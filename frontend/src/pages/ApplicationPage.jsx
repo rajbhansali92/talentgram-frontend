@@ -530,18 +530,16 @@ export default function ApplicationPage() {
                         <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a] mb-4">
                             Thank you, {basics.first_name}
                         </h1>
-                        <p className="text-[#4a4a4a] text-sm leading-relaxed mb-6">
-                            Your application has been received. Our team
-                            reviews every profile. If shortlisted, we'll reach
-                            out to{" "}
-                            <span className="text-[#1a1a1a] font-mono">
-                                {basics.email}
-                            </span>
-                            .
+                        <p className="text-[#4a4a4a] text-sm leading-relaxed mb-4">
+                            Your profile has been successfully submitted.
                         </p>
-                        <div className="inline-flex items-center gap-2 text-xs text-[#8b8b8b] font-mono">
-                            <Mail className="w-3 h-3" />
-                            Check your inbox for updates.
+                        <p className="text-[#4a4a4a] text-sm leading-relaxed mb-6">
+                            Our team carefully reviews every application. If any additional
+                            information, materials, or next steps are required, a member of
+                            our team will contact you directly.
+                        </p>
+                        <div className="text-xs text-[#8b8b8b] font-medium">
+                            Thank you for your interest in joining Talentgram.
                         </div>
                     </div>
                 </div>

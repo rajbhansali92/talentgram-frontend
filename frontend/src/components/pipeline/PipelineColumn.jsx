@@ -27,6 +27,7 @@ const STAGE_HEADER_TINTS = {
     not_available: "bg-zinc-50/95",
     not_interested: "bg-zinc-50/95",
     pitch: "bg-teal-50/95",
+    follow_up: "bg-amber-50/95",
 };
 
 const calculateStaleCount = (items) => {

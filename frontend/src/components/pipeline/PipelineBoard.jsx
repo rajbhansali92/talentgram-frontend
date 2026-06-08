@@ -13,7 +13,6 @@ import PipelineFilters from "./PipelineFilters";
 import PipelineColumn from "./PipelineColumn";
 import { BoardSection, BoardRow } from "./PipelineBoardSection";
 import BulkActionBar from "./BulkActionBar";
-import FollowUpLane from "./FollowUpLane";
 import { FilterEmptyState } from "./PipelineEmptyState";
 import QuickAddTalents from "./QuickAddTalents";
 import BulkAddModal from "./BulkAddModal";
@@ -86,7 +85,6 @@ function PipelineBoard({ projectId, projectName }) {
 
     // Stage focus state
     const [focusedStageId, setFocusedStageId] = useState(null);
-    const [isFollowUpExpanded, setIsFollowUpExpanded] = useState(false);
 
     // Section collapse states
     const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
@@ -417,7 +415,7 @@ function PipelineBoard({ projectId, projectName }) {
                             </div>
                         )}
 
-                        {!hasZeroAfterFilter && !isFollowUpExpanded && !showOnlyFollowUp && mainStages.length > 0 && (
+                        {!hasZeroAfterFilter && !showOnlyFollowUp && mainStages.length > 0 && (
                             <BoardSection
                                 eyebrow="Pipeline"
                                 helper={`${MAIN_FLOW_STAGES.length} stages`}
@@ -440,20 +438,22 @@ function PipelineBoard({ projectId, projectName }) {
 
                         {/* Supportive Follow-up Lane - clean, no opacity hacks */}
                         {!hasZeroAfterFilter && (!focusedStageId || focusedStageId === 'follow_up') && (
-                            <div className="mt-2">
-                                <FollowUpLane
-                                    items={filteredData.filter((i) => i.is_follow_up === true)}
-                                    refresh={fetchPipeline}
-                                    focusedStageId={focusedStageId}
-                                    onFocus={setFocusedStageId}
-                                    isExpanded={isFollowUpExpanded}
-                                    onToggleExpand={() => setIsFollowUpExpanded(!isFollowUpExpanded)}
-                                    {...columnCommons}
-                                />
-                            </div>
+                            <BoardSection eyebrow="Follow-up">
+                                <BoardRow testid="pipeline-follow-up">
+                                    <PipelineColumn
+                                        key="follow_up"
+                                        stage="follow_up"
+                                        items={filteredData.filter((i) => i.is_follow_up === true)}
+                                        isFocused={focusedStageId === 'follow_up'}
+                                        isCollapsed={isMobile ? !mobileExpandedStages['follow_up'] : !!collapsedStages['follow_up']}
+                                        onToggleCollapse={handleToggleCollapse}
+                                        {...columnCommons}
+                                    />
+                                </BoardRow>
+                            </BoardSection>
                         )}
 
-                        {!hasZeroAfterFilter && !isFollowUpExpanded && !showOnlyFollowUp && outcomeStages.length > 0 && (
+                        {!hasZeroAfterFilter && !showOnlyFollowUp && outcomeStages.length > 0 && (
                             <BoardSection eyebrow="Outcomes" muted>
                                 <BoardRow testid="pipeline-outcomes">
                                     {outcomeStages.map((stage) => (
@@ -471,7 +471,7 @@ function PipelineBoard({ projectId, projectName }) {
                             </BoardSection>
                         )}
 
-                        {!hasZeroAfterFilter && !isFollowUpExpanded && !showOnlyFollowUp && independentStages.length > 0 && (
+                        {!hasZeroAfterFilter && !showOnlyFollowUp && independentStages.length > 0 && (
                             <BoardSection eyebrow="Pitch" divider>
                                 <BoardRow testid="pipeline-pitch">
                                     {independentStages.map((stage) => (

@@ -1157,6 +1157,7 @@ function TalentDetail({
     sendingVoice,
     isSharePreview = false,
 }) {
+    console.log("CLIENT VIEW DATA (TalentDetail)", talent);
     const vis = link.visibility || {};
     const project = link || {};
     const visibleActions = ACTIONS.filter(a => a.key !== "ask_for_test" || project.requires_test === true);

@@ -1239,7 +1239,8 @@ async def set_decision(
     if payload.decision == "approved":
         from core import generate_submission_snapshot
         fresh_sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
-        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com")
+        snap_project = await db.projects.find_one({"id": pid}, {"_id": 0, "id": 1, "custom_questions": 1}) if pid else None
+        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com", project=snap_project)
         
         old_snapshots = fresh_sub.get("client_package_snapshots") or []
         if fresh_sub.get("client_package_snapshot"):
@@ -1395,7 +1396,8 @@ async def admin_edit_submission(
     # Optional dynamic snapshot regeneration inside PUT
     if payload.regenerate_snapshot:
         from core import generate_submission_snapshot
-        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com")
+        snap_project = await db.projects.find_one({"id": fresh_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if fresh_sub.get("project_id") else None
+        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com", project=snap_project)
         old_snapshots = fresh_sub.get("client_package_snapshots") or []
         if fresh_sub.get("client_package_snapshot"):
             old_snapshots = [fresh_sub["client_package_snapshot"]] + old_snapshots
@@ -1434,7 +1436,8 @@ async def regenerate_submission_snapshot_endpoint(
         raise HTTPException(404, "Submission not found")
         
     from core import generate_submission_snapshot
-    new_snapshot = generate_submission_snapshot(sub, admin.get("email") or "admin@example.com")
+    snap_project = await db.projects.find_one({"id": pid}, {"_id": 0, "id": 1, "custom_questions": 1}) if pid else None
+    new_snapshot = generate_submission_snapshot(sub, admin.get("email") or "admin@example.com", project=snap_project)
     
     old_snapshots = sub.get("client_package_snapshots") or []
     if sub.get("client_package_snapshot"):

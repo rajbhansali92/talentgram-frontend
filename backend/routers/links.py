@@ -600,6 +600,23 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         s_order = {sid: i for i, sid in enumerate(submission_ids)}
         raw_subs.sort(key=lambda s: s_order.get(s["id"], 999))
 
+    # Aggregate unique projects referenced by submissions BEFORE building talent
+    # shapes so we can pass project context to _submission_to_client_shape for
+    # custom question ID → question text resolution.
+    seen_pids: List[str] = []
+    if raw_subs:
+        for s in raw_subs:
+            pid = s.get("project_id")
+            if pid and pid not in seen_pids:
+                seen_pids.append(pid)
+    project_meta_by_id: Dict[str, dict] = {}
+    if seen_pids:
+        proj_docs = await db.projects.find(
+            {"id": {"$in": seen_pids}},
+            {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1, "talent_budget": 1, "budget_per_day": 1, "custom_questions": 1},
+        ).to_list(500)
+        project_meta_by_id = {p["id"]: p for p in proj_docs}
+
     # Apply per-talent field-visibility overrides for individual share links.
     # If an entry exists in `talent_field_visibility[talent_id]`, it OVERRIDES
     # the link-level visibility for that talent only. Other talents fall back
@@ -614,7 +631,9 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         # Submission objects already carry their own field_visibility; the
         # link-level visibility is applied as the outer envelope (kept the
         # existing behaviour to avoid breaking M2 semantics).
-        shape = _submission_to_client_shape(s)
+        # Pass the project so custom question IDs are resolved to text.
+        s_project = project_meta_by_id.get(s.get("project_id") or "")
+        shape = _submission_to_client_shape(s, project=s_project)
         talents.append(_filter_talent_for_client(shape, visibility))
 
     # Client-facing project budget (gated by visibility.budget)
@@ -624,21 +643,6 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     # response can render alongside the project's actual shoot window.
     # Sibling array so it stays available even when the budget toggle is off.
     project_shoot_dates: List[Dict[str, Any]] = []
-    # Aggregate unique projects ONCE — both budget + shoot_dates branches
-    # consume it. Preserves first-seen order for stable rendering.
-    seen_pids: List[str] = []
-    if raw_subs:
-        for s in raw_subs:
-            pid = s.get("project_id")
-            if pid and pid not in seen_pids:
-                seen_pids.append(pid)
-    project_meta_by_id: Dict[str, dict] = {}
-    if seen_pids:
-        proj_docs = await db.projects.find(
-            {"id": {"$in": seen_pids}},
-            {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1, "talent_budget": 1, "budget_per_day": 1},
-        ).to_list(500)
-        project_meta_by_id = {p["id"]: p for p in proj_docs}
     if visibility.get("budget"):
         override = link.get("client_budget_override")
         if override:
@@ -1018,7 +1022,8 @@ async def get_share_preview(share_id: str):
         sub = await db.submissions.find_one({"id": talent_id}, {"_id": 0})
         if not sub:
             raise HTTPException(404, "Talent not found")
-        talent_doc = _submission_to_client_shape(sub)
+        sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
+        talent_doc = _submission_to_client_shape(sub, project=sub_project)
         is_sub = True
     elif talent_id in talent_ids:
         direct_talent = await db.talents.find_one({"id": talent_id}, {"_id": 0})
@@ -1033,7 +1038,8 @@ async def get_share_preview(share_id: str):
         matching_sub = next((s for s in sub_docs if s["id"] == talent_id or s.get("talent_id") == talent_id), None)
         if not matching_sub:
             raise HTTPException(404, "Talent not found in this link")
-        talent_doc = _submission_to_client_shape(matching_sub)
+        ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
+        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
         is_sub = True
 
     visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
@@ -1234,7 +1240,8 @@ async def download_talent_zip(
         sub = await db.submissions.find_one({"id": talent_id}, {"_id": 0})
         if not sub:
             raise HTTPException(404, "Talent/Submission not found")
-        talent_doc = _submission_to_client_shape(sub)
+        sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
+        talent_doc = _submission_to_client_shape(sub, project=sub_project)
         is_sub = True
     else:
         sub_docs = await db.submissions.find(
@@ -1244,7 +1251,8 @@ async def download_talent_zip(
         matching_sub = next((s for s in sub_docs if s["id"] == talent_id or s.get("talent_id") == talent_id), None)
         if not matching_sub:
             raise HTTPException(404, "Talent not found in this link")
-        talent_doc = _submission_to_client_shape(matching_sub)
+        ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
+        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
         is_sub = True
 
     if not is_sub:

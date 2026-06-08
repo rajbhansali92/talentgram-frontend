@@ -847,7 +847,7 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     # decide. (Without this, admins toggle "Budget" ON at the link level and
     # still see nothing reach the client.)
     "budget": True,
-    "custom_answers": False,     # opt-in — typed answers may contain PII
+    "custom_answers": True,      # on by default — admin-configured questions are intentional
 }
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
@@ -1350,7 +1350,7 @@ def _public_link_view(link: dict) -> dict:
     }
 
 
-def _submission_to_client_shape(sub: dict) -> dict:
+def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> dict:
     """Flatten a submission document into the shape clients expect.
 
     Order rules (strict, see product spec):
@@ -1364,6 +1364,8 @@ def _submission_to_client_shape(sub: dict) -> dict:
         fields (availability, budget, competitive_brand, custom_answers).
       - `custom_answers` visibility can be a bool (all-or-nothing) OR a dict
         `{question_label: bool}` for per-question control.
+      - When `project` is provided, question IDs in custom_answers are resolved
+        to their human-readable question text using project.custom_questions.
     """
     if sub.get("client_package_snapshot"):
         return sub["client_package_snapshot"]
@@ -1518,30 +1520,64 @@ def _submission_to_client_shape(sub: dict) -> dict:
             out["competitive_brand"] = cb
 
     # Custom answers — support both bool and per-question dict shapes.
+    # Build a question-ID → question-text lookup from the project's custom_questions
+    # array so clients see the human-readable question rather than a raw UUID.
     raw_answers = fd.get("custom_answers") or {}
     if isinstance(raw_answers, dict) and raw_answers:
         ca_vis = fv.get("custom_answers")
         if ca_vis:
+            # Build id→text lookup from project.custom_questions when available.
+            q_text_by_id: Dict[str, str] = {}
+            project_cqs = (project or {}).get("custom_questions") or []
+            for cq in project_cqs:
+                qid = cq.get("id") or ""
+                qtext = (cq.get("question") or "").strip()
+                if qid and qtext:
+                    q_text_by_id[qid] = qtext
+
+            # Iterate in project question order when available.
+            ordered_ids = (
+                [cq.get("id") for cq in project_cqs if cq.get("id")]
+                if project_cqs else list(raw_answers.keys())
+            )
+
             filtered: List[Dict[str, str]] = []
-            for q, a in raw_answers.items():
-                if isinstance(ca_vis, dict):
-                    if not ca_vis.get(q):
-                        continue
-                # else (bool True) — include all non-empty answers
+            seen_ids: set = set()
+            for q_id in ordered_ids:
+                if q_id not in raw_answers:
+                    continue
+                if isinstance(ca_vis, dict) and not ca_vis.get(q_id):
+                    continue
+                a = raw_answers[q_id]
                 ans = str(a or "").strip()
                 if ans:
-                    filtered.append({"question": str(q), "answer": ans})
+                    q_display = q_text_by_id.get(q_id) or q_id
+                    filtered.append({"question": q_display, "answer": ans})
+                seen_ids.add(q_id)
+
+            # Include answers whose question IDs aren't in the project list
+            # (e.g. project was edited after submission).
+            for q_id, a in raw_answers.items():
+                if q_id in seen_ids:
+                    continue
+                if isinstance(ca_vis, dict) and not ca_vis.get(q_id):
+                    continue
+                ans = str(a or "").strip()
+                if ans:
+                    q_display = q_text_by_id.get(q_id) or q_id
+                    filtered.append({"question": q_display, "answer": ans})
+
             if filtered:
                 out["custom_answers"] = filtered
 
     return out
 
 
-def generate_submission_snapshot(sub: dict, admin_email: str) -> dict:
+def generate_submission_snapshot(sub: dict, admin_email: str, project: Optional[dict] = None) -> dict:
     """Compile an immutable copy of the client-facing shape along with recruiter metadata."""
     # We temporarily remove the client_package_snapshot field on sub to prevent circular loading
     sub_copy = {k: v for k, v in sub.items() if k != "client_package_snapshot"}
-    client_shape = _submission_to_client_shape(sub_copy)
+    client_shape = _submission_to_client_shape(sub_copy, project=project)
     
     # Attach snapshot metadata
     client_shape["snapshot_meta"] = {

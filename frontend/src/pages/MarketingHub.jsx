@@ -962,12 +962,19 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
     const handleArchive = async () => {
         if (!client) return;
         if (!window.confirm(`Are you sure you want to archive ${client.name}?`)) return;
+        
+        const requestUrl = `${adminApi.defaults.baseURL || ""}/marketing/clients/${client.id}/archive`;
+        console.log("--- CRM ARCHIVE DIAGNOSTICS ---");
+        console.log("Request URL:", requestUrl);
+        console.log("Request Method: POST");
+        
         setUpdating(true);
         try {
             await adminApi.post(`/marketing/clients/${client.id}/archive`);
             toast.success("Client record archived.");
             onClientDeleted(client.id);
         } catch (e) {
+            console.error("Archive request error:", e);
             toast.error(e?.response?.data?.detail || "Failed to archive client");
         } finally {
             setUpdating(false);
@@ -977,12 +984,19 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
     const handleDelete = async () => {
         if (!client) return;
         if (!window.confirm(`Are you sure you want to delete ${client.name}? This will perform a soft-delete.`)) return;
+        
+        const requestUrl = `${adminApi.defaults.baseURL || ""}/marketing/clients/${client.id}`;
+        console.log("--- CRM DELETE DIAGNOSTICS ---");
+        console.log("Request URL:", requestUrl);
+        console.log("Request Method: DELETE");
+        
         setUpdating(true);
         try {
             await adminApi.delete(`/marketing/clients/${client.id}`);
             toast.success("Client record deleted.");
             onClientDeleted(client.id);
         } catch (e) {
+            console.error("Delete request error:", e);
             toast.error(e?.response?.data?.detail || "Failed to delete client");
         } finally {
             setUpdating(false);
@@ -1095,7 +1109,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
         <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
             <SheetContent
                 side="right"
-                className="w-full sm:max-w-2xl bg-white border-l border-slate-200 text-slate-900 overflow-y-auto shadow-2xl p-0"
+                className="w-full sm:max-w-2xl bg-white border-l border-slate-200 text-slate-900 overflow-y-auto shadow-2xl p-0 [&>button]:hidden"
                 data-testid="marketing-client-drawer"
             >
                 {client && (

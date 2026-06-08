@@ -20,6 +20,7 @@ the backend pod. Using a bare `/marketing` would 404 at the ingress
 layer. Prefix is therefore set to `/api/marketing` so the routes are
 reachable end-to-end. Tags remain `Marketing` as requested.
 """
+import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -27,6 +28,8 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 # Re-use the singleton Motor client from core. The marketing router
 # explicitly does NOT pull in the notifications module — this is a
@@ -215,6 +218,7 @@ async def archive_client(
     client_id: str,
     _admin: dict = Depends(current_team_or_admin),
 ):
+    logger.info("=== BACKEND ROUTE HIT: POST /api/marketing/clients/%s/archive ===", client_id)
     oid = _to_object_id(client_id, field="client_id")
     res = await db.clients.update_one({"_id": oid}, {"$set": {"archived": True}})
     if not res.matched_count:
@@ -227,6 +231,7 @@ async def delete_client(
     client_id: str,
     _admin: dict = Depends(current_team_or_admin),
 ):
+    logger.info("=== BACKEND ROUTE HIT: DELETE /api/marketing/clients/%s ===", client_id)
     oid = _to_object_id(client_id, field="client_id")
     res = await db.clients.update_one({"_id": oid}, {"$set": {"deleted": True}})
     if not res.matched_count:

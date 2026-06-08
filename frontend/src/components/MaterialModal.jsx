@@ -67,7 +67,7 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     onRemove={onRemove}
                     render={(m) => (
                         <a
-                            href={m.url}
+                            href={m.url && !m.url.toLowerCase().endsWith(".pdf") ? `${m.url}.pdf` : m.url}
                             target="_blank"
                             rel="noreferrer"
                             className="flex items-center gap-3 flex-1"

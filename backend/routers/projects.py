@@ -165,11 +165,15 @@ async def add_material(
             f"Reference video too large ({len(data) // (1024 * 1024)} MB). Max {MAX_VIDEO_FILE_BYTES // (1024 * 1024)} MB.",
         )
 
+    import os
+    _, ext = os.path.splitext(file.filename)
+    upload_public_id = f"{material_id}{ext.lower()}" if ext else material_id
+
     rt = "video" if category == "video_file" else "auto"
     result = cloudinary_upload(
         data,
         folder=folder,
-        public_id=material_id,
+        public_id=upload_public_id,
         resource_type=rt,
         content_type=content_type,
     )

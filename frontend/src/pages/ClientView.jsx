@@ -1628,7 +1628,7 @@ function TalentDetail({
 
                                     {(talent.custom_answers || []).length > 0 && (
                                         <div className="bg-white p-5 space-y-3 rounded-xl border border-black/[0.04] shadow-sm">
-                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Additional Details</p>
+                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">CUSTOM QUESTIONS</p>
                                             {talent.custom_answers.map((qa, i) => (
                                                 <div key={`${qa.question}-${i}`} data-testid={`custom-qa-mobile-${i}`}>
                                                     <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-1">{qa.question}</p>
@@ -1958,7 +1958,7 @@ function TalentDetail({
 
                             {(talent.custom_answers || []).length > 0 && (
                                 <div className="mb-8 bg-white p-5 space-y-3 rounded-xl shadow-sm">
-                                    <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Additional Details</p>
+                                    <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">CUSTOM QUESTIONS</p>
                                     {talent.custom_answers.map((qa, i) => (
                                         <div key={`${qa.question}-${i}`} data-testid={`custom-qa-${i}`}>
                                             <p className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] mb-1">{qa.question}</p>

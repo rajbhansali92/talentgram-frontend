@@ -408,7 +408,6 @@ const PipelineCard = memo(function PipelineCard({
         "bg-white",
         "shadow-[0_1px_2px_rgba(0,0,0,0.04)]",
         "border",
-        "min-h-[105px] md:min-h-[120px]", // Minimum height — allows shorter cards to be compact
         isSelected
             ? "border-black/20 ring-1 ring-black/10"
             : "border-black/[0.08]",
@@ -563,33 +562,10 @@ const PipelineCard = memo(function PipelineCard({
                     </div>
                 </div>
                 
-                {/* Row 2: Compact recruiter metadata */}
-                <div className="flex items-center justify-between text-[9px] text-black/50 border-t border-black/[0.04] pt-2">
-                    <div className="flex items-center gap-1.5">
-                        <span className="flex items-center gap-1">
-                            <User className="w-2.5 h-2.5 opacity-45" />
-                            <span className="truncate max-w-[80px]">{recruiterName}</span>
-                        </span>
-                        <span className="w-px h-2 bg-black/10 shrink-0" />
-                        <span className="flex items-center gap-1 text-black/35">
-                            <Clock className="w-2.5 h-2.5 opacity-35" />
-                            <span>{lastActivity || 'N/A'}</span>
-                        </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                        <span className="px-1.5 py-0.5 rounded bg-black/[0.03] text-black/45 shrink-0">
-                            {responseStatus}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded bg-black/[0.03] text-black/45 shrink-0">
-                            {availability}
-                        </span>
-                    </div>
-                </div>
-                
                 {/* Row 3: Stage actions */}
                 {!readOnly && visibleActions.length > 0 && (
                     <div
-                        className="flex flex-wrap items-center gap-1 pt-1.5 border-t border-black/[0.04]"
+                        className="flex flex-wrap items-center gap-1 pt-1.5"
                         role="group"
                         aria-label="Stage actions"
                     >
@@ -601,13 +577,15 @@ const PipelineCard = memo(function PipelineCard({
                                 disabled={moving}
                                 data-testid={`pipeline-card-move-${item.id}-${stage}`}
                                 className="
-                                    px-2 py-1 rounded-md
-                                    text-[9px] font-medium
+                                    px-2.5 py-1.5 md:px-2 md:py-1 rounded-md
+                                    text-[10.5px] md:text-[9px] font-medium
                                     text-black/50 hover:text-black/80
                                     bg-black/[0.03] hover:bg-black/[0.06]
                                     border border-transparent hover:border-black/[0.08]
                                     transition-all duration-100
                                     disabled:opacity-40
+                                    min-h-[32px] md:min-h-0
+                                    flex items-center justify-center
                                 "
                             >
                                 {STAGE_LABELS[stage] || getStageLabel(stage)}
@@ -623,13 +601,13 @@ const PipelineCard = memo(function PipelineCard({
                                     aria-expanded={showMoreActions}
                                     className="
                                         flex items-center justify-center
-                                        w-5 h-5 rounded-md
+                                        w-8 h-8 md:w-5 md:h-5 rounded-md
                                         text-black/40 hover:text-black/60
                                         hover:bg-black/[0.03]
                                         transition-colors duration-100
                                     "
                                 >
-                                    <MoreHorizontal className="w-3 h-3" />
+                                    <MoreHorizontal className="w-4 h-4 md:w-3 h-3" />
                                 </button>
                                 {showMoreActions && (
                                     <div className="absolute bottom-full right-0 mb-1 z-20 bg-white border border-black/[0.08] shadow-[0_4px_12px_-8px_rgba(0,0,0,0.1)] rounded-md py-1 min-w-[100px]">
@@ -730,9 +708,9 @@ const PipelineCard = memo(function PipelineCard({
                     onClick={handleTouchTrigger}
                     aria-label="Quick actions"
                     title="Quick actions"
-                    className="absolute bottom-2.5 right-2.5 z-10 w-6 h-6 rounded-md flex items-center justify-center text-black/30 bg-white/90 border border-black/[0.06] shadow-sm transition-colors duration-100 active:bg-black/[0.04] active:text-black/55"
+                    className="absolute bottom-2.5 right-2.5 z-10 w-11 h-11 md:w-6 md:h-6 rounded-md flex items-center justify-center text-black/30 bg-white/90 border border-black/[0.06] shadow-sm transition-colors duration-100 active:bg-black/[0.04] active:text-black/55"
                 >
-                    <MoreHorizontal className="w-3 h-3" />
+                    <MoreHorizontal className="w-4 h-4 md:w-3 md:h-3" />
                 </button>
             )}
         </div>

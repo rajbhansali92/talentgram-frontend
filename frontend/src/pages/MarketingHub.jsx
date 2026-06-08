@@ -245,7 +245,203 @@ export default function MarketingHub() {
     const [recentSearches, setRecentSearches] = useState([]);
     const [focusedIndex, setFocusedIndex] = useState(-1);
 
+    // Bulk / Multi-Select States
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [isSelectionMode, setIsSelectionMode] = useState(false);
+    const [bulkArchiveOpen, setBulkArchiveOpen] = useState(false);
+    const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+    const [bulkDeleteConfirmInput, setBulkDeleteConfirmInput] = useState("");
+    const [bulkTagOpen, setBulkTagOpen] = useState(false);
+    const [selectedBulkTags, setSelectedBulkTags] = useState([]);
+    const [newBulkTagInput, setNewBulkTagInput] = useState("");
+    const [updating, setUpdating] = useState(false);
+
     const searchInputRef = useRef(null);
+
+    const toggleSelect = useCallback((id) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) {
+                next.delete(id);
+            } else {
+                next.add(id);
+            }
+            return next;
+        });
+    }, []);
+
+    const clearSelection = useCallback(() => {
+        setSelectedIds(new Set());
+        setIsSelectionMode(false);
+    }, []);
+
+    const selectAllVisible = useCallback(() => {
+        const visibleIds = filteredClients.map(c => c.id);
+        const allSelected = visibleIds.every(id => selectedIds.has(id));
+        
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (allSelected) {
+                visibleIds.forEach(id => next.delete(id));
+            } else {
+                visibleIds.forEach(id => next.add(id));
+            }
+            return next;
+        });
+    }, [filteredClients, selectedIds]);
+
+    const isAllVisibleSelected = useMemo(() => {
+        if (filteredClients.length === 0) return false;
+        return filteredClients.every(c => selectedIds.has(c.id));
+    }, [filteredClients, selectedIds]);
+
+    const isAnyVisibleSelected = useMemo(() => {
+        return filteredClients.some(c => selectedIds.has(c.id));
+    }, [filteredClients, selectedIds]);
+
+    const handleBulkArchive = async () => {
+        const idsArray = Array.from(selectedIds);
+        setUpdating(true);
+        try {
+            await adminApi.post("/marketing/clients/bulk-archive", { ids: idsArray });
+            toast.success(`${idsArray.length} contact(s) archived.`);
+            setClients(prev => prev.filter(c => !selectedIds.has(c.id)));
+            clearSelection();
+            setBulkArchiveOpen(false);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to archive contacts");
+        } finally {
+            setUpdating(false);
+        }
+    };
+
+    const handleBulkDelete = async () => {
+        if (bulkDeleteConfirmInput !== "DELETE") return;
+        const idsArray = Array.from(selectedIds);
+        setUpdating(true);
+        try {
+            await adminApi.post("/marketing/clients/bulk-delete", { ids: idsArray });
+            toast.success(`${idsArray.length} contact(s) deleted.`);
+            setClients(prev => prev.filter(c => !selectedIds.has(c.id)));
+            clearSelection();
+            setBulkDeleteOpen(false);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to delete contacts");
+        } finally {
+            setUpdating(false);
+        }
+    };
+
+    const allExistingTags = useMemo(() => {
+        const set = new Set();
+        clients.forEach(c => {
+            (c.tags || []).forEach(t => set.add(t));
+        });
+        const defaults = ["Brand Manager", "Agency", "Producer", "Casting Director", "Creative Director", "Influencer Manager"];
+        defaults.forEach(t => set.add(t));
+        return Array.from(set).sort();
+    }, [clients]);
+
+    const handleBulkTag = async () => {
+        const idsArray = Array.from(selectedIds);
+        const tagsToApply = [...selectedBulkTags];
+        const newTag = newBulkTagInput.trim();
+        if (newTag) {
+            tagsToApply.push(newTag);
+        }
+        if (tagsToApply.length === 0) {
+            toast.error("Please select or enter at least one tag.");
+            return;
+        }
+        setUpdating(true);
+        try {
+            await adminApi.post("/marketing/clients/bulk-tag", { ids: idsArray, tags: tagsToApply });
+            toast.success(`Tags assigned to ${idsArray.length} contact(s).`);
+            setClients(prev => prev.map(c => {
+                if (selectedIds.has(c.id)) {
+                    const merged = Array.from(new Set([...(c.tags || []), ...tagsToApply]));
+                    return { ...c, tags: merged };
+                }
+                return c;
+            }));
+            clearSelection();
+            setBulkTagOpen(false);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to assign tags");
+        } finally {
+            setUpdating(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!bulkDeleteOpen) {
+            setBulkDeleteConfirmInput("");
+        }
+    }, [bulkDeleteOpen]);
+
+    useEffect(() => {
+        if (!bulkTagOpen) {
+            setSelectedBulkTags([]);
+            setNewBulkTagInput("");
+        }
+    }, [bulkTagOpen]);
+
+    // Touch event variables for mobile long press
+    const touchTimeoutRef = useRef({});
+    const touchStartCoordsRef = useRef({});
+
+    const handleTouchStart = (e, id) => {
+        const touch = e.touches[0];
+        touchStartCoordsRef.current[id] = { x: touch.clientX, y: touch.clientY };
+        
+        if (touchTimeoutRef.current[id]) {
+            clearTimeout(touchTimeoutRef.current[id]);
+        }
+        
+        touchTimeoutRef.current[id] = setTimeout(() => {
+            setIsSelectionMode(true);
+            toggleSelect(id);
+            if (navigator.vibrate) {
+                navigator.vibrate(50);
+            }
+        }, 500);
+    };
+
+    const handleTouchMove = (e, id) => {
+        const touch = e.touches[0];
+        const start = touchStartCoordsRef.current[id];
+        if (start) {
+            const diffX = Math.abs(touch.clientX - start.x);
+            const diffY = Math.abs(touch.clientY - start.y);
+            if (diffX > 10 || diffY > 10) {
+                if (touchTimeoutRef.current[id]) {
+                    clearTimeout(touchTimeoutRef.current[id]);
+                    touchTimeoutRef.current[id] = null;
+                }
+            }
+        }
+    };
+
+    const handleTouchEnd = (id) => {
+        if (touchTimeoutRef.current[id]) {
+            clearTimeout(touchTimeoutRef.current[id]);
+            touchTimeoutRef.current[id] = null;
+        }
+    };
+
+    const handleCardClick = (e, client, index) => {
+        if (e.target.closest("input[type=checkbox]")) {
+            return;
+        }
+        if (selectedIds.size > 0 || isSelectionMode) {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleSelect(client.id);
+        } else {
+            setActiveClient(client);
+            setFocusedIndex(index);
+        }
+    };
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -580,6 +776,65 @@ export default function MarketingHub() {
                 </div>
             </div>
 
+            {/* Bulk Actions Controls Deck & Action Bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-3.5 px-4 mb-6 bg-slate-50 border border-slate-200/60 rounded-2xl">
+                <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={isAllVisibleSelected}
+                            ref={el => {
+                                if (el) {
+                                    el.indeterminate = isAnyVisibleSelected && !isAllVisibleSelected;
+                                }
+                            }}
+                            onChange={selectAllVisible}
+                            className="w-4.5 h-4.5 rounded border-slate-300 text-slate-900 focus:ring-slate-900 cursor-pointer"
+                        />
+                        <span className="text-xs font-semibold text-slate-700">Select All Visible</span>
+                    </label>
+                    {selectedIds.size > 0 && (
+                        <span className="text-xs font-mono font-bold text-slate-500 bg-slate-200/60 px-2 py-0.5 rounded-lg select-none">
+                            {selectedIds.size} Selected
+                        </span>
+                    )}
+                </div>
+
+                {/* Desktop Bulk Actions */}
+                {selectedIds.size > 0 && (
+                    <div className="hidden md:flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={() => setBulkTagOpen(true)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                        >
+                            Assign Tags
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setBulkArchiveOpen(true)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                        >
+                            Archive Selected
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setBulkDeleteOpen(true)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-50 hover:bg-red-100 border border-red-200 hover:border-red-300 rounded-xl text-xs font-semibold text-red-700 transition-colors shadow-sm active:scale-[0.98]"
+                        >
+                            Delete Selected
+                        </button>
+                        <button
+                            type="button"
+                            onClick={clearSelection}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
+                        >
+                            Clear Selection
+                        </button>
+                    </div>
+                )}
+            </div>
+
             {/* List with keyboard index highlights */}
             {loading ? (
                 <div className="space-y-4" data-testid="marketing-loading">
@@ -608,15 +863,34 @@ export default function MarketingHub() {
                         return (
                             <div
                                 key={c.id}
-                                onClick={() => { setActiveClient(c); setFocusedIndex(i); }}
+                                onClick={(e) => handleCardClick(e, c, i)}
+                                onTouchStart={(e) => handleTouchStart(e, c.id)}
+                                onTouchMove={(e) => handleTouchMove(e, c.id)}
+                                onTouchEnd={() => handleTouchEnd(c.id)}
                                 data-testid={`marketing-client-row-${c.id}`}
-                                className={`group bg-white border rounded-2xl p-4 sm:p-5 cursor-pointer transition-all duration-200 hover:shadow-md ${
-                                    isFocused 
-                                        ? "border-slate-900 ring-1 ring-slate-950 bg-slate-50/20" 
-                                        : "border-slate-200 hover:border-slate-300"
+                                className={`group bg-white border rounded-2xl p-4 sm:p-5 cursor-pointer transition-all duration-200 hover:shadow-md select-none ${
+                                    selectedIds.has(c.id)
+                                        ? "border-slate-900 bg-slate-50/40 shadow-sm"
+                                        : isFocused 
+                                            ? "border-slate-900 ring-1 ring-slate-950 bg-slate-50/20" 
+                                            : "border-slate-200 hover:border-slate-300"
                                 }`}
                             >
                                 <div className="flex items-start gap-3 sm:gap-5">
+                                    {/* Hover checkbox / Mobile check indicator */}
+                                    <div className={`shrink-0 flex items-center justify-center mr-1 sm:mr-2 self-center transition-all ${
+                                        selectedIds.has(c.id) 
+                                            ? "opacity-100 scale-100" 
+                                            : "opacity-0 md:group-hover:opacity-100 scale-90 md:scale-100"
+                                    }`}>
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedIds.has(c.id)}
+                                            onChange={() => toggleSelect(c.id)}
+                                            className="w-4.5 h-4.5 rounded border-slate-300 text-slate-900 focus:ring-slate-950 cursor-pointer transition-all shadow-sm"
+                                        />
+                                    </div>
+
                                     {/* Glassmorphic Initial Avatar */}
                                     <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center font-display text-base sm:text-lg font-medium text-slate-800 shrink-0 shadow-sm">
                                         {initial}
@@ -701,6 +975,206 @@ export default function MarketingHub() {
                 onClose={() => setAddOpen(false)}
                 onCreated={handleClientCreated}
             />
+
+            {/* Mobile Sticky Bottom Action Bar */}
+            {selectedIds.size > 0 && (
+                <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 shadow-[0_-8px_30px_rgb(0,0,0,0.12)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-in slide-in-from-bottom duration-300">
+                    <div className="flex items-center justify-between gap-4 mb-3">
+                        <span className="text-xs font-semibold text-slate-700">
+                            {selectedIds.size} Contact(s) Selected
+                        </span>
+                        <button
+                            type="button"
+                            onClick={clearSelection}
+                            className="text-xs font-semibold text-slate-500 hover:text-slate-800"
+                        >
+                            Clear
+                        </button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <button
+                            type="button"
+                            onClick={() => setBulkTagOpen(true)}
+                            className="inline-flex items-center justify-center py-2.5 bg-slate-900 text-white rounded-xl text-xs font-bold transition-all active:scale-[0.98]"
+                        >
+                            Assign Tags
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setBulkArchiveOpen(true)}
+                            className="inline-flex items-center justify-center py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 transition-all active:scale-[0.98]"
+                        >
+                            Archive
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setBulkDeleteOpen(true)}
+                            className="inline-flex items-center justify-center py-2.5 bg-red-50 border border-red-200 rounded-xl text-xs font-semibold text-red-700 transition-all active:scale-[0.98]"
+                        >
+                            Delete
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Bulk Archive Dialog */}
+            <Dialog open={bulkArchiveOpen} onOpenChange={setBulkArchiveOpen}>
+                <DialogContent className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                    <DialogHeader>
+                        <DialogTitle className="text-xl font-semibold text-slate-950">
+                            Archive Contacts
+                        </DialogTitle>
+                        <DialogDescription className="text-slate-500 text-xs mt-1">
+                            Are you sure you want to archive {selectedIds.size} selected contact(s)?
+                            Archiving will remove them from the active list but preserve their interaction logs.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter className="mt-6 gap-3">
+                        <button
+                            type="button"
+                            onClick={() => setBulkArchiveOpen(false)}
+                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleBulkArchive}
+                            disabled={updating}
+                            className="inline-flex items-center gap-1.5 bg-slate-950 text-white px-4 py-2.5 rounded-xl text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 shadow-sm"
+                        >
+                            {updating && <Loader2 className="w-3 animate-spin" />}
+                            Archive {selectedIds.size} Contacts
+                        </button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Bulk Delete Dialog */}
+            <Dialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+                <DialogContent className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                    <DialogHeader>
+                        <DialogTitle className="text-xl font-semibold text-red-700">
+                            Delete Contacts
+                        </DialogTitle>
+                        <DialogDescription className="text-slate-500 text-xs mt-1">
+                            Are you sure you want to delete {selectedIds.size} selected contact(s)?
+                            This action cannot be undone. Type <strong className="text-slate-900">DELETE</strong> to proceed.
+                        </DialogDescription>
+                    </DialogHeader>
+                    
+                    <div className="mt-4">
+                        <input
+                            type="text"
+                            value={bulkDeleteConfirmInput}
+                            onChange={(e) => setBulkDeleteConfirmInput(e.target.value)}
+                            placeholder="Type DELETE to confirm"
+                            className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-red-300 focus:outline-none transition-colors"
+                        />
+                    </div>
+
+                    <DialogFooter className="mt-6 gap-3">
+                        <button
+                            type="button"
+                            onClick={() => setBulkDeleteOpen(false)}
+                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleBulkDelete}
+                            disabled={updating || bulkDeleteConfirmInput !== "DELETE"}
+                            className="inline-flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold disabled:opacity-50 shadow-sm"
+                        >
+                            {updating && <Loader2 className="w-3 animate-spin" />}
+                            Delete {selectedIds.size} Contacts
+                        </button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Bulk Tag Dialog */}
+            <Dialog open={bulkTagOpen} onOpenChange={setBulkTagOpen}>
+                <DialogContent className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                    <DialogHeader>
+                        <DialogTitle className="text-xl font-semibold text-slate-950">
+                            Assign Tags
+                        </DialogTitle>
+                        <DialogDescription className="text-slate-500 text-xs mt-1">
+                            Assign or create tags for {selectedIds.size} selected contact(s).
+                            New tags will be merged with their existing tags.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    {/* Pre-existing tags multi select */}
+                    <div className="mt-4 space-y-3">
+                        <div className="text-[10px] font-semibold tracking-wider font-mono text-slate-400 uppercase">
+                            Select Tags to Merge:
+                        </div>
+                        <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto pr-1">
+                            {allExistingTags.map(tag => {
+                                const active = selectedBulkTags.includes(tag);
+                                return (
+                                    <button
+                                        key={tag}
+                                        type="button"
+                                        onClick={() => {
+                                            setSelectedBulkTags(prev => 
+                                                prev.includes(tag) 
+                                                    ? prev.filter(t => t !== tag) 
+                                                    : [...prev, tag]
+                                            );
+                                        }}
+                                        className={`px-3 py-1.5 border rounded-xl text-xs font-medium transition-all ${
+                                            active
+                                                ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                                                : "bg-white text-slate-600 border-slate-200 hover:border-slate-355"
+                                        }`}
+                                    >
+                                        #{tag}
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        {/* Inline new tag creator */}
+                        <div className="pt-2 border-t border-slate-100">
+                            <label className="block">
+                                <span className="text-[10px] font-semibold tracking-wider font-mono text-slate-400 uppercase">
+                                    Create New Tag:
+                                </span>
+                                <input
+                                    type="text"
+                                    value={newBulkTagInput}
+                                    onChange={(e) => setNewBulkTagInput(e.target.value)}
+                                    placeholder="Enter new tag..."
+                                    className="mt-1.5 w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-slate-350 focus:outline-none transition-colors"
+                                />
+                            </label>
+                        </div>
+                    </div>
+
+                    <DialogFooter className="mt-6 gap-3">
+                        <button
+                            type="button"
+                            onClick={() => setBulkTagOpen(false)}
+                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleBulkTag}
+                            disabled={updating || (selectedBulkTags.length === 0 && !newBulkTagInput.trim())}
+                            className="inline-flex items-center gap-1.5 bg-slate-950 text-white px-4 py-2.5 rounded-xl text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 shadow-sm"
+                        >
+                            {updating && <Loader2 className="w-3 animate-spin" />}
+                            Apply Tags
+                        </button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
 
             <ClientDrawer
                 client={activeClient}

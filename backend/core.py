@@ -1368,7 +1368,56 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
         to their human-readable question text using project.custom_questions.
     """
     if sub.get("client_package_snapshot"):
-        return sub["client_package_snapshot"]
+        snap = sub["client_package_snapshot"]
+        ca_snap = snap.get("custom_answers")
+        
+        # If snapshot already has the new array format, or there are no custom answers to process, return the snapshot
+        if isinstance(ca_snap, list) and len(ca_snap) > 0:
+            return snap
+            
+        if not ca_snap and not (sub.get("form_data") or {}).get("custom_answers"):
+            return snap
+        # Snapshot exists but custom_answers are missing — resolve them now
+        # and merge into a copy of the snapshot so the rest of the function
+        # can return the enriched shape without touching the stored document.
+        fd_for_resolve = sub.get("form_data") or {}
+        fv_for_resolve = {**DEFAULT_FIELD_VISIBILITY, **(sub.get("field_visibility") or {})}
+        raw_answers_snap = fd_for_resolve.get("custom_answers") or {}
+        if isinstance(raw_answers_snap, dict) and raw_answers_snap and fv_for_resolve.get("custom_answers"):
+            q_text_by_id_snap: Dict[str, str] = {}
+            project_cqs_snap = (project or {}).get("custom_questions") or []
+            for cq in project_cqs_snap:
+                qid = cq.get("id") or ""
+                qtext = (cq.get("question") or "").strip()
+                if qid and qtext:
+                    q_text_by_id_snap[qid] = qtext
+            ordered_ids_snap = (
+                [cq.get("id") for cq in project_cqs_snap if cq.get("id")]
+                if project_cqs_snap else list(raw_answers_snap.keys())
+            )
+            ca_vis_snap = fv_for_resolve.get("custom_answers")
+            filtered_snap: List[Dict[str, str]] = []
+            seen_snap: set = set()
+            for q_id in ordered_ids_snap:
+                if q_id not in raw_answers_snap:
+                    continue
+                if isinstance(ca_vis_snap, dict) and not ca_vis_snap.get(q_id):
+                    continue
+                ans = str(raw_answers_snap[q_id] or "").strip()
+                if ans:
+                    filtered_snap.append({"question": q_text_by_id_snap.get(q_id) or q_id, "answer": ans})
+                seen_snap.add(q_id)
+            for q_id, a in raw_answers_snap.items():
+                if q_id in seen_snap:
+                    continue
+                if isinstance(ca_vis_snap, dict) and not ca_vis_snap.get(q_id):
+                    continue
+                ans = str(a or "").strip()
+                if ans:
+                    filtered_snap.append({"question": q_text_by_id_snap.get(q_id) or q_id, "answer": ans})
+            if filtered_snap:
+                return {**snap, "custom_answers": filtered_snap}
+        return snap
 
     fd = sub.get("form_data") or {}
     # Merge defaults with stored visibility so newly added keys (e.g.

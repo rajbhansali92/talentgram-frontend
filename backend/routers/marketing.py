@@ -107,6 +107,8 @@ def _serialise_client(doc: dict) -> dict:
         "contact_type": doc.get("contact_type"),
         "created_at": doc.get("created_at"),
         "last_contacted_date": doc.get("last_contacted_date"),
+        "archived": doc.get("archived") or False,
+        "deleted": doc.get("deleted") or False,
     }
 
 
@@ -154,9 +156,8 @@ async def create_client(
 async def list_clients(
     _admin: dict = Depends(current_team_or_admin),
 ) -> List[dict]:
-    """Return every client. Sorted by most-recent contact first so a
-    sales user sees the freshest leads at the top of the table."""
-    cursor = db.clients.find().sort("last_contacted_date", -1)
+    """Return every active, non-archived client. Sorted by most-recent contact first."""
+    cursor = db.clients.find({"archived": {"$ne": True}, "deleted": {"$ne": True}}).sort("last_contacted_date", -1)
     items = await cursor.to_list(length=None)
     return [_serialise_client(d) for d in items]
 
@@ -207,6 +208,30 @@ async def update_client(
         
     doc = await db.clients.find_one({"_id": oid})
     return _serialise_client(doc)
+
+
+@router.post("/clients/{client_id}/archive")
+async def archive_client(
+    client_id: str,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    oid = _to_object_id(client_id, field="client_id")
+    res = await db.clients.update_one({"_id": oid}, {"$set": {"archived": True}})
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {"success": True}
+
+
+@router.delete("/clients/{client_id}")
+async def delete_client(
+    client_id: str,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    oid = _to_object_id(client_id, field="client_id")
+    res = await db.clients.update_one({"_id": oid}, {"$set": {"deleted": True}})
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {"success": True}
 
 
 # ---------------------------------------------------------------------------

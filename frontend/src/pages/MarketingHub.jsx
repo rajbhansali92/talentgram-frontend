@@ -398,6 +398,11 @@ export default function MarketingHub() {
         setActiveClient(updatedClient);
     }, []);
 
+    const handleClientDeleted = useCallback((deletedId) => {
+        setClients(prev => prev.filter(c => c.id !== deletedId));
+        setActiveClient(null);
+    }, []);
+
     const handleInteractionAdded = useCallback((updatedDate) => {
         if (!activeClient) return;
         const bumped = { 
@@ -701,6 +706,7 @@ export default function MarketingHub() {
                 client={activeClient}
                 onClose={() => setActiveClient(null)}
                 onClientUpdated={handleClientUpdated}
+                onClientDeleted={handleClientDeleted}
                 onInteractionAdded={handleInteractionAdded}
             />
         </div>
@@ -921,7 +927,7 @@ const INTERACTION_TYPES = [
     { value: "whatsapp", label: "WhatsApp", icon: MessageSquare },
 ];
 
-function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) {
+function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInteractionAdded }) {
     const open = !!client;
     const [interactions, setInteractions] = useState([]);
     const [loadingList, setLoadingList] = useState(false);
@@ -940,6 +946,48 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
     const [editTags, setEditTags] = useState("");
     const [editContactType, setEditContactType] = useState("");
     const [updating, setUpdating] = useState(false);
+
+    // Escape key listener to close drawer
+    useEffect(() => {
+        if (!open) return;
+        const handleKeyDown = (e) => {
+            if (e.key === "Escape") {
+                onClose();
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [open, onClose]);
+
+    const handleArchive = async () => {
+        if (!client) return;
+        if (!window.confirm(`Are you sure you want to archive ${client.name}?`)) return;
+        setUpdating(true);
+        try {
+            await adminApi.post(`/marketing/clients/${client.id}/archive`);
+            toast.success("Client record archived.");
+            onClientDeleted(client.id);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to archive client");
+        } finally {
+            setUpdating(false);
+        }
+    };
+
+    const handleDelete = async () => {
+        if (!client) return;
+        if (!window.confirm(`Are you sure you want to delete ${client.name}? This will perform a soft-delete.`)) return;
+        setUpdating(true);
+        try {
+            await adminApi.delete(`/marketing/clients/${client.id}`);
+            toast.success("Client record deleted.");
+            onClientDeleted(client.id);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to delete client");
+        } finally {
+            setUpdating(false);
+        }
+    };
 
     const loadInteractions = useCallback(async (cid) => {
         setLoadingList(true);
@@ -1073,13 +1121,24 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                                     )}
                                 </SheetDescription>
                             </SheetHeader>
-                            <button
-                                onClick={() => setIsEditing(!isEditing)}
-                                className="absolute right-5 top-8 p-2 text-slate-400 hover:text-slate-800 border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-sm bg-white"
-                                title="Edit Profile"
-                            >
-                                {isEditing ? <Check className="w-4 h-4 text-[#5A7D5A]" /> : <Edit2 className="w-4 h-4" />}
-                            </button>
+                            <div className="absolute right-5 top-6 sm:top-8 flex items-center gap-2">
+                                <button
+                                    onClick={() => setIsEditing(!isEditing)}
+                                    className="p-2 text-slate-400 hover:text-slate-800 border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-sm bg-white"
+                                    title="Edit Profile"
+                                >
+                                    {isEditing ? <Check className="w-4 h-4 text-[#5A7D5A]" /> : <Edit2 className="w-4 h-4" />}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={onClose}
+                                    data-testid="marketing-drawer-close-btn"
+                                    className="p-2 text-slate-400 hover:text-slate-800 border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-sm bg-white"
+                                    title="Close Drawer"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
                         </div>
 
                         {/* Scrollable Content */}
@@ -1180,51 +1239,49 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                                     </div>
                                     
                                     {/* Action Deck Bar (Prominent Apple/Linear-style Contact actions) */}
-                                    <div className="grid grid-cols-3 gap-2.5 bg-slate-50 border border-slate-200/60 rounded-2xl p-2.5">
-                                        {client.phone_number ? (
-                                            <a
-                                                href={`tel:${client.phone_number}`}
-                                                className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
-                                            >
-                                                <Phone className="w-4 h-4 text-slate-600" />
-                                                <span>Call</span>
-                                            </a>
-                                        ) : (
-                                            <span className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-100 bg-slate-100/50 rounded-xl text-[11px] font-semibold text-slate-400 opacity-60 cursor-not-allowed select-none">
-                                                <Phone className="w-4 h-4 text-slate-300" />
-                                                <span>No Phone</span>
-                                            </span>
-                                        )}
-                                        {client.email ? (
-                                            <a
-                                                href={`mailto:${client.email}`}
-                                                className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
-                                            >
-                                                <Mail className="w-4 h-4 text-slate-600" />
-                                                <span>Email</span>
-                                            </a>
-                                        ) : (
-                                            <span className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-100 bg-slate-100/50 rounded-xl text-[11px] font-semibold text-slate-400 opacity-60 cursor-not-allowed select-none">
-                                                <Mail className="w-4 h-4 text-slate-300" />
-                                                <span>No Email</span>
-                                            </span>
-                                        )}
-                                        {client.phone_number ? (
-                                            <button
-                                                type="button"
-                                                onClick={handleShare}
-                                                className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#B89B5E]/30 bg-white hover:bg-[#B89B5E]/5 rounded-xl text-[11px] font-semibold text-[#B89B5E] shadow-sm transition-all duration-200 active:scale-[0.97]"
-                                            >
-                                                <MessageSquare className="w-4 h-4 text-[#B89B5E]" />
-                                                <span>WhatsApp</span>
-                                            </button>
-                                        ) : (
-                                            <span className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-100 bg-slate-100/50 rounded-xl text-[11px] font-semibold text-slate-400 opacity-60 cursor-not-allowed select-none">
-                                                <MessageSquare className="w-4 h-4 text-slate-300" />
-                                                <span>No WhatsApp</span>
-                                            </span>
-                                        )}
-                                    </div>
+                                    {(() => {
+                                        const showPhone = !!client.phone_number;
+                                        const showEmail = !!client.email;
+                                        const showWhatsApp = !!client.phone_number;
+                                        
+                                        const colsCount = (showPhone ? 1 : 0) + (showEmail ? 1 : 0) + (showWhatsApp ? 1 : 0);
+                                        if (colsCount === 0) return null;
+                                        
+                                        const gridColsClass = colsCount === 3 ? "grid-cols-3" : colsCount === 2 ? "grid-cols-2" : "grid-cols-1";
+                                        
+                                        return (
+                                            <div className={`grid ${gridColsClass} gap-2.5 bg-slate-50 border border-slate-200/60 rounded-2xl p-2.5`}>
+                                                {showPhone && (
+                                                    <a
+                                                        href={`tel:${client.phone_number}`}
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                    >
+                                                        <Phone className="w-4 h-4 text-slate-600" />
+                                                        <span>Call</span>
+                                                    </a>
+                                                )}
+                                                {showEmail && (
+                                                    <a
+                                                        href={`mailto:${client.email}`}
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                    >
+                                                        <Mail className="w-4 h-4 text-slate-600" />
+                                                        <span>Email</span>
+                                                    </a>
+                                                )}
+                                                {showWhatsApp && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleShare}
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#B89B5E]/30 bg-white hover:bg-[#B89B5E]/5 rounded-xl text-[11px] font-semibold text-[#B89B5E] shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                    >
+                                                        <MessageSquare className="w-4 h-4 text-[#B89B5E]" />
+                                                        <span>WhatsApp</span>
+                                                    </button>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
 
                                     {/* Mini Scorecard row */}
                                     <div className="grid grid-cols-3 gap-3">
@@ -1274,6 +1331,37 @@ function ClientDrawer({ client, onClose, onClientUpdated, onInteractionAdded }) 
                                                     <span className="ml-1.5 text-slate-400 text-[10px] font-mono">({daysSince}d ago)</span>
                                                 )}
                                             </span>
+                                        </div>
+                                    </div>
+
+                                    {/* Relationship Management danger / archive controls */}
+                                    <div className="border border-red-100 bg-red-50/20 rounded-2xl p-4 space-y-3">
+                                        <div className="flex items-center gap-1.5 text-red-800 font-semibold text-xs select-none">
+                                            <AlertCircle className="w-4 h-4 text-red-600" />
+                                            <span>Relationship Management</span>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 leading-normal select-none">
+                                            Manage the visibility of this contact record. Deleting or archiving will remove it from your active workspace.
+                                        </p>
+                                        <div className="flex gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={handleArchive}
+                                                disabled={updating}
+                                                data-testid="marketing-drawer-archive-btn"
+                                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 hover:border-slate-300 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-40"
+                                            >
+                                                Archive Client
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={handleDelete}
+                                                disabled={updating}
+                                                data-testid="marketing-drawer-delete-btn"
+                                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-red-200 hover:border-red-300 rounded-xl text-xs font-semibold text-red-700 bg-white hover:bg-red-50/50 transition-colors shadow-sm disabled:opacity-40"
+                                            >
+                                                Delete Record
+                                            </button>
                                         </div>
                                     </div>
                                 </div>

@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
-import { Search, Plus, Check, User, LayoutGrid, List } from "lucide-react";
+import { Search, Plus, Check, User, LayoutGrid, List, Tag } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
+import TagPopover from "@/components/TagPopover";
+import BulkTagDialog from "@/components/BulkTagDialog";
 
 // ---------------------------------------------------------------------------
 // Skeleton card — prevents layout shift during load
@@ -92,6 +94,7 @@ const TalentCard = React.memo(function TalentCard({
     isSelectionMode,
     canBulkDelete,
     onToggle,
+    onTagClick,
 }) {
     const handleToggle = useCallback(
         (e) => {
@@ -99,6 +102,15 @@ const TalentCard = React.memo(function TalentCard({
             onToggle(t.id);
         },
         [t.id, onToggle]
+    );
+
+    const handleTagClick = useCallback(
+        (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onTagClick(t);
+        },
+        [t, onTagClick]
     );
 
     const cardContent = (
@@ -179,6 +191,22 @@ const TalentCard = React.memo(function TalentCard({
                 </button>
             )}
 
+            {/* Tag Assignment Trigger */}
+            <button
+                type="button"
+                onClick={handleTagClick}
+                aria-label="Manage tags"
+                data-testid={`talent-tag-btn-${t.id}`}
+                className={[
+                    "absolute top-2 right-2 z-10 w-11 h-11 md:w-8 md:h-8 rounded-full bg-white/90 border border-black/15 shadow-sm flex items-center justify-center text-black/60 hover:text-black hover:bg-white active:scale-95 transition-all",
+                    checked
+                        ? "opacity-100"
+                        : "opacity-100 md:opacity-0 md:group-hover:opacity-100",
+                ].join(" ")}
+            >
+                <Tag className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
+            </button>
+
             {/* Card body — link or button depending on selection mode */}
             {!isSelectionMode ? (
                 <Link
@@ -209,6 +237,7 @@ const TalentListRow = React.memo(function TalentListRow({
     isSelectionMode,
     canBulkDelete,
     onToggle,
+    onTagClick,
 }) {
     const handleToggle = useCallback(
         (e) => {
@@ -216,6 +245,15 @@ const TalentListRow = React.memo(function TalentListRow({
             onToggle(t.id);
         },
         [t.id, onToggle]
+    );
+
+    const handleTagClick = useCallback(
+        (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onTagClick(t);
+        },
+        [t, onTagClick]
     );
 
     // Filter media arrays safely
@@ -292,20 +330,42 @@ const TalentListRow = React.memo(function TalentListRow({
 
                 {/* Info block */}
                 <div className="min-w-0 flex-1 grid grid-cols-1 md:grid-cols-12 gap-2 md:gap-4 items-center">
-                    {/* Name */}
+                    {/* Name & Tags */}
                     <div className="md:col-span-4 min-w-0">
-                        {!isSelectionMode ? (
-                            <Link
-                                to={`/admin/talents/${t.id}`}
-                                className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 hover:text-black hover:underline truncate block"
-                            >
-                                {t.name || "—"}
-                            </Link>
-                        ) : (
-                            <span className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 truncate block">
-                                {t.name || "—"}
-                            </span>
-                        )}
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {!isSelectionMode ? (
+                                <Link
+                                    to={`/admin/talents/${t.id}`}
+                                    className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 hover:text-black hover:underline truncate block"
+                                >
+                                    {t.name || "—"}
+                                </Link>
+                            ) : (
+                                <span className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 truncate block">
+                                    {t.name || "—"}
+                                </span>
+                            )}
+                            
+                            {/* Tags display in row */}
+                            {(t.tags || []).length > 0 && (
+                                <div className="flex items-center gap-1 flex-wrap">
+                                    {(t.tags || []).slice(0, 2).map((tag) => (
+                                        <span
+                                            key={tag.id}
+                                            className="px-1.5 py-0.5 rounded text-[9px] tracking-[0.05em] bg-black/[0.05] text-black/50 border border-black/[0.06] truncate max-w-[72px]"
+                                            title={tag.name}
+                                        >
+                                            {tag.name}
+                                        </span>
+                                    ))}
+                                    {(t.tags || []).length > 2 && (
+                                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-black/[0.03] text-black/35 border border-black/[0.05]">
+                                            +{(t.tags || []).length - 2}
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                         {/* Mobile metadata summary */}
                         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400 mt-0.5 md:hidden">
                             {t.gender && <span className="capitalize">{t.gender}</span>}
@@ -357,6 +417,17 @@ const TalentListRow = React.memo(function TalentListRow({
                 <div className="flex items-center gap-1">
                     {!isSelectionMode && (
                         <>
+                            <button
+                                type="button"
+                                onClick={handleTagClick}
+                                aria-label="Manage tags"
+                                data-testid={`talent-tag-btn-${t.id}`}
+                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 hover:bg-black/[0.02] bg-white text-black text-[11px] font-medium w-11 h-11 md:w-auto md:px-2.5 md:py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
+                                title="Manage Tags"
+                            >
+                                <Tag className="w-4.5 h-4.5 md:w-3.5 md:h-3.5 md:mr-1" />
+                                <span className="hidden md:inline">Tags</span>
+                            </button>
                             <Link
                                 to={`/admin/talents/${t.id}`}
                                 className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
@@ -402,6 +473,10 @@ export default function TalentList() {
     const [totalPages, setTotalPages] = useState(1);
     const [totalItems, setTotalItems] = useState(0);
     const canBulkDelete = isAdmin();
+
+    // Inline tagging state
+    const [tagPopoverTalent, setTagPopoverTalent] = useState(null);
+    const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
 
     const [viewMode, setViewMode] = useState(() => {
         try {
@@ -495,6 +570,31 @@ export default function TalentList() {
 
     const isSelectionMode = selected.size > 0;
 
+    // ── Optimistic state updates ─────────────────────────────────────────────
+    const handleSaveTagsOptimistic = useCallback((talentId, updatedTags) => {
+        setTalents(prev => prev.map(t => t.id === talentId ? { ...t, tags: updatedTags } : t));
+    }, []);
+
+    const handleBulkSaveTagsOptimistic = useCallback((tag, actionType) => {
+        const ids = Array.from(selected);
+        setTalents(prev => prev.map(t => {
+            if (ids.includes(t.id)) {
+                const existing = t.tags || [];
+                let nextTags = [...existing];
+                if (actionType === "assign") {
+                    if (!existing.some(tg => tg.id === tag.id)) {
+                        nextTags.push({ id: tag.id, name: tag.name });
+                    }
+                } else {
+                    nextTags = nextTags.filter(tg => tg.id !== tag.id);
+                }
+                return { ...t, tags: nextTags };
+            }
+            return t;
+        }));
+        clear();
+    }, [selected, clear]);
+
     // ── Bulk delete ──────────────────────────────────────────────────────────
     const bulkDelete = useCallback(async () => {
         const ids = Array.from(selected);
@@ -515,6 +615,42 @@ export default function TalentList() {
             throw err;
         }
     }, [selected, clear, load, q]);
+
+    // ── Export ───────────────────────────────────────────────────────────────
+    const handleExport = useCallback(() => {
+        const selectedTalents = talents.filter(t => selected.has(t.id));
+        if (selectedTalents.length === 0) return;
+        
+        // Define CSV Headers
+        const headers = ["Name", "Email", "Phone", "Location", "Gender", "Age", "Height", "Instagram Handle", "Followers", "Tags"];
+        const rows = selectedTalents.map(t => [
+            t.name || "",
+            t.email || "",
+            t.phone || "",
+            t.location || "",
+            t.gender || "",
+            t.age || "",
+            t.height || "",
+            t.instagram_handle || "",
+            t.instagram_followers || "",
+            (t.tags || []).map(tg => tg.name).join("; ")
+        ]);
+        
+        // Build CSV Content
+        const csvContent = "data:text/csv;charset=utf-8," 
+            + [headers.join(","), ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(","))].join("\n");
+        
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `talents_export_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        toast.success(`Exported ${selectedTalents.length} talents successfully.`);
+        clear();
+    }, [talents, selected, clear]);
 
     // ── Stats bar ────────────────────────────────────────────────────────────
     const totalAssets = useMemo(
@@ -635,6 +771,7 @@ export default function TalentList() {
                             isSelectionMode={isSelectionMode}
                             canBulkDelete={canBulkDelete}
                             onToggle={toggle}
+                            onTagClick={setTagPopoverTalent}
                         />
                     ))}
                 </div>
@@ -651,6 +788,7 @@ export default function TalentList() {
                             isSelectionMode={isSelectionMode}
                             canBulkDelete={canBulkDelete}
                             onToggle={toggle}
+                            onTagClick={setTagPopoverTalent}
                         />
                     ))}
                 </div>
@@ -696,9 +834,32 @@ export default function TalentList() {
                     onSelectAll={selectAll}
                     onClear={clear}
                     onDelete={() => setConfirmOpen(true)}
+                    onAssignTags={() => setBulkTagAction("assign")}
+                    onRemoveTags={() => setBulkTagAction("remove")}
+                    onExport={handleExport}
                     labelSingular="talent"
                     labelPlural="talents"
                     testid="talents-bulk-bar"
+                />
+            )}
+
+            {/* Individual Inline Tag Popover */}
+            {tagPopoverTalent && (
+                <TagPopover
+                    talent={tagPopoverTalent}
+                    onSave={handleSaveTagsOptimistic}
+                    onClose={() => setTagPopoverTalent(null)}
+                />
+            )}
+
+            {/* Bulk Tag Dialog */}
+            {bulkTagAction && (
+                <BulkTagDialog
+                    selectedCount={selected.size}
+                    selectedIds={Array.from(selected)}
+                    actionType={bulkTagAction}
+                    onSave={handleBulkSaveTagsOptimistic}
+                    onClose={() => setBulkTagAction(null)}
                 />
             )}
 

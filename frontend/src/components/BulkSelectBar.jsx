@@ -22,6 +22,9 @@ export default function BulkSelectBar({
     onSelectAll,
     onClear,
     onDelete,
+    onAssignTags,
+    onRemoveTags,
+    onExport,
     labelSingular = "item",
     labelPlural = "items",
     testid = "bulk-select-bar",
@@ -30,11 +33,11 @@ export default function BulkSelectBar({
     const noun = count === 1 ? labelSingular : labelPlural;
     return (
         <div
-            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 border border-border bg-background/95 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-sm px-4 py-2.5 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2"
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 border border-border bg-background/95 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-sm px-4 py-2.5 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 max-w-[95vw] overflow-x-auto"
             data-testid={testid}
         >
             <span
-                className="text-sm font-medium"
+                className="text-sm font-medium shrink-0"
                 data-testid={`${testid}-count`}
             >
                 {count} {noun} selected
@@ -43,22 +46,56 @@ export default function BulkSelectBar({
                 <button
                     type="button"
                     onClick={onSelectAll}
-                    className="text-xs tg-mono text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+                    className="text-xs tg-mono text-muted-foreground hover:text-foreground inline-flex items-center gap-1 shrink-0"
                     data-testid={`${testid}-select-all`}
                 >
                     <Check className="w-3 h-3" /> Select all {total}
                 </button>
             )}
             {allSelected && total > 1 && (
-                <span className="text-[10px] tg-mono text-muted-foreground">
+                <span className="text-[10px] tg-mono text-muted-foreground shrink-0">
                     all selected
                 </span>
             )}
-            <span className="w-px h-5 bg-border" />
+            <span className="w-px h-5 bg-border shrink-0" />
+            
+            {onAssignTags && (
+                <button
+                    type="button"
+                    onClick={onAssignTags}
+                    className="text-xs px-3 py-2 border border-border hover:border-foreground/60 rounded-sm text-foreground inline-flex items-center gap-1 shrink-0"
+                    data-testid={`${testid}-assign-tags`}
+                >
+                    Assign Tags
+                </button>
+            )}
+
+            {onRemoveTags && (
+                <button
+                    type="button"
+                    onClick={onRemoveTags}
+                    className="text-xs px-3 py-2 border border-border hover:border-foreground/60 rounded-sm text-foreground inline-flex items-center gap-1 shrink-0"
+                    data-testid={`${testid}-remove-tags`}
+                >
+                    Remove Tags
+                </button>
+            )}
+
+            {onExport && (
+                <button
+                    type="button"
+                    onClick={onExport}
+                    className="text-xs px-3 py-2 border border-border hover:border-foreground/60 rounded-sm text-foreground inline-flex items-center gap-1 shrink-0"
+                    data-testid={`${testid}-export`}
+                >
+                    Export
+                </button>
+            )}
+
             <button
                 type="button"
                 onClick={onDelete}
-                className="text-xs px-3 py-2 bg-[var(--tg-danger)] text-white rounded-sm inline-flex items-center gap-1.5 hover:opacity-90"
+                className="text-xs px-3 py-2 bg-[var(--tg-danger)] text-white rounded-sm inline-flex items-center gap-1.5 hover:opacity-90 shrink-0"
                 data-testid={`${testid}-delete`}
             >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -67,7 +104,7 @@ export default function BulkSelectBar({
             <button
                 type="button"
                 onClick={onClear}
-                className="text-xs px-2 py-2 border border-border hover:border-foreground/60 rounded-sm"
+                className="text-xs px-2 py-2 border border-border hover:border-foreground/60 rounded-sm shrink-0"
                 aria-label="Clear selection"
                 data-testid={`${testid}-clear`}
             >

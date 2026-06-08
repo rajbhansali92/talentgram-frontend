@@ -439,3 +439,33 @@ def test_get_talent_query_objectid():
     if len(tid) == 24:
         query = {"$or": [{"id": tid}, {"_id": ObjectId(tid)}]}
     assert query == {"$or": [{"id": "60a1f2e9d5e3c8b4a0f12345"}, {"_id": ObjectId("60a1f2e9d5e3c8b4a0f12345")}]}
+
+
+@pytest.mark.asyncio
+async def test_async_mock_bulk_assign_tag():
+    """Verify update_many mock structure for bulk assign tag."""
+    mock_update_many = AsyncMock(return_value=MagicMock(modified_count=5))
+    tag_obj = {"id": "tag-123", "name": "Bulk Tag"}
+    talent_ids = ["t1", "t2", "t3", "t4", "t5"]
+
+    res = await mock_update_many(
+        {"id": {"$in": talent_ids}, "tags.id": {"$ne": "tag-123"}},
+        {"$push": {"tags": tag_obj}}
+    )
+    assert res.modified_count == 5
+    mock_update_many.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_mock_bulk_remove_tag():
+    """Verify update_many mock structure for bulk remove tag."""
+    mock_update_many = AsyncMock(return_value=MagicMock(modified_count=4))
+    talent_ids = ["t1", "t2", "t3", "t4"]
+
+    res = await mock_update_many(
+        {"id": {"$in": talent_ids}},
+        {"$pull": {"tags": {"id": "tag-123"}}}
+    )
+    assert res.modified_count == 4
+    mock_update_many.assert_called_once()
+

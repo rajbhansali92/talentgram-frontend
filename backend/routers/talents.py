@@ -411,6 +411,45 @@ async def delete_talent(tid: str, admin: dict = Depends(current_admin)):
     return {"ok": True, "deleted_id": tid}
 
 
+class BulkTagPayload(BaseModel):
+    ids: List[str] = Field(..., min_length=1)
+    tag_id: str = Field(..., min_length=1)
+
+
+@router.post("/talents/bulk-assign-tag")
+async def bulk_assign_tag(
+    payload: BulkTagPayload,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk assign an existing tag to multiple talents."""
+    tag = await db.tags.find_one({"id": payload.tag_id}, {"_id": 0})
+    if not tag:
+        raise HTTPException(404, "Tag not found")
+    
+    tag_obj = {"id": tag["id"], "name": tag["name"]}
+    
+    # Update talents: push tag_obj to tags array if the tag_id is not already present in the tags array.
+    res = await db.talents.update_many(
+        {"id": {"$in": payload.ids}, "tags.id": {"$ne": payload.tag_id}},
+        {"$push": {"tags": tag_obj}}
+    )
+    return {"ok": True, "modified_count": res.modified_count}
+
+
+@router.post("/talents/bulk-remove-tag")
+async def bulk_remove_tag(
+    payload: BulkTagPayload,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk remove a tag from multiple talents."""
+    res = await db.talents.update_many(
+        {"id": {"$in": payload.ids}},
+        {"$pull": {"tags": {"id": payload.tag_id}}}
+    )
+    return {"ok": True, "modified_count": res.modified_count}
+
+
+
 @router.post("/talents/{tid}/media", response_model=TalentOut)
 async def add_media(
     tid: str,

@@ -258,6 +258,141 @@ export default function MarketingHub() {
 
     const searchInputRef = useRef(null);
 
+
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const { data } = await adminApi.get("/marketing/clients");
+            const clientsData = Array.isArray(data) ? data : (data?.items || []);
+            setClients(clientsData);
+        } catch (e) {
+            const errorMsg = e?.response?.data?.detail || "Failed to load clients";
+            setError(errorMsg);
+            toast.error(errorMsg);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        load();
+    }, [load]);
+
+    // Load recent searches on mount
+    useEffect(() => {
+        const stored = localStorage.getItem("tg_crm_recent_searches");
+        if (stored) {
+            try { setRecentSearches(JSON.parse(stored)); } catch (e) { console.error(e); }
+        }
+    }, []);
+
+    // Save recent searches when queries match successfully
+    const saveSearchQuery = useCallback((query) => {
+        if (!query || query.trim().length < 2) return;
+        const q = query.trim();
+        setRecentSearches(prev => {
+            const next = [q, ...prev.filter(x => x.toLowerCase() !== q.toLowerCase())].slice(0, 4);
+            localStorage.setItem("tg_crm_recent_searches", JSON.stringify(next));
+            return next;
+        });
+    }, []);
+
+    // Filter logic including multi-field tags fuzzy match
+    const filteredClients = useMemo(() => {
+        return clients.filter(client => {
+            const query = searchQuery.trim().toLowerCase();
+            const tagsString = (client.tags || []).join(" ").toLowerCase();
+            const matchesSearch = query === "" || 
+                client.name?.toLowerCase().includes(query) ||
+                client.company_name?.toLowerCase().includes(query) ||
+                client.phone_number?.includes(query) ||
+                client.email?.toLowerCase().includes(query) ||
+                tagsString.includes(query);
+            
+            if (!matchesSearch) return false;
+            
+            if (selectedContactType !== "all" && client.contact_type !== selectedContactType) {
+                return false;
+            }
+            
+            if (filterType === "recent") {
+                const days = getDaysSinceContact(client.last_contacted_date);
+                return days !== null && days <= 7 && client.stage !== "key_account";
+            }
+            if (filterType === "dormant") {
+                const days = getDaysSinceContact(client.last_contacted_date);
+                return days === null || days > 30;
+            }
+            if (filterType === "high_value") {
+                return client.stage === "key_account";
+            }
+            if (filterType === "lead") {
+                return client.stage === "lead";
+            }
+            
+            return true;
+        });
+    }, [clients, searchQuery, filterType, selectedContactType]);
+
+    // Derived Statistics Dashboard
+    const stats = useMemo(() => {
+        const active = clients.filter(c => {
+            const days = getDaysSinceContact(c.last_contacted_date);
+            return days !== null && days <= 7 && c.stage !== "key_account";
+        }).length;
+        const dormant = clients.filter(c => {
+            const days = getDaysSinceContact(c.last_contacted_date);
+            return days === null || days > 30;
+        }).length;
+        const keyAccounts = clients.filter(c => c.stage === "key_account").length;
+        return { active, dormant, keyAccounts, total: clients.length };
+    }, [clients]);
+
+    const contactTypeCounts = useMemo(() => {
+        const counts = {};
+        CONTACT_TYPES.forEach(t => {
+            counts[t.value] = 0;
+        });
+        clients.forEach(c => {
+            if (c.contact_type && counts[c.contact_type] !== undefined) {
+                counts[c.contact_type]++;
+            }
+        });
+        return counts;
+    }, [clients]);
+
+    // Handle arrow keys and CMD+K keyboard focus shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+                e.preventDefault();
+                searchInputRef.current?.focus();
+                setFocusedIndex(-1);
+            } else if (e.key === "/") {
+                const activeEl = document.activeElement;
+                if (activeEl && ["INPUT", "TEXTAREA"].includes(activeEl.tagName)) return;
+                e.preventDefault();
+                searchInputRef.current?.focus();
+                setFocusedIndex(-1);
+            } else if (e.key === "ArrowDown" && filteredClients.length > 0) {
+                e.preventDefault();
+                setFocusedIndex(prev => Math.min(prev + 1, filteredClients.length - 1));
+            } else if (e.key === "ArrowUp" && filteredClients.length > 0) {
+                e.preventDefault();
+                setFocusedIndex(prev => Math.max(prev - 1, 0));
+            } else if (e.key === "Enter" && focusedIndex >= 0 && focusedIndex < filteredClients.length) {
+                e.preventDefault();
+                setActiveClient(filteredClients[focusedIndex]);
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [filteredClients, focusedIndex]);
+
+    // Bulk / Multi-Select Handlers and Helpers (Moved below filteredClients to avoid temporal dead zone crashes)
     const toggleSelect = useCallback((id) => {
         setSelectedIds(prev => {
             const next = new Set(prev);
@@ -442,138 +577,6 @@ export default function MarketingHub() {
             setFocusedIndex(index);
         }
     };
-
-    const load = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const { data } = await adminApi.get("/marketing/clients");
-            const clientsData = Array.isArray(data) ? data : (data?.items || []);
-            setClients(clientsData);
-        } catch (e) {
-            const errorMsg = e?.response?.data?.detail || "Failed to load clients";
-            setError(errorMsg);
-            toast.error(errorMsg);
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
-    useEffect(() => {
-        load();
-    }, [load]);
-
-    // Load recent searches on mount
-    useEffect(() => {
-        const stored = localStorage.getItem("tg_crm_recent_searches");
-        if (stored) {
-            try { setRecentSearches(JSON.parse(stored)); } catch (e) { console.error(e); }
-        }
-    }, []);
-
-    // Save recent searches when queries match successfully
-    const saveSearchQuery = useCallback((query) => {
-        if (!query || query.trim().length < 2) return;
-        const q = query.trim();
-        setRecentSearches(prev => {
-            const next = [q, ...prev.filter(x => x.toLowerCase() !== q.toLowerCase())].slice(0, 4);
-            localStorage.setItem("tg_crm_recent_searches", JSON.stringify(next));
-            return next;
-        });
-    }, []);
-
-    // Filter logic including multi-field tags fuzzy match
-    const filteredClients = useMemo(() => {
-        return clients.filter(client => {
-            const query = searchQuery.trim().toLowerCase();
-            const tagsString = (client.tags || []).join(" ").toLowerCase();
-            const matchesSearch = query === "" || 
-                client.name?.toLowerCase().includes(query) ||
-                client.company_name?.toLowerCase().includes(query) ||
-                client.phone_number?.includes(query) ||
-                client.email?.toLowerCase().includes(query) ||
-                tagsString.includes(query);
-            
-            if (!matchesSearch) return false;
-            
-            if (selectedContactType !== "all" && client.contact_type !== selectedContactType) {
-                return false;
-            }
-            
-            if (filterType === "recent") {
-                const days = getDaysSinceContact(client.last_contacted_date);
-                return days !== null && days <= 7 && client.stage !== "key_account";
-            }
-            if (filterType === "dormant") {
-                const days = getDaysSinceContact(client.last_contacted_date);
-                return days === null || days > 30;
-            }
-            if (filterType === "high_value") {
-                return client.stage === "key_account";
-            }
-            if (filterType === "lead") {
-                return client.stage === "lead";
-            }
-            
-            return true;
-        });
-    }, [clients, searchQuery, filterType, selectedContactType]);
-
-    // Derived Statistics Dashboard
-    const stats = useMemo(() => {
-        const active = clients.filter(c => {
-            const days = getDaysSinceContact(c.last_contacted_date);
-            return days !== null && days <= 7 && c.stage !== "key_account";
-        }).length;
-        const dormant = clients.filter(c => {
-            const days = getDaysSinceContact(c.last_contacted_date);
-            return days === null || days > 30;
-        }).length;
-        const keyAccounts = clients.filter(c => c.stage === "key_account").length;
-        return { active, dormant, keyAccounts, total: clients.length };
-    }, [clients]);
-
-    const contactTypeCounts = useMemo(() => {
-        const counts = {};
-        CONTACT_TYPES.forEach(t => {
-            counts[t.value] = 0;
-        });
-        clients.forEach(c => {
-            if (c.contact_type && counts[c.contact_type] !== undefined) {
-                counts[c.contact_type]++;
-            }
-        });
-        return counts;
-    }, [clients]);
-
-    // Handle arrow keys and CMD+K keyboard focus shortcuts
-    useEffect(() => {
-        const handleKeyDown = (e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-                e.preventDefault();
-                searchInputRef.current?.focus();
-                setFocusedIndex(-1);
-            } else if (e.key === "/") {
-                const activeEl = document.activeElement;
-                if (activeEl && ["INPUT", "TEXTAREA"].includes(activeEl.tagName)) return;
-                e.preventDefault();
-                searchInputRef.current?.focus();
-                setFocusedIndex(-1);
-            } else if (e.key === "ArrowDown" && filteredClients.length > 0) {
-                e.preventDefault();
-                setFocusedIndex(prev => Math.min(prev + 1, filteredClients.length - 1));
-            } else if (e.key === "ArrowUp" && filteredClients.length > 0) {
-                e.preventDefault();
-                setFocusedIndex(prev => Math.max(prev - 1, 0));
-            } else if (e.key === "Enter" && focusedIndex >= 0 && focusedIndex < filteredClients.length) {
-                e.preventDefault();
-                setActiveClient(filteredClients[focusedIndex]);
-            }
-        };
-
-        window.addEventListener("keydown", handleKeyDown);
-        return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [filteredClients, focusedIndex]);
 
     // Handle search selection callbacks
     useEffect(() => {

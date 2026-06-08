@@ -1445,7 +1445,7 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
             <div className="fixed inset-0 z-[150] bg-black/50 md:hidden flex items-end animate-fade-in" onClick={handleBackdropClick}>
                 <div className="relative w-full bg-white rounded-t-3xl shadow-2xl animate-in slide-in-from-bottom duration-300 max-h-[85vh] flex flex-col overflow-hidden">
                     <div className="w-12 h-1 bg-slate-200 rounded-full mx-auto my-3 flex-shrink-0" />
-                    <div className="flex-1 overflow-y-auto">
+                    <div className="flex-1 flex flex-col min-h-0">
                         {drawerContent}
                     </div>
                 </div>

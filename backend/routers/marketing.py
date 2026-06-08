@@ -75,6 +75,15 @@ class InteractionCreate(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=4000)
 
 
+class BulkActionPayload(BaseModel):
+    ids: List[str] = Field(..., description="List of client object IDs (24-hex)")
+
+
+class BulkTagPayload(BaseModel):
+    ids: List[str] = Field(..., description="List of client object IDs (24-hex)")
+    tags: List[str] = Field(..., description="List of tags to assign/merge")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -237,6 +246,44 @@ async def delete_client(
     if not res.matched_count:
         raise HTTPException(status_code=404, detail="Client not found")
     return {"success": True}
+
+
+@router.post("/clients/bulk-archive")
+async def bulk_archive_clients(
+    payload: BulkActionPayload,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    logger.info("=== BACKEND ROUTE HIT: POST /api/marketing/clients/bulk-archive ===")
+    oids = [_to_object_id(cid, field="client_id") for cid in payload.ids]
+    await db.clients.update_many({"_id": {"$in": oids}}, {"$set": {"archived": True}})
+    return {"success": True, "count": len(oids)}
+
+
+@router.post("/clients/bulk-delete")
+async def bulk_delete_clients(
+    payload: BulkActionPayload,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    logger.info("=== BACKEND ROUTE HIT: POST /api/marketing/clients/bulk-delete ===")
+    oids = [_to_object_id(cid, field="client_id") for cid in payload.ids]
+    await db.clients.update_many({"_id": {"$in": oids}}, {"$set": {"deleted": True}})
+    return {"success": True, "count": len(oids)}
+
+
+@router.post("/clients/bulk-tag")
+async def bulk_tag_clients(
+    payload: BulkTagPayload,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    logger.info("=== BACKEND ROUTE HIT: POST /api/marketing/clients/bulk-tag ===")
+    oids = [_to_object_id(cid, field="client_id") for cid in payload.ids]
+    tags_clean = [t.strip() for t in payload.tags if t.strip()]
+    if tags_clean:
+        await db.clients.update_many(
+            {"_id": {"$in": oids}},
+            {"$addToSet": {"tags": {"$each": tags_clean}}}
+        )
+    return {"success": True, "count": len(oids)}
 
 
 # ---------------------------------------------------------------------------

@@ -238,3 +238,51 @@ class TestMarketingInteractions:
         assert full[0]["id"] == cid, (
             f"expected {cid} at top after interaction, got {full[0]['id']}"
         )
+
+
+class TestMarketingBulkActions:
+    def test_bulk_actions(self, auth_headers):
+        c1 = requests.post(
+            f"{BASE_URL}/api/marketing/clients",
+            json={"name": "TEST_Bulk 1", "tags": ["TagA"]},
+            headers=auth_headers,
+            timeout=15,
+        ).json()
+        c2 = requests.post(
+            f"{BASE_URL}/api/marketing/clients",
+            json={"name": "TEST_Bulk 2", "tags": ["TagB"]},
+            headers=auth_headers,
+            timeout=15,
+        ).json()
+        ids = [c1["id"], c2["id"]]
+
+        r_tag = requests.post(
+            f"{BASE_URL}/api/marketing/clients/bulk-tag",
+            json={"ids": ids, "tags": ["TagShared", "TagNew"]},
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r_tag.status_code == 200, r_tag.text
+        assert r_tag.json()["count"] == 2
+
+        g1 = requests.get(f"{BASE_URL}/api/marketing/clients/{ids[0]}", headers=auth_headers).json()
+        assert set(g1["tags"]) == {"TagA", "TagShared", "TagNew"}
+
+        r_arc = requests.post(
+            f"{BASE_URL}/api/marketing/clients/bulk-archive",
+            json={"ids": ids},
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r_arc.status_code == 200, r_arc.text
+
+        lst = requests.get(f"{BASE_URL}/api/marketing/clients", headers=auth_headers).json()
+        assert not any(c["id"] in ids for c in lst)
+
+        r_del = requests.post(
+            f"{BASE_URL}/api/marketing/clients/bulk-delete",
+            json={"ids": ids},
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r_del.status_code == 200, r_del.text

@@ -130,6 +130,7 @@ export default function TalentEdit() {
     const isEdit = Boolean(id);
     const isAdminRole = isAdmin();
     const [loading, setLoading] = useState(isEdit); // ISSUE 1: Fixed loading state
+    const [isEditing, setIsEditing] = useState(!isEdit);
     const [talent, setTalent] = useState(emptyTalent);
     const [workInput, setWorkInput] = useState("");
     const [saving, setSaving] = useState(false);
@@ -166,6 +167,11 @@ export default function TalentEdit() {
     const updateTalent = useCallback((patch) => {
         setTalent(prev => ({ ...prev, ...patch }));
     }, []);
+
+    const handleCancel = useCallback(() => {
+        setTalent(originalTalent);
+        setIsEditing(false);
+    }, [originalTalent]);
 
     const formatDuration = (sec) => {
         if (!sec) return null;
@@ -271,6 +277,7 @@ export default function TalentEdit() {
             if (isEdit) {
                 await adminApi.put(`/talents/${id}`, payload);
                 setOriginalTalent(payload);
+                setIsEditing(false);
                 toast.success("Saved");
             } else {
                 const { data } = await adminApi.post(`/talents`, payload);
@@ -524,22 +531,62 @@ export default function TalentEdit() {
         return JSON.stringify(talent) !== JSON.stringify(originalTalent);
     }, [talent, originalTalent]);
 
-    // Unsaved changes warning
+    // Unsaved changes warning across all navigation pathways
     useEffect(() => {
-        if (!isEdit || loading) return;
+        if (loading) return;
         
         const handleBeforeUnload = (e) => {
-            const hasChanges = JSON.stringify(talent) !== JSON.stringify(originalTalent);
-            if (hasChanges) {
+            if (isDirty) {
                 e.preventDefault();
-                e.returnValue = "You have unsaved changes. Are you sure you want to leave?";
+                e.returnValue = "You have unsaved changes. Leave without saving?";
                 return e.returnValue;
             }
         };
         
         window.addEventListener("beforeunload", handleBeforeUnload);
         return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-    }, [talent, originalTalent, isEdit, loading]);
+    }, [isDirty, loading]);
+
+    useEffect(() => {
+        if (!isDirty || !isEditing) return;
+
+        const handlePopState = (e) => {
+            window.history.pushState(null, "", window.location.pathname);
+            const leave = window.confirm("You have unsaved changes. Leave without saving?");
+            if (leave) {
+                nav(-1);
+            }
+        };
+
+        window.history.pushState(null, "", window.location.pathname);
+        window.addEventListener("popstate", handlePopState);
+
+        return () => {
+            window.removeEventListener("popstate", handlePopState);
+        };
+    }, [isDirty, isEditing, nav]);
+
+    useEffect(() => {
+        if (!isDirty || !isEditing) return;
+
+        const handleAnchorClick = (e) => {
+            const anchor = e.target.closest("a");
+            if (!anchor) return;
+            const href = anchor.getAttribute("href");
+            if (href && (href.startsWith("/") || href.includes(window.location.host))) {
+                const leave = window.confirm("You have unsaved changes. Leave without saving?");
+                if (!leave) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            }
+        };
+
+        document.addEventListener("click", handleAnchorClick, true);
+        return () => {
+            document.removeEventListener("click", handleAnchorClick, true);
+        };
+    }, [isDirty, isEditing]);
 
     // ISSUE 1: Fixed loading skeleton
     if (loading) {
@@ -588,15 +635,32 @@ export default function TalentEdit() {
                             <Trash2 className="w-3 h-3" strokeWidth={1.5} /> Delete
                         </button>
                     )}
-                    <button
-                        onClick={save}
-                        disabled={saving}
-                        data-testid="save-talent-btn"
-                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors"
-                    >
-                        {saving && <Loader2 className="w-3 h-3 animate-spin" />}{" "}
-                        {isEdit ? "Save changes" : "Create talent"}
-                    </button>
+                    {isEditing ? (
+                        <>
+                            <button
+                                onClick={handleCancel}
+                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:bg-black/[0.02] rounded-md text-xs transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={save}
+                                disabled={saving}
+                                data-testid="save-talent-btn"
+                                className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors"
+                            >
+                                {saving && <Loader2 className="w-3 h-3 animate-spin" />}{" "}
+                                {isEdit ? "Save changes" : "Create talent"}
+                            </button>
+                        </>
+                    ) : (
+                        <button
+                            onClick={() => setIsEditing(true)}
+                            className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/90 transition-colors"
+                        >
+                            Edit
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -608,6 +672,7 @@ export default function TalentEdit() {
                         label="Full Name"
                         value={talent.name}
                         onChange={(v) => updateTalent({ name: v })}
+                        disabled={!isEditing}
                     />
                     <Field
                         label="Email"
@@ -616,6 +681,7 @@ export default function TalentEdit() {
                         onChange={(v) => updateTalent({ email: v })}
                         data-testid="talent-email-input"
                         placeholder="optional"
+                        disabled={!isEditing}
                     />
                     <Field
                         label="Phone"
@@ -624,6 +690,7 @@ export default function TalentEdit() {
                         onChange={(v) => updateTalent({ phone: v })}
                         data-testid="talent-phone-input"
                         placeholder="optional"
+                        disabled={!isEditing}
                     />
 
                     <label className="block" data-testid="field-dob">
@@ -636,7 +703,8 @@ export default function TalentEdit() {
                             onChange={(e) => updateTalent({ dob: e.target.value })}
                             max={new Date().toISOString().split("T")[0]}
                             data-testid="dob-input"
-                            className="mt-2 w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2.5 text-sm text-black/85"
+                            disabled={!isEditing}
+                            className="mt-2 w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 disabled:opacity-70"
                         />
                     </label>
                     <div data-testid="field-age-auto">
@@ -669,6 +737,7 @@ export default function TalentEdit() {
                                     <button
                                         key={g.key}
                                         type="button"
+                                        disabled={!isEditing}
                                         onClick={() =>
                                             updateTalent({
                                                 gender: active ? "" : g.key,
@@ -679,7 +748,7 @@ export default function TalentEdit() {
                                             active
                                                 ? "bg-black text-white border-black"
                                                 : "border-black/[0.15] hover:border-black/[0.30] text-black/70 hover:text-black"
-                                        }`}
+                                        } disabled:opacity-60`}
                                     >
                                         {g.label}
                                     </button>
@@ -699,7 +768,8 @@ export default function TalentEdit() {
                             >
                                 <SelectTrigger
                                     data-testid="height-select-trigger"
-                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
+                                    disabled={!isEditing}
+                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
                                 >
                                     <SelectValue placeholder="Select height" />
                                 </SelectTrigger>
@@ -723,6 +793,7 @@ export default function TalentEdit() {
                         label="Location"
                         value={talent.location}
                         onChange={(v) => updateTalent({ location: v })}
+                        disabled={!isEditing}
                     />
                     <div data-testid="field-ethnicity">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
@@ -735,7 +806,8 @@ export default function TalentEdit() {
                             >
                                 <SelectTrigger
                                     data-testid="ethnicity-select-trigger"
-                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
+                                    disabled={!isEditing}
+                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
                                 >
                                     <SelectValue placeholder="Select ethnicity" />
                                 </SelectTrigger>
@@ -759,6 +831,7 @@ export default function TalentEdit() {
                         value={talent.instagram_handle}
                         onChange={(v) => updateTalent({ instagram_handle: v })}
                         placeholder="@username"
+                        disabled={!isEditing}
                     />
                     <div data-testid="field-followers">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
@@ -771,7 +844,8 @@ export default function TalentEdit() {
                             >
                                 <SelectTrigger
                                     data-testid="followers-select-trigger"
-                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
+                                    disabled={!isEditing}
+                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
                                 >
                                     <SelectValue placeholder="Select range" />
                                 </SelectTrigger>
@@ -808,8 +882,9 @@ export default function TalentEdit() {
                     <textarea
                         value={talent.bio || ""}
                         onChange={(e) => updateTalent({ bio: e.target.value })}
+                        disabled={!isEditing}
                         rows={3}
-                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl resize-none"
+                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl resize-none disabled:opacity-75"
                     />
                 </div>
                 <div className="mt-6">
@@ -845,39 +920,43 @@ export default function TalentEdit() {
                                             >
                                                 Open
                                             </a>
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    updateTalent({
-                                                        work_links: talent.work_links.filter((_, j) => j !== i),
-                                                    })
-                                                }
-                                                className="text-black/35 hover:text-red-600 p-2 transition-colors"
-                                                title="Remove Link"
-                                            >
-                                                <X className="w-3.5 h-3.5" />
-                                            </button>
+                                            {isEditing && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        updateTalent({
+                                                            work_links: talent.work_links.filter((_, j) => j !== i),
+                                                        })
+                                                    }
+                                                    className="text-black/35 hover:text-red-600 p-2 transition-colors"
+                                                    title="Remove Link"
+                                                >
+                                                    <X className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
                                 );
                             })}
                         </div>
-                        <div className="flex gap-2">
-                            <input
-                                type="url"
-                                value={workInput}
-                                onChange={(e) => setWorkInput(e.target.value)}
-                                placeholder="https://..."
-                                className="flex-1 bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                            />
-                            <button
-                                type="button"
-                                onClick={addWorkLink}
-                                className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors shrink-0"
-                            >
-                                + Add link
-                            </button>
-                        </div>
+                        {isEditing && (
+                            <div className="flex gap-2">
+                                <input
+                                    type="url"
+                                    value={workInput}
+                                    onChange={(e) => setWorkInput(e.target.value)}
+                                    placeholder="https://..."
+                                    className="flex-1 bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={addWorkLink}
+                                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors shrink-0"
+                                >
+                                    + Add link
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </div>
                 {/* ── Interested In ────────────────────────────────────── */}
@@ -901,6 +980,7 @@ export default function TalentEdit() {
                                     <button
                                         key={cat}
                                         type="button"
+                                        disabled={!isEditing}
                                         onClick={() => {
                                             const set = new Set(talent.interested_in || []);
                                             if (active) set.delete(cat); else set.add(cat);
@@ -909,7 +989,7 @@ export default function TalentEdit() {
                                         data-testid={`edit-interest-${cat.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
                                         aria-pressed={active}
                                         className={[
-                                            "px-3 py-1.5 rounded-full border text-[11px] tracking-[0.06em] transition-all duration-150",
+                                            "px-3 py-1.5 rounded-full border text-[11px] tracking-[0.06em] transition-all duration-150 disabled:opacity-60",
                                             active
                                                 ? "border-black bg-black text-white"
                                                 : "border-black/[0.12] text-black/60 hover:border-black/30 hover:text-black",
@@ -945,16 +1025,18 @@ export default function TalentEdit() {
                                     data-testid={`talent-tag-${tag.id}`}
                                 >
                                     {tag.name}
-                                    <button
-                                        type="button"
-                                        onClick={() => removeTagFromTalent(tag.id)}
-                                        className="text-black/30 hover:text-red-500 transition-colors"
-                                        title="Remove from this talent"
-                                        data-testid={`remove-tag-${tag.id}`}
-                                    >
-                                        <X className="w-3 h-3" />
-                                    </button>
-                                    {isAdminRole && (
+                                    {isEditing && (
+                                        <button
+                                            type="button"
+                                            onClick={() => removeTagFromTalent(tag.id)}
+                                            className="text-black/30 hover:text-red-500 transition-colors"
+                                            title="Remove from this talent"
+                                            data-testid={`remove-tag-${tag.id}`}
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    )}
+                                    {isEditing && isAdminRole && (
                                         <button
                                             type="button"
                                             onClick={() => {
@@ -976,7 +1058,7 @@ export default function TalentEdit() {
                         </div>
 
                         {/* Searchable Tag Autocomplete */}
-                        {isEdit && (
+                        {isEditing && (
                             <div className="relative max-w-md">
                                 <div className="relative">
                                     <input
@@ -1166,7 +1248,7 @@ export default function TalentEdit() {
                         >
                             <div className="flex items-center justify-between mb-6">
                                 <p className="eyebrow">{cat.label}</p>
-                                {cat.key !== "video" && (
+                                {cat.key !== "video" && isEditing && (
                                     <button
                                         onClick={() => fileRefs.current[cat.key]?.click()}
                                         disabled={uploading === cat.key}
@@ -1201,7 +1283,7 @@ export default function TalentEdit() {
                                 (() => {
                                     const videoMedia = mediaBy("video");
                                     if (videoMedia.length === 0) {
-                                        return (
+                                        return isEditing ? (
                                             <div 
                                                 onClick={() => fileRefs.current.video?.click()}
                                                 className="border-2 border-dashed border-black/[0.08] hover:border-black/35 rounded-xl p-8 text-center cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 min-h-[140px]"
@@ -1213,6 +1295,13 @@ export default function TalentEdit() {
                                                     <p className="text-xs font-semibold text-black/70">Upload Audition / Intro Video</p>
                                                     <p className="text-[10px] text-black/40 mt-1">Supports MP4, MOV, WEBM up to 25MB</p>
                                                 </div>
+                                            </div>
+                                        ) : (
+                                            <div className="border-2 border-dashed border-black/[0.06] rounded-xl p-8 text-center flex flex-col items-center justify-center gap-2 min-h-[140px] opacity-50">
+                                                <div className="w-10 h-10 rounded-full bg-black/5 flex items-center justify-center text-black/30">
+                                                    <Upload className="w-5 h-5" />
+                                                </div>
+                                                <p className="text-xs text-black/40">No video uploaded</p>
                                             </div>
                                         );
                                     }
@@ -1264,23 +1353,27 @@ export default function TalentEdit() {
                                                     <p><span className="font-medium text-black/40">Uploaded:</span> {formattedUploadDate}</p>
                                                 </div>
                                                 <div className="mt-4 flex flex-wrap gap-2">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => fileRefs.current.video?.click()}
-                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-black/[0.16] rounded-lg text-xs font-medium text-black/70 hover:text-black transition-colors"
-                                                    >
-                                                        Replace
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setMediaToRemove(m.id);
-                                                            setConfirmRemoveOpen(true);
-                                                        }}
-                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-red-600/20 rounded-lg text-xs font-medium text-black/70 hover:border-red-600 hover:text-red-600 transition-colors"
-                                                    >
-                                                        Delete
-                                                    </button>
+                                                    {isEditing && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => fileRefs.current.video?.click()}
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-black/[0.16] rounded-lg text-xs font-medium text-black/70 hover:text-black transition-colors"
+                                                        >
+                                                            Replace
+                                                        </button>
+                                                    )}
+                                                    {isEditing && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setMediaToRemove(m.id);
+                                                                setConfirmRemoveOpen(true);
+                                                            }}
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-red-600/20 rounded-lg text-xs font-medium text-black/70 hover:border-red-600 hover:text-red-600 transition-colors"
+                                                        >
+                                                            Delete
+                                                        </button>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         onClick={() => {
@@ -1346,7 +1439,7 @@ export default function TalentEdit() {
                                             );
                                             })()}
                                             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/40 flex items-center justify-center gap-2">
-                                                {!cat.isVideo && (
+                                                {isEditing && !cat.isVideo && (
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -1360,17 +1453,19 @@ export default function TalentEdit() {
                                                         />
                                                     </button>
                                                 )}
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setMediaToRemove(m.id);
-                                                        setConfirmRemoveOpen(true);
-                                                    }}
-                                                    title="Delete"
-                                                    className="p-1.5 bg-white/20 hover:bg-red-600/80 rounded-md transition-colors"
-                                                >
-                                                    <Trash2 className="w-3.5 h-3.5 text-white" />
-                                                </button>
+                                                {isEditing && (
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setMediaToRemove(m.id);
+                                                            setConfirmRemoveOpen(true);
+                                                        }}
+                                                        title="Delete"
+                                                        className="p-1.5 bg-white/20 hover:bg-red-600/80 rounded-md transition-colors"
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5 text-white" />
+                                                    </button>
+                                                )}
                                             </div>
                                             {talent.cover_media_id ===
                                                 m.id && (

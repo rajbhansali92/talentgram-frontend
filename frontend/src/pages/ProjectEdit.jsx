@@ -85,7 +85,7 @@ const MAX_FILE_SIZE = {
     video_file: 100 * 1024 * 1024, // 100MB
 };
 
-function TextField({ label, value, onChange, type = "text", ...rest }) {
+function TextField({ label, value, onChange, type = "text", disabled = false, ...rest }) {
     return (
         <label className="block">
             <span className="text-[11px] text-black/45 tracking-widest uppercase">
@@ -95,7 +95,8 @@ function TextField({ label, value, onChange, type = "text", ...rest }) {
                 type={type}
                 value={value || ""}
                 onChange={(e) => onChange(e.target.value)}
-                className="mt-2 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30"
+                disabled={disabled}
+                className="mt-2 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30 disabled:opacity-60 disabled:cursor-not-allowed"
                 {...rest}
             />
         </label>
@@ -133,6 +134,11 @@ export default function ProjectEdit() {
     const audioRef = useRef();
     const videoFileRef = useRef();
 
+    // ─── View / Edit mode ─────────────────────────────────────────────────────
+    const [isEditing, setIsEditing] = useState(!isEdit);
+    const [originalProject, setOriginalProject] = useState(empty);
+    const isDirty = isEditing && JSON.stringify(project) !== JSON.stringify(originalProject);
+
     const updateProject = useCallback((patch) => {
         setProject(prev => ({
             ...prev,
@@ -161,7 +167,9 @@ export default function ProjectEdit() {
             try {
                 const { data } = await adminApi.get(`/projects/${id}`);
                 if (isMounted.current) {
-                    setProject({ ...empty, ...data });
+                    const loaded = { ...empty, ...data };
+                    setProject(loaded);
+                    setOriginalProject(loaded);
                     setLoading(false);
                     loadSubmissions(id);
                 }
@@ -235,6 +243,11 @@ export default function ProjectEdit() {
         window.open(`https://wa.me/?text=${msg}`, "_blank");
     };
 
+    const handleCancel = () => {
+        setProject(originalProject);
+        setIsEditing(false);
+    };
+
     const save = async () => {
         if (!project.brand_name.trim()) {
             toast.error("Brand / Project name is required");
@@ -249,6 +262,8 @@ export default function ProjectEdit() {
             if (isEdit) {
                 await adminApi.put(`/projects/${id}`, payload);
                 toast.success("Saved");
+                setOriginalProject(payload);
+                setIsEditing(false);
             } else {
                 const { data } = await adminApi.post(`/projects`, payload);
                 toast.success("Project created");
@@ -283,6 +298,49 @@ export default function ProjectEdit() {
             throw err;
         }
     };
+
+    // ─── Navigation guards (dirty state) ──────────────────────────────────────
+    useEffect(() => {
+        const handleBeforeUnload = (e) => {
+            if (!isDirty) return;
+            e.preventDefault();
+            e.returnValue = "";
+        };
+        window.addEventListener("beforeunload", handleBeforeUnload);
+        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+    }, [isDirty]);
+
+    useEffect(() => {
+        if (!isDirty) return;
+        const handlePopState = () => {
+            const leave = window.confirm("You have unsaved changes. Leave without saving?");
+            if (leave) {
+                window.removeEventListener("popstate", handlePopState);
+                nav(-1);
+            } else {
+                window.history.pushState(null, "", window.location.href);
+            }
+        };
+        window.history.pushState(null, "", window.location.href);
+        window.addEventListener("popstate", handlePopState);
+        return () => window.removeEventListener("popstate", handlePopState);
+    }, [isDirty, nav]);
+
+    useEffect(() => {
+        if (!isDirty) return;
+        const handleClick = (e) => {
+            const anchor = e.target.closest("a[href]");
+            if (!anchor) return;
+            const href = anchor.getAttribute("href");
+            if (!href || href.startsWith("#") || href.startsWith("http") || anchor.target === "_blank") return;
+            e.preventDefault();
+            e.stopPropagation();
+            const leave = window.confirm("You have unsaved changes. Leave without saving?");
+            if (leave) nav(href);
+        };
+        document.addEventListener("click", handleClick, true);
+        return () => document.removeEventListener("click", handleClick, true);
+    }, [isDirty, nav]);
 
     // ISSUE 2: More robust file validation using startsWith() for broad compatibility
     const validateFile = (file, category) => {
@@ -452,7 +510,9 @@ export default function ProjectEdit() {
             <div className="flex items-end justify-between flex-wrap gap-4 mb-8">
                 <div>
                     <p className="eyebrow mb-3">
-                        {isEdit ? "Edit Project" : "New Project"}
+                        {isEdit
+                            ? isEditing ? "Editing Project" : "Project"
+                            : "New Project"}
                     </p>
                     <h1 className="font-display text-4xl md:text-5xl tracking-tight text-black/90">
                         {project.brand_name || "Untitled"}
@@ -469,22 +529,27 @@ export default function ProjectEdit() {
                                 <FolderOpen className="w-3.5 h-3.5" /> View Audition
                                 Material ({materialsCount})
                             </button>
-                            <button
-                                onClick={() => setConfirmDeleteOpen(true)}
-                                className={`inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-sm text-xs ${isAdminRole ? "" : "hidden"}`}
-                                data-testid="delete-project-btn"
-                            >
-                                <Trash2 className="w-3 h-3" /> Delete
-                            </button>
+                            {isAdminRole && (
+                                <button
+                                    onClick={() => setConfirmDeleteOpen(true)}
+                                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-sm text-xs"
+                                    data-testid="delete-project-btn"
+                                >
+                                    <Trash2 className="w-3 h-3" /> Delete
+                                </button>
+                            )}
                         </>
                     )}
+                    {/* Status — always visible, only interactive in edit mode */}
                     <Select
                         value={project.status || "ongoing"}
-                        onValueChange={(v) => updateProject({ status: v })}
+                        onValueChange={(v) => isEditing && updateProject({ status: v })}
+                        disabled={!isEditing}
                     >
                         <SelectTrigger
                             data-testid="project-status-select-trigger"
-                            className="bg-transparent border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium"
+                            disabled={!isEditing}
+                            className="bg-transparent border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                             <SelectValue placeholder="Status" />
                         </SelectTrigger>
@@ -495,15 +560,37 @@ export default function ProjectEdit() {
                             <SelectItem value="locked">Locked</SelectItem>
                         </SelectContent>
                     </Select>
-                    <button
-                        onClick={save}
-                        disabled={saving}
-                        data-testid="save-project-btn"
-                        className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-sm text-xs font-medium hover:bg-black/90 transition-colors"
-                    >
-                        {saving && <Loader2 className="w-3 h-3 animate-spin" />}
-                        {isEdit ? "Save changes" : "Create project"}
-                    </button>
+                    {/* View mode: Edit button */}
+                    {isEdit && !isEditing && (
+                        <button
+                            onClick={() => setIsEditing(true)}
+                            data-testid="edit-project-btn"
+                            className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-sm text-xs font-medium hover:bg-black/90 transition-colors"
+                        >
+                            Edit
+                        </button>
+                    )}
+                    {/* Edit mode: Cancel + Save */}
+                    {isEditing && isEdit && (
+                        <button
+                            onClick={handleCancel}
+                            data-testid="cancel-project-btn"
+                            className="inline-flex items-center gap-2 px-5 py-2.5 border border-black/[0.12] rounded-sm text-xs font-medium text-black/60 hover:text-black transition-colors"
+                        >
+                            Cancel
+                        </button>
+                    )}
+                    {(!isEdit || isEditing) && (
+                        <button
+                            onClick={save}
+                            disabled={saving}
+                            data-testid="save-project-btn"
+                            className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-sm text-xs font-medium hover:bg-black/90 transition-colors disabled:opacity-60"
+                        >
+                            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                            {isEdit ? "Save Changes" : "Create project"}
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -527,30 +614,35 @@ export default function ProjectEdit() {
                                 label="Project / Brand Name"
                                 value={project.brand_name}
                                 onChange={(v) => updateProject({ brand_name: v })}
+                                disabled={!isEditing}
                                 data-testid="project-brand-input"
                             />
                             <TextField
                                 label="Project / Brand Link"
                                 value={project.brand_link}
                                 onChange={(v) => updateProject({ brand_link: v })}
+                                disabled={!isEditing}
                                 placeholder="https://..."
                             />
                             <TextField
                                 label="Character"
                                 value={project.character}
                                 onChange={(v) => updateProject({ character: v })}
+                                disabled={!isEditing}
                                 placeholder="e.g. Young Mother, 28-35"
                             />
                             <TextField
                                 label="Shoot Dates"
                                 value={project.shoot_dates}
                                 onChange={(v) => updateProject({ shoot_dates: v })}
+                                disabled={!isEditing}
                                 placeholder="e.g. 15–18 March 2026"
                             />
                             <TextField
                                 label="Budget per Day"
                                 value={project.budget_per_day}
                                 onChange={(v) => updateProject({ budget_per_day: v })}
+                                disabled={!isEditing}
                                 placeholder="e.g. ₹50,000"
                             />
                             <div>
@@ -560,11 +652,13 @@ export default function ProjectEdit() {
                                 <div className="mt-2">
                                     <Select
                                         value={project.commission_percent || ""}
-                                        onValueChange={(v) => updateProject({ commission_percent: v })}
+                                        onValueChange={(v) => isEditing && updateProject({ commission_percent: v })}
+                                        disabled={!isEditing}
                                     >
                                         <SelectTrigger
                                             data-testid="commission-select-trigger"
-                                            className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5"
+                                            disabled={!isEditing}
+                                            className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-60 disabled:cursor-not-allowed"
                                         >
                                             <SelectValue placeholder="Select commission" />
                                         </SelectTrigger>
@@ -587,17 +681,20 @@ export default function ProjectEdit() {
                                 label="Medium / Usage"
                                 value={project.medium_usage}
                                 onChange={(v) => updateProject({ medium_usage: v })}
+                                disabled={!isEditing}
                                 placeholder="e.g. TVC · Digital · Print — 1yr"
                             />
                             <TextField
                                 label="Director"
                                 value={project.director}
                                 onChange={(v) => updateProject({ director: v })}
+                                disabled={!isEditing}
                             />
                             <TextField
                                 label="Production House"
                                 value={project.production_house}
                                 onChange={(v) => updateProject({ production_house: v })}
+                                disabled={!isEditing}
                             />
                         </div>
                         <div className="mt-6 border-t border-black/[0.08] pt-6">
@@ -619,7 +716,8 @@ export default function ProjectEdit() {
                                     value={project.additional_details || ""}
                                     onChange={(e) => updateProject({ additional_details: e.target.value })}
                                     rows={3}
-                                    className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
+                                    disabled={!isEditing}
+                                    className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
                                 />
                             )}
                         </div>
@@ -653,48 +751,52 @@ export default function ProjectEdit() {
 
                     {!collapsedSections.auditionMaterial && (
                         <>
-                            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                                <UploadTile
-                                    title="Script (PDF)"
-                                    icon={FileText}
-                                    accept="application/pdf,.pdf"
-                                    onPick={(files) => uploadMaterial(files, "script")}
-                                    inputRef={scriptRef}
-                                    uploading={uploading === "script"}
-                                    testid="upload-script"
-                                />
-                                <UploadTile
-                                    title="Images"
-                                    icon={ImageIcon}
-                                    accept="image/*"
-                                    multiple
-                                    onPick={(files) => uploadMaterial(files, "image")}
-                                    inputRef={imageRef}
-                                    uploading={uploading === "image"}
-                                    testid="upload-image"
-                                />
-                                <UploadTile
-                                    title="Audio Notes"
-                                    icon={Music}
-                                    accept="audio/*"
-                                    multiple
-                                    onPick={(files) => uploadMaterial(files, "audio")}
-                                    inputRef={audioRef}
-                                    uploading={uploading === "audio"}
-                                    testid="upload-audio"
-                                />
-                                <UploadTile
-                                    title="Reference Videos"
-                                    icon={Film}
-                                    accept="video/*"
-                                    multiple
-                                    onPick={(files) => uploadMaterial(files, "video_file")}
-                                    inputRef={videoFileRef}
-                                    uploading={uploading === "video_file"}
-                                    testid="upload-video-file"
-                                    hint="Max 100 MB · mp4/mov/webm"
-                                />
-                            </div>
+                            {isEditing ? (
+                                <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                                    <UploadTile
+                                        title="Script (PDF)"
+                                        icon={FileText}
+                                        accept="application/pdf,.pdf"
+                                        onPick={(files) => uploadMaterial(files, "script")}
+                                        inputRef={scriptRef}
+                                        uploading={uploading === "script"}
+                                        testid="upload-script"
+                                    />
+                                    <UploadTile
+                                        title="Images"
+                                        icon={ImageIcon}
+                                        accept="image/*"
+                                        multiple
+                                        onPick={(files) => uploadMaterial(files, "image")}
+                                        inputRef={imageRef}
+                                        uploading={uploading === "image"}
+                                        testid="upload-image"
+                                    />
+                                    <UploadTile
+                                        title="Audio Notes"
+                                        icon={Music}
+                                        accept="audio/*"
+                                        multiple
+                                        onPick={(files) => uploadMaterial(files, "audio")}
+                                        inputRef={audioRef}
+                                        uploading={uploading === "audio"}
+                                        testid="upload-audio"
+                                    />
+                                    <UploadTile
+                                        title="Reference Videos"
+                                        icon={Film}
+                                        accept="video/*"
+                                        multiple
+                                        onPick={(files) => uploadMaterial(files, "video_file")}
+                                        inputRef={videoFileRef}
+                                        uploading={uploading === "video_file"}
+                                        testid="upload-video-file"
+                                        hint="Max 100 MB · mp4/mov/webm"
+                                    />
+                                </div>
+                            ) : (
+                                <p className="text-xs text-black/40 italic mb-8">Enable Edit to upload new materials.</p>
+                            )}
 
                             {/* Video links list */}
                             <div>
@@ -716,38 +818,42 @@ export default function ProjectEdit() {
                                             >
                                                 {v}
                                             </a>
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    updateProject({
-                                                        video_links: project.video_links.filter(
-                                                            (_, j) => j !== i,
-                                                        ),
-                                                    })
-                                                }
-                                                className="text-black/40 hover:text-red-600 transition-colors"
-                                            >
-                                                <X className="w-3.5 h-3.5" />
-                                            </button>
+                                            {isEditing && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        updateProject({
+                                                            video_links: project.video_links.filter(
+                                                                (_, j) => j !== i,
+                                                            ),
+                                                        })
+                                                    }
+                                                    className="text-black/40 hover:text-red-600 transition-colors"
+                                                >
+                                                    <X className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
                                         </div>
                                     ))}
                                 </div>
-                                <div className="flex gap-2">
-                                    <input
-                                        type="url"
-                                        value={videoInput}
-                                        onChange={(e) => setVideoInput(e.target.value)}
-                                        placeholder="https://youtube.com/..."
-                                        className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={addVideoLink}
-                                        className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
-                                    >
-                                        <Plus className="w-3 h-3" /> Add link
-                                    </button>
-                                </div>
+                                {isEditing && (
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="url"
+                                            value={videoInput}
+                                            onChange={(e) => setVideoInput(e.target.value)}
+                                            placeholder="https://youtube.com/..."
+                                            className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={addVideoLink}
+                                            className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
+                                        >
+                                            <Plus className="w-3 h-3" /> Add link
+                                        </button>
+                                    </div>
+                                )}
                                 <p className="text-[10px] text-black/35 mt-3 tg-mono">
                                     Save project after adding video links
                                 </p>
@@ -850,9 +956,10 @@ export default function ProjectEdit() {
                                 <input
                                     type="checkbox"
                                     checked={project.require_reapproval_on_edit !== false}
-                                    onChange={(e) => updateProject({ require_reapproval_on_edit: e.target.checked })}
+                                    onChange={(e) => isEditing && updateProject({ require_reapproval_on_edit: e.target.checked })}
                                     data-testid="require-reapproval-toggle"
-                                    className="w-5 h-5 accent-black"
+                                    disabled={!isEditing}
+                                    className="w-5 h-5 accent-black disabled:opacity-60"
                                 />
                             </label>
                             <label className="flex items-center justify-between cursor-pointer mb-6">
@@ -867,13 +974,14 @@ export default function ProjectEdit() {
                                 </div>
                                 <button
                                     type="button"
+                                    disabled={!isEditing}
                                     onClick={() =>
-                                        updateProject({
+                                        isEditing && updateProject({
                                             competitive_brand_enabled: !project.competitive_brand_enabled,
                                         })
                                     }
                                     data-testid="toggle-competitive-brand"
-                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
+                                    className={`w-10 h-5 rounded-full relative transition-colors shrink-0 disabled:opacity-60 disabled:cursor-not-allowed ${project.competitive_brand_enabled ? "bg-black" : "bg-black/15"}`}
                                 >
                                     <span
                                         className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${project.competitive_brand_enabled ? "translate-x-5 bg-white" : "bg-black"}`}
@@ -899,39 +1007,43 @@ export default function ProjectEdit() {
                                             <span className="text-sm text-black/75 flex-1 truncate">
                                                 {q.question}
                                             </span>
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    updateProject({
-                                                        custom_questions: project.custom_questions.filter(
-                                                            (_, j) => j !== i,
-                                                        ),
-                                                    })
-                                                }
-                                                className="text-black/40 hover:text-red-600 transition-colors"
-                                            >
-                                                <X className="w-3.5 h-3.5" />
-                                            </button>
+                                            {isEditing && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        updateProject({
+                                                            custom_questions: project.custom_questions.filter(
+                                                                (_, j) => j !== i,
+                                                            ),
+                                                        })
+                                                    }
+                                                    className="text-black/40 hover:text-red-600 transition-colors"
+                                                >
+                                                    <X className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
                                         </div>
                                     ))}
                                 </div>
-                                <div className="flex gap-2">
-                                    <input
-                                        value={cqInput}
-                                        onChange={(e) => setCqInput(e.target.value)}
-                                        placeholder="e.g. Can you ride a bike?"
-                                        data-testid="cq-input"
-                                        className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={addCustomQuestion}
-                                        data-testid="cq-add-btn"
-                                        className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
-                                    >
-                                        <Plus className="w-3 h-3" /> Add
-                                    </button>
-                                </div>
+                                {isEditing && (
+                                    <div className="flex gap-2">
+                                        <input
+                                            value={cqInput}
+                                            onChange={(e) => setCqInput(e.target.value)}
+                                            placeholder="e.g. Can you ride a bike?"
+                                            data-testid="cq-input"
+                                            className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={addCustomQuestion}
+                                            data-testid="cq-add-btn"
+                                            className="text-xs px-3 py-2 border border-black/[0.10] hover:border-black/[0.20] rounded-sm inline-flex items-center gap-1 text-black/70 hover:text-black transition-colors"
+                                        >
+                                            <Plus className="w-3 h-3" /> Add
+                                        </button>
+                                    </div>
+                                )}
                                 <p className="text-[10px] text-black/35 mt-3 tg-mono">
                                     Save project to apply changes
                                 </p>

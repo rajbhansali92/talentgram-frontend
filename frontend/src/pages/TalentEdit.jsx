@@ -107,6 +107,43 @@ const getLinkMeta = (url) => {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Work-links helpers
+// ---------------------------------------------------------------------------
+const WORK_LINK_URL_RE = /https?:\/\/[^\s]+/;
+
+function parseStoredLink(stored) {
+    if (typeof stored === "string" && stored.includes(" || ")) {
+        const idx = stored.indexOf(" || ");
+        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
+    }
+    return { label: "", url: stored || "" };
+}
+
+function parseWorkLinksText(text) {
+    return text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+            const match = WORK_LINK_URL_RE.exec(line);
+            if (!match) return null;
+            const url = match[0];
+            const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
+            return before ? `${before} || ${url}` : url;
+        })
+        .filter(Boolean);
+}
+
+function linksToText(links) {
+    return (links || [])
+        .map((w) => {
+            const { label, url } = parseStoredLink(w);
+            return label ? `${label} - ${url}` : url;
+        })
+        .join("\n");
+}
+
 function Field({ label, value, onChange, type = "text", ...rest }) {
     return (
         <label className="block">
@@ -132,7 +169,7 @@ export default function TalentEdit() {
     const [loading, setLoading] = useState(isEdit); // ISSUE 1: Fixed loading state
     const [isEditing, setIsEditing] = useState(!isEdit);
     const [talent, setTalent] = useState(emptyTalent);
-    const [workInput, setWorkInput] = useState("");
+    const [linksDraft, setLinksDraft] = useState("");
     const [saving, setSaving] = useState(false);
     const [uploading, setUploading] = useState(null);
     const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
@@ -241,6 +278,7 @@ export default function TalentEdit() {
                 const { data } = await adminApi.get(`/talents/${id}`);
                 setTalent({ ...emptyTalent, ...data });
                 setOriginalTalent({ ...emptyTalent, ...data });
+                setLinksDraft(linksToText(data.work_links || []));
             } catch {
                 toast.error("Failed to load talent");
             } finally {
@@ -429,11 +467,8 @@ export default function TalentEdit() {
     };
 
     const addWorkLink = () => {
-        if (!workInput.trim()) return;
-        updateTalent({
-            work_links: [...(talent.work_links || []), workInput.trim()]
-        });
-        setWorkInput("");
+        const parsed = parseWorkLinksText(linksDraft);
+        updateTalent({ work_links: parsed });
     };
 
     // Tag management handlers
@@ -889,12 +924,46 @@ export default function TalentEdit() {
                 </div>
                 <div className="mt-6">
                     <span className="text-[11px] text-black/45 tracking-widest uppercase">
-                        Work Links (7–8)
+                        Work Links
                     </span>
-                    <div className="mt-2 space-y-3">
+                    <p className="text-[10px] text-black/35 mt-0.5 mb-2">
+                        One per line. Formats: &ldquo;Label - URL&rdquo;, &ldquo;Label: URL&rdquo;, or bare URL.
+                    </p>
+                    {isEditing && (
+                        <>
+                            <textarea
+                                value={linksDraft}
+                                onChange={(e) => {
+                                    const text = e.target.value;
+                                    setLinksDraft(text);
+                                    updateTalent({ work_links: parseWorkLinksText(text) });
+                                }}
+                                rows={5}
+                                placeholder={
+                                    "Puma Campaign - https://instagram.com/reel/abc\n" +
+                                    "Pepsi - https://youtu.be/xyz\n" +
+                                    "https://vimeo.com/showreel"
+                                }
+                                className="mt-1 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-3 text-sm text-black/85 rounded-xl resize-y font-mono leading-relaxed placeholder:text-black/25"
+                            />
+                            <div className="flex items-center gap-2 mt-1.5">
+                                <span
+                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                                        (talent.work_links || []).length > 0
+                                            ? "text-emerald-700 bg-emerald-50 border-emerald-100"
+                                            : "text-neutral-400 bg-neutral-50 border-neutral-100"
+                                    }`}
+                                >
+                                    Detected Links: {(talent.work_links || []).length}
+                                </span>
+                            </div>
+                        </>
+                    )}
+                    <div className="mt-3 space-y-3">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="talent-work-links">
                             {(talent.work_links || []).map((w, i) => {
-                                const meta = getLinkMeta(w);
+                                const { label, url } = parseStoredLink(w);
+                                const meta = getLinkMeta(url);
                                 return (
                                     <div key={w} className="flex items-center justify-between p-3 rounded-xl border border-black/[0.06] bg-neutral-50/50 hover:bg-neutral-50 transition-colors gap-3">
                                         <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -903,17 +972,17 @@ export default function TalentEdit() {
                                             </div>
                                             <div className="min-w-0 flex-1">
                                                 <p className="text-xs font-semibold text-neutral-800 truncate leading-snug">
-                                                    {meta.platform}
+                                                    {label || meta.platform}
                                                 </p>
-                                                <p className="text-[10px] text-neutral-400 truncate leading-snug mt-0.5" title={w}>
-                                                    {meta.title}
+                                                <p className="text-[10px] text-neutral-400 truncate leading-snug mt-0.5" title={url}>
+                                                    {meta.domain}
                                                 </p>
                                             </div>
                                         </div>
                                         
                                         <div className="flex items-center gap-1 shrink-0">
                                             <a
-                                                href={w}
+                                                href={url}
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="text-[10px] font-semibold bg-white border border-black/[0.08] hover:border-black/30 text-black px-2.5 py-1.5 rounded-lg transition-colors select-none"
@@ -923,11 +992,11 @@ export default function TalentEdit() {
                                             {isEditing && (
                                                 <button
                                                     type="button"
-                                                    onClick={() =>
-                                                        updateTalent({
-                                                            work_links: talent.work_links.filter((_, j) => j !== i),
-                                                        })
-                                                    }
+                                                    onClick={() => {
+                                                        const next = (talent.work_links || []).filter((_, j) => j !== i);
+                                                        updateTalent({ work_links: next });
+                                                        setLinksDraft(linksToText(next));
+                                                    }}
                                                     className="text-black/35 hover:text-red-600 p-2 transition-colors"
                                                     title="Remove Link"
                                                 >
@@ -939,24 +1008,6 @@ export default function TalentEdit() {
                                 );
                             })}
                         </div>
-                        {isEditing && (
-                            <div className="flex gap-2">
-                                <input
-                                    type="url"
-                                    value={workInput}
-                                    onChange={(e) => setWorkInput(e.target.value)}
-                                    placeholder="https://..."
-                                    className="flex-1 bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
-                                />
-                                <button
-                                    type="button"
-                                    onClick={addWorkLink}
-                                    className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors shrink-0"
-                                >
-                                    + Add link
-                                </button>
-                            </div>
-                        )}
                     </div>
                 </div>
                 {/* ── Interested In ────────────────────────────────────── */}

@@ -1059,59 +1059,131 @@ function ApplyLookGroup({
     );
 }
 
+// ---------------------------------------------------------------------------
+// Work-links helpers
+// ---------------------------------------------------------------------------
+const URL_RE = /https?:\/\/[^\s]+/;
+
+/** Convert a single stored work-link string → { label, url } */
+function parseStoredLink(stored) {
+    if (typeof stored === "string" && stored.includes(" || ")) {
+        const idx = stored.indexOf(" || ");
+        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
+    }
+    return { label: "", url: stored || "" };
+}
+
+/**
+ * Parse a multiline text block → array of stored link strings.
+ * Supports: "Label - URL", "Label: URL", "Label URL", bare URL.
+ */
+function parseWorkLinksText(text) {
+    return text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+            const match = URL_RE.exec(line);
+            if (!match) return null;
+            const url = match[0];
+            const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
+            return before ? `${before} || ${url}` : url;
+        })
+        .filter(Boolean);
+}
+
+/** Convert stored links array → editable textarea string */
+function linksToText(links) {
+    return (links || [])
+        .map((w) => {
+            const { label, url } = parseStoredLink(w);
+            return label ? `${label} - ${url}` : url;
+        })
+        .join("\n");
+}
+
 function ApplyWorkLinksEditor({ links, onChange }) {
-    const [input, setInput] = useState("");
-    const add = () => {
-        const v = input.trim();
-        if (!v) return;
-        onChange([...(links || []), v]);
-        setInput("");
+    const [draft, setDraft] = useState(() => linksToText(links));
+
+    // Keep draft in sync if links change externally (e.g. prefill)
+    const linksKey = (links || []).join("|");
+    const prevLinksKey = React.useRef(linksKey);
+    React.useEffect(() => {
+        if (prevLinksKey.current !== linksKey) {
+            setDraft(linksToText(links));
+            prevLinksKey.current = linksKey;
+        }
+    }, [linksKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const parsed = parseWorkLinksText(draft);
+
+    const handleChange = (e) => {
+        const text = e.target.value;
+        setDraft(text);
+        onChange(parseWorkLinksText(text));
     };
-    const remove = (i) =>
-        onChange((links || []).filter((_, idx) => idx !== i));
+
     return (
         <div className="mt-2 space-y-2" data-testid="apply-work-links-editor">
-            {(links || []).map((w, i) => (
-                <div
-                    key={`${w}-${i}`}
-                    className="flex items-center justify-between gap-2 px-3 py-2 bg-[#faf9f6] border border-[#e8e6df] rounded-lg text-xs font-mono break-all"
-                    data-testid={`apply-work-link-row-${i}`}
-                >
-                    <span className="truncate text-[#4a4a4a]">{w}</span>
-                    <button
-                        type="button"
-                        onClick={() => remove(i)}
-                        data-testid={`apply-work-link-remove-${i}`}
-                        className="text-[#b0aea6] hover:text-[#d03a2a] shrink-0 transition-colors duration-150"
-                    >
-                        <X className="w-3.5 h-3.5" />
-                    </button>
-                </div>
-            ))}
+            <textarea
+                value={draft}
+                onChange={handleChange}
+                data-testid="apply-work-link-input"
+                rows={5}
+                placeholder={
+                    "Paste all your work links here, one per line.\n" +
+                    "Examples:\n" +
+                    "Puma Campaign - https://instagram.com/reel/abc\n" +
+                    "Pepsi - https://youtu.be/xyz\n" +
+                    "https://vimeo.com/showreel"
+                }
+                className="w-full bg-white border border-[#e8e6df] rounded-lg p-4 text-[14px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150 resize-y font-mono leading-relaxed"
+            />
             <div className="flex items-center gap-2">
-                <input
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                            e.preventDefault();
-                            add();
-                        }
-                    }}
-                    inputMode="url"
-                    placeholder="https://… (paste & press Enter)"
-                    data-testid="apply-work-link-input"
-                    className="flex-1 bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
-                />
-                <button
-                    type="button"
-                    onClick={add}
-                    data-testid="apply-work-link-add-btn"
-                    className="text-xs px-4 py-2 border border-[#d1cfc8] bg-white rounded-lg hover:border-[#b0aea6] transition-colors duration-150 font-medium"
+                <span
+                    className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${
+                        parsed.length > 0
+                            ? "text-emerald-700 bg-emerald-50 border-emerald-100"
+                            : "text-[#b0aea6] bg-[#faf9f6] border-[#e8e6df]"
+                    }`}
+                    data-testid="apply-work-links-count"
                 >
-                    Add
-                </button>
+                    Detected Links: {parsed.length}
+                </span>
+                {parsed.length > 0 && (
+                    <span className="text-[10px] text-[#8b8b8b]">
+                        {parsed.map((s) => parseStoredLink(s).label || "Unlabeled").join(" · ")}
+                    </span>
+                )}
             </div>
+            {parsed.length > 0 && (
+                <div className="space-y-1.5 pt-1" data-testid="apply-work-links-preview">
+                    {parsed.map((stored, i) => {
+                        const { label, url } = parseStoredLink(stored);
+                        return (
+                            <div
+                                key={i}
+                                className="flex items-center gap-2 px-3 py-2 bg-[#faf9f6] border border-[#e8e6df] rounded-lg"
+                                data-testid={`apply-work-link-row-${i}`}
+                            >
+                                {label && (
+                                    <span className="text-[11px] text-[#6b6b6b] font-medium shrink-0 max-w-[120px] truncate">
+                                        {label}
+                                    </span>
+                                )}
+                                <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[11px] font-mono text-[#4a4a4a] hover:text-[#1a1a1a] truncate underline underline-offset-2 flex-1 min-w-0"
+                                >
+                                    {url}
+                                </a>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
         </div>
     );
 }

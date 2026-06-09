@@ -1,9 +1,46 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { ArrowLeft, User, MapPin, Sparkles, Instagram, Plus, Trash2, Save, FileText } from "lucide-react";
+import { ArrowLeft, Sparkles, Instagram, Save } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { api as axios } from "@/lib/api";
+
+// ---------------------------------------------------------------------------
+// Work-links helpers (shared with ApplicationPage)
+// ---------------------------------------------------------------------------
+const WORK_LINK_URL_RE = /https?:\/\/[^\s]+/;
+
+function parseStoredLink(stored) {
+    if (typeof stored === "string" && stored.includes(" || ")) {
+        const idx = stored.indexOf(" || ");
+        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
+    }
+    return { label: "", url: stored || "" };
+}
+
+function parseWorkLinksText(text) {
+    return text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+            const match = WORK_LINK_URL_RE.exec(line);
+            if (!match) return null;
+            const url = match[0];
+            const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
+            return before ? `${before} || ${url}` : url;
+        })
+        .filter(Boolean);
+}
+
+function linksToText(links) {
+    return (links || [])
+        .map((w) => {
+            const { label, url } = parseStoredLink(w);
+            return label ? `${label} - ${url}` : url;
+        })
+        .join("\n");
+}
 
 export default function PortalProfile() {
     const navigate = useNavigate();
@@ -23,7 +60,7 @@ export default function PortalProfile() {
         interested_in: [],
     });
 
-    const [newLink, setNewLink] = useState("");
+    const [linksDraft, setLinksDraft] = useState("");
 
     const categoryOptions = ["Acting", "Modeling", "Influencer Campaigns"];
 
@@ -48,6 +85,7 @@ export default function PortalProfile() {
                     work_links: data.work_links || [],
                     interested_in: data.interested_in || [],
                 });
+                setLinksDraft(linksToText(data.work_links || []));
             } catch (err) {
                 console.error("Fetch profile error:", err);
                 toast.error("Unable to load profile");
@@ -78,26 +116,9 @@ export default function PortalProfile() {
         });
     };
 
-    const handleAddLink = () => {
-        const url = newLink.trim();
-        if (!url) return;
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            toast.error("Links must start with http:// or https://");
-            return;
-        }
-        setProfile((prev) => ({
-            ...prev,
-            work_links: [...prev.work_links, url],
-        }));
-        setNewLink("");
-    };
-
-    const handleRemoveLink = (index) => {
-        setProfile((prev) => {
-            const current = [...prev.work_links];
-            current.splice(index, 1);
-            return { ...prev, work_links: current };
-        });
+    const handleLinksTextChange = (text) => {
+        setLinksDraft(text);
+        setProfile((prev) => ({ ...prev, work_links: parseWorkLinksText(text) }));
     };
 
     const handleSaveProfile = async (e) => {
@@ -294,51 +315,74 @@ export default function PortalProfile() {
                         {/* 3. Portfolio Links */}
                         <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-4">
                             <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2">
-                                Portfolio & Work Links
+                                Portfolio &amp; Work Links
                             </h2>
-                            <p className="text-xs text-black/40">Include links to your external portfolios, showreels, or agency sheets:</p>
+                            <p className="text-xs text-black/40">
+                                Paste all your work links below, one per line. Include a label before the URL
+                                to identify each project (e.g. &ldquo;Puma Campaign - https://…&rdquo;).
+                            </p>
 
-                            {/* Added Links Stream */}
-                            <div className="flex flex-col gap-2">
-                                {profile.work_links.length > 0 ? (
-                                    profile.work_links.map((link, idx) => (
-                                        <div key={idx} className="flex items-center justify-between bg-black/5 border border-black/5 rounded-lg px-3 py-2 text-xs">
-                                            <span className="text-black/75 truncate pr-4">{link}</span>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleRemoveLink(idx)}
-                                                className="text-black/45 hover:text-red-600 transition-colors duration-150 p-1"
-                                            >
-                                                <Trash2 className="w-3.5 h-3.5" />
-                                            </button>
-                                        </div>
-                                    ))
-                                ) : (
-                                    <div className="border border-dashed border-black/10 rounded-lg p-6 text-center text-xs text-black/40">
-                                        No links added yet.
-                                    </div>
+                            <textarea
+                                value={linksDraft}
+                                onChange={(e) => handleLinksTextChange(e.target.value)}
+                                rows={6}
+                                placeholder={
+                                    "Puma Campaign - https://instagram.com/reel/abc\n" +
+                                    "Pepsi - https://youtu.be/xyz\n" +
+                                    "https://vimeo.com/showreel"
+                                }
+                                style={{ fontSize: "14px" }}
+                                className="w-full px-3 py-3 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 resize-y font-mono leading-relaxed"
+                            />
+
+                            {/* Live counter */}
+                            <div className="flex items-center gap-2">
+                                <span
+                                    className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full border ${
+                                        profile.work_links.length > 0
+                                            ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+                                            : "text-black/35 bg-black/5 border-black/10"
+                                    }`}
+                                >
+                                    Detected Links: {profile.work_links.length}
+                                </span>
+                                {profile.work_links.length > 0 && (
+                                    <span className="text-[10px] text-black/40 truncate">
+                                        {profile.work_links
+                                            .map((s) => parseStoredLink(s).label || "Unlabeled")
+                                            .join(" · ")}
+                                    </span>
                                 )}
                             </div>
 
-                            {/* Link input */}
-                            <div className="flex gap-2 mt-2">
-                                <input
-                                    type="url"
-                                    value={newLink}
-                                    onChange={(e) => setNewLink(e.target.value)}
-                                    placeholder="https://vimeo.com/showreel"
-                                    style={{ fontSize: "16px" }}
-                                    className="flex-1 px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
-                                />
-                                <button
-                                    type="button"
-                                    onClick={handleAddLink}
-                                    className="bg-black text-white px-4 py-2.5 rounded-lg text-xs font-medium hover:opacity-90 active:scale-[0.98] transition-all duration-150 flex items-center gap-1 h-[44px]"
-                                >
-                                    <Plus className="w-4 h-4" />
-                                    Add Link
-                                </button>
-                            </div>
+                            {/* Preview of parsed links */}
+                            {profile.work_links.length > 0 && (
+                                <div className="flex flex-col gap-1.5">
+                                    {profile.work_links.map((stored, idx) => {
+                                        const { label, url } = parseStoredLink(stored);
+                                        return (
+                                            <div
+                                                key={idx}
+                                                className="flex items-center gap-2 bg-black/[0.03] border border-black/[0.06] rounded-lg px-3 py-2 text-xs"
+                                            >
+                                                {label && (
+                                                    <span className="text-black/60 font-medium shrink-0 max-w-[140px] truncate">
+                                                        {label}
+                                                    </span>
+                                                )}
+                                                <a
+                                                    href={url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-black/50 hover:text-black font-mono truncate flex-1 min-w-0 underline underline-offset-2"
+                                                >
+                                                    {url}
+                                                </a>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
 
                         {/* CTA Save */}

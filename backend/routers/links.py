@@ -1096,16 +1096,48 @@ def _get_video_download_url(url: str) -> str:
         clean_url = f"{main_path}.mp4{query}"
     return clean_url
 
+def _safe_text(s: str, max_len: int = 50) -> str:
+    if not s:
+        return "—"
+    s = str(s)
+    # Split by whitespace, truncate any word longer than max_len to prevent FPDFException
+    words = s.split()
+    safe_words = []
+    for w in words:
+        if len(w) > max_len:
+            safe_words.append(w[:max_len-3] + "...")
+        else:
+            safe_words.append(w)
+    return " ".join(safe_words)
+
+def _get_link_label(url: str) -> str:
+    url_lower = url.lower()
+    if "youtube" in url_lower or "youtu.be" in url_lower:
+        return "YouTube"
+    if "instagram" in url_lower:
+        return "Instagram"
+    if "vimeo" in url_lower:
+        return "Vimeo"
+    if "tiktok" in url_lower:
+        return "TikTok"
+    if "drive.google" in url_lower:
+        return "Google Drive"
+    return "Work Link"
+
 def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], client_status: Optional[str]) -> bytes:
     from fpdf import FPDF
     pdf = FPDF()
     pdf.add_page()
     
-    # Title
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.set_text_color(26, 26, 26)
-    pdf.cell(0, 15, "Talent Profile Details", ln=True, align="C")
-    pdf.ln(5)
+    # Header - Branding
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, "TALENTGRAM", ln=True, align="L")
+    
+    pdf.set_font("Helvetica", "", 14)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, "Talent Profile", ln=True, align="L")
+    pdf.ln(10)
     
     # Metadata sections
     pdf.set_font("Helvetica", "B", 11)
@@ -1117,7 +1149,7 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
     
     pdf.set_text_color(17, 17, 17)
     fields = [
-        ("Name", talent_doc.get("name") or "Unnamed"),
+        ("Name", privatize_name(talent_doc.get("name") or "Unnamed")),
         ("Age", str(talent_doc.get("age") or "—")),
         ("Height", talent_doc.get("height") or "—"),
         ("Location", talent_doc.get("location") or "—"),
@@ -1146,18 +1178,6 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
             fields.append(("Budget", bstatus.capitalize() or "—"))
     else:
         fields.append(("Budget", "—"))
-        
-    # Status
-    action_labels = {
-        "ask_for_test": "Ask for Test",
-        "interested": "Audition Approved",
-        "not_for_this": "Does Not Work For This Project",
-        "shortlist": "Shortlist",
-        "lock": "Lock",
-        "not_sure": "Unsure"
-    }
-    status_label = action_labels.get(client_status, "Pending Action")
-    fields.append(("Status", status_label))
     
     if talent_doc.get("competitive_brand"):
         fields.append(("Competitive Brand", talent_doc["competitive_brand"]))
@@ -1168,11 +1188,40 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
             
     for label, val in fields:
         pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(17, 17, 17)
         pdf.cell(50, 7, f"{label}", ln=False)
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 7, val)
+        pdf.multi_cell(0, 7, _safe_text(val))
         pdf.ln(1)
         
+    # Media and Links
+    work_links = talent_doc.get("work_links") or []
+    videos = [m for m in (talent_doc.get("media") or []) if m.get("category") == "video"]
+    
+    if work_links or videos:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(138, 138, 138)
+        pdf.cell(0, 6, "WORK LINKS & MEDIA", ln=True)
+        pdf.line(pdf.get_x(), pdf.get_y(), pdf.get_x() + 190, pdf.get_y())
+        pdf.ln(4)
+        
+        pdf.set_font("Helvetica", "", 10)
+        idx = 1
+        for v in videos:
+            pdf.set_text_color(0, 102, 204)
+            url = v.get("url") or ""
+            if url:
+                pdf.cell(0, 6, f"{idx}. Introduction Video", ln=True, link=url)
+                idx += 1
+                
+        for wl in work_links:
+            pdf.set_text_color(0, 102, 204)
+            lbl = _get_link_label(wl)
+            pdf.cell(0, 6, f"{idx}. {lbl}", ln=True, link=wl)
+            idx += 1
+            
+    # Additional Questions
     custom_answers = talent_doc.get("custom_answers") or []
     if custom_answers:
         pdf.ln(5)
@@ -1182,14 +1231,14 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
         pdf.line(pdf.get_x(), pdf.get_y(), pdf.get_x() + 190, pdf.get_y())
         pdf.ln(4)
         
-        pdf.set_text_color(17, 17, 17)
         for qa in custom_answers:
             q = qa.get("question") or ""
             a = qa.get("answer") or ""
+            pdf.set_text_color(17, 17, 17)
             pdf.set_font("Helvetica", "B", 10)
-            pdf.multi_cell(0, 6, f"Question: {q}")
+            pdf.multi_cell(0, 6, f"Question: {_safe_text(q)}")
             pdf.set_font("Helvetica", "", 10)
-            pdf.multi_cell(0, 6, f"Answer: {a}")
+            pdf.multi_cell(0, 6, f"Answer: {_safe_text(a)}")
             pdf.ln(2)
             
     return pdf.output()
@@ -1304,8 +1353,8 @@ async def download_talent_zip(
         logger.info("PDF GENERATED")
     except Exception as e:
         logger.exception("FAILED AT PDF GENERATION")
-        import traceback
-        raise HTTPException(status_code=500, detail=f"FAILED AT PDF GENERATION: {str(e)}\n{traceback.format_exc()}")
+        # Do not expose internal traceback to the client
+        raise HTTPException(status_code=500, detail="Unable to generate Talent Folder. Please try again or contact Talentgram support.")
 
     zip_items = []
     

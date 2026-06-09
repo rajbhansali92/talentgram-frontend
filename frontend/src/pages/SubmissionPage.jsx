@@ -169,6 +169,10 @@ function SubmissionPage() {
     // transient network drop doesn't lose the file selection.
     const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
 
+    // Portfolio (General) — tracks which thumbnail has its action overlay
+    // visible on touch devices (tap-to-reveal). null = all overlays hidden.
+    const [activePortfolioThumbId, setActivePortfolioThumbId] = useState(null);
+
     // Ref: prevents the ATK-resume useEffect from running more than once per mount.
     const atkTriedRef = useRef(false);
 
@@ -222,6 +226,20 @@ function SubmissionPage() {
             }
         })();
     }, [slug]);
+
+    // Dismiss the portfolio-thumbnail action overlay when the user taps/clicks
+    // anywhere outside of the active tile. Uses a deferred document listener
+    // (setTimeout) so the same event that opened the overlay does not
+    // immediately close it via bubbling.
+    useEffect(() => {
+        if (!activePortfolioThumbId) return;
+        const dismiss = () => setActivePortfolioThumbId(null);
+        const tid = setTimeout(() => document.addEventListener("click", dismiss), 0);
+        return () => {
+            clearTimeout(tid);
+            document.removeEventListener("click", dismiss);
+        };
+    }, [activePortfolioThumbId]);
 
     // Prefill from query params or localStorage talent portal session
     useEffect(() => {
@@ -2475,55 +2493,92 @@ function SubmissionPage() {
                                         {!isGenericPortfolioCollapsed && (
                                             <div className="mt-4 animate-fadeIn">
                                                 <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-                                                    {images.map((m) => (
-                                                        <div
-                                                            key={m.id}
-                                                            className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
-                                                        >
-                                                            <img
-                                                                src={thumbnailUrl(m)}
-                                                                alt=""
-                                                                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 cursor-pointer"
-                                                                onClick={() => setActiveLightboxImage(m)}
-                                                            />
-                                                            <div className="absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => setActiveLightboxImage(m)}
-                                                                    className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                                    title="Zoom"
+                                                    {images.map((m) => {
+                                                        // Actions are hidden by default and revealed:
+                                                        //   • Desktop — on hover (group-hover:opacity-100)
+                                                        //   • Mobile  — on tap (activePortfolioThumbId === m.id)
+                                                        const isActionsVisible = activePortfolioThumbId === m.id;
+                                                        return (
+                                                            <div
+                                                                key={m.id}
+                                                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02] cursor-pointer"
+                                                                onClick={(e) => {
+                                                                    // Touch devices: first tap reveals the overlay;
+                                                                    // the dismiss useEffect clears it when tapping outside.
+                                                                    // Desktop: hover already shows the overlay, so click
+                                                                    // goes straight to lightbox.
+                                                                    const isTouch = window.matchMedia("(hover: none)").matches;
+                                                                    if (isTouch && !isActionsVisible) {
+                                                                        e.stopPropagation();
+                                                                        setActivePortfolioThumbId(m.id);
+                                                                        return;
+                                                                    }
+                                                                    setActivePortfolioThumbId(null);
+                                                                    setActiveLightboxImage(m);
+                                                                }}
+                                                            >
+                                                                <img
+                                                                    src={thumbnailUrl(m)}
+                                                                    alt=""
+                                                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                                                />
+                                                                {/* Action overlay — hidden by default, revealed on
+                                                                    hover (desktop) or tap (mobile). */}
+                                                                <div
+                                                                    className={`absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2 transition-opacity duration-200 ${
+                                                                        isActionsVisible
+                                                                            ? "opacity-100"
+                                                                            : "opacity-0 group-hover:opacity-100"
+                                                                    }`}
                                                                 >
-                                                                    <Search className="w-3.5 h-3.5" />
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        const inp = document.createElement("input");
-                                                                        inp.type = "file";
-                                                                        inp.accept = "image/*";
-                                                                        inp.onchange = (e) => {
-                                                                            if (e.target.files?.length) {
-                                                                                replaceMediaFile(m, e.target.files[0]);
-                                                                            }
-                                                                        };
-                                                                        inp.click();
-                                                                    }}
-                                                                    className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                                    title="Replace"
-                                                                >
-                                                                    <Upload className="w-3.5 h-3.5" />
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => removeMedia(m.id)}
-                                                                    className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                                    title="Delete"
-                                                                >
-                                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                                </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setActivePortfolioThumbId(null);
+                                                                            setActiveLightboxImage(m);
+                                                                        }}
+                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                        title="Zoom"
+                                                                    >
+                                                                        <Search className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setActivePortfolioThumbId(null);
+                                                                            const inp = document.createElement("input");
+                                                                            inp.type = "file";
+                                                                            inp.accept = "image/*";
+                                                                            inp.onchange = (ev) => {
+                                                                                if (ev.target.files?.length) {
+                                                                                    replaceMediaFile(m, ev.target.files[0]);
+                                                                                }
+                                                                            };
+                                                                            inp.click();
+                                                                        }}
+                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                        title="Replace"
+                                                                    >
+                                                                        <Upload className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setActivePortfolioThumbId(null);
+                                                                            removeMedia(m.id);
+                                                                        }}
+                                                                        className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                        title="Delete"
+                                                                    >
+                                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                </div>
                                                             </div>
-                                                        </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                     {Object.entries(activeUploads)
                                                         .filter(([key, state]) => state.category === "image")
                                                         .map(([key, state]) => (

@@ -35,6 +35,18 @@ import {
 
 // API is imported from @/lib/api above — single source of truth across all pages.
 
+// ---------------------------------------------------------------------------
+// Work-links helpers — shared format: "Label || https://..." or bare URL
+// ---------------------------------------------------------------------------
+function parseStoredWorkLink(stored) {
+    if (typeof stored === "string" && stored.includes(" || ")) {
+        const idx = stored.indexOf(" || ");
+        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
+    }
+    // Legacy bare URL
+    return { label: "", url: stored || "" };
+}
+
 /**
  * Client-facing privacy helper — collapses the talent's full name to
  * "First L." so casting clients never see the full last name.
@@ -1257,7 +1269,8 @@ function TalentDetail({
                 lines.push("");
                 lines.push("Work Links:");
                 talent.work_links.forEach((w) => {
-                    lines.push(`- ${w}`);
+                    const { label, url } = parseStoredWorkLink(w);
+                    lines.push(label ? `- ${label}: ${url}` : `- ${url}`);
                 });
             }
 
@@ -1651,12 +1664,15 @@ function TalentDetail({
                                         <div>
                                             <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
                                             <div className="space-y-2">
-                                                {talent.work_links.map((w) => (
-                                                    <a key={w} href={w} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
-                                                        <ExternalLink className="w-3 h-3 shrink-0" />
-                                                        <span className="truncate">{w}</span>
-                                                    </a>
-                                                ))}
+                                                {talent.work_links.map((w, i) => {
+                                                    const { label, url } = parseStoredWorkLink(w);
+                                                    return (
+                                                        <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
+                                                            <ExternalLink className="w-3 h-3 shrink-0" />
+                                                            <span className="truncate">{label || url}</span>
+                                                        </a>
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     )}
@@ -1981,12 +1997,15 @@ function TalentDetail({
                                 <div className="mb-8">
                                     <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
                                     <div className="space-y-2">
-                                        {talent.work_links.map((w) => (
-                                            <a key={w} href={w} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
-                                                <ExternalLink className="w-3 h-3 shrink-0" />
-                                                <span className="truncate">{w}</span>
-                                            </a>
-                                        ))}
+                                        {talent.work_links.map((w, i) => {
+                                            const { label, url } = parseStoredWorkLink(w);
+                                            return (
+                                                <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
+                                                    <ExternalLink className="w-3 h-3 shrink-0" />
+                                                    <span className="truncate">{label || url}</span>
+                                                </a>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             )}

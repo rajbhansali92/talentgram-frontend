@@ -1370,19 +1370,20 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
     if sub.get("client_package_snapshot"):
         snap = sub["client_package_snapshot"]
         ca_snap = snap.get("custom_answers")
-        
-        # If snapshot already has the new array format, or there are no custom answers to process, return the snapshot
+
+        # If snapshot already has correct array format with data, return it as-is.
         if isinstance(ca_snap, list) and len(ca_snap) > 0:
             return snap
-            
-        if not ca_snap and not (sub.get("form_data") or {}).get("custom_answers"):
-            return snap
-        # Snapshot exists but custom_answers are missing — resolve them now
-        # and merge into a copy of the snapshot so the rest of the function
-        # can return the enriched shape without touching the stored document.
+
+        # Snapshot exists but custom_answers are absent OR in legacy dict format.
+        # Always attempt to rebuild from live form_data so that:
+        #   (a) snapshots frozen before custom questions existed get enriched, and
+        #   (b) legacy dict-format answers ({uuid: answer}) are converted to arrays.
         fd_for_resolve = sub.get("form_data") or {}
         fv_for_resolve = {**DEFAULT_FIELD_VISIBILITY, **(sub.get("field_visibility") or {})}
         raw_answers_snap = fd_for_resolve.get("custom_answers") or {}
+
+        # Only rebuild when there are actual answers and visibility is enabled.
         if isinstance(raw_answers_snap, dict) and raw_answers_snap and fv_for_resolve.get("custom_answers"):
             q_text_by_id_snap: Dict[str, str] = {}
             project_cqs_snap = (project or {}).get("custom_questions") or []
@@ -1417,6 +1418,8 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
                     filtered_snap.append({"question": q_text_by_id_snap.get(q_id) or q_id, "answer": ans})
             if filtered_snap:
                 return {**snap, "custom_answers": filtered_snap}
+
+        # No custom answers to inject — return snapshot as-is.
         return snap
 
     fd = sub.get("form_data") or {}

@@ -1098,7 +1098,7 @@ def _get_video_download_url(url: str) -> str:
 
 def _safe_text(s: str, max_len: int = 50) -> str:
     if not s:
-        return "—"
+        return "-"
     s = str(s)
     # Split by whitespace, truncate any word longer than max_len to prevent FPDFException
     words = s.split()
@@ -1150,9 +1150,9 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
     pdf.set_text_color(17, 17, 17)
     fields = [
         ("Name", privatize_name(talent_doc.get("name") or "Unnamed")),
-        ("Age", str(talent_doc.get("age") or "—")),
-        ("Height", talent_doc.get("height") or "—"),
-        ("Location", talent_doc.get("location") or "—"),
+        ("Age", str(talent_doc.get("age") or "-")),
+        ("Height", talent_doc.get("height") or "-"),
+        ("Location", talent_doc.get("location") or "-"),
     ]
     
     # Availability
@@ -1161,10 +1161,10 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
         avail_status = avail.get("status") or ""
         avail_label = "Available" if avail_status == "yes" else "Not Available" if avail_status == "no" else avail_status.capitalize()
         if avail.get("note"):
-            avail_label += f" — {avail.get('note')}"
+            avail_label += f" - {avail.get('note')}"
         fields.append(("Availability", avail_label))
     else:
-        fields.append(("Availability", "—"))
+        fields.append(("Availability", "-"))
         
     # Budget
     budget = talent_doc.get("budget")
@@ -1173,11 +1173,11 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
         if bstatus == "accept":
             fields.append(("Budget", f"Agreed Budget ({agreed_val or 'Project Budget'})"))
         elif bstatus == "custom":
-            fields.append(("Budget", f"Counter Budget: {budget.get('value') or '—'}"))
+            fields.append(("Budget", f"Counter Budget: {budget.get('value') or '-'}"))
         else:
-            fields.append(("Budget", bstatus.capitalize() or "—"))
+            fields.append(("Budget", bstatus.capitalize() or "-"))
     else:
-        fields.append(("Budget", "—"))
+        fields.append(("Budget", "-"))
     
     if talent_doc.get("competitive_brand"):
         fields.append(("Competitive Brand", talent_doc["competitive_brand"]))
@@ -1236,8 +1236,10 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
             a = qa.get("answer") or ""
             pdf.set_text_color(17, 17, 17)
             pdf.set_font("Helvetica", "B", 10)
+            pdf.set_x(10)
             pdf.multi_cell(0, 6, f"Question: {_safe_text(q)}")
             pdf.set_font("Helvetica", "", 10)
+            pdf.set_x(10)
             pdf.multi_cell(0, 6, f"Answer: {_safe_text(a)}")
             pdf.ln(2)
             

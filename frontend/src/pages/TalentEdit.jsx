@@ -31,6 +31,8 @@ import {
     ETHNICITY_OPTIONS,
     FOLLOWER_TIERS,
 } from "@/lib/talentSchema";
+import WorkLinksDisplay from "@/components/WorkLinksDisplay";
+
 
 const emptyTalent = {
     name: "",
@@ -67,45 +69,8 @@ function calcAge(dob) {
     return age >= 0 && age <= 120 ? age : null;
 }
 
-const getLinkMeta = (url) => {
-    try {
-        const u = new URL(url);
-        let platform = "Website";
-        let icon = "🌐";
-        let color = "text-neutral-500 bg-neutral-50 border-neutral-100";
-        
-        if (u.hostname.includes("youtube.com") || u.hostname.includes("youtu.be")) {
-            platform = "YouTube";
-            icon = "🎥";
-            color = "text-red-600 bg-red-50 border-red-100";
-        } else if (u.hostname.includes("instagram.com")) {
-            platform = "Instagram";
-            icon = "📸";
-            color = "text-pink-600 bg-pink-50 border-pink-100";
-        } else if (u.hostname.includes("vimeo.com")) {
-            platform = "Vimeo";
-            icon = "🎬";
-            color = "text-blue-500 bg-blue-50 border-blue-100";
-        } else if (u.hostname.includes("tiktok.com")) {
-            platform = "TikTok";
-            icon = "🎵";
-            color = "text-black bg-neutral-100 border-neutral-200";
-        } else if (u.hostname.includes("facebook.com")) {
-            platform = "Facebook";
-            icon = "👥";
-            color = "text-blue-700 bg-blue-50 border-blue-100";
-        }
-        
-        // Clean path as campaign title preview
-        let title = u.pathname.split("/").filter(Boolean).pop() || "Campaign / Portfolio";
-        title = decodeURIComponent(title).replace(/[-_]/g, " ");
-        if (title.length > 30) title = title.substring(0, 30) + "...";
-        
-        return { platform, icon, color, title, domain: u.hostname };
-    } catch {
-        return { platform: "Link", icon: "🔗", color: "text-neutral-500 bg-neutral-50 border-neutral-100", title: url, domain: url };
-    }
-};
+// getLinkMeta is provided by @/components/WorkLinksDisplay (shared)
+
 
 // ---------------------------------------------------------------------------
 // Work-links helpers
@@ -115,10 +80,13 @@ const WORK_LINK_URL_RE = /https?:\/\/[^\s]+/;
 function parseStoredLink(stored) {
     if (typeof stored === "string" && stored.includes(" || ")) {
         const idx = stored.indexOf(" || ");
-        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
+        const url = stored.slice(idx + 4).trim().replace(/[.,;:!?)\]>]+$/, "");
+        return { label: stored.slice(0, idx).trim(), url };
     }
-    return { label: "", url: stored || "" };
+    const url = (stored || "").replace(/[.,;:!?)\]>]+$/, "");
+    return { label: "", url };
 }
+
 
 function parseWorkLinksText(text) {
     return text
@@ -128,12 +96,14 @@ function parseWorkLinksText(text) {
         .map((line) => {
             const match = WORK_LINK_URL_RE.exec(line);
             if (!match) return null;
-            const url = match[0];
+            // Strip trailing punctuation that may have been captured by the greedy [^\s]+ match
+            const url = match[0].replace(/[.,;:!?)\]>]+$/, "");
             const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
             return before ? `${before} || ${url}` : url;
         })
         .filter(Boolean);
 }
+
 
 function linksToText(links) {
     return (links || [])
@@ -960,54 +930,26 @@ export default function TalentEdit() {
                         </>
                     )}
                     <div className="mt-3 space-y-3">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="talent-work-links">
-                            {(talent.work_links || []).map((w, i) => {
-                                const { label, url } = parseStoredLink(w);
-                                const meta = getLinkMeta(url);
-                                return (
-                                    <div key={w} className="flex items-center justify-between p-3 rounded-xl border border-black/[0.06] bg-neutral-50/50 hover:bg-neutral-50 transition-colors gap-3">
-                                        <div className="flex items-center gap-3 min-w-0 flex-1">
-                                            <div className={`w-9 h-9 rounded-lg flex items-center justify-center border text-base shrink-0 ${meta.color}`}>
-                                                {meta.icon}
-                                            </div>
-                                            <div className="min-w-0 flex-1">
-                                                <p className="text-xs font-semibold text-neutral-800 truncate leading-snug">
-                                                    {label || meta.platform}
-                                                </p>
-                                                <p className="text-[10px] text-neutral-400 truncate leading-snug mt-0.5" title={url}>
-                                                    {meta.domain}
-                                                </p>
-                                            </div>
-                                        </div>
-                                        
-                                        <div className="flex items-center gap-1 shrink-0">
-                                            <a
-                                                href={url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-[10px] font-semibold bg-white border border-black/[0.08] hover:border-black/30 text-black px-2.5 py-1.5 rounded-lg transition-colors select-none"
-                                            >
-                                                Open
-                                            </a>
-                                            {isEditing && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        const next = (talent.work_links || []).filter((_, j) => j !== i);
-                                                        updateTalent({ work_links: next });
-                                                        setLinksDraft(linksToText(next));
-                                                    }}
-                                                    className="text-black/35 hover:text-red-600 p-2 transition-colors"
-                                                    title="Remove Link"
-                                                >
-                                                    <X className="w-3.5 h-3.5" />
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
+                        <WorkLinksDisplay
+                            links={talent.work_links || []}
+                            className=""
+                            renderExtra={(url, i) =>
+                                isEditing ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const next = (talent.work_links || []).filter((_, j) => j !== i);
+                                            updateTalent({ work_links: next });
+                                            setLinksDraft(linksToText(next));
+                                        }}
+                                        className="text-black/35 hover:text-red-600 p-2 transition-colors shrink-0"
+                                        title="Remove Link"
+                                    >
+                                        <X className="w-3.5 h-3.5" />
+                                    </button>
+                                ) : null
+                            }
+                        />
                     </div>
                 </div>
                 {/* ── Interested In ────────────────────────────────────── */}

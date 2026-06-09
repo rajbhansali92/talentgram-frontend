@@ -13,10 +13,13 @@ const WORK_LINK_URL_RE = /https?:\/\/[^\s]+/;
 function parseStoredLink(stored) {
     if (typeof stored === "string" && stored.includes(" || ")) {
         const idx = stored.indexOf(" || ");
-        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
+        const url = stored.slice(idx + 4).trim().replace(/[.,;:!?)\]>]+$/, "");
+        return { label: stored.slice(0, idx).trim(), url };
     }
-    return { label: "", url: stored || "" };
+    const url = (stored || "").replace(/[.,;:!?)\]>]+$/, "");
+    return { label: "", url };
 }
+
 
 function parseWorkLinksText(text) {
     return text
@@ -26,12 +29,14 @@ function parseWorkLinksText(text) {
         .map((line) => {
             const match = WORK_LINK_URL_RE.exec(line);
             if (!match) return null;
-            const url = match[0];
+            // Strip trailing punctuation that may have been captured by the greedy [^\s]+ match
+            const url = match[0].replace(/[.,;:!?)\]>]+$/, "");
             const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
             return before ? `${before} || ${url}` : url;
         })
         .filter(Boolean);
 }
+
 
 function linksToText(links) {
     return (links || [])

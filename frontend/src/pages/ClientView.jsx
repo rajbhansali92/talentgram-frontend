@@ -4,6 +4,7 @@ import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL, API } 
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
+import WorkLinksDisplay, { parseStoredWorkLink } from "@/components/WorkLinksDisplay";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import VoiceRecorder from "@/components/VoiceRecorder";
@@ -34,18 +35,7 @@ import {
 } from "lucide-react";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
-
-// ---------------------------------------------------------------------------
-// Work-links helpers — shared format: "Label || https://..." or bare URL
-// ---------------------------------------------------------------------------
-function parseStoredWorkLink(stored) {
-    if (typeof stored === "string" && stored.includes(" || ")) {
-        const idx = stored.indexOf(" || ");
-        return { label: stored.slice(0, idx).trim(), url: stored.slice(idx + 4).trim() };
-    }
-    // Legacy bare URL
-    return { label: "", url: stored || "" };
-}
+// parseStoredWorkLink and WorkLinksDisplay are imported from @/components/WorkLinksDisplay.
 
 /**
  * Client-facing privacy helper — collapses the talent's full name to
@@ -1663,17 +1653,7 @@ function TalentDetail({
                                     {vis.work_links && (talent.work_links || []).length > 0 && (
                                         <div>
                                             <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
-                                            <div className="space-y-2">
-                                                {talent.work_links.map((w, i) => {
-                                                    const { label, url } = parseStoredWorkLink(w);
-                                                    return (
-                                                        <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
-                                                            <ExternalLink className="w-3 h-3 shrink-0" />
-                                                            <span className="truncate">{label || url}</span>
-                                                        </a>
-                                                    );
-                                                })}
-                                            </div>
+                                            <WorkLinksDisplay links={talent.work_links} />
                                         </div>
                                     )}
                                 </div>
@@ -1996,17 +1976,7 @@ function TalentDetail({
                             {vis.work_links && (talent.work_links || []).length > 0 && (
                                 <div className="mb-8">
                                     <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
-                                    <div className="space-y-2">
-                                        {talent.work_links.map((w, i) => {
-                                            const { label, url } = parseStoredWorkLink(w);
-                                            return (
-                                                <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-sm text-[#4A4A4A] hover:text-[#111111] font-mono truncate transition-colors duration-150">
-                                                    <ExternalLink className="w-3 h-3 shrink-0" />
-                                                    <span className="truncate">{label || url}</span>
-                                                </a>
-                                            );
-                                        })}
-                                    </div>
+                                    <WorkLinksDisplay links={talent.work_links} />
                                 </div>
                             )}
 

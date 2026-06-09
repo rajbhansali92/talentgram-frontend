@@ -1296,39 +1296,39 @@ export default function SubmissionReviewCenter() {
 
                     {/* Sticky Decision Footer */}
                     {detail && !isPreviewMode && (
-                        <footer className="px-6 py-4 bg-white border-t border-black/[0.08] shrink-0 flex flex-col gap-3 shadow-lg z-20">
-                            <div className="w-full">
-                                <input
-                                    type="text"
-                                    value={decisionNote}
-                                    onChange={(e) => setDecisionNote(e.target.value)}
-                                    placeholder="Add a decision note or internal comment..."
-                                    className="w-full text-xs px-3.5 py-2 border border-black/[0.08] focus:border-black/40 rounded-lg outline-none bg-black/[0.02] focus:bg-white transition-all text-black/85"
-                                />
-                            </div>
-                            <div className="flex items-center justify-between gap-4 flex-wrap">
-                                <span className="text-[10px] uppercase font-mono tracking-wider text-black/45">Review decision actions:</span>
-                                <div className="flex gap-2">
+                        <footer className="px-6 py-5 bg-white border-t-2 border-black/[0.08] shrink-0 flex flex-col gap-4 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-20">
+                            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+                                <div className="flex-1">
+                                    <label className="text-[10px] uppercase font-mono tracking-widest text-black/60 font-semibold mb-1.5 block">Review Decision Note</label>
+                                    <input
+                                        type="text"
+                                        value={decisionNote}
+                                        onChange={(e) => setDecisionNote(e.target.value)}
+                                        placeholder="Add an internal comment or reason..."
+                                        className="w-full text-sm px-4 py-3 border border-black/[0.12] focus:border-black/50 rounded-xl outline-none bg-[#fafaf9] focus:bg-white transition-all text-black/90 shadow-sm"
+                                    />
+                                </div>
+                                <div className="flex items-center gap-3 shrink-0 mt-2 lg:mt-0">
                                     <button
-                                        onClick={() => handleDecision("approved")}
+                                        onClick={() => handleDecision("rejected")}
                                         disabled={saving}
-                                        className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-md text-xs font-bold transition-all shadow-sm"
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-rose-200 text-rose-700 hover:bg-rose-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm"
                                     >
-                                        <Check className="w-4 h-4" /> Approve
+                                        <XCircle className="w-4 h-4" /> Reject
                                     </button>
                                     <button
                                         onClick={() => handleDecision("hold")}
                                         disabled={saving}
-                                        className="inline-flex items-center gap-1.5 px-4 py-2.5 border border-purple-500 text-purple-600 hover:bg-purple-50 rounded-md text-xs font-bold transition-all bg-white shadow-sm"
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm"
                                     >
                                         <PauseCircle className="w-4 h-4" /> Hold
                                     </button>
                                     <button
-                                        onClick={() => handleDecision("rejected")}
+                                        onClick={() => handleDecision("approved")}
                                         disabled={saving}
-                                        className="inline-flex items-center gap-1.5 px-4 py-2.5 border border-red-500 text-red-600 hover:bg-red-50 rounded-md text-xs font-bold transition-all bg-white shadow-sm"
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg"
                                     >
-                                        <XCircle className="w-4 h-4" /> Reject
+                                        <Check className="w-4 h-4" /> Approve
                                     </button>
                                 </div>
                             </div>

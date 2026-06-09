@@ -32,6 +32,7 @@ import {
     ChevronDown,
     Lock,
     ClipboardCheck,
+    Copy,
 } from "lucide-react";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
@@ -1518,24 +1519,22 @@ function TalentDetail({
         >
             <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
 
-                {/* Mobile Top Sticky Header */}
-                <div className="md:hidden sticky top-0 z-30 bg-white border-b border-black/[0.04] px-4 py-3 flex items-center justify-between shrink-0 shadow-sm">
-                    <div className="min-w-0 flex-1 pr-4">
-                        <h2 className="font-display text-base font-semibold text-[#111111] truncate">
+                {/* Unified Top Sticky Header (Desktop & Mobile) */}
+                <div className="sticky top-0 z-50 bg-white border-b border-slate-200 px-4 md:px-6 py-3 md:py-4 flex flex-wrap items-center justify-between shrink-0 shadow-sm">
+                    <div className="min-w-0 flex-1 pr-4 flex items-center gap-3">
+                        <h2 className="font-display text-base md:text-lg font-bold text-slate-900 truncate">
                             {privatizeName(talent.name)}
                         </h2>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                        <span className={`inline-flex items-center text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${
+                        <span className={`hidden md:inline-flex items-center text-[10px] px-2.5 py-1 rounded-full border font-mono uppercase tracking-wider ${
                             viewerAction?.action === "shortlist"
-                                ? "bg-[#B89B5E]/10 text-[#B89B5E] border-[#B89B5E]/20"
-                                : viewerAction?.action === "interested"
-                                ? "bg-green-50 text-green-700 border-green-200"
-                                : viewerAction?.action === "not_for_this"
-                                ? "bg-red-50 text-red-700 border-red-200"
-                                : viewerAction?.action === "not_sure"
                                 ? "bg-amber-50 text-amber-700 border-amber-200"
-                                : "bg-black/5 text-black/60 border-black/10"
+                                : viewerAction?.action === "interested"
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : viewerAction?.action === "not_for_this"
+                                ? "bg-rose-50 text-rose-700 border-rose-200"
+                                : viewerAction?.action === "not_sure"
+                                ? "bg-orange-50 text-orange-700 border-orange-200"
+                                : "bg-slate-50 text-slate-500 border-slate-200"
                         }`}>
                             {{
                                 shortlist: "Shortlist",
@@ -1544,13 +1543,75 @@ function TalentDetail({
                                 not_sure: "Hold",
                             }[viewerAction?.action] || "Pending"}
                         </span>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 md:gap-3 shrink-0">
+                        {/* Mobile action indicator */}
+                        <span className={`md:hidden inline-flex items-center text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${
+                            viewerAction?.action === "shortlist"
+                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                : viewerAction?.action === "interested"
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : viewerAction?.action === "not_for_this"
+                                ? "bg-rose-50 text-rose-700 border-rose-200"
+                                : viewerAction?.action === "not_sure"
+                                ? "bg-orange-50 text-orange-700 border-orange-200"
+                                : "bg-slate-50 text-slate-500 border-slate-200"
+                        }`}>
+                            {{
+                                shortlist: "Shortlist",
+                                interested: "Interested",
+                                not_for_this: "Reject",
+                                not_sure: "Hold",
+                            }[viewerAction?.action] || "Pending"}
+                        </span>
+
+                        {vis.download && !isSharePreview && (
+                            <button
+                                onClick={handleDownloadPackage}
+                                disabled={isDownloadingPackage}
+                                className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Download Talent Folder"
+                                data-testid="header-download-package-btn"
+                            >
+                                {isDownloadingPackage ? (
+                                    <>
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                                        <span className="hidden lg:inline">Preparing...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Download className="w-3.5 h-3.5 text-slate-500" />
+                                        <span className="hidden lg:inline">Download Folder</span>
+                                    </>
+                                )}
+                            </button>
+                        )}
+                        <button
+                            onClick={handleCopyForm}
+                            className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-slate-700"
+                            data-testid="header-copy-form-btn"
+                        >
+                            <Copy className="w-3.5 h-3.5 text-slate-500" />
+                            <span className="hidden lg:inline">Copy Form</span>
+                        </button>
+                        {!isSharePreview && (
+                            <button
+                                onClick={() => onShare(talent.id)}
+                                className="hidden md:flex w-9 h-9 md:w-10 md:h-10 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full items-center justify-center transition-colors duration-150 shadow-sm"
+                                title="Share Portfolio"
+                                data-testid="header-share-btn"
+                            >
+                                <Share2 className="w-4 h-4 text-slate-500" />
+                            </button>
+                        )}
                         {!isSharePreview && (
                             <button
                                 onClick={onClose}
-                                className="p-1 hover:bg-black/5 rounded-full text-black/60 hover:text-black transition-colors"
-                                data-testid="mobile-detail-close-btn"
+                                className="w-8 h-8 md:w-10 md:h-10 bg-slate-100 hover:bg-slate-200 rounded-full flex items-center justify-center transition-colors duration-150 ml-1 md:ml-0"
+                                data-testid="header-close-btn"
                             >
-                                <X className="w-5 h-5" />
+                                <X className="w-4 h-4 md:w-5 md:h-5 text-slate-700" />
                             </button>
                         )}
                     </div>
@@ -1873,55 +1934,7 @@ function TalentDetail({
                     <div className="hidden md:block w-full md:w-[42%] lg:w-[40%] bg-white overflow-y-visible md:overflow-y-auto shadow-[-10px_0_30px_-20px_rgba(0,0,0,0.08)] min-h-0">
                         {/* pb-[130px] gives clearance above the fixed mobile bottom action bar + home indicator */}
                         <div className="p-6 md:p-8 pt-20 md:pt-20 pb-[130px] md:pb-8">
-                            <div className="hidden md:flex absolute top-5 right-5 z-50 gap-2">
-                                {vis.download && !isSharePreview && (
-                                    <button
-                                        onClick={handleDownloadPackage}
-                                        disabled={isDownloadingPackage}
-                                        className="h-11 px-4 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center gap-2 bg-white/90 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111] disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title="Download Talent Folder"
-                                        data-testid="detail-download-package-btn"
-                                    >
-                                        {isDownloadingPackage ? (
-                                            <>
-                                                <Loader2 className="w-4 h-4 animate-spin text-black" />
-                                                <span>Preparing...</span>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Download className="w-4 h-4 text-[#8A8A8A]" />
-                                                <span>Download Talent Folder</span>
-                                            </>
-                                        )}
-                                    </button>
-                                )}
-                                <button
-                                    onClick={handleCopyForm}
-                                    className="h-11 px-4 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center gap-2 bg-white/90 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111]"
-                                    data-testid="copy-form-btn-desktop"
-                                >
-                                    Copy Form
-                                </button>
-                                {!isSharePreview && (
-                                    <button
-                                        onClick={() => onShare(talent.id)}
-                                        className="w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center justify-center bg-white/90 transition-colors duration-150 shadow-sm"
-                                        title="Share Portfolio"
-                                        data-testid="detail-share-btn"
-                                    >
-                                        <Share2 className="w-4 h-4 text-[#8A8A8A]" />
-                                    </button>
-                                )}
-                                {!isSharePreview && (
-                                    <button
-                                        onClick={onClose}
-                                        className="w-11 h-11 border border-black/[0.06] hover:border-black/20 rounded-full flex items-center justify-center bg-white/90 transition-colors duration-150 shadow-sm"
-                                        data-testid="detail-close-btn"
-                                    >
-                                        <X className="w-4 h-4" />
-                                    </button>
-                                )}
-                            </div>
+
 
                             <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Talent Details Form</p>
                             <h2 className="font-display text-3xl md:text-4xl tracking-wide mb-6 text-[#111111]">

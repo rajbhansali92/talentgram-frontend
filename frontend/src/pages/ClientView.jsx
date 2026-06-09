@@ -918,8 +918,8 @@ export default function ClientView() {
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
     };
     const buckets = {
-        pending_action: talents.filter((t) => !viewerActions[t.id]?.action),
-        viewed: talents.filter((t) => reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
+        pending_action: talents.filter((t) => !reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
+        viewed: talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action),
         ask_for_test: talents.filter((t) => viewerActions[t.id]?.action === "ask_for_test"),
         interested: talents.filter((t) => viewerActions[t.id]?.action === "interested"),
         not_for_this: talents.filter((t) => viewerActions[t.id]?.action === "not_for_this"),

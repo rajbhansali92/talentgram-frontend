@@ -1667,7 +1667,7 @@ function TalentDetail({
                             {vis.takes !== false && takes.length > 0 && (
                                 <div className="mb-10">
                                     <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Audition Takes</p>
-                                    <div className="grid grid-cols-2 gap-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {takes.map((t, i) => (
                                             <div key={t.id} data-testid={`client-take-${i}`}>
                                                 <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate flex items-center justify-between">

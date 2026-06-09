@@ -3055,11 +3055,11 @@ function WorkLinksEditor({ links, onChange }) {
     const [draft, setDraft] = useState(() => linksToText(links));
 
     // Keep draft in sync if links change externally (e.g. prefill)
-    const linksKey = (links || []).join("|");
+    const linksKey = JSON.stringify(links || []);
     const prevLinksKey = React.useRef(linksKey);
     React.useEffect(() => {
         if (prevLinksKey.current !== linksKey) {
-            setDraft(linksToText(links));
+            setDraft(linksToText(JSON.parse(linksKey)));
             prevLinksKey.current = linksKey;
         }
     }, [linksKey]);

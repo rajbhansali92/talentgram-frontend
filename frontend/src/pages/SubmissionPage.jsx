@@ -52,6 +52,10 @@ const MAX_IMAGES = 8;
 const MAX_IMAGES_PER_CATEGORY = 10;
 const LS_KEY = (slug) => `tg_submission_${slug}`;
 const LS_DRAFT_KEY = (slug) => `tg_draft_${slug}`;
+// Long-lived opaque access token (stored in DB). Survives JWT expiry and
+// cross-browser / cross-device scenarios where only the URL slug is known.
+const LS_ATK_KEY = (slug) => `tg_atk_${slug}`;
+
 
 function readSaved(slug) {
     try {
@@ -164,6 +168,10 @@ function SubmissionPage() {
     // Upload retry queue: per-slot pending file with attempt counter so a
     // transient network drop doesn't lose the file selection.
     const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
+
+    // Ref: prevents the ATK-resume useEffect from running more than once per mount.
+    const atkTriedRef = useRef(false);
+
 
     // Email-first gate: hides every form section EXCEPT the email field
     // until the talent's email has been blurred and the prefill response
@@ -294,6 +302,62 @@ function SubmissionPage() {
             }
         })();
     }, [saved, slug]);
+
+    // Persistent ATK-based resume — runs after JWT resume path so it only
+    // fires when `saved` is null (no valid JWT in localStorage). Uses the
+    // long-lived opaque access_token stored in LS_ATK_KEY to call the
+    // /public/projects/{slug}/submission/me endpoint and restore the full
+    // submission state without re-entering any identity details.
+    useEffect(() => {
+        if (saved) return;          // JWT resume already handled this session
+        if (atkTriedRef.current) return; // already attempted once this mount
+        const atk = localStorage.getItem(LS_ATK_KEY(slug));
+        if (!atk) return;
+        atkTriedRef.current = true;
+        (async () => {
+            try {
+                const { data } = await axios.get(
+                    `${API}/public/projects/${slug}/submission/me`,
+                    { params: { atk } },
+                );
+                if (data?.id) {
+                    // Restore saved state — use the ATK as the bearer token
+                    // (decode_submitter now supports opaque ATK lookup)
+                    const next = { id: data.id, token: atk };
+                    localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
+                    setSaved(next);
+                    setSubmission(data);
+                    if (data.form_data) {
+                        const fd = data.form_data;
+                        setForm((f) => ({
+                            ...f,
+                            ...fd,
+                            availability:
+                                typeof fd.availability === "object" && fd.availability !== null
+                                    ? { status: "", note: "", ...fd.availability }
+                                    : f.availability,
+                            budget:
+                                typeof fd.budget === "object" && fd.budget !== null
+                                    ? { status: "", value: "", ...fd.budget }
+                                    : f.budget,
+                        }));
+                    }
+                    // Restore the email into the form so it's visible on
+                    // the dashboard header and any validation checks pass.
+                    if (data.talent_email) {
+                        setForm((f) => ({ ...f, email: data.talent_email }));
+                    }
+                    setEmailGateUnlocked(true);
+                }
+            } catch {
+                // Token invalid or submission deleted — clear stale ATK.
+                localStorage.removeItem(LS_ATK_KEY(slug));
+            }
+        })();
+    // `saved` in deps: if JWT resume runs first and sets saved→null (expired),
+    // this effect re-evaluates and runs the ATK check as a fallback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [slug, saved]);
 
     const computedAge = useMemo(() => {
         if (form.overrideAge && form.submitted_age_override) {
@@ -471,6 +535,12 @@ function SubmissionPage() {
             );
             const next = { id: data.id, token: data.token };
             localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
+            // Persist the long-lived access_token separately so the talent
+            // can resume their submission from any browser/device as long as
+            // this localStorage key survives (much longer than the 3-day JWT).
+            if (data.access_token) {
+                localStorage.setItem(LS_ATK_KEY(slug), data.access_token);
+            }
             setSaved(next);
             setSubmission(data);
             setCollapsedSections((prev) => ({ ...prev, uploads: false }));
@@ -688,6 +758,11 @@ function SubmissionPage() {
             );
             const ref = { id: data.id, token: data.token };
             localStorage.setItem(LS_KEY(slug), JSON.stringify(ref));
+            // Persist the long-lived access_token so the talent can resume
+            // from any browser/device using the ATK-based resume path.
+            if (data.access_token) {
+                localStorage.setItem(LS_ATK_KEY(slug), data.access_token);
+            }
             setSaved(ref);
             setCollapsedSections((prev) => ({ ...prev, uploads: false }));
             toast.success("✓ Details saved successfully. Next step: Upload your introduction video, audition takes and portfolio images.");

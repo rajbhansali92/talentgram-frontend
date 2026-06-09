@@ -86,6 +86,20 @@ def make_token(payload: Dict[str, Any], days: int = 30) -> str:
     return jwt.encode(data, JWT_SECRET, algorithm="HS256")
 
 
+def make_access_token() -> str:
+    """Generate a cryptographically secure opaque access token.
+
+    Unlike make_token(), this is NOT a JWT — it is a random URL-safe string
+    (43 chars, 256 bits of entropy) stored verbatim in the database. This
+    makes it cross-device persistent: the token survives JWT expiry and can
+    be re-used indefinitely until the submission is deleted or the user
+    explicitly revokes access.
+    """
+    import secrets
+    return secrets.token_urlsafe(32)
+
+
+
 def decode_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
@@ -203,13 +217,38 @@ def decode_viewer(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
     return data
 
 
-def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
+async def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     token = authorization.split(" ", 1)[1]
     data = decode_token(token)
     if not data or data.get("role") != "submitter":
+        sub = await db.submissions.find_one({"access_token": token})
+        if sub:
+            return {"role": "submitter", "sid": sub["id"], "slug": sub["project_slug"]}
+        app_doc = await db.applications.find_one({"access_token": token})
+        if app_doc:
+            return {"role": "submitter", "sid": app_doc["id"], "kind": "application"}
         return None
+    sid = data.get("sid")
+    kind = data.get("kind")
+    if sid:
+        if kind == "application":
+            app_doc = await db.applications.find_one({"id": sid})
+            if app_doc:
+                db_token = app_doc.get("access_token")
+                if db_token and db_token != token:
+                    return None
+                if not db_token:
+                    await db.applications.update_one({"id": sid}, {"$set": {"access_token": token}})
+        else:
+            sub = await db.submissions.find_one({"id": sid})
+            if sub:
+                db_token = sub.get("access_token")
+                if db_token and db_token != token:
+                    return None
+                if not db_token:
+                    await db.submissions.update_one({"id": sid}, {"$set": {"access_token": token}})
     return data
 
 
@@ -728,6 +767,12 @@ async def seed_admin() -> None:
         ("talents", [("name", 1)], {"name": "talents_name"}),
         ("casting_pipeline", [("project_id", 1), ("created_at", 1)], {"name": "pipeline_project_created_at"}),
         ("projects", [("slug", 1)], {"unique": True, "name": "proj_slug_unique"}),
+        # Persistent access_token lookup — sparse so docs without the field
+        # are ignored, unique so two submissions can't share a token.
+        ("submissions", [("access_token", 1)],
+         {"unique": True, "sparse": True, "name": "submissions_access_token_unique"}),
+        ("applications", [("access_token", 1)],
+         {"unique": True, "sparse": True, "name": "applications_access_token_unique"}),
     ]
     for coll, keys, opts in p0_indexes:
         try:

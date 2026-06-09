@@ -34,6 +34,7 @@ from core import (
     current_team_or_admin,
     db,
     decode_submitter,
+    make_access_token,
     make_token,
     remove_synced_media_from_global_talent,
     sync_media_to_global_talent,
@@ -267,10 +268,17 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
     })
     if existing:
         sid = existing["id"]
+        # Reuse the existing persistent access_token, or mint one if legacy
+        # records pre-date this feature.
+        atk = existing.get("access_token")
+        if not atk:
+            atk = make_access_token()
+            await db.submissions.update_one({"id": sid}, {"$set": {"access_token": atk}})
         token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
         return {
             "id": sid,
             "token": token,
+            "access_token": atk,
             "resumed": True,
             "status": existing.get("status", "draft"),
         }
@@ -380,6 +388,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
     effective_age_val = compute_effective_age(fd, talent_age)
 
     sid = str(uuid.uuid4())
+    atk = make_access_token()
     doc = {
         "id": sid,
         "project_id": project["id"],
@@ -394,6 +403,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "media": deduplicate_media(prefill_media),
         "status": "draft",
         "decision": "pending",
+        "access_token": atk,
         "created_at": _now(),
         "submitted_at": None,
     }
@@ -408,16 +418,21 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         })
         if existing:
             sid = existing["id"]
+            atk = existing.get("access_token")
+            if not atk:
+                atk = make_access_token()
+                await db.submissions.update_one({"id": sid}, {"$set": {"access_token": atk}})
             token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
             return {
                 "id": sid,
                 "token": token,
+                "access_token": atk,
                 "resumed": True,
                 "status": existing.get("status", "draft"),
             }
         raise HTTPException(409, "Submission already exists for this email")
     token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
-    return {"id": sid, "token": token, "resumed": False, "status": "draft"}
+    return {"id": sid, "token": token, "access_token": atk, "resumed": False, "status": "draft"}
 
 
 @router.put("/public/submissions/{sid}")
@@ -426,7 +441,7 @@ async def submission_update(
     payload: SubmissionUpdateIn,
     authorization: Optional[str] = Header(None),
 ):
-    submitter = decode_submitter(authorization)
+    submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
     sub = await db.submissions.find_one({"id": sid})
@@ -473,7 +488,7 @@ async def submission_upload(
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(None),
 ):
-    submitter = decode_submitter(authorization)
+    submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
     if category not in SUBMISSION_UPLOAD_CATEGORIES:
@@ -669,7 +684,7 @@ async def submission_update_media(
     authorization: Optional[str] = Header(None),
 ):
     """Patch a take's label. Only `take` media supports this today."""
-    submitter = decode_submitter(authorization)
+    submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
     sub = await db.submissions.find_one({"id": sid})
@@ -695,7 +710,7 @@ async def submission_update_media(
 async def submission_delete_media(
     sid: str, mid: str, authorization: Optional[str] = Header(None)
 ):
-    submitter = decode_submitter(authorization)
+    submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
     sub = await db.submissions.find_one({"id": sid})
@@ -716,7 +731,7 @@ async def submission_delete_media(
 
 @router.post("/public/submissions/{sid}/finalize")
 async def submission_finalize(sid: str, authorization: Optional[str] = Header(None)):
-    submitter = decode_submitter(authorization)
+    submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
     sub = await db.submissions.find_one({"id": sid})
@@ -948,7 +963,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
 
 @router.get("/public/submissions/{sid}")
 async def public_submission(sid: str, authorization: Optional[str] = Header(None)):
-    submitter = decode_submitter(authorization)
+    submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
     sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
@@ -959,6 +974,34 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
     # for client→talent communication (relay through admin moderation).
     from routers.feedback import list_approved_feedback_for_talent
     sub["client_feedback"] = await list_approved_feedback_for_talent(sid)
+    return sub
+
+
+# --------------------------------------------------------------------------
+# Public resume-by-token endpoint
+# --------------------------------------------------------------------------
+@router.get("/public/projects/{slug}/submission/me")
+async def get_my_submission_by_token(slug: str, atk: str):
+    """Persistent identity resume endpoint.
+
+    Given a long-lived opaque access_token (atk) that was issued when the
+    talent first submitted, return the full submission state so the frontend
+    can bypass the identity gate and render the dashboard directly.
+
+    This endpoint is intentionally unauthenticated (no JWT required) because
+    the access_token itself IS the credential — it is a 256-bit random secret
+    stored in the DB, functionally equivalent to a session cookie.
+    """
+    if not atk or len(atk) < 10:
+        raise HTTPException(400, "access_token is required")
+    sub = await db.submissions.find_one(
+        {"access_token": atk, "project_slug": slug},
+        {"_id": 0},
+    )
+    if not sub:
+        raise HTTPException(404, "Submission not found or token invalid")
+    from routers.feedback import list_approved_feedback_for_talent
+    sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
     return sub
 
 

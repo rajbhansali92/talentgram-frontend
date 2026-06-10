@@ -81,6 +81,11 @@ async def public_project(slug: str):
     project = await db.projects.find_one({"slug": slug}, {"_id": 0, "created_by": 0, "client_budget": 0})
     if not project:
         raise HTTPException(404, "Project not found")
+    # Gate budget visibility: if admin has toggled "Hide Budget From Talent",
+    # strip budget_per_day and talent_budget from the public payload.
+    if project.get("hide_budget_from_talent"):
+        project.pop("budget_per_day", None)
+        project.pop("talent_budget", None)
     return project
 
 

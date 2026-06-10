@@ -138,7 +138,7 @@ export default function AdminFeedback() {
             </div>
 
             <div
-                className="mb-6 flex items-center gap-2 flex-wrap border-b border-black/[0.08] pb-3"
+                className="mb-6 flex items-center gap-2 flex-wrap border-b border-[#eaeaea] pb-3"
                 data-testid="feedback-filters"
             >
                 {FILTERS.map((f) => {
@@ -152,7 +152,7 @@ export default function AdminFeedback() {
                             className={`text-[11px] tracking-widest uppercase px-3.5 py-2 rounded-md border transition-all ${
                                 active
                                     ? "border-black bg-black text-white shadow-sm"
-                                    : "border-black/[0.08] text-black/60 hover:border-black/[0.16] hover:text-black"
+                                    : "border-[#eaeaea] text-black/60 hover:border-[#d4d4d4] hover:text-black"
                             }`}
                         >
                             {f.label}
@@ -172,7 +172,7 @@ export default function AdminFeedback() {
                 </div>
             ) : items.length === 0 ? (
                 <div
-                    className="py-16 text-center text-black/45 text-sm border border-black/[0.08] rounded-xl bg-white shadow-sm"
+                    className="py-16 text-center text-black/45 text-sm border border-[#eaeaea] rounded-xl bg-white shadow-sm"
                     data-testid="feedback-empty"
                 >
                     {filter === "pending"
@@ -213,14 +213,14 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
     const isVoice = fb.type === "voice";
     const status = fb.status || "pending";
     const statusColor = {
-        pending: "text-black/60 border-black/[0.08]",
+        pending: "text-black/60 border-[#eaeaea]",
         approved: "text-emerald-600 border-emerald-500/20 bg-emerald-50/30",
         rejected: "text-red-600 border-red-500/20 bg-red-50/30",
     }[status];
 
     return (
         <div
-            className="border border-black/[0.08] bg-white rounded-xl p-5 hover:border-black/[0.16] transition-all shadow-sm"
+            className="border border-[#eaeaea] bg-white rounded-xl p-5 hover:border-[#d4d4d4] transition-all shadow-sm"
             data-testid={`feedback-card-${fb.id}`}
         >
             <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -268,7 +268,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                                     onClick={onEdit}
                                     data-testid={`feedback-edit-${fb.id}`}
                                     title="Edit text"
-                                    className="inline-flex items-center text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md transition-colors bg-[#fafaf8]"
+                                    className="inline-flex items-center text-xs px-3 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-md transition-colors bg-[#fafaf8]"
                                 >
                                     <Edit3 className="w-3.5 h-3.5 text-black/70" />
                                 </button>
@@ -277,7 +277,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                                 onClick={onReject}
                                 data-testid={`feedback-reject-${fb.id}`}
                                 title="Reject"
-                                className="inline-flex items-center text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-md transition-colors bg-[#fafaf8]"
+                                className="inline-flex items-center text-xs px-3 py-2 border border-[#eaeaea] hover:border-red-600 hover:text-red-600 rounded-md transition-colors bg-[#fafaf8]"
                             >
                                 <XCircle className="w-3.5 h-3.5 text-black/50 hover:text-inherit" />
                             </button>
@@ -287,7 +287,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                         onClick={onDelete}
                         data-testid={`feedback-delete-${fb.id}`}
                         title="Delete"
-                        className="inline-flex items-center text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 text-black/45 rounded-md transition-colors bg-[#fafaf8]"
+                        className="inline-flex items-center text-xs px-3 py-2 border border-[#eaeaea] hover:border-red-600 hover:text-red-600 text-black/45 rounded-md transition-colors bg-[#fafaf8]"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -335,10 +335,10 @@ function EditModal({ text, onChange, onCancel, onSave }) {
             data-testid="feedback-edit-modal"
         >
             <div
-                className="bg-white border border-black/[0.08] rounded-xl max-w-xl w-full shadow-lg"
+                className="bg-white border border-[#eaeaea] rounded-xl max-w-xl w-full shadow-lg"
                 onClick={(e) => e.stopPropagation()}
             >
-                <div className="px-6 py-4 border-b border-black/[0.08]">
+                <div className="px-6 py-4 border-b border-[#eaeaea]">
                     <p className="eyebrow">Edit feedback before sharing</p>
                 </div>
                 <div className="p-6">
@@ -348,14 +348,14 @@ function EditModal({ text, onChange, onCancel, onSave }) {
                         rows={6}
                         maxLength={4000}
                         data-testid="feedback-edit-textarea"
-                        className="w-full bg-[#fafaf8] border border-black/[0.08] focus:border-black/[0.16] rounded-lg p-3 text-sm outline-none resize-none text-black/80"
+                        className="w-full bg-[#fafaf8] border border-[#eaeaea] focus:border-[#d4d4d4] rounded-lg p-3 text-sm outline-none resize-none text-black/80"
                     />
                     <p className="text-[10px] text-black/40 tg-mono mt-2">
                         {text.length} / 4000 — saving does NOT auto-share. Click
                         Approve & Share separately.
                     </p>
                 </div>
-                <div className="px-6 py-4 border-t border-black/[0.08] flex items-center justify-end gap-2">
+                <div className="px-6 py-4 border-t border-[#eaeaea] flex items-center justify-end gap-2">
                     <button
                         onClick={onCancel}
                         className="text-xs text-black/60 hover:text-black px-3 py-2"

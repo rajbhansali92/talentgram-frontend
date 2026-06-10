@@ -1106,6 +1106,7 @@ class ProjectIn(BaseModel):
     # submission back to "pending" decision so admins re-review. When False,
     # the prior decision (approved/rejected/hold) is preserved silently.
     require_reapproval_on_edit: bool = True
+    hide_budget_from_talent: bool = False
     status: str = "ongoing"
 
 

@@ -124,7 +124,7 @@ function Field({ label, value, onChange, type = "text", ...rest }) {
                 type={type}
                 value={value || ""}
                 onChange={(e) => onChange(e.target.value)}
-                className="mt-2 w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30"
+                className="mt-2 w-full bg-transparent border-b border-[#eaeaea] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30"
                 {...rest}
             />
         </label>
@@ -635,7 +635,7 @@ export default function TalentEdit() {
                         <button
                             onClick={() => setConfirmDeleteOpen(true)}
                             data-testid="delete-talent-btn"
-                            className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-md text-xs transition-colors"
+                            className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#eaeaea] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-md text-xs transition-colors"
                         >
                             <Trash2 className="w-3 h-3" strokeWidth={1.5} /> Delete
                         </button>
@@ -644,7 +644,7 @@ export default function TalentEdit() {
                         <>
                             <button
                                 onClick={handleCancel}
-                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:bg-black/[0.02] rounded-md text-xs transition-colors"
+                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#eaeaea] text-black/60 hover:bg-black/[0.02] rounded-md text-xs transition-colors"
                             >
                                 Cancel
                             </button>
@@ -670,7 +670,7 @@ export default function TalentEdit() {
             </div>
 
             {/* Basic info */}
-            <section className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6">
+            <section className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mb-6">
                 <p className="eyebrow mb-6">Profile</p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-6">
                     <Field
@@ -709,14 +709,14 @@ export default function TalentEdit() {
                             max={new Date().toISOString().split("T")[0]}
                             data-testid="dob-input"
                             disabled={!isEditing}
-                            className="mt-2 w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 disabled:opacity-70"
+                            className="mt-2 w-full bg-transparent border-b border-[#eaeaea] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 disabled:opacity-70"
                         />
                     </label>
                     <div data-testid="field-age-auto">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Age (auto)
                         </span>
-                        <div className="mt-2 border-b border-black/[0.08] py-2.5 text-sm flex items-center justify-between">
+                        <div className="mt-2 border-b border-[#eaeaea] py-2.5 text-sm flex items-center justify-between">
                             <span
                                 data-testid="computed-age"
                                 className="font-display text-base text-black/85"
@@ -774,11 +774,11 @@ export default function TalentEdit() {
                                 <SelectTrigger
                                     data-testid="height-select-trigger"
                                     disabled={!isEditing}
-                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
+                                    className="bg-transparent border-0 border-b border-[#eaeaea] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
                                 >
                                     <SelectValue placeholder="Select height" />
                                 </SelectTrigger>
-                                <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl max-h-72">
+                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl max-h-72">
                                     {HEIGHT_OPTIONS.map((h) => (
                                         <SelectItem
                                             key={h}
@@ -812,11 +812,11 @@ export default function TalentEdit() {
                                 <SelectTrigger
                                     data-testid="ethnicity-select-trigger"
                                     disabled={!isEditing}
-                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
+                                    className="bg-transparent border-0 border-b border-[#eaeaea] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
                                 >
                                     <SelectValue placeholder="Select ethnicity" />
                                 </SelectTrigger>
-                                <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl max-h-72">
+                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl max-h-72">
                                     {ETHNICITY_OPTIONS.map((e) => (
                                         <SelectItem
                                             key={e.key}
@@ -850,11 +850,11 @@ export default function TalentEdit() {
                                 <SelectTrigger
                                     data-testid="followers-select-trigger"
                                     disabled={!isEditing}
-                                    className="bg-transparent border-0 border-b border-black/[0.08] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
+                                    className="bg-transparent border-0 border-b border-[#eaeaea] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-70"
                                 >
                                     <SelectValue placeholder="Select range" />
                                 </SelectTrigger>
-                                <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl max-h-80">
+                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl max-h-80">
                                     {FOLLOWER_TIERS.map((tier, i) => (
                                         <React.Fragment key={tier.label}>
                                             {i > 0 && <SelectSeparator className="bg-black/[0.08]" />}
@@ -889,7 +889,7 @@ export default function TalentEdit() {
                         onChange={(e) => updateTalent({ bio: e.target.value })}
                         disabled={!isEditing}
                         rows={3}
-                        className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl resize-none disabled:opacity-75"
+                        className="mt-2 w-full bg-transparent border border-[#eaeaea] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl resize-none disabled:opacity-75"
                     />
                 </div>
                 <div className="mt-6">
@@ -914,7 +914,7 @@ export default function TalentEdit() {
                                     "Pepsi - https://youtu.be/xyz\n" +
                                     "https://vimeo.com/showreel"
                                 }
-                                className="mt-1 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-3 text-sm text-black/85 rounded-xl resize-y font-mono leading-relaxed placeholder:text-black/25"
+                                className="mt-1 w-full bg-transparent border border-[#eaeaea] focus:border-black/40 outline-none p-3 text-sm text-black/85 rounded-xl resize-y font-mono leading-relaxed placeholder:text-black/25"
                             />
                             <div className="flex items-center gap-2 mt-1.5">
                                 <span
@@ -1065,7 +1065,7 @@ export default function TalentEdit() {
                                         placeholder="Search or create tags..."
                                         maxLength={80}
                                         data-testid="tag-input"
-                                        className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
+                                        className="w-full bg-transparent border-b border-[#eaeaea] focus:border-black/40 outline-none py-2 text-sm text-black/85 placeholder:text-black/30"
                                     />
                                     {tagSearch && (
                                         <button
@@ -1084,7 +1084,7 @@ export default function TalentEdit() {
                                             className="fixed inset-0 z-10" 
                                             onClick={() => setIsTagDropdownOpen(false)} 
                                         />
-                                        <div className="absolute left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-black/[0.08] rounded-xl shadow-xl z-20 divide-y divide-black/[0.04] tg-scroll">
+                                        <div className="absolute left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-[#eaeaea] rounded-xl shadow-xl z-20 divide-y divide-black/[0.04] tg-scroll">
                                             {(() => {
                                                 const filtered = allTags
                                                     .filter(t => !(talent.tags || []).some(tt => tt.id === t.id))
@@ -1157,7 +1157,7 @@ export default function TalentEdit() {
             {/* Global tag delete confirmation modal */}
             {globalTagDeleteTarget && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" data-testid="global-tag-delete-modal">
-                    <div className="bg-white rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl border border-black/[0.08]">
+                    <div className="bg-white rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl border border-[#eaeaea]">
                         <div className="flex items-start gap-3 mb-4">
                             <div className="w-9 h-9 rounded-full bg-red-50 flex items-center justify-center shrink-0">
                                 <AlertTriangle className="w-4 h-4 text-red-600" />
@@ -1186,7 +1186,7 @@ export default function TalentEdit() {
                             <button
                                 type="button"
                                 onClick={() => { setGlobalTagDeleteTarget(null); setGlobalTagDeleteConfirmText(""); }}
-                                className="px-4 py-2 text-xs border border-black/[0.08] rounded-lg text-black/60 hover:text-black transition-colors"
+                                className="px-4 py-2 text-xs border border-[#eaeaea] rounded-lg text-black/60 hover:text-black transition-colors"
                             >
                                 Cancel
                             </button>
@@ -1236,7 +1236,7 @@ export default function TalentEdit() {
                     ].map((cat) => (
                         <section
                             key={cat.key}
-                            className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6"
+                            className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mb-6"
                             data-testid={`media-section-${cat.key}`}
                         >
                             <div className="flex items-center justify-between mb-6">
@@ -1246,7 +1246,7 @@ export default function TalentEdit() {
                                         onClick={() => fileRefs.current[cat.key]?.click()}
                                         disabled={uploading === cat.key}
                                         data-testid={`upload-${cat.key}-btn`}
-                                        className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/70 hover:text-black transition-colors"
+                                        className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-md text-black/70 hover:text-black transition-colors"
                                     >
                                         {uploading === cat.key ? (
                                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -1279,7 +1279,7 @@ export default function TalentEdit() {
                                         return isEditing ? (
                                             <div 
                                                 onClick={() => fileRefs.current.video?.click()}
-                                                className="border-2 border-dashed border-black/[0.08] hover:border-black/35 rounded-xl p-8 text-center cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 min-h-[140px]"
+                                                className="border-2 border-dashed border-[#eaeaea] hover:border-black/35 rounded-xl p-8 text-center cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 min-h-[140px]"
                                             >
                                                 <div className="w-10 h-10 rounded-full bg-black/5 flex items-center justify-center text-black/50">
                                                     {uploading === "video" ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
@@ -1310,7 +1310,7 @@ export default function TalentEdit() {
                                                     setLightboxCategory("video");
                                                     setLightboxIndex(0);
                                                 }}
-                                                className={`relative w-full sm:w-64 aspect-video border border-black/[0.08] rounded-xl overflow-hidden cursor-pointer hover:shadow-md transition-shadow group shrink-0 ${!(m.poster_url || m.thumbnail_url) ? "bg-black/5" : ""}`}
+                                                className={`relative w-full sm:w-64 aspect-video border border-[#eaeaea] rounded-xl overflow-hidden cursor-pointer hover:shadow-md transition-shadow group shrink-0 ${!(m.poster_url || m.thumbnail_url) ? "bg-black/5" : ""}`}
                                             >
                                                 {m.poster_url || m.thumbnail_url ? (
                                                     <img
@@ -1350,7 +1350,7 @@ export default function TalentEdit() {
                                                         <button
                                                             type="button"
                                                             onClick={() => fileRefs.current.video?.click()}
-                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-black/[0.16] rounded-lg text-xs font-medium text-black/70 hover:text-black transition-colors"
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-lg text-xs font-medium text-black/70 hover:text-black transition-colors"
                                                         >
                                                             Replace
                                                         </button>
@@ -1362,7 +1362,7 @@ export default function TalentEdit() {
                                                                 setMediaToRemove(m.id);
                                                                 setConfirmRemoveOpen(true);
                                                             }}
-                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-red-600/20 rounded-lg text-xs font-medium text-black/70 hover:border-red-600 hover:text-red-600 transition-colors"
+                                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[#eaeaea] hover:border-red-600/20 rounded-lg text-xs font-medium text-black/70 hover:border-red-600 hover:text-red-600 transition-colors"
                                                         >
                                                             Delete
                                                         </button>
@@ -1391,7 +1391,7 @@ export default function TalentEdit() {
                                                 setLightboxCategory(cat.key);
                                                 setLightboxIndex(idx);
                                             }}
-                                            className="relative group aspect-square bg-[#fafaf8] border border-black/[0.08] rounded-lg overflow-hidden cursor-zoom-in"
+                                            className="relative group aspect-square bg-[#fafaf8] border border-[#eaeaea] rounded-lg overflow-hidden cursor-zoom-in"
                                         >
                                             {(() => {
                                                 const isVideo = m.content_type?.startsWith("video") || m.category === "video" || m.resource_type === "video";
@@ -1505,7 +1505,7 @@ export default function TalentEdit() {
 
             {/* Sticky Save Changes Bar */}
             {isDirty && (
-                <div className="fixed bottom-4 left-4 right-4 z-40 bg-white border border-black/[0.08] shadow-2xl rounded-xl p-4 flex flex-row items-center justify-between gap-4 max-w-sm md:max-w-none w-[calc(100vw-2rem)] md:w-auto md:fixed md:top-4 md:right-4 md:bottom-auto md:left-auto md:shadow-lg animate-in fade-in slide-in-from-bottom-5 duration-200">
+                <div className="fixed bottom-4 left-4 right-4 z-40 bg-white border border-[#eaeaea] shadow-2xl rounded-xl p-4 flex flex-row items-center justify-between gap-4 max-w-sm md:max-w-none w-[calc(100vw-2rem)] md:w-auto md:fixed md:top-4 md:right-4 md:bottom-auto md:left-auto md:shadow-lg animate-in fade-in slide-in-from-bottom-5 duration-200">
                     <div className="flex flex-col min-w-0 pr-2">
                         <span className="text-xs font-semibold text-black/85">Unsaved Changes</span>
                         <span className="text-[10px] text-black/45 truncate">You have modified this profile</span>
@@ -1514,7 +1514,7 @@ export default function TalentEdit() {
                         <button
                             type="button"
                             onClick={() => setTalent(originalTalent)}
-                            className="px-3 py-2 text-xs border border-black/[0.08] hover:bg-black/5 rounded-lg text-black/60 transition-colors"
+                            className="px-3 py-2 text-xs border border-[#eaeaea] hover:bg-black/5 rounded-lg text-black/60 transition-colors"
                         >
                             Discard
                         </button>

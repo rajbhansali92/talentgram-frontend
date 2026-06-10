@@ -104,7 +104,7 @@ const getRelationshipHealth = (client) => {
     }
     const days = getDaysSinceContact(client.last_contacted_date);
     if (days === null) {
-        return { status: "inactive", label: "New Lead", color: "text-slate-500 bg-slate-50 border-slate-200/60", icon: Zap };
+        return { status: "inactive", label: "New Lead", color: "text-slate-500 bg-slate-50 border-[#eaeaea]/60", icon: Zap };
     }
     if (days <= 7) {
         return { status: "healthy", label: "Active", color: "text-[#5A7D5A] bg-[#5A7D5A]/8 border-[#5A7D5A]/20", icon: TrendingUp };
@@ -129,7 +129,7 @@ const getMomentum = (lastContacted) => {
 // ============================================================================
 
 const ClientCardSkeleton = () => (
-    <div className="bg-white border border-slate-200 rounded-2xl p-6 animate-pulse shadow-sm">
+    <div className="bg-white border border-[#eaeaea] rounded-2xl p-6 animate-pulse shadow-sm">
         <div className="flex items-start justify-between gap-6 flex-wrap">
             <div className="flex-1">
                 <div className="flex items-center gap-3 mb-3">
@@ -163,7 +163,7 @@ const ErrorState = ({ message, onRetry }) => (
         <p className="text-slate-500 text-sm mb-4 max-w-xs mx-auto leading-relaxed">{message || "Please check network or backend credentials."}</p>
         <button
             onClick={onRetry}
-            className="inline-flex items-center gap-2 px-5 py-2 bg-white border border-slate-200 hover:border-slate-300 rounded-xl text-sm text-slate-700 hover:text-slate-900 transition-colors shadow-sm"
+            className="inline-flex items-center gap-2 px-5 py-2 bg-white border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl text-sm text-slate-700 hover:text-slate-900 transition-colors shadow-sm"
         >
             <Loader2 className="w-3.5 h-3.5" />
             Retry Connection
@@ -176,8 +176,8 @@ const ErrorState = ({ message, onRetry }) => (
 // ============================================================================
 
 const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
-    <div className="border-2 border-dashed border-slate-200 rounded-2xl py-16 sm:py-20 text-center bg-slate-50/30">
-        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-100/50 mb-4 border border-slate-200/30">
+    <div className="border-2 border-dashed border-[#eaeaea] rounded-2xl py-16 sm:py-20 text-center bg-slate-50/30">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-100/50 mb-4 border border-[#eaeaea]/30">
             <Users className="w-6 h-6 text-slate-400" />
         </div>
         {hasSearch || hasFilters ? (
@@ -186,7 +186,7 @@ const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
                 <p className="text-slate-500 text-xs max-w-xs mx-auto">Try refining your fuzzy match filter, lifecycle stage selectors, or query terms.</p>
                 <button
                     onClick={onClearFilters}
-                    className="mt-4 text-xs font-semibold px-4 py-2 border border-slate-200 bg-white hover:border-slate-300 rounded-xl text-slate-600 hover:text-slate-800 shadow-sm transition-colors"
+                    className="mt-4 text-xs font-semibold px-4 py-2 border border-[#eaeaea] bg-white hover:border-[#d4d4d4] rounded-xl text-slate-600 hover:text-slate-800 shadow-sm transition-colors"
                 >
                     Clear Search Filters
                 </button>
@@ -224,7 +224,7 @@ const FieldInput = ({ label, value, onChange, required, placeholder, testId, aut
             required={required}
             autoFocus={autoFocus}
             data-testid={testId}
-            className="mt-1.5 w-full bg-slate-50/40 rounded-xl border border-slate-200/80 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[15px] sm:text-sm text-slate-900 placeholder:text-slate-400 transition-all duration-200 shadow-sm"
+            className="mt-1.5 w-full bg-slate-50/40 rounded-xl border border-[#eaeaea]/80 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[15px] sm:text-sm text-slate-900 placeholder:text-slate-400 transition-all duration-200 shadow-sm"
         />
     </label>
 );
@@ -674,7 +674,7 @@ export default function MarketingHub() {
                             <div
                                 key={st.id}
                                 onClick={() => { setFilterType(st.id); setFocusedIndex(-1); }}
-                                className={`cursor-pointer bg-white border ${active ? st.activeBg : `border-slate-200 ${st.color}`} rounded-2xl p-3.5 sm:p-5 transition-all duration-200 hover:shadow-sm`}
+                                className={`cursor-pointer bg-white border ${active ? st.activeBg : `border-[#eaeaea] ${st.color}`} rounded-2xl p-3.5 sm:p-5 transition-all duration-200 hover:shadow-sm`}
                             >
                                 <div className="text-xl sm:text-2xl font-bold text-slate-950 mb-0.5">{st.count}</div>
                                 <div className="text-[11px] font-semibold text-slate-800 tracking-tight">{st.label}</div>
@@ -699,7 +699,7 @@ export default function MarketingHub() {
                                 placeholder="Search by name, company, phone, or tags... (CMD+K / /)"
                                 value={searchQuery}
                                 onChange={(e) => { setSearchQuery(e.target.value); setFocusedIndex(-1); }}
-                                className="w-full pl-11 pr-10 py-3.5 bg-slate-50/50 border border-slate-200 rounded-2xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 focus:outline-none transition-all shadow-inner font-sans"
+                                className="w-full pl-11 pr-10 py-3.5 bg-slate-50/50 border border-[#eaeaea] rounded-2xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 focus:outline-none transition-all shadow-inner font-sans"
                             />
                             {searchQuery && (
                                 <button
@@ -711,7 +711,7 @@ export default function MarketingHub() {
                             )}
                         </div>
                         <div className="flex items-center gap-1.5 text-xs text-slate-400 font-mono">
-                            <span className="bg-slate-50 border border-slate-200 px-2 py-1 rounded">⌘K</span>
+                            <span className="bg-slate-50 border border-[#eaeaea] px-2 py-1 rounded">⌘K</span>
                             <span>to focus search</span>
                         </div>
                     </div>
@@ -724,7 +724,7 @@ export default function MarketingHub() {
                                 <button
                                     key={`${s}-${idx}`}
                                     onClick={() => { setSearchQuery(s); setFocusedIndex(-1); }}
-                                    className="inline-flex items-center gap-1 px-3 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs text-slate-600 hover:text-slate-900 rounded-full transition-colors font-medium shadow-sm"
+                                    className="inline-flex items-center gap-1 px-3 py-1 bg-slate-50 hover:bg-slate-100 border border-[#eaeaea] text-xs text-slate-600 hover:text-slate-900 rounded-full transition-colors font-medium shadow-sm"
                                 >
                                     {s}
                                 </button>
@@ -749,7 +749,7 @@ export default function MarketingHub() {
                             className={`inline-flex items-center gap-1.5 px-3 py-1 border rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200 ${
                                 selectedContactType === "all"
                                     ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                    : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
+                                    : "bg-white text-slate-600 border-[#eaeaea] hover:border-[#d4d4d4]"
                             }`}
                         >
                             All Types
@@ -765,7 +765,7 @@ export default function MarketingHub() {
                                     className={`inline-flex items-center gap-1.5 px-3 py-1 border rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200 ${
                                         active
                                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                            : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
+                                            : "bg-white text-slate-600 border-[#eaeaea] hover:border-[#d4d4d4]"
                                     }`}
                                 >
                                     <span>{t.label}</span>
@@ -780,7 +780,7 @@ export default function MarketingHub() {
             </div>
 
             {/* Bulk Actions Controls Deck & Action Bar */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-3.5 px-4 mb-6 bg-slate-50 border border-slate-200/60 rounded-2xl">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-3.5 px-4 mb-6 bg-slate-50 border border-[#eaeaea]/60 rounded-2xl">
                 <div className="flex items-center gap-3">
                     <label className="flex items-center gap-2 cursor-pointer select-none">
                         <input
@@ -792,7 +792,7 @@ export default function MarketingHub() {
                                 }
                             }}
                             onChange={selectAllVisible}
-                            className="w-4.5 h-4.5 rounded border-slate-300 text-slate-900 focus:ring-slate-900 cursor-pointer"
+                            className="w-4.5 h-4.5 rounded border-[#d4d4d4] text-slate-900 focus:ring-slate-900 cursor-pointer"
                         />
                         <span className="text-xs font-semibold text-slate-700">Select All Visible</span>
                     </label>
@@ -809,14 +809,14 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkTagOpen(true)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#eaeaea] hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
                         >
                             Assign Tags
                         </button>
                         <button
                             type="button"
                             onClick={() => setBulkArchiveOpen(true)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#eaeaea] hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
                         >
                             Archive Selected
                         </button>
@@ -876,7 +876,7 @@ export default function MarketingHub() {
                                         ? "border-slate-900 bg-slate-50/40 shadow-sm"
                                         : isFocused 
                                             ? "border-slate-900 ring-1 ring-slate-950 bg-slate-50/20" 
-                                            : "border-slate-200 hover:border-slate-300"
+                                            : "border-[#eaeaea] hover:border-[#d4d4d4]"
                                 }`}
                             >
                                 <div className="flex items-start gap-3 sm:gap-5">
@@ -890,12 +890,12 @@ export default function MarketingHub() {
                                             type="checkbox"
                                             checked={selectedIds.has(c.id)}
                                             onChange={() => toggleSelect(c.id)}
-                                            className="w-4.5 h-4.5 rounded border-slate-300 text-slate-900 focus:ring-slate-950 cursor-pointer transition-all shadow-sm"
+                                            className="w-4.5 h-4.5 rounded border-[#d4d4d4] text-slate-900 focus:ring-slate-950 cursor-pointer transition-all shadow-sm"
                                         />
                                     </div>
 
                                     {/* Glassmorphic Initial Avatar */}
-                                    <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center font-display text-base sm:text-lg font-medium text-slate-800 shrink-0 shadow-sm">
+                                    <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-slate-50 border border-[#eaeaea] flex items-center justify-center font-display text-base sm:text-lg font-medium text-slate-800 shrink-0 shadow-sm">
                                         {initial}
                                     </div>
                                     <div className="flex-1 min-w-0">
@@ -939,7 +939,7 @@ export default function MarketingHub() {
                                         {c.tags && c.tags.length > 0 && (
                                             <div className="flex gap-1.5 flex-wrap mb-3 font-mono">
                                                 {c.tags.map(t => (
-                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-slate-200/80 rounded-md text-[10px] text-slate-500">
+                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-[#eaeaea]/80 rounded-md text-[10px] text-slate-500">
                                                         #{t}
                                                     </span>
                                                 ))}
@@ -981,7 +981,7 @@ export default function MarketingHub() {
 
             {/* Mobile Sticky Bottom Action Bar */}
             {selectedIds.size > 0 && (
-                <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 shadow-[0_-8px_30px_rgb(0,0,0,0.12)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-in slide-in-from-bottom duration-300">
+                <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-[#eaeaea] shadow-[0_-8px_30px_rgb(0,0,0,0.12)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-in slide-in-from-bottom duration-300">
                     <div className="flex items-center justify-between gap-4 mb-3">
                         <span className="text-xs font-semibold text-slate-700">
                             {selectedIds.size} Contact(s) Selected
@@ -1005,7 +1005,7 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkArchiveOpen(true)}
-                            className="inline-flex items-center justify-center py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 transition-all active:scale-[0.98]"
+                            className="inline-flex items-center justify-center py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-xs font-semibold text-slate-700 transition-all active:scale-[0.98]"
                         >
                             Archive
                         </button>
@@ -1022,7 +1022,7 @@ export default function MarketingHub() {
 
             {/* Bulk Archive Dialog */}
             <Dialog open={bulkArchiveOpen} onOpenChange={setBulkArchiveOpen}>
-                <DialogContent className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                <DialogContent className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
                     <DialogHeader>
                         <DialogTitle className="text-xl font-semibold text-slate-950">
                             Archive Contacts
@@ -1055,7 +1055,7 @@ export default function MarketingHub() {
 
             {/* Bulk Delete Dialog */}
             <Dialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
-                <DialogContent className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                <DialogContent className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
                     <DialogHeader>
                         <DialogTitle className="text-xl font-semibold text-red-700">
                             Delete Contacts
@@ -1072,7 +1072,7 @@ export default function MarketingHub() {
                             value={bulkDeleteConfirmInput}
                             onChange={(e) => setBulkDeleteConfirmInput(e.target.value)}
                             placeholder="Type DELETE to confirm"
-                            className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-red-300 focus:outline-none transition-colors"
+                            className="w-full px-4 py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-red-300 focus:outline-none transition-colors"
                         />
                     </div>
 
@@ -1099,7 +1099,7 @@ export default function MarketingHub() {
 
             {/* Bulk Tag Dialog */}
             <Dialog open={bulkTagOpen} onOpenChange={setBulkTagOpen}>
-                <DialogContent className="bg-white border-slate-200 text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                <DialogContent className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
                     <DialogHeader>
                         <DialogTitle className="text-xl font-semibold text-slate-950">
                             Assign Tags
@@ -1132,7 +1132,7 @@ export default function MarketingHub() {
                                         className={`px-3 py-1.5 border rounded-xl text-xs font-medium transition-all ${
                                             active
                                                 ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                : "bg-white text-slate-600 border-slate-200 hover:border-slate-355"
+                                                : "bg-white text-slate-600 border-[#eaeaea] hover:border-slate-355"
                                         }`}
                                     >
                                         #{tag}
@@ -1152,7 +1152,7 @@ export default function MarketingHub() {
                                     value={newBulkTagInput}
                                     onChange={(e) => setNewBulkTagInput(e.target.value)}
                                     placeholder="Enter new tag..."
-                                    className="mt-1.5 w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-slate-350 focus:outline-none transition-colors"
+                                    className="mt-1.5 w-full px-4 py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-slate-350 focus:outline-none transition-colors"
                                 />
                             </label>
                         </div>
@@ -1250,7 +1250,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
     return (
         <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
             <DialogContent
-                className="bg-white border-slate-200 text-slate-900 sm:max-w-lg rounded-2xl shadow-xl overflow-hidden p-0"
+                className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-lg rounded-2xl shadow-xl overflow-hidden p-0"
                 data-testid="marketing-add-client-dialog"
             >
                 <div className="bg-slate-50 border-b border-slate-100 p-6">
@@ -1307,7 +1307,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             <select
                                 value={stage}
                                 onChange={(e) => setStage(e.target.value)}
-                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                             >
                                 <option value="lead">New Lead</option>
                                 <option value="active">Active partner</option>
@@ -1331,7 +1331,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             <select
                                 value={contactType}
                                 onChange={(e) => setContactType(e.target.value)}
-                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                             >
                                 <option value="">Select Type (optional)</option>
                                 <optgroup label="Brand & Marketing">
@@ -1586,7 +1586,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
         <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
             <SheetContent
                 side="right"
-                className="w-full sm:max-w-2xl bg-white border-l border-slate-200 text-slate-900 overflow-y-auto shadow-2xl p-0 [&>button]:hidden"
+                className="w-full sm:max-w-2xl bg-white border-l border-[#eaeaea] text-slate-900 overflow-y-auto shadow-2xl p-0 [&>button]:hidden"
                 data-testid="marketing-client-drawer"
             >
                 {client && (
@@ -1615,7 +1615,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             <div className="absolute right-5 top-6 sm:top-8 flex items-center gap-2">
                                 <button
                                     onClick={() => setIsEditing(!isEditing)}
-                                    className="p-2 text-slate-400 hover:text-slate-800 border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-sm bg-white"
+                                    className="p-2 text-slate-400 hover:text-slate-800 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl transition-all shadow-sm bg-white"
                                     title="Edit Profile"
                                 >
                                     {isEditing ? <Check className="w-4 h-4 text-[#5A7D5A]" /> : <Edit2 className="w-4 h-4" />}
@@ -1624,7 +1624,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     type="button"
                                     onClick={onClose}
                                     data-testid="marketing-drawer-close-btn"
-                                    className="p-2 text-slate-400 hover:text-slate-800 border border-slate-200 hover:border-slate-300 rounded-xl transition-all shadow-sm bg-white"
+                                    className="p-2 text-slate-400 hover:text-slate-800 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl transition-all shadow-sm bg-white"
                                     title="Close Drawer"
                                 >
                                     <X className="w-4 h-4" />
@@ -1637,7 +1637,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             
                             {/* Inline Editing Form Toggle */}
                             {isEditing ? (
-                                <form onSubmit={submitUpdate} className="bg-slate-50/50 border border-slate-200 rounded-2xl p-5 space-y-4 shadow-sm animate-in fade-in duration-200">
+                                <form onSubmit={submitUpdate} className="bg-slate-50/50 border border-[#eaeaea] rounded-2xl p-5 space-y-4 shadow-sm animate-in fade-in duration-200">
                                     <h4 className="text-xs font-mono font-semibold text-slate-500 uppercase tracking-wider mb-2">Edit Relationship File</h4>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <FieldInput label="Name" value={editName} onChange={setEditName} required />
@@ -1655,7 +1655,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             <select
                                                 value={editStage}
                                                 onChange={(e) => setEditStage(e.target.value)}
-                                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                                             >
                                                 <option value="lead">New Lead</option>
                                                 <option value="active">Active partner</option>
@@ -1669,7 +1669,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             <select
                                                 value={editContactType}
                                                 onChange={(e) => setEditContactType(e.target.value)}
-                                                className="mt-1.5 w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-slate-300 focus:outline-none transition-colors"
+                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                                             >
                                                 <option value="">Select Type (optional)</option>
                                                 <optgroup label="Brand & Marketing">
@@ -1741,11 +1741,11 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                         const gridColsClass = colsCount === 3 ? "grid-cols-3" : colsCount === 2 ? "grid-cols-2" : "grid-cols-1";
                                         
                                         return (
-                                            <div className={`grid ${gridColsClass} gap-2.5 bg-slate-50 border border-slate-200/60 rounded-2xl p-2.5`}>
+                                            <div className={`grid ${gridColsClass} gap-2.5 bg-slate-50 border border-[#eaeaea]/60 rounded-2xl p-2.5`}>
                                                 {showPhone && (
                                                     <a
                                                         href={`tel:${client.phone_number}`}
-                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#eaeaea]/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
                                                     >
                                                         <Phone className="w-4 h-4 text-slate-600" />
                                                         <span>Call</span>
@@ -1754,7 +1754,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                 {showEmail && (
                                                     <a
                                                         href={`mailto:${client.email}`}
-                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-slate-200/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#eaeaea]/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
                                                     >
                                                         <Mail className="w-4 h-4 text-slate-600" />
                                                         <span>Email</span>
@@ -1799,7 +1799,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     </div>
 
                                     {/* Relationship card details */}
-                                    <div className="bg-slate-50/30 border border-slate-200/60 rounded-2xl p-4 space-y-2.5 text-xs">
+                                    <div className="bg-slate-50/30 border border-[#eaeaea]/60 rounded-2xl p-4 space-y-2.5 text-xs">
                                         <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
                                             <span className="text-slate-500 font-medium">Email Address</span>
                                             <span className="font-mono text-slate-800 font-semibold break-all">{client.email || "—"}</span>
@@ -1840,7 +1840,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                 onClick={handleArchive}
                                                 disabled={updating}
                                                 data-testid="marketing-drawer-archive-btn"
-                                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 hover:border-slate-300 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-40"
+                                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-40"
                                             >
                                                 Archive Client
                                             </button>
@@ -1882,7 +1882,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                     className={`inline-flex items-center gap-2 px-4 py-2 text-xs rounded-xl border transition-colors duration-150 font-medium ${
                                                         active
                                                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                            : "bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50"
+                                                            : "bg-white text-slate-600 border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50"
                                                     }`}
                                                 >
                                                     <Icon className="w-3.5 h-3.5" />
@@ -1899,7 +1899,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             rows={3}
                                             maxLength={4000}
                                             data-testid="marketing-interaction-notes"
-                                            className="w-full bg-slate-50/50 border border-slate-200 rounded-2xl px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none shadow-inner"
+                                            className="w-full bg-slate-50/50 border border-[#eaeaea] rounded-2xl px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-[#d4d4d4] focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none shadow-inner"
                                         />
                                         <div className="absolute right-3.5 bottom-3 text-[10px] font-mono text-slate-400">
                                             {notes.length}/4000
@@ -1930,7 +1930,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     </div>
                                 ) : interactions.length === 0 ? (
                                     <div
-                                        className="text-xs text-slate-400 py-10 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/20"
+                                        className="text-xs text-slate-400 py-10 text-center border-2 border-dashed border-[#eaeaea] rounded-2xl bg-slate-50/20"
                                         data-testid="marketing-history-empty"
                                     >
                                         <MessageSquare className="w-7 h-7 mx-auto mb-2 text-slate-300" />
@@ -1951,7 +1951,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                     )}
                                                     <div className="absolute left-0 top-1.5 w-4 h-4 rounded-full bg-slate-900 border-2 border-white shadow-sm flex items-center justify-center" />
                                                     
-                                                    <div className="bg-white border border-slate-200 rounded-2xl p-4 ml-2 shadow-[0_2px_10px_rgba(15,23,42,0.02)] hover:shadow-md transition-shadow duration-200">
+                                                    <div className="bg-white border border-[#eaeaea] rounded-2xl p-4 ml-2 shadow-[0_2px_10px_rgba(15,23,42,0.02)] hover:shadow-md transition-shadow duration-200">
                                                         <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b border-slate-50 pb-2">
                                                             <div className="flex items-center gap-1.5">
                                                                 <Icon className="w-3.5 h-3.5 text-slate-500" />

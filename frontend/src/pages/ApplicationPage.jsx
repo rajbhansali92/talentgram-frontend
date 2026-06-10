@@ -432,7 +432,7 @@ export default function ApplicationPage() {
 
                             {applyPrefill && !emailGateUnlocked && (
                                 <div
-                                    className="bg-white rounded-xl border border-[#e8e6df] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
+                                    className="bg-white rounded-xl border border-[#eaeaea] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
                                     data-testid="apply-prefill-card"
                                 >
                                     <div className="min-w-0 flex-1">
@@ -463,7 +463,7 @@ export default function ApplicationPage() {
                                             type="button"
                                             onClick={dismissApplyPrefill}
                                             data-testid="apply-prefill-dismiss-btn"
-                                            className="border border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#b0aea6] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
+                                            className="border border-[#eaeaea] bg-white text-[#4a4a4a] hover:border-[#d4d4d4] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
                                         >
                                             Edit manually
                                         </button>
@@ -522,7 +522,7 @@ export default function ApplicationPage() {
             >
                 <Header />
                 <div className="flex-1 flex items-center justify-center p-6">
-                    <div className="max-w-md text-center bg-white rounded-2xl p-8 md:p-10 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.08)] border border-[#e8e6df]">
+                    <div className="max-w-md text-center bg-white rounded-2xl p-8 md:p-10 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.08)] border border-[#eaeaea]">
                         <div className="w-14 h-14 rounded-full bg-[#e6f7e6] text-[#2b6e2f] inline-flex items-center justify-center mb-6">
                             <Check className="w-6 h-6" />
                         </div>
@@ -556,7 +556,7 @@ export default function ApplicationPage() {
             <Header />
             <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
                 <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Application · {basics.email}</p>
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-[#e8e6df] pb-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-[#eaeaea] pb-4">
                     <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a]">
                         Your Profile
                     </h1>
@@ -581,7 +581,7 @@ export default function ApplicationPage() {
                             <Label>
                                 Age {form.dob ? "(auto calculated)" : ""}
                             </Label>
-                            <div className="mt-2 h-11 flex items-center px-4 bg-slate-50 rounded-lg border border-[#e8e6df] text-[15px] text-slate-500 font-mono">
+                            <div className="mt-2 h-11 flex items-center px-4 bg-slate-50 rounded-lg border border-[#eaeaea] text-[15px] text-slate-500 font-mono">
                                 {form.dob ? (calcAge(form.dob) ?? "—") : "—"}
                             </div>
                         </div>
@@ -595,12 +595,12 @@ export default function ApplicationPage() {
                                 }
                             >
                                 <SelectTrigger
-                                    className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] transition-all duration-150"
+                                    className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] transition-all duration-150"
                                     data-testid="form-height"
                                 >
                                     <SelectValue placeholder="Select height" />
                                 </SelectTrigger>
-                                <SelectContent className="bg-white border border-[#e8e6df] rounded-xl shadow-lg">
+                                <SelectContent className="bg-white border border-[#eaeaea] rounded-xl shadow-lg">
                                     {HEIGHT_OPTIONS.map((h) => (
                                         <SelectItem key={h} value={h} className="text-[15px]">
                                             {h}
@@ -619,7 +619,7 @@ export default function ApplicationPage() {
                                 }
                                 placeholder="City, Country"
                                 data-testid="form-location"
-                                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
+                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
                             />
                         </div>
 
@@ -637,7 +637,7 @@ export default function ApplicationPage() {
                                         className={`px-4 py-2 rounded-full border text-xs tracking-[0.08em] uppercase transition-all duration-150 ${
                                             form.gender === g.key
                                                 ? "border-[#1a1a1a] bg-[#1a1a1a] text-white"
-                                                : "border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#b0aea6]"
+                                                : "border-[#eaeaea] bg-white text-[#4a4a4a] hover:border-[#d4d4d4]"
                                         }`}
                                     >
                                         {g.label}
@@ -663,7 +663,7 @@ export default function ApplicationPage() {
                                 }
                                 placeholder="@yourhandle"
                                 data-testid="form-instagram"
-                                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
+                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
                             />
                         </div>
                         <div>
@@ -675,12 +675,12 @@ export default function ApplicationPage() {
                                 }
                             >
                                 <SelectTrigger
-                                    className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] transition-all duration-150"
+                                    className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] transition-all duration-150"
                                     data-testid="form-followers"
                                 >
                                     <SelectValue placeholder="Select range" />
                                 </SelectTrigger>
-                                <SelectContent className="bg-white border border-[#e8e6df] rounded-xl shadow-lg max-h-72">
+                                <SelectContent className="bg-white border border-[#eaeaea] rounded-xl shadow-lg max-h-72">
                                     {FOLLOWER_TIERS.map((tier) => (
                                         <SelectGroup key={tier.label}>
                                             <SelectLabel className="text-[10px] tracking-[0.08em] uppercase text-[#8b8b8b] px-2 py-1.5">
@@ -706,12 +706,12 @@ export default function ApplicationPage() {
                                 }
                             >
                                 <SelectTrigger
-                                    className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] transition-all duration-150"
+                                    className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] transition-all duration-150"
                                     data-testid="form-ethnicity"
                                 >
                                     <SelectValue placeholder="Select ethnicity" />
                                 </SelectTrigger>
-                                <SelectContent className="bg-white border border-[#e8e6df] rounded-xl shadow-lg max-h-72">
+                                <SelectContent className="bg-white border border-[#eaeaea] rounded-xl shadow-lg max-h-72">
                                     {ETHNICITY_OPTIONS.map((e) => (
                                         <SelectItem
                                             key={e.key}
@@ -735,7 +735,7 @@ export default function ApplicationPage() {
                                 rows={4}
                                 placeholder="A few lines about yourself — experience, strengths, what you're looking for."
                                 data-testid="form-bio"
-                                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg p-4 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150 resize-vertical"
+                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg p-4 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 resize-vertical"
                             />
                         </div>
                         <div className="md:col-span-2">
@@ -786,14 +786,14 @@ export default function ApplicationPage() {
                                     src={intro.url}
                                     poster={posterUrl(intro)}
                                     label="Introduction Video"
-                                    className="max-w-lg shadow-sm border border-[#e8e6df]"
+                                    className="max-w-lg shadow-sm border border-[#eaeaea]"
                                 />
                             ) : (
                                 <button
                                     onClick={() => videoRef.current?.click()}
                                     data-testid="apply-intro-upload-btn"
                                     disabled={uploading === "intro_video"}
-                                    className="w-full max-w-lg bg-[#f5f4f0] border border-dashed border-[#d1cfc8] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
+                                    className="w-full max-w-lg bg-[#f5f4f0] border border-dashed border-[#eaeaea] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
                                 >
                                     {uploading === "intro_video" ? (
                                         <Loader2 className="w-5 h-5 animate-spin" />
@@ -852,7 +852,7 @@ export default function ApplicationPage() {
                                         onClick={() => imgRef.current?.click()}
                                         data-testid="apply-image-upload-btn"
                                         disabled={uploading === "image"}
-                                        className="inline-flex items-center gap-1.5 text-xs border border-[#d1cfc8] bg-white hover:border-[#b0aea6] px-3 py-1.5 rounded-lg transition-colors duration-150"
+                                        className="inline-flex items-center gap-1.5 text-xs border border-[#eaeaea] bg-white hover:border-[#d4d4d4] px-3 py-1.5 rounded-lg transition-colors duration-150"
                                     >
                                         {uploading === "image" ? (
                                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -877,7 +877,7 @@ export default function ApplicationPage() {
                             {images.length === 0 ? (
                                 <button
                                     onClick={() => imgRef.current?.click()}
-                                    className="w-full bg-[#f5f4f0] border border-dashed border-[#d1cfc8] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
+                                    className="w-full bg-[#f5f4f0] border border-dashed border-[#eaeaea] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
                                 >
                                     <Camera className="w-5 h-5" />
                                     <span>Upload images</span>
@@ -887,7 +887,7 @@ export default function ApplicationPage() {
                                     {images.map((m) => (
                                         <div
                                             key={m.id}
-                                            className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#e8e6df] overflow-hidden group shadow-sm"
+                                            className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#eaeaea] overflow-hidden group shadow-sm"
                                         >
                                             <img
                                                 src={m.url}
@@ -933,7 +933,7 @@ export default function ApplicationPage() {
 
 function Header() {
     return (
-        <header className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-white/90 backdrop-blur-md border-b border-[#e8e6df]">
+        <header className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-white/90 backdrop-blur-md border-b border-[#eaeaea]">
             <Logo className="h-8" />
         </header>
     );
@@ -941,7 +941,7 @@ function Header() {
 
 function Section({ title, index, children }) {
     return (
-        <section className="mb-10 bg-white rounded-xl border border-[#e8e6df] shadow-[0_8px_30px_-12px_rgba(0,0,0,0.04)] p-6 md:p-8">
+        <section className="mb-10 bg-white rounded-xl border border-[#eaeaea] shadow-[0_8px_30px_-12px_rgba(0,0,0,0.04)] p-6 md:p-8">
             <div className="flex items-center gap-3 mb-6">
                 <span className="text-[10px] font-mono text-[#b0aea6]">
                     {index}
@@ -971,7 +971,7 @@ function Row({ label, value, onChange, onBlur, type = "text", testid, hint }) {
                 onChange={(e) => onChange(e.target.value)}
                 onBlur={onBlur}
                 data-testid={testid}
-                className="mt-2 w-full bg-white border border-[#e8e6df] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150"
+                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
             />
             {hint && (
                 <p className="text-[10px] text-[#8b8b8b] font-mono mt-1.5">
@@ -1021,7 +1021,7 @@ function ApplyLookGroup({
                     <div
                         key={m.id}
                         data-testid={`${testidPrefix}-image-${m.id}`}
-                        className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#e8e6df] overflow-hidden group shadow-sm"
+                        className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#eaeaea] overflow-hidden group shadow-sm"
                     >
                         <img
                             src={thumbnailUrl(m)}
@@ -1044,7 +1044,7 @@ function ApplyLookGroup({
                         onClick={() => inputRef.current?.click()}
                         disabled={isUploading}
                         data-testid={`apply-add-${testidPrefix}-btn`}
-                        className="aspect-[3/4] bg-[#f5f4f0] border border-dashed border-[#d1cfc8] rounded-xl flex flex-col items-center justify-center gap-1 text-xs text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150 disabled:opacity-50"
+                        className="aspect-[3/4] bg-[#f5f4f0] border border-dashed border-[#eaeaea] rounded-xl flex flex-col items-center justify-center gap-1 text-xs text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150 disabled:opacity-50"
                     >
                         {isUploading ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -1137,14 +1137,14 @@ function ApplyWorkLinksEditor({ links, onChange }) {
                     "Pepsi - https://youtu.be/xyz\n" +
                     "https://vimeo.com/showreel"
                 }
-                className="w-full bg-white border border-[#e8e6df] rounded-lg p-4 text-[14px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#b0aea6] outline-none transition-all duration-150 resize-y font-mono leading-relaxed"
+                className="w-full bg-white border border-[#eaeaea] rounded-lg p-4 text-[14px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 resize-y font-mono leading-relaxed"
             />
             <div className="flex items-center gap-2">
                 <span
                     className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${
                         parsed.length > 0
                             ? "text-emerald-700 bg-emerald-50 border-emerald-100"
-                            : "text-[#b0aea6] bg-[#faf9f6] border-[#e8e6df]"
+                            : "text-[#b0aea6] bg-[#faf9f6] border-[#eaeaea]"
                     }`}
                     data-testid="apply-work-links-count"
                 >
@@ -1163,7 +1163,7 @@ function ApplyWorkLinksEditor({ links, onChange }) {
                         return (
                             <div
                                 key={i}
-                                className="flex items-center gap-2 px-3 py-2 bg-[#faf9f6] border border-[#e8e6df] rounded-lg"
+                                className="flex items-center gap-2 px-3 py-2 bg-[#faf9f6] border border-[#eaeaea] rounded-lg"
                                 data-testid={`apply-work-link-row-${i}`}
                             >
                                 {label && (
@@ -1230,7 +1230,7 @@ function InterestedInSelector({ selected, onChange }) {
                             "active:scale-95",
                             active
                                 ? "border-[#1a1a1a] bg-[#1a1a1a] text-white shadow-sm"
-                                : "border-[#d1cfc8] bg-white text-[#4a4a4a] hover:border-[#9a9890] hover:bg-[#f5f4f0]",
+                                : "border-[#eaeaea] bg-white text-[#4a4a4a] hover:border-[#9a9890] hover:bg-[#f5f4f0]",
                         ].join(" ")}
                     >
                         {cat}

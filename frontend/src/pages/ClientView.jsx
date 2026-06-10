@@ -1520,7 +1520,7 @@ function TalentDetail({
             <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
 
                 {/* Unified Top Sticky Header (Desktop & Mobile) */}
-                <div className="sticky top-0 z-50 bg-white border-b border-slate-200 px-4 md:px-6 py-3 md:py-4 flex flex-wrap items-center justify-between shrink-0 shadow-sm">
+                <div className="sticky top-0 z-50 bg-white border-b border-[#eaeaea] px-4 md:px-6 py-3 md:py-4 flex flex-wrap items-center justify-between shrink-0 shadow-sm">
                     <div className="min-w-0 flex-1 pr-4 flex items-center gap-3">
                         <h2 className="font-display text-base md:text-lg font-bold text-slate-900 truncate">
                             {privatizeName(talent.name)}
@@ -1534,7 +1534,7 @@ function TalentDetail({
                                 ? "bg-rose-50 text-rose-700 border-rose-200"
                                 : viewerAction?.action === "not_sure"
                                 ? "bg-orange-50 text-orange-700 border-orange-200"
-                                : "bg-slate-50 text-slate-500 border-slate-200"
+                                : "bg-slate-50 text-slate-500 border-[#eaeaea]"
                         }`}>
                             {{
                                 shortlist: "Shortlist",
@@ -1556,7 +1556,7 @@ function TalentDetail({
                                 ? "bg-rose-50 text-rose-700 border-rose-200"
                                 : viewerAction?.action === "not_sure"
                                 ? "bg-orange-50 text-orange-700 border-orange-200"
-                                : "bg-slate-50 text-slate-500 border-slate-200"
+                                : "bg-slate-50 text-slate-500 border-[#eaeaea]"
                         }`}>
                             {{
                                 shortlist: "Shortlist",
@@ -1570,7 +1570,7 @@ function TalentDetail({
                             <button
                                 onClick={handleDownloadPackage}
                                 disabled={isDownloadingPackage}
-                                className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Download Talent Folder"
                                 data-testid="header-download-package-btn"
                             >
@@ -1589,7 +1589,7 @@ function TalentDetail({
                         )}
                         <button
                             onClick={handleCopyForm}
-                            className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-slate-700"
+                            className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-slate-700"
                             data-testid="header-copy-form-btn"
                         >
                             <Copy className="w-3.5 h-3.5 text-slate-500" />
@@ -1598,7 +1598,7 @@ function TalentDetail({
                         {!isSharePreview && (
                             <button
                                 onClick={() => onShare(talent.id)}
-                                className="hidden md:flex w-9 h-9 md:w-10 md:h-10 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full items-center justify-center transition-colors duration-150 shadow-sm"
+                                className="hidden md:flex w-9 h-9 md:w-10 md:h-10 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center justify-center transition-colors duration-150 shadow-sm"
                                 title="Share Portfolio"
                                 data-testid="header-share-btn"
                             >
@@ -1657,7 +1657,7 @@ function TalentDetail({
                                 </button>
                                 <button
                                     onClick={handleCopyForm}
-                                    className="ml-3 text-[11px] px-2.5 py-1.5 border border-black/[0.08] hover:border-black/20 rounded-md transition-colors text-[#111111] bg-white font-medium shadow-sm flex items-center justify-center shrink-0"
+                                    className="ml-3 text-[11px] px-2.5 py-1.5 border border-[#eaeaea] hover:border-black/20 rounded-md transition-colors text-[#111111] bg-white font-medium shadow-sm flex items-center justify-center shrink-0"
                                     data-testid="copy-form-btn-mobile"
                                 >
                                     Copy Form
@@ -1873,7 +1873,7 @@ function TalentDetail({
                                                 className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-full text-xs font-medium transition-colors duration-150 ${
                                                     isReviewed
                                                         ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
-                                                        : "border-black/[0.08] hover:border-black/20 text-[#4A4A4A]"
+                                                        : "border-[#eaeaea] hover:border-black/20 text-[#4A4A4A]"
                                                 }`}
                                                 data-testid="mark-reviewed-btn-mobile"
                                             >
@@ -1885,7 +1885,7 @@ function TalentDetail({
                                             {visibleActions.map((a) => {
                                                 const active = viewerAction?.action === a.key;
                                                 return (
-                                                    <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}-mobile`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-black/[0.08] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
+                                                    <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}-mobile`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-[#eaeaea] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
                                                         <a.icon className={`w-3.5 h-3.5 ${active ? "opacity-90" : "opacity-40"}`} />
                                                         {a.label}
                                                     </button>
@@ -1899,8 +1899,8 @@ function TalentDetail({
                                             <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
                                             <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
                                         </div>
-                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
-                                        <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
+                                        <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
                                     </div>
 
                                     {talent.submission_id && talent.project_id && (
@@ -2003,7 +2003,7 @@ function TalentDetail({
                                             className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-full text-xs font-medium transition-colors duration-150 ${
                                                 isReviewed
                                                     ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
-                                                    : "border-black/[0.08] hover:border-black/20 text-[#4A4A4A]"
+                                                    : "border-[#eaeaea] hover:border-black/20 text-[#4A4A4A]"
                                             }`}
                                             data-testid="mark-reviewed-btn"
                                         >
@@ -2015,7 +2015,7 @@ function TalentDetail({
                                         {visibleActions.map((a) => {
                                             const active = viewerAction?.action === a.key;
                                             return (
-                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-black/[0.08] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
+                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-[#eaeaea] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
                                                     <a.icon className={`w-3.5 h-3.5 ${active ? "opacity-90" : "opacity-40"}`} />
                                                     {a.label}
                                                 </button>
@@ -2028,8 +2028,8 @@ function TalentDetail({
                                             <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
                                             <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
                                         </div>
-                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-black/[0.08] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
-                                        <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-black/[0.08] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
+                                        <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
                                     </div>
 
                                     {talent.submission_id && talent.project_id && (

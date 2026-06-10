@@ -28,11 +28,11 @@ img {
 /* SINGLE :root — Merged operational + Shadcn tokens */
 :root {
   /* Core operational palette */
-  --tg-bg: #f5f5f2;
+  --tg-bg: #ffffff;
   --tg-surface: #ffffff;
-  --tg-surface-2: #fafaf8;
-  --tg-border: rgba(0, 0, 0, 0.08);
-  --tg-border-strong: rgba(0, 0, 0, 0.16);
+  --tg-surface-2: #f7f7f7;
+  --tg-border: #eaeaea;
+  --tg-border-strong: #d4d4d4;
   --tg-text: #0a0a0a;
   --tg-muted: #5a5a5a;
   --tg-success: #16a34a;
@@ -45,7 +45,7 @@ img {
   --tg-scrollbar-active: rgba(0, 0, 0, 0.18);
 
   /* Shadcn design tokens — fully operational light-only */
-  --background: 40 20% 96%;
+  --background: 0 0% 100%;
   --foreground: 0 0% 4%;
   --card: 0 0% 100%;
   --card-foreground: 0 0% 4%;
@@ -53,11 +53,11 @@ img {
   --popover-foreground: 0 0% 4%;
   --primary: 0 0% 8%;
   --primary-foreground: 0 0% 98%;
-  --secondary: 40 12% 94%;
+  --secondary: 0 0% 95%;
   --secondary-foreground: 0 0% 10%;
-  --muted: 40 10% 94%;
+  --muted: 0 0% 95%;
   --muted-foreground: 0 0% 42%;
-  --accent: 40 12% 93%;
+  --accent: 0 0% 94%;
   --accent-foreground: 0 0% 8%;
   --destructive: 4 75% 55%;
   --destructive-foreground: 0 0% 100%;

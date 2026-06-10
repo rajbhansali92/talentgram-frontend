@@ -1165,7 +1165,7 @@ function SubmissionPage() {
                     <ThemeToggle />
                 </div>
                 <div className="max-w-xl mx-auto px-6 py-16 md:py-24 tg-fade-up">
-                    <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-10 border border-slate-200/60 shadow-[0_20px_40px_-12px_rgba(0,0,0,0.05)] text-center">
+                    <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-10 border border-[#eaeaea]/60 shadow-[0_20px_40px_-12px_rgba(0,0,0,0.05)] text-center">
                         <div className="relative w-20 h-20 mx-auto mb-8">
                             <div className="absolute inset-0 rounded-full bg-emerald-100/60 blur-xl animate-pulse" />
                             <div className="relative w-full h-full rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center shadow-sm">
@@ -1205,7 +1205,7 @@ function SubmissionPage() {
                         <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-4">Client Feedback</p>
                         {feedback.length === 0 ? (
                             <div
-                                className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-slate-400 border border-slate-200/60"
+                                className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-slate-400 border border-[#eaeaea]/60"
                                 data-testid="talent-feedback-empty"
                             >
                                 No feedback yet — the team will share notes here
@@ -1232,7 +1232,7 @@ function SubmissionPage() {
                 <div className="absolute bottom-0 -right-40 w-80 h-80 rounded-full bg-slate-200/40 mix-blend-multiply animate-blob animation-delay-2000" />
             </div>
 
-            <header className="relative w-full pt-10 pb-8 px-5 border-b border-slate-200/60 bg-white/40">
+            <header className="relative w-full pt-10 pb-8 px-5 border-b border-[#eaeaea]/60 bg-white/40">
                 <div className="absolute top-5 right-5 z-40">
                     <ThemeToggle size="sm" />
                 </div>
@@ -1281,7 +1281,7 @@ function SubmissionPage() {
                 {/* Mobile-only 3-step indicator below the centered branding */}
                 {emailGateUnlocked && (
                     <div
-                        className="md:hidden mt-6 max-w-2xl mx-auto border-t border-slate-200/40 pt-4"
+                        className="md:hidden mt-6 max-w-2xl mx-auto border-t border-[#eaeaea]/40 pt-4"
                         data-testid="wizard-stepbar"
                     >
                         <div className="flex items-center gap-3">
@@ -1298,7 +1298,7 @@ function SubmissionPage() {
                                         className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-80" : "opacity-50"}`}
                                     >
                                         <span
-                                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-slate-700 border border-slate-300" : "border border-slate-300 text-slate-500"}`}
+                                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-slate-700 border border-[#d4d4d4]" : "border border-[#d4d4d4] text-slate-500"}`}
                                         >
                                             {reached && !active ? <Check className="w-3 h-3" /> : n}
                                         </span>
@@ -1322,7 +1322,7 @@ function SubmissionPage() {
 
             <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-8 bg-white/60 rounded-3xl p-5 sm:p-7 border border-slate-200/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
+                <section className="mb-8 bg-white/60 rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
                         <div className="flex flex-col gap-1">
@@ -1336,9 +1336,12 @@ function SubmissionPage() {
                             <span>Draft Auto-Saved</span>
                         </div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5 border-t border-slate-200/50 pt-6">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5 border-t border-[#eaeaea]/50 pt-6">
                         <Info label="Character" value={project.character} />
                         <Info label="Shoot Dates" value={project.shoot_dates} />
+                        {project.budget_per_day && (
+                            <Info label="Budget Per Day" value={project.budget_per_day} />
+                        )}
                         {/* Phase 1 (v37): expose Director + Production House so
                             talents see who's behind the project before they
                             invest time. Both fields already exist in the
@@ -1365,7 +1368,7 @@ function SubmissionPage() {
                         <button
                             onClick={() => setShowMaterial(true)}
                             data-testid="view-audition-material-btn"
-                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-slate-200 hover:border-slate-300 rounded-full text-[13px] text-slate-700 transition-all hover:shadow-sm hover:-translate-y-[1px] bg-white/40"
+                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full text-[13px] text-slate-700 transition-all hover:shadow-sm hover:-translate-y-[1px] bg-white/40"
                         >
                             <FolderOpen className="w-4 h-4" /> View Audition Material
                         </button>
@@ -1374,7 +1377,7 @@ function SubmissionPage() {
 
                 {/* SUBMISSION PROGRESS CHECKLIST */}
                 {emailGateUnlocked && (
-                    <section className="mb-10 bg-white rounded-3xl p-6 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
+                    <section className="mb-10 bg-white rounded-3xl p-6 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
                         <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-3">Submission Progress</p>
                         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                             {[
@@ -1398,7 +1401,7 @@ function SubmissionPage() {
                                                 <Check className="w-3 h-3 stroke-[3]" />
                                             </div>
                                         ) : (
-                                            <div className="w-5 h-5 rounded-full border-2 border-slate-200 bg-white" />
+                                            <div className="w-5 h-5 rounded-full border-2 border-[#eaeaea] bg-white" />
                                         )}
                                     </span>
                                     <span className="text-[12px] font-medium tracking-tight truncate">
@@ -1416,7 +1419,7 @@ function SubmissionPage() {
                     data-testid="talent-details-section"
                     data-step="1-2"
                 >
-                    <div className="bg-white rounded-3xl p-7 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
+                    <div className="bg-white rounded-3xl p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4" data-step="1">Talent Details</p>
                     <h2 className="font-display text-2xl md:text-3xl tracking-tight text-slate-900 mb-3 leading-[1.05]" data-step="1">
                         Your profile.
@@ -1455,7 +1458,7 @@ function SubmissionPage() {
                                                 }}
                                                 placeholder="Enter your email address"
                                                 style={{ fontSize: "16px" }}
-                                                className="flex-1 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-800 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none transition duration-150 h-[44px]"
+                                                className="flex-1 px-4 py-2.5 bg-white border border-[#eaeaea] rounded-xl text-slate-800 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none transition duration-150 h-[44px]"
                                                 disabled={gatewayLoading}
                                             />
                                             <button
@@ -1480,10 +1483,10 @@ function SubmissionPage() {
                                                 <img
                                                     src={gatewayRecognition.image_url}
                                                     alt={gatewayRecognition.name}
-                                                    className="w-12 h-12 rounded-full object-cover border border-slate-200"
+                                                    className="w-12 h-12 rounded-full object-cover border border-[#eaeaea]"
                                                 />
                                             ) : (
-                                                <div className="w-12 h-12 rounded-full bg-slate-200 flex items-center justify-center border border-slate-300">
+                                                <div className="w-12 h-12 rounded-full bg-slate-200 flex items-center justify-center border border-[#d4d4d4]">
                                                     <User className="w-5 h-5 text-slate-400" />
                                                 </div>
                                             )}
@@ -1495,7 +1498,7 @@ function SubmissionPage() {
                                             </div>
                                         </div>
 
-                                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-slate-200/40">
+                                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-[#eaeaea]/40">
                                             <button
                                                 type="button"
                                                 onClick={handleInlineContinue}
@@ -1507,7 +1510,7 @@ function SubmissionPage() {
                                             <button
                                                 type="button"
                                                 onClick={handleInlineCancel}
-                                                className="border border-slate-200 text-slate-500 hover:border-slate-300 px-4 py-2.5 rounded-xl text-xs inline-flex items-center justify-center h-[40px] bg-white"
+                                                className="border border-[#eaeaea] text-slate-500 hover:border-[#d4d4d4] px-4 py-2.5 rounded-xl text-xs inline-flex items-center justify-center h-[40px] bg-white"
                                             >
                                                 Use another email
                                             </button>
@@ -1565,7 +1568,7 @@ function SubmissionPage() {
                                 <button
                                     type="button"
                                     onClick={handleUseAnotherEmail}
-                                    className="border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-800 px-4 py-2 text-xs rounded-full inline-flex items-center justify-center min-h-[36px] bg-white transition-all active:scale-[0.98] shrink-0"
+                                    className="border border-[#eaeaea] text-slate-500 hover:border-[#d4d4d4] hover:text-slate-800 px-4 py-2 text-xs rounded-full inline-flex items-center justify-center min-h-[36px] bg-white transition-all active:scale-[0.98] shrink-0"
                                 >
                                     Use Another Email
                                 </button>
@@ -1575,8 +1578,8 @@ function SubmissionPage() {
                         {emailGateUnlocked && (
                         <>
                         {/* Section 1: Your Profile */}
-                        <div className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
-                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                        <div className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <h3 className="text-base font-bold text-slate-900 tracking-tight">Your Profile</h3>
                                     <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
@@ -1589,7 +1592,7 @@ function SubmissionPage() {
                                             profile: !prev.profile,
                                         }))
                                     }
-                                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                                     title={collapsedSections.profile ? "Expand Profile" : "Collapse Profile"}
                                 >
                                     <ChevronDown
@@ -1649,7 +1652,7 @@ function SubmissionPage() {
                                         />
                                         
                                         {/* Project-specific age override checkbox and input */}
-                                        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-slate-200/50 focus-within:border-amber-300 focus-within:ring-4 focus-within:ring-amber-50/50 transition-all duration-300 col-span-1 md:col-span-2">
+                                        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-[#eaeaea]/50 focus-within:border-amber-300 focus-within:ring-4 focus-within:ring-amber-50/50 transition-all duration-300 col-span-1 md:col-span-2">
                                             <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
                                                 <input
                                                     type="checkbox"
@@ -1664,7 +1667,7 @@ function SubmissionPage() {
                                                         setTimeout(saveForm, 0);
                                                     }}
                                                     data-testid="form-override-age-checkbox"
-                                                    className="w-5 h-5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
+                                                    className="w-5 h-5 rounded border-[#d4d4d4] text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
                                                 />
                                                 <span className="text-sm font-medium text-slate-700 select-none">
                                                     Use different age for this project?
@@ -1692,7 +1695,7 @@ function SubmissionPage() {
                                                         max={80}
                                                         placeholder="e.g. 25"
                                                         data-testid="form-override-age-input"
-                                                        className="mt-2 w-full bg-white rounded-xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                        className="mt-2 w-full bg-white rounded-xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                     />
                                                     <p className="text-[10px] text-slate-400 font-mono mt-1.5">
                                                         Only use this if you wish to be presented as a different age range for this project. This override is isolated to this submission only.
@@ -1716,7 +1719,7 @@ function SubmissionPage() {
                                                 min={10}
                                                 max={80}
                                                 data-testid="form-age-input"
-                                                className="mt-2 w-full bg-slate-100 rounded-2xl border border-slate-200 outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="mt-2 w-full bg-slate-100 rounded-2xl border border-[#eaeaea] outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         </div>
                                         <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-100">
@@ -1737,11 +1740,11 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-height-trigger"
-                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select height" />
                                                     </SelectTrigger>
-                                                    <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
+                                                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
                                                         {HEIGHT_OPTIONS.map((h) => (
                                                             <SelectItem
                                                                 key={h}
@@ -1815,7 +1818,7 @@ function SubmissionPage() {
                                                             className={`px-3 py-2.5 text-[12px] rounded-full border transition-all duration-200 min-h-[44px] active:scale-[0.97] ${
                                                                 active
                                                                     ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                                    : "bg-white/60 border-slate-200 hover:border-slate-300 text-slate-600"
+                                                                    : "bg-white/60 border-[#eaeaea] hover:border-[#d4d4d4] text-slate-600"
                                                             }`}
                                                         >
                                                             {g.label}
@@ -1838,11 +1841,11 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-ethnicity-trigger"
-                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select ethnicity" />
                                                     </SelectTrigger>
-                                                    <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
+                                                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
                                                         {ETHNICITY_OPTIONS.map((e) => (
                                                             <SelectItem
                                                                 key={e.key}
@@ -1895,11 +1898,11 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-instagram-followers-trigger"
-                                                        className="bg-white/60 border border-slate-200 rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select range" />
                                                     </SelectTrigger>
-                                                    <SelectContent className="max-h-72 bg-white border-slate-200 rounded-2xl">
+                                                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
                                                         {FOLLOWER_TIERS.map((tier) => (
                                                             <SelectGroup key={tier.label}>
                                                                 <SelectLabel className="text-[10px] tracking-wide uppercase text-slate-400 font-mono">
@@ -1936,7 +1939,7 @@ function SubmissionPage() {
                                                 rows={3}
                                                 maxLength={600}
                                                 data-testid="form-bio"
-                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                 placeholder="A short note about you (max 600 chars)"
                                             />
                                         </label>
@@ -1946,8 +1949,8 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 2: Project Questions */}
-                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
-                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <h3 className="text-base font-bold text-slate-900 tracking-tight">Project Questions</h3>
                                     <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
@@ -1960,7 +1963,7 @@ function SubmissionPage() {
                                             projectQuestions: !prev.projectQuestions,
                                         }))
                                     }
-                                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                                     title={collapsedSections.projectQuestions ? "Expand Project Questions" : "Collapse Project Questions"}
                                 >
                                     <ChevronDown
@@ -1979,7 +1982,7 @@ function SubmissionPage() {
                                         data-step="2"
                                         className="mb-6"
                                     >
-                                        <div className="bg-white/70 border border-slate-200/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                                        <div className="bg-white/70 border border-[#eaeaea]/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
                                             <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-2">
                                                 Availability
                                             </p>
@@ -2022,7 +2025,7 @@ function SubmissionPage() {
                                                         className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                             active
                                                                 ? "bg-slate-950 text-white border-slate-950 shadow-sm"
-                                                                : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
+                                                                : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700"
                                                         }`}
                                                     >
                                                         {opt.key === "yes" ? "Available" : "Not Available"}
@@ -2046,7 +2049,7 @@ function SubmissionPage() {
                                                 rows={3}
                                                 placeholder="Please specify reason / alternate availability"
                                                 data-testid="availability-note-input"
-                                                className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         )}
                                     </div>
@@ -2057,7 +2060,7 @@ function SubmissionPage() {
                                             data-testid="commission-block"
                                             className="mb-6"
                                         >
-                                            <div className="bg-white/70 border border-slate-200/80 rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="commission-card">
+                                            <div className="bg-white/70 border border-[#eaeaea]/80 rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="commission-card">
                                                 <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-1.5">
                                                     Commission
                                                 </p>
@@ -2075,7 +2078,7 @@ function SubmissionPage() {
                                             data-step="2"
                                             className="mb-6"
                                         >
-                                            <div className="bg-white/70 border border-slate-200/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="project-budget-card">
+                                            <div className="bg-white/70 border border-[#eaeaea]/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="project-budget-card">
                                                 <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-2">
                                                     Project Budget
                                                 </p>
@@ -2117,7 +2120,7 @@ function SubmissionPage() {
                                                     className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                         form.budget.status === "accept"
                                                             ? "bg-slate-950 text-white border-slate-955 shadow-sm"
-                                                            : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
+                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700"
                                                     }`}
                                                 >
                                                     Accept Budget
@@ -2138,7 +2141,7 @@ function SubmissionPage() {
                                                     className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                         form.budget.status === "custom"
                                                             ? "bg-slate-955 text-white border-slate-955 shadow-sm"
-                                                            : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"
+                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700"
                                                     }`}
                                                 >
                                                     Propose Own
@@ -2160,7 +2163,7 @@ function SubmissionPage() {
                                                     onBlur={saveForm}
                                                     placeholder="Enter your expected budget per day"
                                                     data-testid="budget-value-input"
-                                                    className="w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                    className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                 />
                                             )}
                                         </div>
@@ -2208,8 +2211,8 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 3: Work Links & Additional Material */}
-                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-slate-200/50 p-6">
-                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <h3 className="text-base font-bold text-slate-900 tracking-tight">Work Links</h3>
                                     <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
@@ -2222,7 +2225,7 @@ function SubmissionPage() {
                                             workLinks: !prev.workLinks,
                                         }))
                                     }
-                                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                                     title={collapsedSections.workLinks ? "Expand Work Links" : "Collapse Work Links"}
                                 >
                                     <ChevronDown
@@ -2278,8 +2281,8 @@ function SubmissionPage() {
                         data-testid="uploads-section"
                         data-step="3"
                     >
-                        <div className="bg-white rounded-3xl p-7 border border-slate-200/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
-                        <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-200/30">
+                        <div className="bg-white rounded-3xl p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
+                        <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                             <div>
                                 <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">Uploads</p>
                                 <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">
@@ -2295,7 +2298,7 @@ function SubmissionPage() {
                                         uploads: !prev.uploads,
                                     }))
                                 }
-                                className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                                 title={collapsedSections.uploads ? "Expand Uploads" : "Collapse Uploads"}
                             >
                                 <ChevronDown
@@ -2369,7 +2372,7 @@ function SubmissionPage() {
                                     {Object.entries(activeUploads)
                                         .filter(([key, state]) => state.category === "take" && !takes.some(t => t.label === state.label))
                                         .map(([key, state]) => (
-                                            <div key={key} className="bg-white border border-slate-200 rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] text-left">
+                                            <div key={key} className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] text-left">
                                                 <div className="flex items-center justify-between">
                                                     <div>
                                                         <span className="text-[11px] font-mono text-amber-600/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
@@ -2466,7 +2469,7 @@ function SubmissionPage() {
                                     />
 
                                     {/* Generic Portfolio collapsible group */}
-                                    <div className="mb-6 bg-slate-50/50 border border-slate-200/60 rounded-2xl p-4" data-testid="portfolio-group-generic">
+                                    <div className="mb-6 bg-slate-50/50 border border-[#eaeaea]/60 rounded-2xl p-4" data-testid="portfolio-group-generic">
                                         <div
                                             className="flex items-center justify-between cursor-pointer select-none"
                                             onClick={() => setIsGenericPortfolioCollapsed(!isGenericPortfolioCollapsed)}
@@ -2479,7 +2482,7 @@ function SubmissionPage() {
                                             </div>
                                             <button
                                                 type="button"
-                                                className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                                                 title={isGenericPortfolioCollapsed ? "Expand" : "Collapse"}
                                             >
                                                 <ChevronDown
@@ -2501,7 +2504,7 @@ function SubmissionPage() {
                                                         return (
                                                             <div
                                                                 key={m.id}
-                                                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02] cursor-pointer"
+                                                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-[#eaeaea] group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02] cursor-pointer"
                                                                 onClick={(e) => {
                                                                     // Touch devices: first tap reveals the overlay;
                                                                     // the dismiss useEffect clears it when tapping outside.
@@ -2582,7 +2585,7 @@ function SubmissionPage() {
                                                     {Object.entries(activeUploads)
                                                         .filter(([key, state]) => state.category === "image")
                                                         .map(([key, state]) => (
-                                                            <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                                                            <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
                                                                 <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
                                                                 <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
                                                                 <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
@@ -2611,7 +2614,7 @@ function SubmissionPage() {
                                                                 imagesRef.current?.click()
                                                             }
                                                             data-testid="add-image-btn"
-                                                            className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                                            className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                                                         >
                                                             <div className="relative flex flex-col items-center gap-1">
                                                                 <Camera className="w-5 h-5" />
@@ -2653,7 +2656,7 @@ function SubmissionPage() {
                                                         onClick={() => cameraImagesRef.current?.click()}
                                                         disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
                                                         data-testid="add-image-camera-btn"
-                                                        className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                                        className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                                     >
                                                         <Camera className="w-3.5 h-3.5" /> Take photo
                                                     </button>
@@ -2662,7 +2665,7 @@ function SubmissionPage() {
                                                         onClick={() => imagesRef.current?.click()}
                                                         disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
                                                         data-testid="add-image-library-btn"
-                                                        className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                                        className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                                     >
                                                         <FolderOpen className="w-3.5 h-3.5" /> From library
                                                     </button>
@@ -2736,7 +2739,7 @@ function SubmissionPage() {
                 Step 3 uses the in-section "Submit Audition" sticky button. */}
             {emailGateUnlocked && mobileStep < 3 && (
                 <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-slate-200/60 px-4 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
+                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-[#eaeaea]/60 px-4 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
                     data-testid="wizard-bottom-bar"
                 >
                     <div className="flex items-center gap-2 max-w-3xl mx-auto">
@@ -2745,7 +2748,7 @@ function SubmissionPage() {
                                 type="button"
                                 onClick={() => goToStep(mobileStep - 1)}
                                 data-testid="wizard-back-btn"
-                                className="px-5 py-3 border border-slate-200 text-slate-600 rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                className="px-5 py-3 border border-[#eaeaea] text-slate-600 rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                 style={{ WebkitTapHighlightColor: "transparent" }}
                             >
                                 Back
@@ -2788,7 +2791,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
     const failedCount = items.filter(([_, u]) => u.status === "failed").length;
 
     return (
-        <div className="fixed bottom-6 right-6 z-50 max-w-xs w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
+        <div className="fixed bottom-6 right-6 z-50 max-w-xs w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
             <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3 cursor-pointer" onClick={() => setCollapsed(!collapsed)}>
                 <div className="flex items-center gap-2">
                     <div className="relative">
@@ -2903,7 +2906,7 @@ function PremiumPortfolioGroup({
         return typeof window !== "undefined" && window.innerWidth < 768;
     });
     return (
-        <div className="mb-6 bg-slate-50/50 border border-slate-200/60 rounded-2xl p-4" data-testid={`portfolio-group-${testidPrefix}`}>
+        <div className="mb-6 bg-slate-50/50 border border-[#eaeaea]/60 rounded-2xl p-4" data-testid={`portfolio-group-${testidPrefix}`}>
             <div
                 className="flex items-center justify-between cursor-pointer select-none"
                 onClick={() => setIsCollapsed(!isCollapsed)}
@@ -2916,7 +2919,7 @@ function PremiumPortfolioGroup({
                 </div>
                 <button
                     type="button"
-                    className="p-1 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                     title={isCollapsed ? "Expand" : "Collapse"}
                 >
                     <ChevronDown
@@ -2937,7 +2940,7 @@ function PremiumPortfolioGroup({
                         {items.map((m) => (
                             <div
                                 key={m.id}
-                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-slate-200 group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
+                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-[#eaeaea] group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
                                 data-testid={`${testidPrefix}-image-${m.id}`}
                             >
                                 <img
@@ -2960,7 +2963,7 @@ function PremiumPortfolioGroup({
                         {Object.entries(activeUploads)
                             .filter(([key, state]) => state.category === category)
                             .map(([key, state]) => (
-                                <div key={key} className="relative aspect-square bg-slate-50 border border-slate-200 rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                                <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
                                     <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
                                     <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
                                     <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
@@ -2987,7 +2990,7 @@ function PremiumPortfolioGroup({
                                 type="button"
                                 onClick={() => inputRef.current?.click()}
                                 data-testid={`add-${testidPrefix}-image-btn`}
-                                className="relative aspect-square rounded-2xl border border-dashed border-slate-300 hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                             >
                                 <div className="relative flex flex-col items-center gap-1">
                                     <Plus className="w-5 h-5" />
@@ -3091,7 +3094,7 @@ function WorkLinksEditor({ links, onChange }) {
                     "Pepsi - https://youtu.be/xyz\n" +
                     "https://vimeo.com/showreel"
                 }
-                className="w-full bg-white/60 border border-slate-200 rounded-2xl p-4 text-[14px] text-slate-900 placeholder:text-slate-400 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[14px] text-slate-900 placeholder:text-slate-400 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
             />
             <div className="flex items-center gap-2">
                 <span
@@ -3116,7 +3119,7 @@ function WorkLinksEditor({ links, onChange }) {
                         return (
                             <div
                                 key={i}
-                                className="flex items-center gap-2 px-3 py-2 bg-white/60 border border-slate-200 rounded-xl"
+                                className="flex items-center gap-2 px-3 py-2 bg-white/60 border border-[#eaeaea] rounded-xl"
                                 data-testid={`work-link-row-${i}`}
                             >
                                 {label && (
@@ -3210,7 +3213,7 @@ function PremiumFormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-white/60 rounded-2xl border border-slate-200 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-slate-900 placeholder:text-slate-500 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-500 ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-slate-900 placeholder:text-slate-500 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-500 ${className}`}
             />
             {hint && (
                 <span className="block text-[10.5px] text-slate-500 mt-1 font-mono">
@@ -3276,7 +3279,7 @@ function PremiumUploadSlot({
             )}
             {hasFile ? (
                 isVideo ? (
-                    <div className="bg-white border border-slate-200 rounded-3xl p-4 flex flex-col gap-3 shadow-[0_4px_20px_rgba(15,23,42,0.03)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.05)] text-left">
+                    <div className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 shadow-[0_4px_20px_rgba(15,23,42,0.03)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.05)] text-left">
                         <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
                             <div className="flex items-center gap-2">
                                 <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-slate-700">
@@ -3290,7 +3293,7 @@ function PremiumUploadSlot({
                             <button
                                 type="button"
                                 onClick={() => setIsVideoCollapsed(!isVideoCollapsed)}
-                                className="p-1.5 border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
                                 title={isVideoCollapsed ? "Expand preview" : "Collapse preview"}
                             >
                                 <ChevronDown
@@ -3340,7 +3343,7 @@ function PremiumUploadSlot({
                                     <button
                                         type="button"
                                         onClick={() => inputRef.current?.click()}
-                                        className="flex-1 border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                                        className="flex-1 border border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
                                     >
                                         <Upload className="w-3.5 h-3.5" />
                                         Replace
@@ -3358,7 +3361,7 @@ function PremiumUploadSlot({
                         </div>
                     </div>
                 ) : (
-                    <div className="bg-white/60 border border-slate-200 rounded-2xl p-3 flex items-center gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                    <div className="bg-white/60 border border-[#eaeaea] rounded-2xl p-3 flex items-center gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
                         <Icon className="w-4 h-4 text-slate-500 shrink-0" />
                         <div className="min-w-0 flex-1">
                             <div className="text-[13px] truncate">
@@ -3398,7 +3401,7 @@ function PremiumUploadSlot({
                                 onClick={() => cameraRef.current?.click()}
                                 disabled={isPending}
                                 data-testid={`${testid}-camera-btn`}
-                                className="border border-slate-200 hover:border-slate-300 p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
                                 <Camera className="w-4 h-4" />
                                 {isVideo ? "Record" : "Take photo"}
@@ -3408,7 +3411,7 @@ function PremiumUploadSlot({
                                 onClick={() => inputRef.current?.click()}
                                 disabled={isPending}
                                 data-testid={`${testid}-library-btn`}
-                                className="border border-slate-200 hover:border-slate-300 p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3.5 text-[13px] rounded-full flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                             >
                                 <FolderOpen className="w-4 h-4" />
                                 From library
@@ -3419,7 +3422,7 @@ function PremiumUploadSlot({
                         onClick={() => inputRef.current?.click()}
                         disabled={isPending}
                         data-testid={`${testid}-btn`}
-                        className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-slate-200 hover:border-amber-200 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
+                        className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-amber-200 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
                     >
                         {uploadState && uploadState.status !== "failed" && uploadState.pct > 0 && (
                             <span
@@ -3515,7 +3518,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
 
     return (
         <div
-            className="bg-white border border-slate-200 rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.05)] text-left"
+            className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.05)] text-left"
             data-testid={`take-row-${index}`}
         >
             <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[220px]">
@@ -3589,7 +3592,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
                         <button
                             type="button"
                             onClick={() => localInputRef.current?.click()}
-                            className="flex-1 border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                            className="flex-1 border border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
                         >
                             <Upload className="w-3.5 h-3.5" />
                             Replace
@@ -3634,7 +3637,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
 
     return (
         <div
-            className="bg-gradient-to-b from-white to-slate-50/70 border border-slate-200 hover:border-amber-200 rounded-2xl p-3 relative overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 hover:-translate-y-[1px]"
+            className="bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-amber-200 rounded-2xl p-3 relative overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 hover:-translate-y-[1px]"
             data-testid={`add-take-${number}`}
         >
             <div className="flex items-center gap-2 relative">
@@ -3642,14 +3645,14 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                     placeholder={`${fallback} — add a label`}
-                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-slate-200 focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-slate-700"
+                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-[#eaeaea] focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-slate-700"
                     enterKeyHint="done"
                     data-testid={`new-take-label-${number}`}
                 />
                 <button
                     type="button"
                     onClick={triggerLib}
-                    className="hidden md:inline-flex relative text-[11px] px-4 py-2 border border-slate-200 hover:border-slate-300 rounded-full items-center gap-1 disabled:opacity-40 min-h-[44px] bg-white/60 text-slate-600 transition-all duration-200"
+                    className="hidden md:inline-flex relative text-[11px] px-4 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full items-center gap-1 disabled:opacity-40 min-h-[44px] bg-white/60 text-slate-600 transition-all duration-200"
                     data-testid={`new-take-upload-${number}`}
                 >
                     <Plus className="w-3 h-3" />
@@ -3662,7 +3665,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                 <button
                     type="button"
                     onClick={triggerCam}
-                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
+                    className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                     data-testid={`new-take-camera-${number}`}
                 >
                     <Camera className="w-3.5 h-3.5" /> Record
@@ -3670,7 +3673,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                 <button
                     type="button"
                     onClick={triggerLib}
-                    className="border border-slate-200 hover:border-slate-300 p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
+                    className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
                     data-testid={`new-take-library-${number}`}
                 >
                     <FolderOpen className="w-3.5 h-3.5" /> Library
@@ -3710,7 +3713,7 @@ function FeedbackRow({ fb }) {
     const isVoice = fb.type === "voice";
     return (
         <div
-            className="bg-white/60 border border-slate-200 rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.06)]"
+            className="bg-white/60 border border-[#eaeaea] rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.06)]"
             data-testid={`talent-feedback-${fb.id}`}
         >
             <div className="flex items-center justify-between gap-3 mb-3">
@@ -3774,7 +3777,7 @@ class SubmissionErrorBoundary extends React.Component {
         if (this.state.hasError) {
             return (
                 <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4 py-12 sm:px-6 lg:px-8">
-                    <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-3xl border border-slate-200 shadow-sm text-center">
+                    <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-3xl border border-[#eaeaea] shadow-sm text-center">
                         <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 7.5h.008v.008H12v-.008Z" />

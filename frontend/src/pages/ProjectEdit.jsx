@@ -74,6 +74,7 @@ const empty = {
     talent_budget: [],
     client_budget: [],
     require_reapproval_on_edit: true,
+    hide_budget_from_talent: false,
     status: "ongoing",
 };
 
@@ -479,7 +480,7 @@ export default function ProjectEdit() {
                         </div>
                         <div className="h-10 w-32 bg-black/10 rounded"></div>
                     </div>
-                    <div className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6">
+                    <div className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mb-6">
                         <div className="h-4 w-32 bg-black/10 rounded mb-6"></div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
                             {[...Array(10)].map((_, i) => (
@@ -524,7 +525,7 @@ export default function ProjectEdit() {
                             <button
                                 onClick={() => setShowMaterialModal(true)}
                                 data-testid="view-audition-material-btn"
-                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs transition-colors"
+                                className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-xs transition-colors"
                             >
                                 <FolderOpen className="w-3.5 h-3.5" /> View Audition
                                 Material ({materialsCount})
@@ -532,7 +533,7 @@ export default function ProjectEdit() {
                             {isAdminRole && (
                                 <button
                                     onClick={() => setConfirmDeleteOpen(true)}
-                                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-sm text-xs"
+                                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#eaeaea] text-black/60 hover:text-red-600 hover:border-red-600/40 rounded-sm text-xs"
                                     data-testid="delete-project-btn"
                                 >
                                     <Trash2 className="w-3 h-3" /> Delete
@@ -549,11 +550,11 @@ export default function ProjectEdit() {
                         <SelectTrigger
                             data-testid="project-status-select-trigger"
                             disabled={!isEditing}
-                            className="bg-transparent border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            className="bg-transparent border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                             <SelectValue placeholder="Status" />
                         </SelectTrigger>
-                        <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl">
+                        <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
                             <SelectItem value="ongoing">Ongoing</SelectItem>
                             <SelectItem value="hold">Hold</SelectItem>
                             <SelectItem value="complete">Complete</SelectItem>
@@ -595,13 +596,13 @@ export default function ProjectEdit() {
             </div>
 
             {/* Project details */}
-            <section className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mb-6">
+            <section className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mb-6">
                 <div className="flex items-center justify-between mb-6">
                     <p className="eyebrow">Project Details</p>
                     <button
                         type="button"
                         onClick={() => setCollapsedSections(prev => ({ ...prev, projectDetails: !prev.projectDetails }))}
-                        className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors"
+                        className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors"
                         aria-label={collapsedSections.projectDetails ? "Expand project details" : "Collapse project details"}
                     >
                         <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.projectDetails ? "-rotate-90" : ""}`} />
@@ -662,7 +663,7 @@ export default function ProjectEdit() {
                                         >
                                             <SelectValue placeholder="Select commission" />
                                         </SelectTrigger>
-                                        <SelectContent className="bg-white border border-black/[0.08] text-black shadow-xl">
+                                        <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
                                             {COMMISSION_OPTIONS.map((c) => (
                                                 <SelectItem
                                                     key={c}
@@ -697,7 +698,7 @@ export default function ProjectEdit() {
                                 disabled={!isEditing}
                             />
                         </div>
-                        <div className="mt-6 border-t border-black/[0.08] pt-6">
+                        <div className="mt-6 border-t border-[#eaeaea] pt-6">
                             <div className="flex items-center justify-between mb-4">
                                 <span className="text-[11px] text-black/45 tracking-widest uppercase font-semibold">
                                     Additional Details
@@ -705,7 +706,7 @@ export default function ProjectEdit() {
                                 <button
                                     type="button"
                                     onClick={() => setCollapsedSections(prev => ({ ...prev, additionalDetails: !prev.additionalDetails }))}
-                                    className="p-1 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded text-black/55 hover:text-black transition-colors"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded text-black/55 hover:text-black transition-colors"
                                     aria-label={collapsedSections.additionalDetails ? "Expand additional details" : "Collapse additional details"}
                                 >
                                     <ChevronDown className={`w-3 h-3 transform transition-transform duration-200 ${collapsedSections.additionalDetails ? "-rotate-90" : ""}`} />
@@ -717,7 +718,7 @@ export default function ProjectEdit() {
                                     onChange={(e) => updateProject({ additional_details: e.target.value })}
                                     rows={3}
                                     disabled={!isEditing}
-                                    className="mt-2 w-full bg-transparent border border-black/[0.08] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
+                                    className="mt-2 w-full bg-transparent border border-[#eaeaea] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
                                 />
                             )}
                         </div>
@@ -728,7 +729,7 @@ export default function ProjectEdit() {
             {/* Audition Material uploads */}
             {isEdit && (
                 <section
-                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8"
+                    className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8"
                     data-testid="audition-material-section"
                 >
                     <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -742,7 +743,7 @@ export default function ProjectEdit() {
                         <button
                             type="button"
                             onClick={() => setCollapsedSections(prev => ({ ...prev, auditionMaterial: !prev.auditionMaterial }))}
-                            className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                            className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
                             aria-label={collapsedSections.auditionMaterial ? "Expand audition material" : "Collapse audition material"}
                         >
                             <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.auditionMaterial ? "-rotate-90" : ""}`} />
@@ -878,7 +879,7 @@ export default function ProjectEdit() {
                 changes. */}
             {false && isEdit && (
                 <section
-                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
+                    className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="budget-config-section"
                 >
                     <p className="eyebrow mb-2">Project Budget</p>
@@ -903,7 +904,7 @@ export default function ProjectEdit() {
                         />
                     </div>
 
-                    <div className="border-t border-black/[0.08] pt-6">
+                    <div className="border-t border-[#eaeaea] pt-6">
                         <p className="text-sm text-black/80 mb-1">
                             Client-Facing Budget
                         </p>
@@ -927,7 +928,7 @@ export default function ProjectEdit() {
             {/* Submission Form Configuration */}
             {isEdit && (
                 <section
-                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
+                    className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="form-config-section"
                 >
                     <div className="flex items-center justify-between mb-6">
@@ -935,7 +936,7 @@ export default function ProjectEdit() {
                         <button
                             type="button"
                             onClick={() => setCollapsedSections(prev => ({ ...prev, formConfig: !prev.formConfig }))}
-                            className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                            className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
                             aria-label={collapsedSections.formConfig ? "Expand form config" : "Collapse form config"}
                         >
                             <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.formConfig ? "-rotate-90" : ""}`} />
@@ -958,6 +959,24 @@ export default function ProjectEdit() {
                                     checked={project.require_reapproval_on_edit !== false}
                                     onChange={(e) => isEditing && updateProject({ require_reapproval_on_edit: e.target.checked })}
                                     data-testid="require-reapproval-toggle"
+                                    disabled={!isEditing}
+                                    className="w-5 h-5 accent-black disabled:opacity-60"
+                                />
+                            </label>
+                            <label className="flex items-center justify-between cursor-pointer mb-6">
+                                <div>
+                                    <div className="text-sm text-black/80">
+                                        Hide Budget From Talent
+                                    </div>
+                                    <div className="text-[11px] text-black/45 tg-mono mt-0.5">
+                                        When ON, the Budget Per Day field is hidden from the public audition submission page. Default is OFF (budget visible).
+                                    </div>
+                                </div>
+                                <input
+                                    type="checkbox"
+                                    checked={project.hide_budget_from_talent === true}
+                                    onChange={(e) => isEditing && updateProject({ hide_budget_from_talent: e.target.checked })}
+                                    data-testid="hide-budget-toggle"
                                     disabled={!isEditing}
                                     className="w-5 h-5 accent-black disabled:opacity-60"
                                 />
@@ -989,7 +1008,7 @@ export default function ProjectEdit() {
                                 </button>
                             </label>
 
-                            <div className="border-t border-black/[0.08] pt-6">
+                            <div className="border-t border-[#eaeaea] pt-6">
                                 <p className="text-sm text-black/80 mb-1">
                                     Custom Questions
                                 </p>
@@ -1056,7 +1075,7 @@ export default function ProjectEdit() {
             {/* Share submission link */}
             {isEdit && (
                 <section
-                    className="border border-black/[0.08] bg-white rounded-xl p-6 md:p-8 mt-6"
+                    className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mt-6"
                     data-testid="submission-link-section"
                 >
                     <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
@@ -1072,14 +1091,14 @@ export default function ProjectEdit() {
                                 href={submissionUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
                             >
                                 <ExternalLink className="w-3.5 h-3.5" /> Preview
                             </a>
                             <button
                                 onClick={copySubmitLink}
                                 data-testid="copy-submit-link-btn"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
+                                className="inline-flex items-center gap-2 text-xs px-3 py-2 border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
                             >
                                 <Copy className="w-3.5 h-3.5" /> Copy
                             </button>
@@ -1094,7 +1113,7 @@ export default function ProjectEdit() {
                             <button
                                 type="button"
                                 onClick={() => setCollapsedSections(prev => ({ ...prev, submissionLink: !prev.submissionLink }))}
-                                className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                                className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
                                 aria-label={collapsedSections.submissionLink ? "Expand submission link" : "Collapse submission link"}
                             >
                                 <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissionLink ? "-rotate-90" : ""}`} />
@@ -1102,7 +1121,7 @@ export default function ProjectEdit() {
                         </div>
                     </div>
                     {!collapsedSections.submissionLink && (
-                        <div className="border border-black/[0.08] bg-[#fafaf8] px-4 py-3 tg-mono text-xs text-black/70 break-all">
+                        <div className="border border-[#eaeaea] bg-[#fafaf8] px-4 py-3 tg-mono text-xs text-black/70 break-all">
                             {submissionUrl}
                         </div>
                     )}
@@ -1112,10 +1131,10 @@ export default function ProjectEdit() {
             {/* Submissions Review */}
             {isEdit && (
                 <section
-                    className="border border-black/[0.08] bg-white rounded-xl mt-6"
+                    className="border border-[#eaeaea] bg-white rounded-xl mt-6"
                     data-testid="submissions-review-section"
                 >
-                    <div className="px-6 py-4 border-b border-black/[0.08] flex items-center justify-between gap-3 flex-wrap">
+                    <div className="px-6 py-4 border-b border-[#eaeaea] flex items-center justify-between gap-3 flex-wrap">
                         <div>
                             <p className="eyebrow">Submissions</p>
                             <p className="text-xs text-black/45 mt-1">
@@ -1125,7 +1144,7 @@ export default function ProjectEdit() {
                         <div className="flex items-center gap-2">
                             <Link
                                 to={`/admin/projects/${id}/submissions`}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.08] hover:border-black/35 hover:bg-black/[0.02] rounded-md text-xs text-black/75 hover:text-black font-semibold transition-all shadow-sm"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[#eaeaea] hover:border-black/35 hover:bg-black/[0.02] rounded-md text-xs text-black/75 hover:text-black font-semibold transition-all shadow-sm"
                             >
                                 <ExternalLink className="w-3.5 h-3.5" />
                                 Open Review Center
@@ -1133,7 +1152,7 @@ export default function ProjectEdit() {
                             <button
                                 type="button"
                                 onClick={() => setCollapsedSections(prev => ({ ...prev, submissions: !prev.submissions }))}
-                                className="p-1.5 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                                className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
                                 aria-label={collapsedSections.submissions ? "Expand submissions" : "Collapse submissions"}
                             >
                                 <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissions ? "-rotate-90" : ""}`} />
@@ -1151,7 +1170,7 @@ export default function ProjectEdit() {
                             ) : (
                                 <>
                                     {/* Summary Stats Row */}
-                                    <div className="px-4 md:px-6 py-4 bg-black/[0.01] border-b border-black/[0.08] grid grid-cols-3 sm:grid-cols-6 gap-4 select-none">
+                                    <div className="px-4 md:px-6 py-4 bg-black/[0.01] border-b border-[#eaeaea] grid grid-cols-3 sm:grid-cols-6 gap-4 select-none">
                                         <div className="text-center sm:text-left">
                                             <p className="text-[10px] font-semibold text-black/40 uppercase tracking-wider font-mono">Total</p>
                                             <p className="text-lg font-bold text-black/90 mt-0.5">{submissions.length}</p>
@@ -1181,14 +1200,14 @@ export default function ProjectEdit() {
                                     </div>
 
                                     <div
-                                        className="px-4 md:px-6 py-3 border-b border-black/[0.08] flex items-center gap-1.5 flex-wrap"
+                                        className="px-4 md:px-6 py-3 border-b border-[#eaeaea] flex items-center gap-1.5 flex-wrap"
                                         data-testid="submission-filters"
                                     >
                                         <button
                                             type="button"
                                             onClick={() => setSubmissionFilter("all")}
                                             data-testid="filter-chip-all"
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "all" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "all" ? "border-black bg-black text-white" : "border-[#eaeaea] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
                                         >
                                             All
                                             <span className={`ml-2 tg-mono ${submissionFilter === "all" ? "text-white/60" : "text-black/40"}`}>
@@ -1199,7 +1218,7 @@ export default function ProjectEdit() {
                                             type="button"
                                             onClick={() => setSubmissionFilter("pending")}
                                             data-testid="filter-chip-pending"
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "pending" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "pending" ? "border-black bg-black text-white" : "border-[#eaeaea] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
                                         >
                                             Pending
                                             <span className={`ml-2 tg-mono ${submissionFilter === "pending" ? "text-white/60" : "text-black/40"}`}>
@@ -1210,7 +1229,7 @@ export default function ProjectEdit() {
                                             type="button"
                                             onClick={() => setSubmissionFilter("approved")}
                                             data-testid="filter-chip-approved"
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "approved" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "approved" ? "border-black bg-black text-white" : "border-[#eaeaea] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
                                         >
                                             Approved
                                             <span className={`ml-2 tg-mono ${submissionFilter === "approved" ? "text-white/60" : "text-black/40"}`}>
@@ -1221,7 +1240,7 @@ export default function ProjectEdit() {
                                             type="button"
                                             onClick={() => setSubmissionFilter("rejected")}
                                             data-testid="filter-chip-rejected"
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "rejected" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "rejected" ? "border-black bg-black text-white" : "border-[#eaeaea] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
                                         >
                                             Rejected
                                             <span className={`ml-2 tg-mono ${submissionFilter === "rejected" ? "text-white/60" : "text-black/40"}`}>
@@ -1232,7 +1251,7 @@ export default function ProjectEdit() {
                                             type="button"
                                             onClick={() => setSubmissionFilter("updated")}
                                             data-testid="filter-chip-updated"
-                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "updated" ? "border-black bg-black text-white" : "border-black/[0.08] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
+                                            className={`text-[11px] tracking-widest uppercase px-3 py-1.5 rounded-sm border transition-colors ${submissionFilter === "updated" ? "border-black bg-black text-white" : "border-[#eaeaea] text-black/60 hover:border-black/[0.20] hover:text-black"}`}
                                         >
                                             Updated
                                             <span className={`ml-2 tg-mono ${submissionFilter === "updated" ? "text-white/60" : "text-black/40"}`}>
@@ -1441,14 +1460,14 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                 <div className="flex gap-1 flex-wrap">
                     <button
                         onClick={onOpen}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
+                        className="text-xs px-3 py-2 border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-black/70 hover:text-black transition-colors"
                         data-testid={`review-submission-${s.id}`}
                     >
                         Review
                     </button>
                     <button
                         onClick={() => onDecision("approved")}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70 transition-colors"
+                        className="text-xs px-3 py-2 border border-[#eaeaea] hover:border-green-600 hover:text-green-600 rounded-sm text-black/70 transition-colors"
                         data-testid={`approve-${s.id}`}
                         title="Approve"
                     >
@@ -1456,7 +1475,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                     </button>
                     <button
                         onClick={() => onDecision("hold")}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-purple-600 hover:text-purple-600 rounded-sm text-black/70 transition-colors"
+                        className="text-xs px-3 py-2 border border-[#eaeaea] hover:border-purple-600 hover:text-purple-600 rounded-sm text-black/70 transition-colors"
                         data-testid={`hold-${s.id}`}
                         title="Hold"
                     >
@@ -1464,7 +1483,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                     </button>
                     <button
                         onClick={() => onDecision("rejected")}
-                        className="text-xs px-3 py-2 border border-black/[0.08] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70 transition-colors"
+                        className="text-xs px-3 py-2 border border-[#eaeaea] hover:border-red-600 hover:text-red-600 rounded-sm text-black/70 transition-colors"
                         data-testid={`reject-${s.id}`}
                         title="Reject"
                     >
@@ -1473,7 +1492,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                     {onDelete && (
                         <button
                             onClick={onDelete}
-                            className="text-xs px-3 py-2 border border-black/[0.08] hover:border-black/40 text-black/50 rounded-sm transition-colors"
+                            className="text-xs px-3 py-2 border border-[#eaeaea] hover:border-black/40 text-black/50 rounded-sm transition-colors"
                             title="Delete"
                         >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1503,7 +1522,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                                 {s.talent_name}
                             </span>
                             <span
-                                className={`inline-flex items-center gap-0.5 text-[8.5px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${meta.bg ? meta.bg : "border-black/[0.08] text-black/60 bg-black/[0.02]"}`}
+                                className={`inline-flex items-center gap-0.5 text-[8.5px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${meta.bg ? meta.bg : "border-[#eaeaea] text-black/60 bg-black/[0.02]"}`}
                             >
                                 {meta.label}
                             </span>
@@ -1534,7 +1553,7 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                     {s.talent_phone ? (
                         <a
                             href={`tel:${s.talent_phone}`}
-                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 border border-black/[0.08] rounded text-xs font-semibold text-black/70 active:bg-black/5 transition-colors"
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 border border-[#eaeaea] rounded text-xs font-semibold text-black/70 active:bg-black/5 transition-colors"
                         >
                             <Phone className="w-3.5 h-3.5 text-black/50" />
                             <span>Call</span>
@@ -1603,21 +1622,21 @@ const SubmissionRow = React.memo(function SubmissionRow({ submission, onOpen, on
                             <div className="pt-2 border-t border-black/[0.03] flex items-center gap-2 flex-wrap">
                                 <button
                                     onClick={() => onDecision("approved")}
-                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "approved" ? "bg-green-600 text-white border-green-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "approved" ? "bg-green-600 text-white border-green-600" : "border-[#eaeaea] text-black/70 active:bg-black/5"}`}
                                 >
                                     <Check className="w-3.5 h-3.5" />
                                     <span>Approve</span>
                                 </button>
                                 <button
                                     onClick={() => onDecision("hold")}
-                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "hold" ? "bg-purple-600 text-white border-purple-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "hold" ? "bg-purple-600 text-white border-purple-600" : "border-[#eaeaea] text-black/70 active:bg-black/5"}`}
                                 >
                                     <PauseCircle className="w-3.5 h-3.5" />
                                     <span>Hold</span>
                                 </button>
                                 <button
                                     onClick={() => onDecision("rejected")}
-                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "rejected" ? "bg-red-600 text-white border-red-600" : "border-black/[0.08] text-black/70 active:bg-black/5"}`}
+                                    className={`flex-1 flex items-center justify-center gap-1 py-1.5 border rounded text-xs font-semibold transition-colors ${s.decision === "rejected" ? "bg-red-600 text-white border-red-600" : "border-[#eaeaea] text-black/70 active:bg-black/5"}`}
                                 >
                                     <XCircle className="w-3.5 h-3.5" />
                                     <span>Reject</span>
@@ -1892,7 +1911,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
         >
             <button
                 onClick={onClose}
-                className="fixed top-5 right-5 z-50 w-10 h-10 border border-black/[0.08] hover:border-black/[0.20] rounded-full flex items-center justify-center bg-white/90 shadow-sm text-black/70 hover:text-black transition-colors"
+                className="fixed top-5 right-5 z-50 w-10 h-10 border border-[#eaeaea] hover:border-black/[0.20] rounded-full flex items-center justify-center bg-white/90 shadow-sm text-black/70 hover:text-black transition-colors"
             >
                 <X className="w-4 h-4" />
             </button>
@@ -1937,7 +1956,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                     </div>
 
                     {/* Persistent Client Sync Status & Decision Header */}
-                    <div className="sticky top-[10px] z-40 mb-10 flex flex-col gap-3 bg-white/95 backdrop-blur-md border border-black/[0.08] rounded-xl px-4 md:px-6 py-4 shadow-lg transition-all duration-300 mobile-sticky-bar" data-testid="client-sync-toolbar">
+                    <div className="sticky top-[10px] z-40 mb-10 flex flex-col gap-3 bg-white/95 backdrop-blur-md border border-[#eaeaea] rounded-xl px-4 md:px-6 py-4 shadow-lg transition-all duration-300 mobile-sticky-bar" data-testid="client-sync-toolbar">
                         {/* Status Note input - visible in Admin mode only */}
                         {!isPreviewMode && (
                             <div className="w-full">
@@ -1946,7 +1965,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     value={decisionNote}
                                     onChange={(e) => setDecisionNote(e.target.value)}
                                     placeholder="Add a decision note or internal recruiter comment (optional)..."
-                                    className="w-full text-xs px-3.5 py-2 border border-black/[0.08] focus:border-black/45 rounded-lg outline-none bg-black/[0.02] focus:bg-white transition-all text-black/85 shadow-inner"
+                                    className="w-full text-xs px-3.5 py-2 border border-[#eaeaea] focus:border-black/45 rounded-lg outline-none bg-black/[0.02] focus:bg-white transition-all text-black/85 shadow-inner"
                                 />
                             </div>
                         )}
@@ -2037,7 +2056,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                 type="button"
                                 onClick={openInDrive}
                                 data-testid="open-in-drive-btn"
-                                className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-colors shadow-sm"
+                                className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-[#eaeaea] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-colors shadow-sm"
                                 title="Opens the Google Drive backup folder for this submission"
                             >
                                 <Cloud className="w-3.5 h-3.5" />
@@ -2047,7 +2066,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                             <button
                                 type="button"
                                 onClick={() => setShowHistory(!showHistory)}
-                                className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-colors shadow-sm"
+                                className="inline-flex items-center gap-2 text-xs tg-mono px-3 py-2 border border-[#eaeaea] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-colors shadow-sm"
                                 title="Toggle Curation Revision History sidebar"
                             >
                                 <Clock className="w-3.5 h-3.5" />
@@ -2070,7 +2089,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Talent details section */}
                     <section
-                        className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm"
+                        className="mb-10 border border-[#eaeaea] bg-white rounded-xl p-5 md:p-6 shadow-sm"
                         data-testid="review-form-data-section"
                     >
                         <div className="flex items-center justify-between mb-5 border-b border-black/[0.05] pb-3">
@@ -2140,7 +2159,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                 ))}
 
                                 {/* Availability (structured) */}
-                                <div className="md:col-span-2 border-t border-black/[0.08] pt-4 mt-2">
+                                <div className="md:col-span-2 border-t border-[#eaeaea] pt-4 mt-2">
                                     <div className="flex items-center justify-between">
                                         <label className="text-[10px] text-black/45 tracking-widest uppercase">
                                             Availability
@@ -2271,7 +2290,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                         {/* Availability and Budget summary inside client preview mode */}
                         {isPreviewMode && (
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 border-t border-black/[0.08] pt-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 border-t border-[#eaeaea] pt-4">
                                 {fv.availability !== false && form.availability?.status && (
                                     <div>
                                         <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
@@ -2295,7 +2314,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                         {Array.isArray(submission.project_custom_questions) &&
                             submission.project_custom_questions.length > 0 && (
-                                <div className="border-t border-black/[0.08] pt-5 mt-4">
+                                <div className="border-t border-[#eaeaea] pt-5 mt-4">
                                     <p className="eyebrow mb-3">Custom Answers</p>
                                     {submission.project_custom_questions.map((q) => (
                                         <div key={q.id} className="mb-3 text-sm">
@@ -2323,7 +2342,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Section 1: Introduction Video */}
                     {(!isPreviewMode || intro) && (
-                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+                        <section className="mb-10 border border-[#eaeaea] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                             <div className="flex items-center justify-between mb-4 border-b border-black/[0.05] pb-3">
                                 <p className="eyebrow">Introduction Video</p>
                                 {!isPreviewMode && intro && (
@@ -2356,7 +2375,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     />
                                 </div>
                             ) : (
-                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                <div className="max-w-3xl border border-dashed border-[#eaeaea] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     Not submitted
                                 </div>
                             )}
@@ -2365,10 +2384,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Section 2: Audition Takes */}
                     {(!isPreviewMode || takes.length > 0) && (
-                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-takes-section">
+                        <section className="mb-10 border border-[#eaeaea] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-takes-section">
                             <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Audition Takes ({takes.length})</p>
                             {takes.length === 0 ? (
-                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                <div className="max-w-3xl border border-dashed border-[#eaeaea] bg-[#fafaf8] aspect-video flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     Not submitted
                                 </div>
                             ) : (
@@ -2471,10 +2490,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Section 3: Indian Look Images */}
                     {(!isPreviewMode || indianImages.length > 0) && (
-                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-indian-images-section">
+                        <section className="mb-10 border border-[#eaeaea] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-indian-images-section">
                             <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Indian Look Images ({indianImages.length})</p>
                             {indianImages.length === 0 ? (
-                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                <div className="max-w-3xl border border-dashed border-[#eaeaea] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     No Indian look images uploaded
                                 </div>
                             ) : (
@@ -2562,10 +2581,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Section 4: Western Look Images */}
                     {(!isPreviewMode || westernImages.length > 0) && (
-                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-western-images-section">
+                        <section className="mb-10 border border-[#eaeaea] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-western-images-section">
                             <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Western Look Images ({westernImages.length})</p>
                             {westernImages.length === 0 ? (
-                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                <div className="max-w-3xl border border-dashed border-[#eaeaea] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     No Western look images uploaded
                                 </div>
                             ) : (
@@ -2651,10 +2670,10 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Section 5: Portfolio Images */}
                     {(!isPreviewMode || portfolioImages.length > 0) && (
-                        <section className="mb-10 border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-portfolio-images-section">
+                        <section className="mb-10 border border-[#eaeaea] bg-white rounded-xl p-5 md:p-6 shadow-sm" data-testid="review-portfolio-images-section">
                             <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Portfolio Images ({portfolioImages.length})</p>
                             {portfolioImages.length === 0 ? (
-                                <div className="max-w-3xl border border-dashed border-black/[0.08] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
+                                <div className="max-w-3xl border border-dashed border-[#eaeaea] bg-[#fafaf8] h-32 flex items-center justify-center text-black/45 text-xs tg-mono rounded-lg">
                                     No Portfolio images uploaded
                                 </div>
                             ) : (
@@ -2742,7 +2761,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
 
                     {/* Curation History Sidebar Drawer */}
                     {showHistory && (
-                        <div className="fixed inset-y-0 right-0 z-50 w-full max-w-sm bg-white shadow-2xl border-l border-black/[0.08] flex flex-col p-6 overflow-y-auto transition-all duration-300 transform translate-x-0">
+                        <div className="fixed inset-y-0 right-0 z-50 w-full max-w-sm bg-white shadow-2xl border-l border-[#eaeaea] flex flex-col p-6 overflow-y-auto transition-all duration-300 transform translate-x-0">
                             <div className="flex items-center justify-between border-b border-black/[0.06] pb-4 mb-4">
                                 <h3 className="font-display text-lg font-bold text-black/90 flex items-center gap-2">
                                     <Clock className="w-5 h-5 text-black/70" />
@@ -2832,7 +2851,7 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
     };
 
     return (
-        <div className="relative border border-black/[0.08] bg-black rounded-lg overflow-hidden aspect-video group shadow-sm">
+        <div className="relative border border-[#eaeaea] bg-black rounded-lg overflow-hidden aspect-video group shadow-sm">
             <video
                 ref={videoRef}
                 src={src}
@@ -2886,7 +2905,7 @@ function UploadTile({
             onClick={() => inputRef.current?.click()}
             data-testid={`${testid}-btn`}
             disabled={uploading}
-            className="border border-dashed border-black/[0.08] hover:border-black/[0.18] p-5 text-left transition-colors bg-white rounded-xl"
+            className="border border-dashed border-[#eaeaea] hover:border-black/[0.18] p-5 text-left transition-colors bg-white rounded-xl"
         >
             <div className="flex items-center justify-between mb-3">
                 <Icon className="w-4 h-4 text-black/50" strokeWidth={1.5} />

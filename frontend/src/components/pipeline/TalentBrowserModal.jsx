@@ -538,7 +538,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             search, gender, ethnicity, location, 
             ageMin, ageMax, heightMin, heightMax, 
             minFollowers, interestedIn, internalTags, 
-            tagMatchMode, interestedInMatchMode 
+            tagMatchMode, interestedInMatchMode,
+            skills, skillsMatchMode
         } = filters;
         
         const searchLower = search.trim().toLowerCase();
@@ -546,6 +547,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         const ageMaxNum = ageMax === "" ? null : Number(ageMax);
         const heightMinNum = heightMin === "" ? null : Number(heightMin);
         const heightMaxNum = heightMax === "" ? null : Number(heightMax);
+        
+        const skillList = skills || [];
         
         return talents.filter((t) => {
             // 1. Text Search
@@ -586,10 +589,10 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             if (interestedIn.length > 0) {
                 const lowerSelected = interestedIn.map(s => s.toLowerCase());
                 if (interestedInMatchMode === "AND") {
-                    const hasAll = lowerSelected.every(cat => t._interestedInSet.has(cat));
+                    const hasAll = lowerSelected.every(cat => t._interestedInSet && t._interestedInSet.has(cat));
                     if (!hasAll) return false;
                 } else {
-                    const hasAny = lowerSelected.some(cat => t._interestedInSet.has(cat));
+                    const hasAny = lowerSelected.some(cat => t._interestedInSet && t._interestedInSet.has(cat));
                     if (!hasAny) return false;
                 }
             }
@@ -597,22 +600,22 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             // 7. Internal Tags (Multi-select AND/OR matching)
             if (internalTags.length > 0) {
                 if (tagMatchMode === "AND") {
-                    const hasAll = internalTags.every(tagId => t._tagIdsSet.has(tagId));
+                    const hasAll = internalTags.every(tagId => t._tagIdsSet && t._tagIdsSet.has(tagId));
                     if (!hasAll) return false;
                 } else {
-                    const hasAny = internalTags.some(tagId => t._tagIdsSet.has(tagId));
+                    const hasAny = internalTags.some(tagId => t._tagIdsSet && t._tagIdsSet.has(tagId));
                     if (!hasAny) return false;
                 }
             }
             
             // 8. Skills & Special Abilities (Multi-select AND/OR matching)
-            if (skills && skills.length > 0) {
-                const lowerSelected = skills.map(s => s.toLowerCase());
+            if (skillList.length > 0) {
+                const lowerSelected = skillList.map(s => s.toLowerCase());
                 if (skillsMatchMode === "AND") {
-                    const hasAll = lowerSelected.every(s => t._skillsSet.has(s));
+                    const hasAll = lowerSelected.every(s => t._skillsSet && t._skillsSet.has(s));
                     if (!hasAll) return false;
                 } else {
-                    const hasAny = lowerSelected.some(s => t._skillsSet.has(s));
+                    const hasAny = lowerSelected.some(s => t._skillsSet && t._skillsSet.has(s));
                     if (!hasAny) return false;
                 }
             }

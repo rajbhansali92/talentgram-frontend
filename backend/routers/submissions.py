@@ -130,6 +130,8 @@ async def prefill_for_email(email: str, request: Request):
     prefill_images = []
     for m in (talent.get("media") or []):
         category = m.get("category")
+        if category == "portfolio":
+            category = "image"
         resource_type = m.get("resource_type") or "image"
         # Match all portfolio image categories (image, indian, western, ethnic, lifestyle, commercial, fashion, character, etc.)
         is_image = resource_type == "image" or (category not in {"video", "intro_video"} and not (m.get("content_type") or "").startswith("video/"))
@@ -306,10 +308,13 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
             talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
             # Image prefill: fetch existing image, indian, western look images from master profile
             for m in (talent_doc.get("media") or []):
-                if m.get("category") in {"image", "indian", "western"} and m.get("url"):
+                category = m.get("category")
+                if category == "portfolio":
+                    category = "image"
+                if category in {"image", "indian", "western"} and m.get("url"):
                     prefill_media.append({
                         "id": m.get("id"),
-                        "category": m.get("category"),
+                        "category": category,
                         "url": m.get("url"),
                         "public_id": m.get("public_id"),
                         "resource_type": m.get("resource_type") or "image",

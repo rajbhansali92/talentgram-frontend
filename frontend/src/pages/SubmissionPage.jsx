@@ -2248,11 +2248,9 @@ function SubmissionPage() {
                         <div className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                         <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                             <div>
-                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Audition Uploads</p>
-                                <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">
-                                    Uploads
+                                <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05] uppercase">
+                                    AUDITION UPLOADS
                                 </h2>
-                                <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Upload audition takes and portfolio images.</p>
                             </div>
                             <button
                                 type="button"
@@ -2275,12 +2273,6 @@ function SubmissionPage() {
 
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
-                                <p
-                                    className="text-[12px] text-[#333333] mb-10 font-mono"
-                                    data-testid="uploads-optional-hint"
-                                >
-                                    Optional — but recommended.
-                                </p>
 
                                 <PremiumUploadSlot
                                     title="Introduction Video"

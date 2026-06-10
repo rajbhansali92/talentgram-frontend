@@ -1195,7 +1195,7 @@ function SubmissionPage() {
                 <div className="max-w-2xl mx-auto flex flex-col items-center text-center">
                     {/* Centered Logo */}
                     <div className="mb-4">
-                        <Logo size={64} className="mx-auto" />
+                        <Logo size={76} className="mx-auto" />
                     </div>
 
                     {/* Clickable Instagram icon */}
@@ -1229,7 +1229,7 @@ function SubmissionPage() {
                             Complete your profile and upload your audition materials.
                         </p>
                         <p className="text-[11px] text-[#333333] font-medium leading-relaxed mt-1">
-                            Your submission will be reviewed by the Talentgram casting team.
+                            Your submission will be reviewed by the Talentgram team.
                         </p>
                     </div>
                 </div>
@@ -1283,9 +1283,9 @@ function SubmissionPage() {
                         <button
                             onClick={() => setShowMaterial(true)}
                             data-testid="view-audition-material-btn"
-                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full text-[13px] text-[#111111] transition-all hover:shadow-sm hover:-translate-y-[1px] bg-white/40"
+                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-[#0c2340] hover:border-[#0c2340] hover:bg-[#0c2340]/[0.08] active:scale-[0.98] rounded-full text-[13px] text-[#0c2340] font-semibold transition-all hover:shadow-md hover:-translate-y-[1px] bg-[#0c2340]/[0.04]"
                         >
-                            <FolderOpen className="w-4 h-4" /> View Audition Material
+                            <FolderOpen className="w-4 h-4 text-[#0c2340]" /> View Audition Material
                         </button>
                     )}
                 </section>

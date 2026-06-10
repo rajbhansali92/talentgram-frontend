@@ -144,6 +144,7 @@ function SubmissionPage() {
         return draft ? { ...base, ...draft } : base;
     });
     const [starting, setStarting] = useState(false);
+    const [submitAttempted, setSubmitAttempted] = useState(false);
 
     const [submission, setSubmission] = useState(null);
     const [activeUploads, setActiveUploads] = useState({});
@@ -1115,36 +1116,257 @@ function SubmissionPage() {
     const isSubmitted =
         submission?.status === "submitted" || submission?.status === "updated";
 
-    const readyToSubmit =
-        // Phase 1 v37c: media is no longer mandatory. Submission requires
-        // ONLY the form-data identity / availability / budget fields. Intro
-        // video, audition takes, and portfolio images are recommended but
-        // optional — talents who are pressed for time can ship a "form-only"
-        // submission and add media later via Refine.
-        form.first_name &&
-        form.last_name &&
-        form.height &&
-        form.location &&
-        form.availability.status &&
-        (form.availability.status !== "no" ||
-            form.availability.note.trim()) &&
-        form.budget.status &&
-        (form.budget.status !== "custom" || form.budget.value.trim());
+    const getMissingRequirements = useCallback(() => {
+        const missingList = [];
+        const requirements = project?.submission_requirements;
+        if (!requirements) {
+            // Fallback legacy validation rules
+            if (!form.first_name?.trim()) {
+                missingList.push({ id: "first_name", label: "First name", section: "profile", selector: '[data-testid="form-first-name"]' });
+            }
+            if (!form.last_name?.trim()) {
+                missingList.push({ id: "last_name", label: "Last name", section: "profile", selector: '[data-testid="form-last-name"]' });
+            }
+            if (!form.height?.trim()) {
+                missingList.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]' });
+            }
+            if (!form.location?.trim()) {
+                missingList.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]' });
+            }
+            
+            const avail = form.availability || {};
+            const status = (avail.status || "").trim();
+            if (status !== "yes" && status !== "no") {
+                missingList.push({ id: "availability", label: "Availability (Yes / No)", section: "profile", selector: '[data-testid="availability-block"]' });
+            } else if (status === "no" && !(avail.note || "").trim()) {
+                missingList.push({ id: "availability_note", label: "Availability note", section: "profile", selector: '[data-testid="availability-note-input"]' });
+            }
 
-    // Specific, actionable checklist of what's still missing — shown under
-    // the Submit button so talents never guess why it's disabled. Media
-    // entries are intentionally excluded (they are recommended, not required).
-    const missing = [];
-    if (!form.first_name) missing.push("First name");
-    if (!form.last_name) missing.push("Last name");
-    if (!form.height) missing.push("Height");
-    if (!form.location) missing.push("Current location");
-    if (!form.availability.status) missing.push("Availability (Yes / No)");
-    else if (form.availability.status === "no" && !form.availability.note.trim())
-        missing.push("Availability note");
-    if (!form.budget.status) missing.push("Budget (Accept / Custom)");
-    else if (form.budget.status === "custom" && !form.budget.value.trim())
-        missing.push("Budget amount");
+            const budget = form.budget || {};
+            const bstatus = (budget.status || "").trim();
+            if (bstatus !== "accept" && bstatus !== "custom") {
+                missingList.push({ id: "budget", label: "Budget (Accept / Custom)", section: "profile", selector: '[data-testid="budget-block"]' });
+            } else if (bstatus === "custom" && !(budget.value || "").trim()) {
+                missingList.push({ id: "budget_value", label: "Expected budget details", section: "profile", selector: '[data-testid="budget-value-input"]' });
+            }
+            return missingList;
+        }
+
+        if (requirements.strictness !== "strict") {
+            return [];
+        }
+
+        const fieldsConfig = requirements.fields || {};
+
+        // 1. Standard Profile Fields
+        if (fieldsConfig.name === "required") {
+            if (!form.first_name?.trim()) {
+                missingList.push({ id: "first_name", label: "First name", section: "profile", selector: '[data-testid="form-first-name"]' });
+            }
+            if (!form.last_name?.trim()) {
+                missingList.push({ id: "last_name", label: "Last name", section: "profile", selector: '[data-testid="form-last-name"]' });
+            }
+        }
+        if (fieldsConfig.email === "required" && !(submission?.talent_email || form.email)?.trim()) {
+            missingList.push({ id: "email", label: "Email", section: "profile", selector: '[data-testid="form-email"]' });
+        }
+        if (fieldsConfig.phone === "required" && !form.phone?.trim()) {
+            missingList.push({ id: "phone", label: "Phone", section: "profile", selector: '[data-testid="form-phone"]' });
+        }
+        if (fieldsConfig.dob === "required" && !form.dob?.trim()) {
+            missingList.push({ id: "dob", label: "Date of Birth", section: "profile", selector: '[data-testid="form-dob"]' });
+        }
+        if (fieldsConfig.age === "required" && (form.age === undefined || form.age === null || String(form.age).trim() === "")) {
+            missingList.push({ id: "age", label: "Age", section: "profile", selector: '[data-testid="form-age-field"]' });
+        }
+        if (fieldsConfig.height === "required" && !form.height?.trim()) {
+            missingList.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]' });
+        }
+        if (fieldsConfig.location === "required" && !form.location?.trim()) {
+            missingList.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]' });
+        }
+        if (fieldsConfig.gender === "required" && !form.gender?.trim()) {
+            missingList.push({ id: "gender", label: "Gender", section: "profile", selector: '[data-testid="form-gender-field"]' });
+        }
+        if (fieldsConfig.ethnicity === "required" && !form.ethnicity?.trim()) {
+            missingList.push({ id: "ethnicity", label: "Ethnicity", section: "profile", selector: '[data-testid="form-ethnicity-field"]' });
+        }
+        if (fieldsConfig.instagram_handle === "required" && !form.instagram_handle?.trim()) {
+            missingList.push({ id: "instagram_handle", label: "Instagram Handle", section: "profile", selector: '[data-testid="form-instagram-handle"]' });
+        }
+        if (fieldsConfig.instagram_followers === "required" && !form.instagram_followers?.trim()) {
+            missingList.push({ id: "instagram_followers", label: "Instagram Followers", section: "profile", selector: '[data-testid="form-instagram-followers-field"]' });
+        }
+        if (fieldsConfig.bio === "required" && !form.bio?.trim()) {
+            missingList.push({ id: "bio", label: "Bio", section: "profile", selector: '[data-testid="form-bio-field"]' });
+        }
+        if (fieldsConfig.competitive_brand === "required" && !form.competitive_brand?.trim()) {
+            missingList.push({ id: "competitive_brand", label: "Competitive Brand details", section: "profile", selector: '[data-testid="form-competitive-brand"]' });
+        }
+
+        if (fieldsConfig.availability === "required") {
+            const avail = form.availability || {};
+            const status = (avail.status || "").trim();
+            if (status !== "yes" && status !== "no") {
+                missingList.push({ id: "availability", label: "Availability (Yes / No)", section: "profile", selector: '[data-testid="availability-block"]' });
+            } else if (status === "no" && !(avail.note || "").trim()) {
+                missingList.push({ id: "availability_note", label: "Availability note", section: "profile", selector: '[data-testid="availability-note-input"]' });
+            }
+        }
+
+        if (fieldsConfig.budget_expectation === "required") {
+            const budget = form.budget || {};
+            const bstatus = (budget.status || "").trim();
+            if (bstatus !== "accept" && bstatus !== "custom") {
+                missingList.push({ id: "budget", label: "Budget (Accept / Custom)", section: "profile", selector: '[data-testid="budget-block"]' });
+            } else if (bstatus === "custom" && !(budget.value || "").trim()) {
+                missingList.push({ id: "budget_value", label: "Expected budget details", section: "profile", selector: '[data-testid="budget-value-input"]' });
+            }
+        }
+
+        if (requirements.interested_in === "required") {
+            if (!form.interested_in || form.interested_in.length === 0) {
+                missingList.push({ id: "interested_in", label: "Casting Interests", section: "profile", selector: '[data-testid="interested-in-section"]' });
+            }
+        }
+
+        // 2. Custom Questions
+        const customReqs = requirements.custom_questions || {};
+        const customAnswers = form.custom_answers || {};
+        (project?.custom_questions || []).forEach(cq => {
+            if (cq.id && customReqs[cq.id] === "required") {
+                if (!String(customAnswers[cq.id] || "").trim()) {
+                    missingList.push({
+                        id: `cq_${cq.id}`,
+                        label: `"${cq.question}" answers`,
+                        section: "profile",
+                        selector: `[data-testid="form-cq-${cq.id}"]`
+                    });
+                }
+            }
+        });
+
+        // 3. Media Uploads
+        const mediaList = submission?.media || [];
+        if (requirements.intro_video === "required") {
+            const hasIntro = mediaList.some(m => m.category === "intro_video");
+            if (!hasIntro) {
+                missingList.push({ id: "intro_video", label: "Introduction Video", section: "uploads", selector: '[data-testid="uploads-section"]' });
+            }
+        }
+
+        const minTakes = parseInt(requirements.min_audition_takes || 0, 10);
+        if (minTakes > 0) {
+            const takesCount = mediaList.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length;
+            if (takesCount < minTakes) {
+                missingList.push({ id: "takes", label: `Audition Takes (minimum ${minTakes})`, section: "uploads", selector: '[data-testid="takes-section"]' });
+            }
+        }
+
+        const portfolioReqs = requirements.portfolio || {};
+        const portfolioCats = [
+            { category: "image", label: "Portfolio (General)", selector: '[data-testid="portfolio-group-generic"]' },
+            { category: "indian", label: "Indian Look", selector: '[data-testid="portfolio-group-indian"]' },
+            { category: "western", label: "Western Look", selector: '[data-testid="portfolio-group-western"]' }
+        ];
+        portfolioCats.forEach(cat => {
+            const minCount = parseInt(portfolioReqs[cat.category] || 0, 10);
+            if (minCount > 0) {
+                const count = mediaList.filter(m => m.category === cat.category).length;
+                if (count < minCount) {
+                    missingList.push({
+                        id: `portfolio_${cat.category}`,
+                        label: `${cat.label} (minimum ${minCount})`,
+                        section: "uploads",
+                        selector: cat.selector
+                    });
+                }
+            }
+        });
+
+        // 4. Work Links
+        const minLinks = parseInt(requirements.min_work_links || 0, 10);
+        if (minLinks > 0) {
+            const linksCount = (form.work_links || []).length;
+            if (linksCount < minLinks) {
+                missingList.push({ id: "work_links", label: `Work Links (minimum ${minLinks})`, section: "profile", selector: '[data-testid="form-work-links-field"]' });
+            }
+        }
+
+        // 5. Skills & Special Abilities
+        const skillsReqs = requirements.skills || {};
+        const userSkills = form.skills || [];
+        const SKILLS_CATEGORIES = {
+            "language": ["English", "Hindi", "Spanish", "French", "Mandarin Chinese", "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Urdu", "Other"],
+            "languages": ["English", "Hindi", "Spanish", "French", "Mandarin Chinese", "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Urdu", "Other"],
+            "performance": ["Actor", "Voice Artist", "Dancer", "Singer", "Host", "Anchor", "Model", "Theatre Artist", "Improvisation", "Stand-up Comedy"],
+            "sports": ["Athlete", "Gymnastics", "Yoga", "Swimming", "Cycling", "Boxing", "Kickboxing", "Wrestling", "CrossFit", "Calisthenics", "Cricket", "Football", "Basketball", "Tennis", "Badminton"],
+            "sports & fitness": ["Athlete", "Gymnastics", "Yoga", "Swimming", "Cycling", "Boxing", "Kickboxing", "Wrestling", "CrossFit", "Calisthenics", "Cricket", "Football", "Basketball", "Tennis", "Badminton"],
+            "action": ["Martial Arts", "Karate", "Taekwondo", "Judo", "Kung Fu", "Fight Choreography", "Horse Riding", "Rock Climbing", "Parkour", "Sword Fighting"],
+            "action & stunts": ["Martial Arts", "Karate", "Taekwondo", "Judo", "Kung Fu", "Fight Choreography", "Horse Riding", "Rock Climbing", "Parkour", "Sword Fighting"],
+            "vehicle": ["Drive Manual Car", "Drive Automatic Car", "Ride Motorcycle", "Ride Scooter", "Ride Bicycle", "Drive Truck", "Operate Boat", "Ride Jet Ski"],
+            "vehicle skills": ["Drive Manual Car", "Drive Automatic Car", "Ride Motorcycle", "Ride Scooter", "Ride Bicycle", "Drive Truck", "Operate Boat", "Ride Jet Ski"],
+            "special": ["Skateboarding", "Roller Skating", "Ice Skating", "Surfing", "Scuba Diving", "Fire Performance", "Juggling"],
+            "special skills": ["Skateboarding", "Roller Skating", "Ice Skating", "Surfing", "Scuba Diving", "Fire Performance", "Juggling"],
+            "dance": ["Hip Hop", "Contemporary", "Bollywood", "Bharatanatyam", "Kathak", "Salsa", "Ballet"],
+            "music": ["Singer", "Piano", "Keyboard", "Guitar", "Violin", "Drums", "Flute", "Ukulele", "DJ", "Beatboxing", "Rapper", "Composer", "Music Producer"]
+        };
+        Object.keys(skillsReqs).forEach(cat => {
+            if (skillsReqs[cat]) {
+                const validSkills = SKILLS_CATEGORIES[cat.toLowerCase()] || [];
+                const hasSkill = userSkills.some(s => validSkills.includes(s));
+                if (!hasSkill) {
+                    missingList.push({
+                        id: `skills_${cat}`,
+                        label: `At least one skill from category "${cat}"`,
+                        section: "profile",
+                        selector: '[data-testid="form-skills-field"]'
+                    });
+                }
+            }
+        });
+
+        // 6. Conditional Rules
+        const getMediaLabel = (m) => {
+            if (m.label) return m.label;
+            if (m.category === "intro_video") return "Introduction Video";
+            if (m.category === "take_1") return "Take 1";
+            if (m.category === "take_2") return "Take 2";
+            if (m.category === "take_3") return "Take 3";
+            return "";
+        };
+        const conditionalRules = requirements.conditional_rules || [];
+        conditionalRules.forEach(rule => {
+            const qid = rule.question_id;
+            const trigger = rule.trigger_value;
+            const videoLabel = rule.video_label;
+            if (qid && trigger && videoLabel) {
+                const ans = String(customAnswers[qid] || "").trim().toLowerCase();
+                if (ans === String(trigger).trim().toLowerCase()) {
+                    const hasCondVideo = mediaList.some(m =>
+                        ["take", "intro_video", "take_1", "take_2", "take_3"].includes(m.category) &&
+                        getMediaLabel(m).trim().toLowerCase() === videoLabel.trim().toLowerCase()
+                    );
+                    if (!hasCondVideo) {
+                        const cqObj = (project?.custom_questions || []).find(q => q.id === qid);
+                        const questionText = cqObj ? cqObj.question : "additional question";
+                        missingList.push({
+                            id: `conditional_${qid}_${videoLabel}`,
+                            label: `"${videoLabel}" required (Because you answered "${trigger}" to "${questionText}")`,
+                            section: "uploads",
+                            selector: '[data-testid="uploads-section"]'
+                        });
+                    }
+                }
+            }
+        });
+
+        return missingList;
+    }, [project, form, submission]);
+
+    const missingRequirements = getMissingRequirements();
+    const readyToSubmit = missingRequirements.length === 0;
+    const missing = missingRequirements.map(req => req.label);
 
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED state — offer a "Refine my submission" path

@@ -760,6 +760,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     requirements = project.get("submission_requirements")
     if requirements and requirements.get("strictness") == "strict":
         fields_config = requirements.get("fields") or {}
+        form = sub.get("form_data") or {}
 
         # 1. Standard Profile Fields
         if fields_config.get("name") == "required":

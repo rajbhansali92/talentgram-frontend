@@ -542,6 +542,20 @@ function SubmissionPage() {
                     ? f.skills
                     : (data.skills || []),
         }));
+        if (data.prefill_media) {
+            setSubmission((s) => ({
+                ...(s || {}),
+                media: data.prefill_media || [],
+            }));
+            
+            // Debugging requirement:
+            console.log("[DEBUG] Talent found");
+            console.log("[DEBUG] Profile loaded");
+            console.log(`[DEBUG] Skills loaded count: ${(data.skills || []).length}`);
+            console.log(`[DEBUG] Images loaded count: ${(data.prefill_media || []).filter(m => m.category !== "intro_video" && m.category !== "video").length}`);
+            console.log(`[DEBUG] Videos loaded count: ${(data.prefill_media || []).filter(m => m.category === "intro_video" || m.category === "video").length}`);
+            console.log(`[DEBUG] Portfolio categories loaded: ${Array.from(new Set((data.prefill_media || []).map(m => m.category))).join(", ")}`);
+        }
     }
 
     const tryPrefill = async () => {

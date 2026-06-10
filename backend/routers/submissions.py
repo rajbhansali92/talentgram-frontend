@@ -116,7 +116,7 @@ async def prefill_for_email(email: str, request: Request):
             "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
             "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
             "instagram_handle": 1, "instagram_followers": 1, "work_links": 1,
-            "media": 1, "cover_media_id": 1,
+            "media": 1, "cover_media_id": 1, "skills": 1,
         },
     )
     if not talent:
@@ -129,13 +129,17 @@ async def prefill_for_email(email: str, request: Request):
     # Image prefill: fetch existing image, indian, western look images from master profile
     prefill_images = []
     for m in (talent.get("media") or []):
-        if m.get("category") in {"image", "indian", "western"} and m.get("url"):
+        category = m.get("category")
+        resource_type = m.get("resource_type") or "image"
+        # Match all portfolio image categories (image, indian, western, ethnic, lifestyle, commercial, fashion, character, etc.)
+        is_image = resource_type == "image" or (category not in {"video", "intro_video"} and not (m.get("content_type") or "").startswith("video/"))
+        if is_image and m.get("url"):
             prefill_images.append({
                 "id": m.get("id"),
-                "category": m.get("category"),
+                "category": category or "image",
                 "url": m.get("url"),
                 "public_id": m.get("public_id"),
-                "resource_type": m.get("resource_type") or "image",
+                "resource_type": "image",
                 "content_type": m.get("content_type") or "image/jpeg",
                 "original_filename": m.get("original_filename"),
                 "size": m.get("size") or 0,
@@ -222,6 +226,7 @@ async def prefill_for_email(email: str, request: Request):
         "instagram_handle": talent.get("instagram_handle"),
         "instagram_followers": talent.get("instagram_followers"),
         "work_links": talent.get("work_links") or [],
+        "skills": talent.get("skills") or [],
         # Cloudinary cover thumbnail for the confirmation prompt. Resolved
         # via _resolve_cover_url so it picks the cover_media_id, falling
         # back to the first portfolio/indian/western image. None when the

@@ -145,6 +145,8 @@ function SubmissionPage() {
     });
     const [starting, setStarting] = useState(false);
     const [submitAttempted, setSubmitAttempted] = useState(false);
+    const [validationErrors, setValidationErrors] = useState({}); // { fieldId: errorMessage }
+    const fieldRefs = useRef({}); // { fieldId: HTMLElement }
 
     const [submission, setSubmission] = useState(null);
     const [activeUploads, setActiveUploads] = useState({});
@@ -1055,6 +1057,69 @@ function SubmissionPage() {
     };
 
     const finalize = async () => {
+        // ── Guided validation: run inline before network call ──────────────
+        const missing = getMissingRequirements();
+        if (missing.length > 0) {
+            // Build error map
+            const errors = {};
+            missing.forEach((req) => {
+                errors[req.id] = req.label + " is required";
+            });
+            setValidationErrors(errors);
+
+            // Expand collapsed sections that contain errors
+            const sectionsToOpen = {};
+            missing.forEach((req) => {
+                if (req.section === "profile" && collapsedSections.profile) {
+                    sectionsToOpen.profile = false;
+                }
+                if (req.section === "uploads" && collapsedSections.uploads) {
+                    sectionsToOpen.uploads = false;
+                }
+                if (req.section === "projectQuestions" && collapsedSections.projectQuestions) {
+                    sectionsToOpen.projectQuestions = false;
+                }
+            });
+            if (Object.keys(sectionsToOpen).length > 0) {
+                setCollapsedSections((prev) => ({ ...prev, ...sectionsToOpen }));
+            }
+
+            // Scroll + focus the first error after a brief paint
+            setTimeout(() => {
+                const first = missing[0];
+                // Try fieldRefs first (most precise — actual input element)
+                const refEl = fieldRefs.current[first.id];
+                if (refEl) {
+                    refEl.scrollIntoView({ behavior: "smooth", block: "center" });
+                    try { refEl.focus(); } catch (_) {}
+                    return;
+                }
+                // Fallback: CSS selector on the data-testid attribute
+                if (first.selector) {
+                    const domEl = document.querySelector(first.selector);
+                    if (domEl) {
+                        domEl.scrollIntoView({ behavior: "smooth", block: "center" });
+                        const focusable = domEl.querySelector(
+                            "input, select, textarea, button"
+                        );
+                        if (focusable) {
+                            try { focusable.focus(); } catch (_) {}
+                        }
+                    }
+                }
+            }, 120);
+
+            toast.error(
+                `Please fill in: ${missing[0].label}${
+                    missing.length > 1 ? ` (+${missing.length - 1} more)` : ""
+                }`
+            );
+            return;
+        }
+
+        // All good — clear any stale errors and proceed
+        setValidationErrors({});
+
         let currentSaved = saved;
         if (!currentSaved) {
             const next = await startSubmissionDirect();
@@ -1793,22 +1858,28 @@ function SubmissionPage() {
                                         <PremiumFormField
                                             label="First Name *"
                                             value={form.first_name}
-                                            onChange={(v) =>
-                                                setForm({ ...form, first_name: v })
-                                            }
+                                            onChange={(v) => {
+                                                setForm({ ...form, first_name: v });
+                                                if (validationErrors.first_name) setValidationErrors((e) => ({ ...e, first_name: undefined }));
+                                            }}
                                             onBlur={saveForm}
                                             testid="form-first-name"
                                             required
+                                            error={validationErrors.first_name}
+                                            inputRef={(el) => { fieldRefs.current.first_name = el; }}
                                         />
                                         <PremiumFormField
                                             label="Last Name *"
                                             value={form.last_name}
-                                            onChange={(v) =>
-                                                setForm({ ...form, last_name: v })
-                                            }
+                                            onChange={(v) => {
+                                                setForm({ ...form, last_name: v });
+                                                if (validationErrors.last_name) setValidationErrors((e) => ({ ...e, last_name: undefined }));
+                                            }}
                                             onBlur={saveForm}
                                             testid="form-last-name"
                                             required
+                                            error={validationErrors.last_name}
+                                            inputRef={(el) => { fieldRefs.current.last_name = el; }}
                                         />
                                         <PremiumFormField
                                             label="Phone"
@@ -1944,12 +2015,15 @@ function SubmissionPage() {
                                         <PremiumFormField
                                             label="Current Location *"
                                             value={form.location}
-                                            onChange={(v) =>
-                                                setForm({ ...form, location: v })
-                                            }
+                                            onChange={(v) => {
+                                                setForm({ ...form, location: v });
+                                                if (validationErrors.location) setValidationErrors((e) => ({ ...e, location: undefined }));
+                                            }}
                                             onBlur={saveForm}
                                             testid="form-location"
                                             required
+                                            error={validationErrors.location}
+                                            inputRef={(el) => { fieldRefs.current.location = el; }}
                                         />
                                         {project.competitive_brand_enabled && (
                                             <PremiumFormField
@@ -2885,7 +2959,7 @@ function SubmissionPage() {
                             </p>
                             <button
                                 onClick={finalize}
-                                disabled={finalizing || !readyToSubmit}
+                                disabled={finalizing}
                                 data-testid="finalize-submission-btn"
                                 className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                                 style={{ WebkitTapHighlightColor: "transparent" }}
@@ -3387,6 +3461,8 @@ function PremiumFormField({
     max,
     disabled,
     className = "",
+    error,
+    inputRef,
 }) {
     const [localValue, setLocalValue] = useState(value || "");
 
@@ -3416,6 +3492,7 @@ function PremiumFormField({
                 {label}
             </span>
             <input
+                ref={inputRef}
                 type={type}
                 value={localValue}
                 onChange={(e) => setLocalValue(e.target.value)}
@@ -3442,9 +3519,18 @@ function PremiumFormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border focus:ring-4 focus:ring-[#0c2340]/10 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${
+                    error
+                        ? "border-rose-400 focus:border-rose-400 focus:ring-rose-400/10 bg-rose-50/30"
+                        : "border-[#eaeaea] focus:border-[#0c2340]/40 bg-white/60"
+                } ${className}`}
             />
-            {hint && (
+            {error && (
+                <span className="block text-[11px] text-rose-500 mt-1.5 font-mono animate-in fade-in duration-150">
+                    ⚠ {error}
+                </span>
+            )}
+            {!error && hint && (
                 <span className="block text-[10.5px] text-[#333333] mt-1 font-mono">
                     {hint}
                 </span>
@@ -3458,6 +3544,7 @@ function PremiumUploadSlot({
     required,
     note,
     icon: Icon,
+    error,
     accept,
     inputRef,
     onPick,
@@ -3480,7 +3567,11 @@ function PremiumUploadSlot({
     });
 
     return (
-        <div className={compact ? "mb-4" : "mb-10"}>
+        <div
+            className={`${compact ? "mb-4" : "mb-10"} ${
+                error ? "rounded-2xl ring-2 ring-rose-400/60 bg-rose-50/20 p-4" : ""
+            }`}
+        >
             {!compact && (
                 <div className="flex items-center justify-between mb-3">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70">
@@ -3719,6 +3810,11 @@ function PremiumUploadSlot({
                     }}
                 />
             )}
+        {error && (
+            <p className="mt-2 text-[11px] text-rose-500 font-mono animate-in fade-in duration-150">
+                ⚠ {error}
+            </p>
+        )}
         </div>
     );
 }

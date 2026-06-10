@@ -1096,26 +1096,6 @@ function SubmissionPage() {
         }
     };
 
-    // ---------------------------------------------------------------
-    if (loading) {
-        return (
-            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white">
-                <Loader2 className="w-6 h-6 animate-spin text-[#333333]" />
-            </div>
-        );
-    }
-    if (!project) {
-        return (
-            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center">
-                <p>Project not found.</p>
-            </div>
-        );
-    }
-    const MAX_TAKES = 5;
-    const canAddTake = takes.length < MAX_TAKES;
-    const isSubmitted =
-        submission?.status === "submitted" || submission?.status === "updated";
-
     const getMissingRequirements = useCallback(() => {
         const missingList = [];
         const requirements = project?.submission_requirements;
@@ -1367,6 +1347,27 @@ function SubmissionPage() {
     const missingRequirements = getMissingRequirements();
     const readyToSubmit = missingRequirements.length === 0;
     const missing = missingRequirements.map(req => req.label);
+
+    const MAX_TAKES = 5;
+    const canAddTake = takes.length < MAX_TAKES;
+    const isSubmitted =
+        submission?.status === "submitted" || submission?.status === "updated";
+
+    // ---------------------------------------------------------------
+    if (loading) {
+        return (
+            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white">
+                <Loader2 className="w-6 h-6 animate-spin text-[#333333]" />
+            </div>
+        );
+    }
+    if (!project) {
+        return (
+            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center">
+                <p>Project not found.</p>
+            </div>
+        );
+    }
 
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED state — offer a "Refine my submission" path

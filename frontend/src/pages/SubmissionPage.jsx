@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
-import { thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
+import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import {
     Select,
     SelectContent,
@@ -1089,13 +1089,13 @@ function SubmissionPage() {
     if (loading) {
         return (
             <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white">
-                <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
+                <Loader2 className="w-6 h-6 animate-spin text-[#333333]" />
             </div>
         );
     }
     if (!project) {
         return (
-            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-slate-500 p-6 text-center">
+            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center">
                 <p>Project not found.</p>
             </div>
         );
@@ -1159,7 +1159,7 @@ function SubmissionPage() {
             submission?.status === "updated" ? "Resubmitted" : "Submitted";
         const feedback = submission?.client_feedback || [];
         return (
-            <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden">
+            <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden">
                 <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-amber-200/20" />
                 <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
@@ -1172,14 +1172,14 @@ function SubmissionPage() {
                                 <Check className="w-8 h-8 text-emerald-600" />
                             </div>
                         </div>
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-4">{statusLabel}</p>
-                        <h1 className="font-display text-4xl md:text-5xl tracking-tight text-slate-900 mb-6 leading-[1.05]">
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-4">{statusLabel}</p>
+                        <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#111111] mb-6 leading-[1.05]">
                             Thank you,{" "}
-                            <span className="text-slate-700">{form.first_name || submission.talent_name?.split(" ")[0]}</span>.
+                            <span className="text-[#111111]">{form.first_name || submission.talent_name?.split(" ")[0]}</span>.
                         </h1>
-                        <p className="text-[13px] leading-relaxed text-slate-500 mb-10 max-w-md mx-auto">
+                        <p className="text-[13px] leading-relaxed text-[#333333] mb-10 max-w-md mx-auto">
                             Your audition for{" "}
-                            <span className="font-medium text-slate-800">
+                            <span className="font-medium text-[#111111]">
                                 {project.brand_name}
                             </span>{" "}
                             has been received. The Talentgram team will review and
@@ -1189,7 +1189,7 @@ function SubmissionPage() {
                             type="button"
                             onClick={() => setEditMode(true)}
                             data-testid="refine-submission-btn"
-                            className="text-[11px] font-mono text-slate-400 hover:text-slate-600 underline underline-offset-4 transition-colors"
+                            className="text-[11px] font-mono text-[#333333] hover:text-[#222222] underline underline-offset-4 transition-colors"
                         >
                             Want to refine or replace a take? Update your submission →
                         </button>
@@ -1202,10 +1202,10 @@ function SubmissionPage() {
                         className="mt-16"
                         data-testid="talent-feedback-section"
                     >
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-4">Client Feedback</p>
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-4">Client Feedback</p>
                         {feedback.length === 0 ? (
                             <div
-                                className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-slate-400 border border-[#eaeaea]/60"
+                                className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-[#333333] border border-[#eaeaea]/60"
                                 data-testid="talent-feedback-empty"
                             >
                                 No feedback yet — the team will share notes here
@@ -1225,7 +1225,7 @@ function SubmissionPage() {
     }
 
     return (
-        <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-slate-900 relative overflow-hidden" data-testid="submission-page" data-mobile-step={mobileStep}>
+        <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page" data-mobile-step={mobileStep}>
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
                 <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-amber-200/40 mix-blend-multiply animate-blob" />
@@ -1248,7 +1248,7 @@ function SubmissionPage() {
                             href="https://www.instagram.com/talentgram.agency/"
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center justify-center p-2 rounded-full text-slate-800 hover:bg-slate-100 transition-all duration-200 cursor-pointer group"
+                            className="inline-flex items-center justify-center p-2 rounded-full text-[#111111] hover:bg-slate-100 transition-all duration-200 cursor-pointer group"
                             title="Follow us on Instagram"
                         >
                             <svg
@@ -1269,10 +1269,10 @@ function SubmissionPage() {
 
                     {/* Trust and Credibility Copy */}
                     <div className="max-w-md mx-auto">
-                        <p className="text-[13px] font-semibold text-slate-700 tracking-tight leading-relaxed">
+                        <p className="text-[13px] font-semibold text-[#111111] tracking-tight leading-relaxed">
                             Complete your profile and upload your audition materials.
                         </p>
-                        <p className="text-[11px] text-slate-400 font-medium leading-relaxed mt-1">
+                        <p className="text-[11px] text-[#333333] font-medium leading-relaxed mt-1">
                             Your submission will be reviewed by the Talentgram casting team.
                         </p>
                     </div>
@@ -1298,11 +1298,11 @@ function SubmissionPage() {
                                         className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-80" : "opacity-50"}`}
                                     >
                                         <span
-                                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-slate-700 border border-[#d4d4d4]" : "border border-[#d4d4d4] text-slate-500"}`}
+                                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-[#111111] border border-[#d4d4d4]" : "border border-[#d4d4d4] text-[#333333]"}`}
                                         >
                                             {reached && !active ? <Check className="w-3 h-3" /> : n}
                                         </span>
-                                        <span className={`text-[11px] tracking-wider uppercase font-medium ${active ? "text-slate-900" : "text-slate-500"}`}>
+                                        <span className={`text-[11px] tracking-wider uppercase font-medium ${active ? "text-[#111111]" : "text-[#333333]"}`}>
                                             {labels[i]}
                                         </span>
                                     </button>
@@ -1326,8 +1326,8 @@ function SubmissionPage() {
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
                         <div className="flex flex-col gap-1">
-                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400">PROJECT</p>
-                            <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-slate-900 leading-[1.05]">
+                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">PROJECT</p>
+                            <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-[#111111] leading-[1.05]">
                                 Talentgram × {project.brand_name}
                             </h1>
                         </div>
@@ -1355,10 +1355,10 @@ function SubmissionPage() {
                     </div>
                     {project.additional_details && (
                         <div className="mt-6 pt-4 border-t border-slate-100">
-                            <p className="text-[11px] text-slate-400 tracking-[0.2em] uppercase font-mono mb-2">
+                            <p className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono mb-2">
                                 Additional Details
                             </p>
-                            <p className="text-[13px] leading-relaxed text-slate-600 whitespace-pre-line">
+                            <p className="text-[13px] leading-relaxed text-[#222222] whitespace-pre-line">
                                 {project.additional_details}
                             </p>
                         </div>
@@ -1368,7 +1368,7 @@ function SubmissionPage() {
                         <button
                             onClick={() => setShowMaterial(true)}
                             data-testid="view-audition-material-btn"
-                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full text-[13px] text-slate-700 transition-all hover:shadow-sm hover:-translate-y-[1px] bg-white/40"
+                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full text-[13px] text-[#111111] transition-all hover:shadow-sm hover:-translate-y-[1px] bg-white/40"
                         >
                             <FolderOpen className="w-4 h-4" /> View Audition Material
                         </button>
@@ -1378,7 +1378,7 @@ function SubmissionPage() {
                 {/* SUBMISSION PROGRESS CHECKLIST */}
                 {emailGateUnlocked && (
                     <section className="mb-10 bg-white rounded-3xl p-6 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-400 mb-3">Submission Progress</p>
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-3">Submission Progress</p>
                         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                             {[
                                 { label: "Profile", completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.location?.trim()) },
@@ -1392,7 +1392,7 @@ function SubmissionPage() {
                                     className={`flex items-center gap-2.5 px-3 py-2.5 rounded-2xl border transition-all duration-300 ${
                                         item.completed 
                                             ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-800" 
-                                            : "bg-slate-50/50 border-slate-100 text-slate-400"
+                                            : "bg-slate-50/50 border-slate-100 text-[#333333]"
                                     }`}
                                 >
                                     <span className="shrink-0">
@@ -1421,10 +1421,10 @@ function SubmissionPage() {
                 >
                     <div className="bg-white rounded-3xl p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4" data-step="1">Talent Details</p>
-                    <h2 className="font-display text-2xl md:text-3xl tracking-tight text-slate-900 mb-3 leading-[1.05]" data-step="1">
+                    <h2 className="font-display text-2xl md:text-3xl tracking-tight text-[#111111] mb-3 leading-[1.05]" data-step="1">
                         Your profile.
                     </h2>
-                    <p className="text-[13px] leading-relaxed text-slate-500 mb-10" data-step="1">
+                    <p className="text-[13px] leading-relaxed text-[#333333] mb-10" data-step="1">
                         All fields are required unless marked optional.
                     </p>
 
@@ -1438,10 +1438,10 @@ function SubmissionPage() {
                                     /* Step A: Inline Email Lookup */
                                     <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
                                         <div className="flex flex-col gap-1.5">
-                                            <label className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                                            <label className="text-xs font-semibold text-[#111111] uppercase tracking-wider">
                                                 Continue your submission
                                             </label>
-                                            <p className="text-xs text-slate-400 leading-normal">
+                                            <p className="text-xs text-[#333333] leading-normal">
                                                 We use your email to recognise you and load any previously submitted details.
                                             </p>
                                         </div>
@@ -1458,7 +1458,7 @@ function SubmissionPage() {
                                                 }}
                                                 placeholder="Enter your email address"
                                                 style={{ fontSize: "16px" }}
-                                                className="flex-1 px-4 py-2.5 bg-white border border-[#eaeaea] rounded-xl text-slate-800 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none transition duration-150 h-[44px]"
+                                                className="flex-1 px-4 py-2.5 bg-white border border-[#eaeaea] rounded-xl text-[#111111] placeholder:text-[#333333] focus:border-slate-500 focus:outline-none transition duration-150 h-[44px]"
                                                 disabled={gatewayLoading}
                                             />
                                             <button
@@ -1471,7 +1471,7 @@ function SubmissionPage() {
                                                 <ArrowRight className="w-3.5 h-3.5" />
                                             </button>
                                         </div>
-                                        <p className="text-[10px] text-slate-400 font-mono mt-1">
+                                        <p className="text-[10px] text-[#333333] font-mono mt-1">
                                             We use your email to recognise you and load any previously submitted details.
                                         </p>
                                     </div>
@@ -1487,12 +1487,12 @@ function SubmissionPage() {
                                                 />
                                             ) : (
                                                 <div className="w-12 h-12 rounded-full bg-slate-200 flex items-center justify-center border border-[#d4d4d4]">
-                                                    <User className="w-5 h-5 text-slate-400" />
+                                                    <User className="w-5 h-5 text-[#333333]" />
                                                 </div>
                                             )}
                                             <div className="text-left">
-                                                <h4 className="font-semibold text-sm text-slate-800">Is this you?</h4>
-                                                <p className="text-xs text-slate-500 font-medium">
+                                                <h4 className="font-semibold text-sm text-[#111111]">Is this you?</h4>
+                                                <p className="text-xs text-[#333333] font-medium">
                                                     {gatewayRecognition.name} {gatewayRecognition.location ? `· ${gatewayRecognition.location}` : ""}
                                                 </p>
                                             </div>
@@ -1510,7 +1510,7 @@ function SubmissionPage() {
                                             <button
                                                 type="button"
                                                 onClick={handleInlineCancel}
-                                                className="border border-[#eaeaea] text-slate-500 hover:border-[#d4d4d4] px-4 py-2.5 rounded-xl text-xs inline-flex items-center justify-center h-[40px] bg-white"
+                                                className="border border-[#eaeaea] text-[#333333] hover:border-[#d4d4d4] px-4 py-2.5 rounded-xl text-xs inline-flex items-center justify-center h-[40px] bg-white"
                                             >
                                                 Use another email
                                             </button>
@@ -1541,7 +1541,7 @@ function SubmissionPage() {
                                         disabled={!!saved}
                                         wide
                                     />
-                                    <p className="text-[11px] text-slate-400 mt-3 font-mono">
+                                    <p className="text-[11px] text-[#333333] mt-3 font-mono">
                                         We use your email to recognise you and load any previously submitted details.
                                     </p>
                                 </>
@@ -1559,8 +1559,8 @@ function SubmissionPage() {
                                 <div className="flex items-start gap-3">
                                     <span className="shrink-0 w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center font-bold text-xs shadow-sm mt-0.5">✓</span>
                                     <div>
-                                        <h4 className="font-semibold text-sm text-slate-800">Profile Found</h4>
-                                        <p className="text-xs text-slate-500 leading-relaxed mt-1">
+                                        <h4 className="font-semibold text-sm text-[#111111]">Profile Found</h4>
+                                        <p className="text-xs text-[#333333] leading-relaxed mt-1">
                                             We've loaded your previously submitted details. You can review and update any information before submitting.
                                         </p>
                                     </div>
@@ -1568,7 +1568,7 @@ function SubmissionPage() {
                                 <button
                                     type="button"
                                     onClick={handleUseAnotherEmail}
-                                    className="border border-[#eaeaea] text-slate-500 hover:border-[#d4d4d4] hover:text-slate-800 px-4 py-2 text-xs rounded-full inline-flex items-center justify-center min-h-[36px] bg-white transition-all active:scale-[0.98] shrink-0"
+                                    className="border border-[#eaeaea] text-[#333333] hover:border-[#d4d4d4] hover:text-[#111111] px-4 py-2 text-xs rounded-full inline-flex items-center justify-center min-h-[36px] bg-white transition-all active:scale-[0.98] shrink-0"
                                 >
                                     Use Another Email
                                 </button>
@@ -1581,8 +1581,8 @@ function SubmissionPage() {
                         <div className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
-                                    <h3 className="text-base font-bold text-slate-900 tracking-tight">Your Profile</h3>
-                                    <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
+                                    <h3 className="text-base font-bold text-[#111111] tracking-tight">Your Profile</h3>
+                                    <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -1592,7 +1592,7 @@ function SubmissionPage() {
                                             profile: !prev.profile,
                                         }))
                                     }
-                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                                     title={collapsedSections.profile ? "Expand Profile" : "Collapse Profile"}
                                 >
                                     <ChevronDown
@@ -1637,7 +1637,7 @@ function SubmissionPage() {
                                             testid="form-phone"
                                         />
                                         <PremiumFormField
-                                            label="Date of Birth (optional)"
+                                            label="Date of Birth"
                                             type="date"
                                             value={form.dob}
                                             max={new Date().toISOString().split("T")[0]}
@@ -1669,14 +1669,14 @@ function SubmissionPage() {
                                                     data-testid="form-override-age-checkbox"
                                                     className="w-5 h-5 rounded border-[#d4d4d4] text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
                                                 />
-                                                <span className="text-sm font-medium text-slate-700 select-none">
+                                                <span className="text-sm font-medium text-[#111111] select-none">
                                                     Use different age for this project?
                                                 </span>
                                             </label>
                                             
                                             {form.overrideAge && (
                                                 <div className="mt-4 animate-fadeIn transition-all duration-300">
-                                                    <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                                    <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                         Project-Specific Age Override *
                                                     </span>
                                                     <input
@@ -1697,7 +1697,7 @@ function SubmissionPage() {
                                                         data-testid="form-override-age-input"
                                                         className="mt-2 w-full bg-white rounded-xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                     />
-                                                    <p className="text-[10px] text-slate-400 font-mono mt-1.5">
+                                                    <p className="text-[10px] text-[#333333] font-mono mt-1.5">
                                                         Only use this if you wish to be presented as a different age range for this project. This override is isolated to this submission only.
                                                     </p>
                                                 </div>
@@ -1705,7 +1705,7 @@ function SubmissionPage() {
                                         </div>
 
                                         <div data-testid="form-age-field">
-                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Age {form.dob ? "(auto calculated)" : "*"}
                                             </span>
                                             <input
@@ -1719,15 +1719,15 @@ function SubmissionPage() {
                                                 min={10}
                                                 max={80}
                                                 data-testid="form-age-input"
-                                                className="mt-2 w-full bg-slate-100 rounded-2xl border border-[#eaeaea] outline-none py-3 px-4 text-[15px] text-slate-500 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="mt-2 w-full bg-slate-100 rounded-2xl border border-[#eaeaea] outline-none py-3 px-4 text-[15px] text-[#333333] shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         </div>
                                         <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-100">
-                                            <h4 className="text-xs font-semibold text-slate-700 tracking-wider uppercase font-mono">Measurements</h4>
-                                            <p className="text-[11px] text-slate-400 mt-1">Accurate measurements help casting teams shortlist appropriately.</p>
+                                            <h4 className="text-xs font-semibold text-[#111111] tracking-wider uppercase font-mono">Measurements</h4>
+                                            <p className="text-[11px] text-[#333333] mt-1">Accurate measurements help casting teams shortlist appropriately.</p>
                                         </div>
                                         <div data-testid="form-height-field">
-                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Height *
                                             </span>
                                             <div className="mt-2">
@@ -1740,7 +1740,7 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-height-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select height" />
                                                     </SelectTrigger>
@@ -1756,7 +1756,7 @@ function SubmissionPage() {
                                                     </SelectContent>
                                                 </Select>
                                             </div>
-                                            <span className="block text-[10px] text-slate-400 mt-1 font-mono">
+                                            <span className="block text-[10px] text-[#333333] mt-1 font-mono">
                                                 Enter your actual height without footwear.
                                             </span>
                                         </div>
@@ -1795,7 +1795,7 @@ function SubmissionPage() {
                                         data-testid="unified-identity-block"
                                     >
                                         <div data-testid="form-gender-field">
-                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Gender
                                             </span>
                                             <div className="mt-2 grid grid-cols-2 gap-2">
@@ -1818,7 +1818,7 @@ function SubmissionPage() {
                                                             className={`px-3 py-2.5 text-[12px] rounded-full border transition-all duration-200 min-h-[44px] active:scale-[0.97] ${
                                                                 active
                                                                     ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                                    : "bg-white/60 border-[#eaeaea] hover:border-[#d4d4d4] text-slate-600"
+                                                                    : "bg-white/60 border-[#eaeaea] hover:border-[#d4d4d4] text-[#222222]"
                                                             }`}
                                                         >
                                                             {g.label}
@@ -1828,7 +1828,7 @@ function SubmissionPage() {
                                             </div>
                                         </div>
                                         <div data-testid="form-ethnicity-field">
-                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Ethnicity
                                             </span>
                                             <div className="mt-2">
@@ -1841,7 +1841,7 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-ethnicity-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select ethnicity" />
                                                     </SelectTrigger>
@@ -1876,13 +1876,21 @@ function SubmissionPage() {
                                                 clean = clean.replace(/\s+/g, "");
                                                 setForm({ ...form, instagram_handle: clean });
                                             }}
-                                            onBlur={saveForm}
+                                            onBlur={() => {
+                                                if (form.instagram_handle) {
+                                                    setForm((prev) => ({
+                                                        ...prev,
+                                                        instagram_handle: normalizeInstagramHandle(form.instagram_handle)
+                                                    }));
+                                                }
+                                                saveForm();
+                                            }}
                                             testid="form-instagram-handle"
                                             placeholder="@yourhandle"
                                             hint="Optional, but helps casting teams review additional work."
                                         />
                                         <div data-testid="form-instagram-followers-field">
-                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Instagram Followers
                                             </span>
                                             <div className="mt-2">
@@ -1898,14 +1906,14 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-instagram-followers-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-slate-700 transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select range" />
                                                     </SelectTrigger>
                                                     <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
                                                         {FOLLOWER_TIERS.map((tier) => (
                                                             <SelectGroup key={tier.label}>
-                                                                <SelectLabel className="text-[10px] tracking-wide uppercase text-slate-400 font-mono">
+                                                                <SelectLabel className="text-[10px] tracking-wide uppercase text-[#333333] font-mono">
                                                                     {tier.label}
                                                                 </SelectLabel>
                                                                 {tier.items.map((it) => (
@@ -1924,7 +1932,7 @@ function SubmissionPage() {
                                             </div>
                                         </div>
                                         <label className="block md:col-span-2" data-testid="form-bio-field">
-                                            <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Bio (optional)
                                             </span>
                                             <textarea
@@ -1952,8 +1960,8 @@ function SubmissionPage() {
                         <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
-                                    <h3 className="text-base font-bold text-slate-900 tracking-tight">Project Questions</h3>
-                                    <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
+                                    <h3 className="text-base font-bold text-[#111111] tracking-tight">Project Questions</h3>
+                                    <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -1963,7 +1971,7 @@ function SubmissionPage() {
                                             projectQuestions: !prev.projectQuestions,
                                         }))
                                     }
-                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                                     title={collapsedSections.projectQuestions ? "Expand Project Questions" : "Collapse Project Questions"}
                                 >
                                     <ChevronDown
@@ -1983,7 +1991,7 @@ function SubmissionPage() {
                                         className="mb-6"
                                     >
                                         <div className="bg-white/70 border border-[#eaeaea]/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
-                                            <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-2">
+                                            <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-[#333333] mb-2">
                                                 Availability
                                             </p>
                                             {project.shoot_dates ? (
@@ -1992,7 +2000,7 @@ function SubmissionPage() {
                                                         const trimmed = line.trim();
                                                         if (!trimmed) return null;
                                                         return (
-                                                            <div key={idx} className="flex items-start gap-2.5 text-[15px] font-medium text-slate-800">
+                                                            <div key={idx} className="flex items-start gap-2.5 text-[15px] font-medium text-[#111111]">
                                                                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0 mt-2.5" />
                                                                 <span>{trimmed}</span>
                                                             </div>
@@ -2000,7 +2008,7 @@ function SubmissionPage() {
                                                     })}
                                                 </div>
                                             ) : (
-                                                <p className="text-[15px] font-medium text-slate-500">Dates to be confirmed</p>
+                                                <p className="text-[15px] font-medium text-[#333333]">Dates to be confirmed</p>
                                             )}
                                         </div>
                                         <div className="grid grid-cols-2 gap-3 mb-4">
@@ -2025,7 +2033,7 @@ function SubmissionPage() {
                                                         className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                             active
                                                                 ? "bg-slate-950 text-white border-slate-950 shadow-sm"
-                                                                : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700"
+                                                                : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                         }`}
                                                     >
                                                         {opt.key === "yes" ? "Available" : "Not Available"}
@@ -2061,10 +2069,10 @@ function SubmissionPage() {
                                             className="mb-6"
                                         >
                                             <div className="bg-white/70 border border-[#eaeaea]/80 rounded-2xl p-5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="commission-card">
-                                                <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-1.5">
+                                                <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-[#333333] mb-1.5">
                                                     Commission
                                                 </p>
-                                                <p className="text-[18px] font-semibold text-slate-800 leading-snug">
+                                                <p className="text-[18px] font-semibold text-[#111111] leading-snug">
                                                     {project.commission_percent}
                                                 </p>
                                             </div>
@@ -2079,11 +2087,11 @@ function SubmissionPage() {
                                             className="mb-6"
                                         >
                                             <div className="bg-white/70 border border-[#eaeaea]/80 rounded-2xl p-5 mb-4 shadow-[0_1px_2px_rgba(0,0,0,0.02)]" data-testid="project-budget-card">
-                                                <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-slate-500 mb-2">
+                                                <p className="text-[12px] tracking-[0.1em] uppercase font-mono font-semibold text-[#333333] mb-2">
                                                     Project Budget
                                                 </p>
                                                 {project.budget_per_day && (
-                                                    <p className="text-[18px] font-semibold text-slate-800 leading-snug">
+                                                    <p className="text-[18px] font-semibold text-[#111111] leading-snug">
                                                         {project.budget_per_day}
                                                     </p>
                                                 )}
@@ -2092,10 +2100,10 @@ function SubmissionPage() {
                                                         {project.talent_budget.map((row, i) => (
                                                             <div
                                                                 key={`${row.label || ""}-${i}`}
-                                                                className="flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-4 text-[15px] leading-relaxed text-slate-700 font-medium"
+                                                                className="flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-4 text-[15px] leading-relaxed text-[#111111] font-medium"
                                                                 data-testid={`talent-budget-line-${i}`}
                                                             >
-                                                                <span className="text-slate-500 whitespace-pre-wrap">{row.label || "—"}</span>
+                                                                <span className="text-[#333333] whitespace-pre-wrap">{row.label || "—"}</span>
                                                                 <span className="text-slate-950 font-semibold shrink-0">{row.value || "—"}</span>
                                                             </div>
                                                         ))}
@@ -2120,7 +2128,7 @@ function SubmissionPage() {
                                                     className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                         form.budget.status === "accept"
                                                             ? "bg-slate-950 text-white border-slate-955 shadow-sm"
-                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700"
+                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                     }`}
                                                 >
                                                     Accept Budget
@@ -2141,7 +2149,7 @@ function SubmissionPage() {
                                                     className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                         form.budget.status === "custom"
                                                             ? "bg-slate-955 text-white border-slate-955 shadow-sm"
-                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700"
+                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                     }`}
                                                 >
                                                     Propose Own
@@ -2172,7 +2180,7 @@ function SubmissionPage() {
                                     {project.medium_usage && (
                                         <div className="border-t border-slate-100 pt-8" data-step="2">
                                             <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Medium / Usage</p>
-                                            <p className="text-[13px] leading-relaxed text-slate-600">
+                                            <p className="text-[13px] leading-relaxed text-[#222222]">
                                                 {project.medium_usage}
                                             </p>
                                         </div>
@@ -2214,8 +2222,8 @@ function SubmissionPage() {
                         <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
-                                    <h3 className="text-base font-bold text-slate-900 tracking-tight">Work Links</h3>
-                                    <p className="text-[12px] text-slate-600 mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
+                                    <h3 className="text-base font-bold text-[#111111] tracking-tight">Work Links</h3>
+                                    <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -2225,7 +2233,7 @@ function SubmissionPage() {
                                             workLinks: !prev.workLinks,
                                         }))
                                     }
-                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                                     title={collapsedSections.workLinks ? "Expand Work Links" : "Collapse Work Links"}
                                 >
                                     <ChevronDown
@@ -2239,7 +2247,7 @@ function SubmissionPage() {
                             {!collapsedSections.workLinks && (
                                 <div className="space-y-4 animate-fadeIn">
                                     <div data-testid="form-work-links-field">
-                                        <span className="text-[11px] text-slate-500 tracking-[0.2em] uppercase font-mono">
+                                        <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                             Work Links (optional)
                                         </span>
                                         <WorkLinksEditor
@@ -2288,7 +2296,7 @@ function SubmissionPage() {
                                 <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">
                                     Show us your work
                                 </h2>
-                                <p className="text-[13px] text-slate-600 mt-1.5 leading-relaxed">Upload audition takes and portfolio images.</p>
+                                <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Upload audition takes and portfolio images.</p>
                             </div>
                             <button
                                 type="button"
@@ -2298,7 +2306,7 @@ function SubmissionPage() {
                                         uploads: !prev.uploads,
                                     }))
                                 }
-                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                                 title={collapsedSections.uploads ? "Expand Uploads" : "Collapse Uploads"}
                             >
                                 <ChevronDown
@@ -2312,7 +2320,7 @@ function SubmissionPage() {
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
                                 <p
-                                    className="text-[12px] text-slate-500 mb-10 font-mono"
+                                    className="text-[12px] text-[#333333] mb-10 font-mono"
                                     data-testid="uploads-optional-hint"
                                 >
                                     Optional — but recommended.
@@ -2337,20 +2345,20 @@ function SubmissionPage() {
 
                                 <div className="mb-10" data-testid="takes-section">
                                     <div className="flex items-center justify-between mb-4">
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-500">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
                                             Audition Takes{" "}
-                                            <span className="text-slate-400">
+                                            <span className="text-[#333333]">
                                                 (up to {MAX_TAKES})
                                             </span>
                                         </p>
                                         <span
-                                            className="text-[11px] font-mono text-slate-400"
+                                            className="text-[11px] font-mono text-[#333333]"
                                             data-testid="takes-counter"
                                         >
                                             {takes.length}/{MAX_TAKES}
                                         </span>
                                     </div>
-                                    <p className="text-[13px] leading-relaxed text-slate-600 mb-6">
+                                    <p className="text-[13px] leading-relaxed text-[#222222] mb-6">
                                         Upload each take as a separate video and label it (e.g., "Scene 1").
                                     </p>
 
@@ -2376,9 +2384,9 @@ function SubmissionPage() {
                                                 <div className="flex items-center justify-between">
                                                     <div>
                                                         <span className="text-[11px] font-mono text-amber-600/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
-                                                        <span className="text-sm font-semibold text-slate-800">{state.label}</span>
+                                                        <span className="text-sm font-semibold text-[#111111]">{state.label}</span>
                                                     </div>
-                                                    <span className="text-[10px] font-mono text-slate-400">
+                                                    <span className="text-[10px] font-mono text-[#333333]">
                                                         {state.status === "uploading" ? `Uploading ${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
                                                     </span>
                                                 </div>
@@ -2419,20 +2427,20 @@ function SubmissionPage() {
 
                                 <div className="mb-8" data-testid="images-upload-section">
                                     <div className="flex items-center justify-between mb-3">
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-slate-500">
+                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
                                             Images{" "}
-                                            <span className="text-slate-400">
+                                            <span className="text-[#333333]">
                                                 (optional)
                                             </span>
                                         </p>
                                         <span
                                             data-testid="image-counter"
-                                            className="text-[11px] font-mono text-slate-400"
+                                            className="text-[11px] font-mono text-[#333333]"
                                         >
                                             {images.length}/{MAX_IMAGES_PER_CATEGORY}
                                         </span>
                                     </div>
-                                    <p className="text-[13px] leading-relaxed text-slate-600 mb-6">
+                                    <p className="text-[13px] leading-relaxed text-[#222222] mb-6">
                                         Upload up to {MAX_IMAGES_PER_CATEGORY} images per category. Add your strongest recent professional looks.
                                     </p>
 
@@ -2450,6 +2458,10 @@ function SubmissionPage() {
                                         activeUploads={activeUploads}
                                         onRetry={retryUpload}
                                         testidPrefix="indian"
+                                        activePortfolioThumbId={activePortfolioThumbId}
+                                        setActivePortfolioThumbId={setActivePortfolioThumbId}
+                                        setActiveLightboxImage={setActiveLightboxImage}
+                                        replaceMediaFile={replaceMediaFile}
                                     />
 
                                     {/* Phase 2 — optional Western look images */}
@@ -2466,6 +2478,10 @@ function SubmissionPage() {
                                         activeUploads={activeUploads}
                                         onRetry={retryUpload}
                                         testidPrefix="western"
+                                        activePortfolioThumbId={activePortfolioThumbId}
+                                        setActivePortfolioThumbId={setActivePortfolioThumbId}
+                                        setActiveLightboxImage={setActiveLightboxImage}
+                                        replaceMediaFile={replaceMediaFile}
                                     />
 
                                     {/* Generic Portfolio collapsible group */}
@@ -2475,14 +2491,14 @@ function SubmissionPage() {
                                             onClick={() => setIsGenericPortfolioCollapsed(!isGenericPortfolioCollapsed)}
                                         >
                                             <div className="flex items-center gap-2">
-                                                <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-slate-700">Portfolio (general)</p>
-                                                <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-slate-600 px-2 py-0.5 rounded-full">
+                                                <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-[#111111]">Portfolio (general)</p>
+                                                <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-[#222222] px-2 py-0.5 rounded-full">
                                                     {images.length}
                                                 </span>
                                             </div>
                                             <button
                                                 type="button"
-                                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                                                 title={isGenericPortfolioCollapsed ? "Expand" : "Collapse"}
                                             >
                                                 <ChevronDown
@@ -2541,7 +2557,7 @@ function SubmissionPage() {
                                                                             setActivePortfolioThumbId(null);
                                                                             setActiveLightboxImage(m);
                                                                         }}
-                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
                                                                         title="Zoom"
                                                                     >
                                                                         <Search className="w-3.5 h-3.5" />
@@ -2561,7 +2577,7 @@ function SubmissionPage() {
                                                                             };
                                                                             inp.click();
                                                                         }}
-                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-slate-800 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
                                                                         title="Replace"
                                                                     >
                                                                         <Upload className="w-3.5 h-3.5" />
@@ -2587,8 +2603,8 @@ function SubmissionPage() {
                                                         .map(([key, state]) => (
                                                             <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
                                                                 <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
-                                                                <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
-                                                                <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
+                                                                <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
+                                                                <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
                                                                     {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
                                                                 </span>
                                                                 {state.status === "failed" ? (
@@ -2614,7 +2630,7 @@ function SubmissionPage() {
                                                                 imagesRef.current?.click()
                                                             }
                                                             data-testid="add-image-btn"
-                                                            className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                                            className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-[#333333] hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                                                         >
                                                             <div className="relative flex flex-col items-center gap-1">
                                                                 <Camera className="w-5 h-5" />
@@ -2678,7 +2694,7 @@ function SubmissionPage() {
                         )}
 
                         <div className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
-                            <p className="text-[12px] text-slate-500 text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
+                            <p className="text-[12px] text-[#333333] text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
                                 Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
                             </p>
                             <button
@@ -2697,7 +2713,7 @@ function SubmissionPage() {
                                 Submit Audition
                             </button>
                             {!readyToSubmit && (
-                                <p className="text-[11px] text-slate-400 text-center mt-3 font-mono">
+                                <p className="text-[11px] text-[#333333] text-center mt-3 font-mono">
                                     Need: First+Last name · Height · Location ·
                                     Availability · Budget
                                 </p>
@@ -2748,7 +2764,7 @@ function SubmissionPage() {
                                 type="button"
                                 onClick={() => goToStep(mobileStep - 1)}
                                 data-testid="wizard-back-btn"
-                                className="px-5 py-3 border border-[#eaeaea] text-slate-600 rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                className="px-5 py-3 border border-[#eaeaea] text-[#222222] rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                 style={{ WebkitTapHighlightColor: "transparent" }}
                             >
                                 Back
@@ -2803,7 +2819,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
                             </span>
                         )}
                     </div>
-                    <span className="font-semibold text-xs text-slate-800 font-mono tracking-wider uppercase">
+                    <span className="font-semibold text-xs text-[#111111] font-mono tracking-wider uppercase">
                         Uploads ({items.length})
                     </span>
                 </div>
@@ -2815,7 +2831,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
                     )}
                     <button
                         type="button"
-                        className="text-slate-400 hover:text-slate-600 p-1"
+                        className="text-[#333333] hover:text-[#222222] p-1"
                     >
                         <ChevronDown className={`w-4 h-4 transform transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`} />
                     </button>
@@ -2830,7 +2846,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
                         return (
                             <div key={key} className="text-xs bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/80">
                                 <div className="flex items-center justify-between mb-1.5">
-                                    <span className="font-medium text-slate-700 truncate max-w-[160px]" title={cleanLabel}>
+                                    <span className="font-medium text-[#111111] truncate max-w-[160px]" title={cleanLabel}>
                                         {cleanLabel}
                                     </span>
                                     <div className="flex items-center gap-1">
@@ -2840,7 +2856,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
                                         <button
                                             type="button"
                                             onClick={() => onDismiss(key)}
-                                            className="text-slate-400 hover:text-slate-600 p-0.5"
+                                            className="text-[#333333] hover:text-[#222222] p-0.5"
                                         >
                                             <X className="w-3 h-3" />
                                         </button>
@@ -2879,10 +2895,10 @@ function Info({ label, value, wide }) {
     if (!value) return null;
     return (
         <div className={wide ? "col-span-1 sm:col-span-2" : ""}>
-            <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-slate-400 mb-1">
+            <div className="text-[10px] tracking-[0.2em] uppercase font-mono text-[#333333] mb-1">
                 {label}
             </div>
-            <div className="text-[13px] font-medium text-slate-700">{value}</div>
+            <div className="text-[13px] font-medium text-[#111111]">{value}</div>
         </div>
     );
 }
@@ -2900,6 +2916,10 @@ function PremiumPortfolioGroup({
     activeUploads = {},
     onRetry,
     testidPrefix,
+    activePortfolioThumbId,
+    setActivePortfolioThumbId,
+    setActiveLightboxImage,
+    replaceMediaFile,
 }) {
     const reachedCap = allImagesCount >= maxImages;
     const [isCollapsed, setIsCollapsed] = useState(() => {
@@ -2912,14 +2932,14 @@ function PremiumPortfolioGroup({
                 onClick={() => setIsCollapsed(!isCollapsed)}
             >
                 <div className="flex items-center gap-2">
-                    <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-slate-700">{label}</p>
-                    <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-slate-600 px-2 py-0.5 rounded-full">
+                    <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-[#111111]">{label}</p>
+                    <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-[#222222] px-2 py-0.5 rounded-full">
                         {items.length}
                     </span>
                 </div>
                 <button
                     type="button"
-                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                     title={isCollapsed ? "Expand" : "Collapse"}
                 >
                     <ChevronDown
@@ -2932,41 +2952,97 @@ function PremiumPortfolioGroup({
             {!isCollapsed && (
                 <div className="mt-4 animate-fadeIn">
                     {hint && (
-                        <p className="text-[12px] text-slate-600 mb-4 leading-relaxed">
+                        <p className="text-[12px] text-[#222222] mb-4 leading-relaxed">
                             {hint}
                         </p>
                     )}
                     <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
-                        {items.map((m) => (
-                            <div
-                                key={m.id}
-                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-[#eaeaea] group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02]"
-                                data-testid={`${testidPrefix}-image-${m.id}`}
-                            >
-                                <img
-                                    src={thumbnailUrl(m)}
-                                    alt=""
-                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                                />
-                                <button
+                        {items.map((m) => {
+                            const isActionsVisible = activePortfolioThumbId === m.id;
+                            return (
+                                <div
+                                    key={m.id}
+                                    className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-[#eaeaea] group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02] cursor-pointer"
+                                    data-testid={`${testidPrefix}-image-${m.id}`}
                                     onClick={(e) => {
-                                        e.stopPropagation();
-                                        removeMedia(m.id);
+                                        const isTouch = window.matchMedia("(hover: none)").matches;
+                                        if (isTouch && !isActionsVisible) {
+                                            e.stopPropagation();
+                                            setActivePortfolioThumbId(m.id);
+                                            return;
+                                        }
+                                        setActivePortfolioThumbId(null);
+                                        setActiveLightboxImage(m);
                                     }}
-                                    data-testid={`${testidPrefix}-image-remove-${m.id}`}
-                                    className="absolute top-2 right-2 p-1.5 bg-white/80 backdrop-blur-sm hover:bg-rose-50 rounded-full shadow-sm transition-colors opacity-0 group-hover:opacity-100"
                                 >
-                                    <X className="w-3.5 h-3.5 text-slate-700" />
-                                </button>
-                            </div>
-                        ))}
+                                    <img
+                                        src={thumbnailUrl(m)}
+                                        alt=""
+                                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                    />
+                                    <div
+                                        className={`absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2 transition-opacity duration-200 ${
+                                            isActionsVisible
+                                                ? "opacity-100"
+                                                : "opacity-0 group-hover:opacity-100"
+                                        }`}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setActivePortfolioThumbId(null);
+                                                setActiveLightboxImage(m);
+                                            }}
+                                            className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                            title="Zoom"
+                                        >
+                                            <Search className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setActivePortfolioThumbId(null);
+                                                const inp = document.createElement("input");
+                                                inp.type = "file";
+                                                inp.accept = "image/*";
+                                                inp.onchange = (ev) => {
+                                                    if (ev.target.files?.length) {
+                                                        replaceMediaFile(m, ev.target.files[0]);
+                                                    }
+                                                };
+                                                inp.click();
+                                            }}
+                                            className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                            title="Replace"
+                                        >
+                                            <Upload className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setActivePortfolioThumbId(null);
+                                                removeMedia(m.id);
+                                            }}
+                                            data-testid={`${testidPrefix}-image-remove-${m.id}`}
+                                            className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                            title="Delete"
+                                        >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
                         {Object.entries(activeUploads)
                             .filter(([key, state]) => state.category === category)
                             .map(([key, state]) => (
                                 <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
                                     <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
-                                    <span className="text-[9px] font-mono text-slate-500 truncate w-full px-1">{state.fileName}</span>
-                                    <span className="text-[10px] font-mono font-semibold text-slate-700 mt-1">
+                                    <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
+                                    <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
                                         {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
                                     </span>
                                     {state.status === "failed" ? (
@@ -2990,7 +3066,7 @@ function PremiumPortfolioGroup({
                                 type="button"
                                 onClick={() => inputRef.current?.click()}
                                 data-testid={`add-${testidPrefix}-image-btn`}
-                                className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-slate-400 hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-[#333333] hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                             >
                                 <div className="relative flex flex-col items-center gap-1">
                                     <Plus className="w-5 h-5" />
@@ -3094,20 +3170,20 @@ function WorkLinksEditor({ links, onChange }) {
                     "Pepsi - https://youtu.be/xyz\n" +
                     "https://vimeo.com/showreel"
                 }
-                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[14px] text-slate-900 placeholder:text-slate-400 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[14px] text-[#111111] placeholder:text-[#333333] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
             />
             <div className="flex items-center gap-2">
                 <span
                     className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${
                         parsed.length > 0
                             ? "text-emerald-700 bg-emerald-50 border-emerald-100"
-                            : "text-slate-400 bg-slate-50 border-slate-100"
+                            : "text-[#333333] bg-slate-50 border-slate-100"
                     }`}
                 >
                     Detected Links: {parsed.length}
                 </span>
                 {parsed.length > 0 && (
-                    <span className="text-[10px] text-slate-500">
+                    <span className="text-[10px] text-[#333333]">
                         {parsed.map((s) => parseStoredWorkLink(s).label || "Unlabeled").join(" · ")}
                     </span>
                 )}
@@ -3123,7 +3199,7 @@ function WorkLinksEditor({ links, onChange }) {
                                 data-testid={`work-link-row-${i}`}
                             >
                                 {label && (
-                                    <span className="text-[11px] text-slate-500 font-medium shrink-0 max-w-[120px] truncate">
+                                    <span className="text-[11px] text-[#333333] font-medium shrink-0 max-w-[120px] truncate">
                                         {label}
                                     </span>
                                 )}
@@ -3131,7 +3207,7 @@ function WorkLinksEditor({ links, onChange }) {
                                     href={url}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="text-[11px] font-mono text-slate-600 hover:text-slate-900 truncate underline underline-offset-2 flex-1 min-w-0"
+                                    className="text-[11px] font-mono text-[#222222] hover:text-[#111111] truncate underline underline-offset-2 flex-1 min-w-0"
                                 >
                                     {url}
                                 </a>
@@ -3183,7 +3259,7 @@ function PremiumFormField({
 
     return (
         <label className={`block ${wide ? "md:col-span-2" : ""}`}>
-            <span className="text-[11px] text-slate-700 tracking-[0.08em] font-semibold uppercase font-mono">
+            <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono">
                 {label}
             </span>
             <input
@@ -3213,10 +3289,10 @@ function PremiumFormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-slate-900 placeholder:text-slate-500 transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-slate-500 ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${className}`}
             />
             {hint && (
-                <span className="block text-[10.5px] text-slate-500 mt-1 font-mono">
+                <span className="block text-[10.5px] text-[#333333] mt-1 font-mono">
                     {hint}
                 </span>
             )}
@@ -3268,12 +3344,12 @@ function PremiumUploadSlot({
                 </div>
             )}
             {!compact && note && (
-                <p className="text-[12px] leading-relaxed text-slate-500 mb-5">
+                <p className="text-[12px] leading-relaxed text-[#333333] mb-5">
                     {note}
                 </p>
             )}
             {!compact && hint && (
-                <p className="text-[11px] text-slate-400 font-mono mb-5">
+                <p className="text-[11px] text-[#333333] font-mono mb-5">
                     {hint}
                 </p>
             )}
@@ -3282,18 +3358,18 @@ function PremiumUploadSlot({
                     <div className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 shadow-[0_4px_20px_rgba(15,23,42,0.03)] transition-all duration-200 hover:shadow-[0_8px_25px_-6px_rgba(0,0,0,0.05)] text-left">
                         <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
                             <div className="flex items-center gap-2">
-                                <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-slate-700">
+                                <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-[#111111]">
                                     <Video className="w-4 h-4" />
                                 </span>
                                 <div>
-                                    <h4 className="font-bold text-sm text-slate-800">{title || "Video"}</h4>
-                                    <p className="text-[11px] text-slate-500 truncate max-w-[180px] font-mono">{media.original_filename || "video_file"}</p>
+                                    <h4 className="font-bold text-sm text-[#111111]">{title || "Video"}</h4>
+                                    <p className="text-[11px] text-[#333333] truncate max-w-[180px] font-mono">{media.original_filename || "video_file"}</p>
                                 </div>
                             </div>
                             <button
                                 type="button"
                                 onClick={() => setIsVideoCollapsed(!isVideoCollapsed)}
-                                className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-slate-500 transition-all duration-200"
+                                className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
                                 title={isVideoCollapsed ? "Expand preview" : "Collapse preview"}
                             >
                                 <ChevronDown
@@ -3323,7 +3399,7 @@ function PremiumUploadSlot({
                         )}
                         <div className="flex flex-col gap-1.5 px-1">
                             {formatMediaTimestamp(media) && (
-                                <span className="text-[11px] text-slate-500 font-mono">
+                                <span className="text-[11px] text-[#333333] font-mono">
                                     Previously uploaded · Last updated: {formatMediaTimestamp(media)}
                                 </span>
                             )}
@@ -3331,7 +3407,7 @@ function PremiumUploadSlot({
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                             {isPending ? (
                                 <div className="w-full px-1">
-                                    <div className="flex items-center justify-between text-xs mb-1 font-mono text-slate-500">
+                                    <div className="flex items-center justify-between text-xs mb-1 font-mono text-[#333333]">
                                         <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
                                     </div>
                                     <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
@@ -3343,7 +3419,7 @@ function PremiumUploadSlot({
                                     <button
                                         type="button"
                                         onClick={() => inputRef.current?.click()}
-                                        className="flex-1 border border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                                        className="flex-1 border border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111] hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
                                     >
                                         <Upload className="w-3.5 h-3.5" />
                                         Replace
@@ -3362,11 +3438,11 @@ function PremiumUploadSlot({
                     </div>
                 ) : (
                     <div className="bg-white/60 border border-[#eaeaea] rounded-2xl p-3 flex items-center gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
-                        <Icon className="w-4 h-4 text-slate-500 shrink-0" />
+                        <Icon className="w-4 h-4 text-[#333333] shrink-0" />
                         <div className="min-w-0 flex-1">
                             <div className="text-[13px] truncate">
                                 {compact && (
-                                    <span className="font-display mr-2 text-slate-700">
+                                    <span className="font-display mr-2 text-[#111111]">
                                         {title}
                                         {required && (
                                             <span className="text-rose-500">
@@ -3375,14 +3451,14 @@ function PremiumUploadSlot({
                                         )}
                                     </span>
                                 )}
-                                <span className="text-slate-500 font-mono text-[11px]">
+                                <span className="text-[#333333] font-mono text-[11px]">
                                     {media.original_filename || "file"}
                                 </span>
                             </div>
                         </div>
                         <button
                             onClick={() => onRemove(media)}
-                            className="text-slate-400 hover:text-rose-500 p-1 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors"
+                            className="text-[#333333] hover:text-rose-500 p-1 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors"
                         >
                             <Trash2 className="w-4 h-4" />
                         </button>
@@ -3432,24 +3508,24 @@ function PremiumUploadSlot({
                             />
                         )}
                         {uploadState && uploadState.status !== "failed" ? (
-                            <Loader2 className="w-4 h-4 animate-spin relative text-slate-600" />
+                            <Loader2 className="w-4 h-4 animate-spin relative text-[#222222]" />
                         ) : (
-                            <Upload className="w-4 h-4 text-slate-500 relative" />
+                            <Upload className="w-4 h-4 text-[#333333] relative" />
                         )}
                         {compact ? (
-                            <span className="text-[13px] flex-1 relative text-slate-700">
+                            <span className="text-[13px] flex-1 relative text-[#111111]">
                                 <span className="font-display mr-2">
                                     {title}
                                     {required && (
                                         <span className="text-rose-500"> *</span>
                                     )}
                                 </span>
-                                <span className="text-slate-400 text-[11px]">
+                                <span className="text-[#333333] text-[11px]">
                                     {uploadState && uploadState.status === "processing" ? "Processing…" : (uploadState && uploadState.status === "uploading" ? `Uploading… ${uploadState.pct}%` : "Tap to upload")}
                                 </span>
                             </span>
                         ) : (
-                            <span className="text-[13px] text-slate-600 relative">
+                            <span className="text-[13px] text-[#222222] relative">
                                 {uploadState && uploadState.status === "processing" ? "Processing…" : (uploadState && uploadState.status === "uploading" ? `Uploading… ${uploadState.pct}%` : "Tap to upload")}
                             </span>
                         )}
@@ -3555,22 +3631,22 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
                                 }
                             }}
                             placeholder={`Take ${index}`}
-                            className={`bg-transparent outline-none text-[13px] font-semibold flex-1 py-1 px-2 rounded-lg border transition-all duration-200 ${dirty ? "border-amber-300 bg-amber-50/30" : "border-slate-100 bg-slate-50/50"} focus:border-amber-200 text-slate-700`}
+                            className={`bg-transparent outline-none text-[13px] font-semibold flex-1 py-1 px-2 rounded-lg border transition-all duration-200 ${dirty ? "border-amber-300 bg-amber-50/30" : "border-slate-100 bg-slate-50/50"} focus:border-amber-200 text-[#111111]`}
                             data-testid={`take-label-${index}`}
                         />
                     ) : (
-                        <div className="text-[13px] font-semibold text-slate-700 py-1">
+                        <div className="text-[13px] font-semibold text-[#111111] py-1">
                             {label}
-                            <span className="ml-2 text-[10px] text-slate-400 font-mono font-normal">
+                            <span className="ml-2 text-[10px] text-[#333333] font-mono font-normal">
                                 (legacy)
                             </span>
                         </div>
                     )}
                 </div>
-                <div className="text-[10px] font-mono text-slate-400 truncate mt-2 flex flex-col gap-0.5">
+                <div className="text-[10px] font-mono text-[#333333] truncate mt-2 flex flex-col gap-0.5">
                     <span>{media.original_filename || "file"}</span>
                     {formatMediaTimestamp(media) && (
-                        <span className="text-slate-500 font-medium mt-0.5">
+                        <span className="text-[#333333] font-medium mt-0.5">
                             Previously uploaded · Last updated: {formatMediaTimestamp(media)}
                         </span>
                     )}
@@ -3580,7 +3656,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
             <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                 {isPending ? (
                     <div className="w-full px-1">
-                        <div className="flex items-center justify-between text-xs mb-1 font-mono text-slate-500">
+                        <div className="flex items-center justify-between text-xs mb-1 font-mono text-[#333333]">
                             <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
                         </div>
                         <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
@@ -3592,7 +3668,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
                         <button
                             type="button"
                             onClick={() => localInputRef.current?.click()}
-                            className="flex-1 border border-[#eaeaea] hover:border-[#d4d4d4] text-slate-700 hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
+                            className="flex-1 border border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111] hover:bg-slate-50 px-4 py-2.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 min-h-[40px] bg-white transition-all active:scale-[0.98]"
                         >
                             <Upload className="w-3.5 h-3.5" />
                             Replace
@@ -3645,14 +3721,14 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                     placeholder={`${fallback} — add a label`}
-                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-[#eaeaea] focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-slate-700"
+                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-[#eaeaea] focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-[#111111]"
                     enterKeyHint="done"
                     data-testid={`new-take-label-${number}`}
                 />
                 <button
                     type="button"
                     onClick={triggerLib}
-                    className="hidden md:inline-flex relative text-[11px] px-4 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full items-center gap-1 disabled:opacity-40 min-h-[44px] bg-white/60 text-slate-600 transition-all duration-200"
+                    className="hidden md:inline-flex relative text-[11px] px-4 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-full items-center gap-1 disabled:opacity-40 min-h-[44px] bg-white/60 text-[#222222] transition-all duration-200"
                     data-testid={`new-take-upload-${number}`}
                 >
                     <Plus className="w-3 h-3" />
@@ -3665,7 +3741,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                 <button
                     type="button"
                     onClick={triggerCam}
-                    className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
+                    className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-[#222222]"
                     data-testid={`new-take-camera-${number}`}
                 >
                     <Camera className="w-3.5 h-3.5" /> Record
@@ -3673,7 +3749,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                 <button
                     type="button"
                     onClick={triggerLib}
-                    className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-slate-600"
+                    className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60 text-[#222222]"
                     data-testid={`new-take-library-${number}`}
                 >
                     <FolderOpen className="w-3.5 h-3.5" /> Library
@@ -3717,7 +3793,7 @@ function FeedbackRow({ fb }) {
             data-testid={`talent-feedback-${fb.id}`}
         >
             <div className="flex items-center justify-between gap-3 mb-3">
-                <span className="inline-flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase font-mono text-slate-500">
+                <span className="inline-flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase font-mono text-[#333333]">
                     {isVoice ? (
                         <Mic className="w-3 h-3" />
                     ) : (
@@ -3725,7 +3801,7 @@ function FeedbackRow({ fb }) {
                     )}
                     {isVoice ? "Voice" : "Text"}
                 </span>
-                <span className="text-[10px] font-mono text-slate-400">
+                <span className="text-[10px] font-mono text-[#333333]">
                     Received {timeAgo(fb.approved_at || fb.created_at)}
                 </span>
             </div>
@@ -3738,7 +3814,7 @@ function FeedbackRow({ fb }) {
                 />
             ) : (
                 <p
-                    className="text-[13px] leading-relaxed text-slate-700 whitespace-pre-wrap"
+                    className="text-[13px] leading-relaxed text-[#111111] whitespace-pre-wrap"
                     data-testid={`talent-feedback-text-${fb.id}`}
                 >
                     {fb.text}
@@ -3784,7 +3860,7 @@ class SubmissionErrorBoundary extends React.Component {
                             </svg>
                         </div>
                         <h2 className="text-xl font-semibold text-slate-950 tracking-tight">Something went wrong</h2>
-                        <p className="mt-2 text-sm text-slate-500 leading-relaxed">
+                        <p className="mt-2 text-sm text-[#333333] leading-relaxed">
                             An unexpected error occurred while loading this page. Don't worry, your progress has not been lost. Please try reloading.
                         </p>
                         <div className="mt-6 flex flex-col gap-2">
@@ -3799,7 +3875,7 @@ class SubmissionErrorBoundary extends React.Component {
                                     localStorage.clear();
                                     window.location.reload();
                                 }}
-                                className="w-full text-slate-500 py-3 rounded-full text-[12px] font-medium hover:text-slate-700 transition-all duration-200"
+                                className="w-full text-[#333333] py-3 rounded-full text-[12px] font-medium hover:text-[#111111] transition-all duration-200"
                             >
                                 Clear Cache & Reload
                             </button>

@@ -104,7 +104,7 @@ const getRelationshipHealth = (client) => {
     }
     const days = getDaysSinceContact(client.last_contacted_date);
     if (days === null) {
-        return { status: "inactive", label: "New Lead", color: "text-slate-500 bg-slate-50 border-[#eaeaea]/60", icon: Zap };
+        return { status: "inactive", label: "New Lead", color: "text-[#333333] bg-slate-50 border-[#eaeaea]/60", icon: Zap };
     }
     if (days <= 7) {
         return { status: "healthy", label: "Active", color: "text-[#5A7D5A] bg-[#5A7D5A]/8 border-[#5A7D5A]/20", icon: TrendingUp };
@@ -160,10 +160,10 @@ const ErrorState = ({ message, onRetry }) => (
             <AlertCircle className="w-6 h-6 text-[#9E4A4A]" />
         </div>
         <div className="text-[#9E4A4A] text-sm font-medium mb-2">Failed to load relationship ecosystem</div>
-        <p className="text-slate-500 text-sm mb-4 max-w-xs mx-auto leading-relaxed">{message || "Please check network or backend credentials."}</p>
+        <p className="text-[#333333] text-sm mb-4 max-w-xs mx-auto leading-relaxed">{message || "Please check network or backend credentials."}</p>
         <button
             onClick={onRetry}
-            className="inline-flex items-center gap-2 px-5 py-2 bg-white border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl text-sm text-slate-700 hover:text-slate-900 transition-colors shadow-sm"
+            className="inline-flex items-center gap-2 px-5 py-2 bg-white border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl text-sm text-[#111111] hover:text-[#111111] transition-colors shadow-sm"
         >
             <Loader2 className="w-3.5 h-3.5" />
             Retry Connection
@@ -178,23 +178,23 @@ const ErrorState = ({ message, onRetry }) => (
 const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
     <div className="border-2 border-dashed border-[#eaeaea] rounded-2xl py-16 sm:py-20 text-center bg-slate-50/30">
         <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-100/50 mb-4 border border-[#eaeaea]/30">
-            <Users className="w-6 h-6 text-slate-400" />
+            <Users className="w-6 h-6 text-[#333333]" />
         </div>
         {hasSearch || hasFilters ? (
             <>
-                <div className="text-slate-800 text-sm font-medium mb-1">No matching clients found</div>
-                <p className="text-slate-500 text-xs max-w-xs mx-auto">Try refining your fuzzy match filter, lifecycle stage selectors, or query terms.</p>
+                <div className="text-[#111111] text-sm font-medium mb-1">No matching clients found</div>
+                <p className="text-[#333333] text-xs max-w-xs mx-auto">Try refining your fuzzy match filter, lifecycle stage selectors, or query terms.</p>
                 <button
                     onClick={onClearFilters}
-                    className="mt-4 text-xs font-semibold px-4 py-2 border border-[#eaeaea] bg-white hover:border-[#d4d4d4] rounded-xl text-slate-600 hover:text-slate-800 shadow-sm transition-colors"
+                    className="mt-4 text-xs font-semibold px-4 py-2 border border-[#eaeaea] bg-white hover:border-[#d4d4d4] rounded-xl text-[#222222] hover:text-[#111111] shadow-sm transition-colors"
                 >
                     Clear Search Filters
                 </button>
             </>
         ) : (
             <>
-                <div className="text-slate-800 text-sm font-medium mb-1">Ecosystem Empty</div>
-                <p className="text-slate-500 text-xs max-w-xs mx-auto mb-5">Begin scaling your production relationships by cataloging your first corporate lead.</p>
+                <div className="text-[#111111] text-sm font-medium mb-1">Ecosystem Empty</div>
+                <p className="text-[#333333] text-xs max-w-xs mx-auto mb-5">Begin scaling your production relationships by cataloging your first corporate lead.</p>
                 <button
                     onClick={onAddClient}
                     className="inline-flex items-center gap-1.5 bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-medium hover:bg-slate-800 transition-colors shadow-sm"
@@ -212,7 +212,7 @@ const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
 
 const FieldInput = ({ label, value, onChange, required, placeholder, testId, autoFocus }) => (
     <label className="block">
-        <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono flex justify-between select-none">
+        <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono flex justify-between select-none">
             <span>{label}</span>
             {required && <span className="text-[#9E4A4A]">* Required</span>}
         </div>
@@ -224,7 +224,7 @@ const FieldInput = ({ label, value, onChange, required, placeholder, testId, aut
             required={required}
             autoFocus={autoFocus}
             data-testid={testId}
-            className="mt-1.5 w-full bg-slate-50/40 rounded-xl border border-[#eaeaea]/80 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[15px] sm:text-sm text-slate-900 placeholder:text-slate-400 transition-all duration-200 shadow-sm"
+            className="mt-1.5 w-full bg-slate-50/40 rounded-xl border border-[#eaeaea]/80 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[15px] sm:text-sm text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-sm"
         />
     </label>
 );
@@ -643,11 +643,11 @@ export default function MarketingHub() {
             <div className="relative mb-8 sm:mb-12">
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 mb-8 sm:mb-10">
                     <div>
-                        <h1 className="text-3xl sm:text-4xl font-light tracking-tight text-slate-900 font-display">
+                        <h1 className="text-3xl sm:text-4xl font-light tracking-tight text-[#111111] font-display">
                             Client Intelligence
                         </h1>
-                        <p className="text-sm text-slate-500 mt-2 font-mono tracking-tight flex items-center gap-1.5">
-                            <Activity className="w-3.5 h-3.5 text-slate-400" />
+                        <p className="text-sm text-[#333333] mt-2 font-mono tracking-tight flex items-center gap-1.5">
+                            <Activity className="w-3.5 h-3.5 text-[#333333]" />
                             Executive Relationship Operating System
                         </p>
                     </div>
@@ -677,8 +677,8 @@ export default function MarketingHub() {
                                 className={`cursor-pointer bg-white border ${active ? st.activeBg : `border-[#eaeaea] ${st.color}`} rounded-2xl p-3.5 sm:p-5 transition-all duration-200 hover:shadow-sm`}
                             >
                                 <div className="text-xl sm:text-2xl font-bold text-slate-950 mb-0.5">{st.count}</div>
-                                <div className="text-[11px] font-semibold text-slate-800 tracking-tight">{st.label}</div>
-                                <div className="text-[9.5px] text-slate-500 font-medium mt-0.5 leading-snug">{st.desc}</div>
+                                <div className="text-[11px] font-semibold text-[#111111] tracking-tight">{st.label}</div>
+                                <div className="text-[9.5px] text-[#333333] font-medium mt-0.5 leading-snug">{st.desc}</div>
                             </div>
                         );
                     })}
@@ -689,7 +689,7 @@ export default function MarketingHub() {
                     <div className="flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
                         <div className="relative flex-1 max-w-full lg:max-w-lg">
                             <div className="absolute left-4 top-1/2 -translate-y-1/2">
-                                <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <svg className="w-4 h-4 text-[#333333]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                                 </svg>
                             </div>
@@ -699,18 +699,18 @@ export default function MarketingHub() {
                                 placeholder="Search by name, company, phone, or tags... (CMD+K / /)"
                                 value={searchQuery}
                                 onChange={(e) => { setSearchQuery(e.target.value); setFocusedIndex(-1); }}
-                                className="w-full pl-11 pr-10 py-3.5 bg-slate-50/50 border border-[#eaeaea] rounded-2xl text-sm text-slate-700 placeholder:text-slate-400 focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 focus:outline-none transition-all shadow-inner font-sans"
+                                className="w-full pl-11 pr-10 py-3.5 bg-slate-50/50 border border-[#eaeaea] rounded-2xl text-sm text-[#111111] placeholder:text-[#333333] focus:bg-white focus:border-slate-400 focus:ring-1 focus:ring-slate-400 focus:outline-none transition-all shadow-inner font-sans"
                             />
                             {searchQuery && (
                                 <button
                                     onClick={() => { setSearchQuery(""); searchInputRef.current?.focus(); }}
-                                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[#333333] hover:text-[#222222] transition-colors"
                                 >
                                     <X className="w-4 h-4" />
                                 </button>
                             )}
                         </div>
-                        <div className="flex items-center gap-1.5 text-xs text-slate-400 font-mono">
+                        <div className="flex items-center gap-1.5 text-xs text-[#333333] font-mono">
                             <span className="bg-slate-50 border border-[#eaeaea] px-2 py-1 rounded">⌘K</span>
                             <span>to focus search</span>
                         </div>
@@ -719,12 +719,12 @@ export default function MarketingHub() {
                     {/* Local searches pills */}
                     {recentSearches.length > 0 && (
                         <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono">Recent:</span>
+                            <span className="text-[10px] font-semibold text-[#333333] uppercase tracking-wider font-mono">Recent:</span>
                             {recentSearches.map((s, idx) => (
                                 <button
                                     key={`${s}-${idx}`}
                                     onClick={() => { setSearchQuery(s); setFocusedIndex(-1); }}
-                                    className="inline-flex items-center gap-1 px-3 py-1 bg-slate-50 hover:bg-slate-100 border border-[#eaeaea] text-xs text-slate-600 hover:text-slate-900 rounded-full transition-colors font-medium shadow-sm"
+                                    className="inline-flex items-center gap-1 px-3 py-1 bg-slate-50 hover:bg-slate-100 border border-[#eaeaea] text-xs text-[#222222] hover:text-[#111111] rounded-full transition-colors font-medium shadow-sm"
                                 >
                                     {s}
                                 </button>
@@ -742,14 +742,14 @@ export default function MarketingHub() {
                     )}
                     {/* Contact Type filters strip */}
                     <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none pt-2 border-t border-slate-50">
-                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider font-mono shrink-0 select-none">Type:</span>
+                        <span className="text-[10px] font-semibold text-[#333333] uppercase tracking-wider font-mono shrink-0 select-none">Type:</span>
                         <button
                             type="button"
                             onClick={() => { setSelectedContactType("all"); setFocusedIndex(-1); }}
                             className={`inline-flex items-center gap-1.5 px-3 py-1 border rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200 ${
                                 selectedContactType === "all"
                                     ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                    : "bg-white text-slate-600 border-[#eaeaea] hover:border-[#d4d4d4]"
+                                    : "bg-white text-[#222222] border-[#eaeaea] hover:border-[#d4d4d4]"
                             }`}
                         >
                             All Types
@@ -765,11 +765,11 @@ export default function MarketingHub() {
                                     className={`inline-flex items-center gap-1.5 px-3 py-1 border rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200 ${
                                         active
                                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                            : "bg-white text-slate-600 border-[#eaeaea] hover:border-[#d4d4d4]"
+                                            : "bg-white text-[#222222] border-[#eaeaea] hover:border-[#d4d4d4]"
                                     }`}
                                 >
                                     <span>{t.label}</span>
-                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold ${active ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500"}`}>
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold ${active ? "bg-white/20 text-white" : "bg-slate-100 text-[#333333]"}`}>
                                         {count}
                                     </span>
                                 </button>
@@ -792,12 +792,12 @@ export default function MarketingHub() {
                                 }
                             }}
                             onChange={selectAllVisible}
-                            className="w-4.5 h-4.5 rounded border-[#d4d4d4] text-slate-900 focus:ring-slate-900 cursor-pointer"
+                            className="w-4.5 h-4.5 rounded border-[#d4d4d4] text-[#111111] focus:ring-slate-900 cursor-pointer"
                         />
-                        <span className="text-xs font-semibold text-slate-700">Select All Visible</span>
+                        <span className="text-xs font-semibold text-[#111111]">Select All Visible</span>
                     </label>
                     {selectedIds.size > 0 && (
-                        <span className="text-xs font-mono font-bold text-slate-500 bg-slate-200/60 px-2 py-0.5 rounded-lg select-none">
+                        <span className="text-xs font-mono font-bold text-[#333333] bg-slate-200/60 px-2 py-0.5 rounded-lg select-none">
                             {selectedIds.size} Selected
                         </span>
                     )}
@@ -809,14 +809,14 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkTagOpen(true)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#eaeaea] hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#eaeaea] hover:border-slate-355 rounded-xl text-xs font-semibold text-[#111111] transition-colors shadow-sm active:scale-[0.98]"
                         >
                             Assign Tags
                         </button>
                         <button
                             type="button"
                             onClick={() => setBulkArchiveOpen(true)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#eaeaea] hover:border-slate-355 rounded-xl text-xs font-semibold text-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#eaeaea] hover:border-slate-355 rounded-xl text-xs font-semibold text-[#111111] transition-colors shadow-sm active:scale-[0.98]"
                         >
                             Archive Selected
                         </button>
@@ -830,7 +830,7 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={clearSelection}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#333333] hover:text-[#111111] transition-colors"
                         >
                             Clear Selection
                         </button>
@@ -890,17 +890,17 @@ export default function MarketingHub() {
                                             type="checkbox"
                                             checked={selectedIds.has(c.id)}
                                             onChange={() => toggleSelect(c.id)}
-                                            className="w-4.5 h-4.5 rounded border-[#d4d4d4] text-slate-900 focus:ring-slate-950 cursor-pointer transition-all shadow-sm"
+                                            className="w-4.5 h-4.5 rounded border-[#d4d4d4] text-[#111111] focus:ring-slate-950 cursor-pointer transition-all shadow-sm"
                                         />
                                     </div>
 
                                     {/* Glassmorphic Initial Avatar */}
-                                    <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-slate-50 border border-[#eaeaea] flex items-center justify-center font-display text-base sm:text-lg font-medium text-slate-800 shrink-0 shadow-sm">
+                                    <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-slate-50 border border-[#eaeaea] flex items-center justify-center font-display text-base sm:text-lg font-medium text-[#111111] shrink-0 shadow-sm">
                                         {initial}
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2.5 mb-1.5 flex-wrap">
-                                            <h3 className="text-base sm:text-lg leading-tight font-semibold text-slate-900">
+                                            <h3 className="text-base sm:text-lg leading-tight font-semibold text-[#111111]">
                                                 {c.name}
                                             </h3>
                                             <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[9px] font-bold uppercase tracking-wider border ${health.color}`}>
@@ -914,22 +914,22 @@ export default function MarketingHub() {
                                             )}
                                         </div>
 
-                                        <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-xs mb-2.5 text-slate-600">
+                                        <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-xs mb-2.5 text-[#222222]">
                                             {c.company_name && (
                                                 <div className="flex items-center gap-1">
-                                                    <Building2 className="w-3.5 h-3.5 text-slate-400" />
+                                                    <Building2 className="w-3.5 h-3.5 text-[#333333]" />
                                                     <span>{c.company_name}</span>
                                                 </div>
                                             )}
                                             {c.email && (
                                                 <div className="flex items-center gap-1 font-mono">
-                                                    <Mail className="w-3.5 h-3.5 text-slate-400" />
+                                                    <Mail className="w-3.5 h-3.5 text-[#333333]" />
                                                     <span className="break-all">{c.email}</span>
                                                 </div>
                                             )}
                                             {c.phone_number && (
                                                 <div className="flex items-center gap-1 font-mono">
-                                                    <PhoneCall className="w-3.5 h-3.5 text-slate-400" />
+                                                    <PhoneCall className="w-3.5 h-3.5 text-[#333333]" />
                                                     <span>{c.phone_number}</span>
                                                 </div>
                                             )}
@@ -939,32 +939,32 @@ export default function MarketingHub() {
                                         {c.tags && c.tags.length > 0 && (
                                             <div className="flex gap-1.5 flex-wrap mb-3 font-mono">
                                                 {c.tags.map(t => (
-                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-[#eaeaea]/80 rounded-md text-[10px] text-slate-500">
+                                                    <span key={t} className="inline-block px-2 py-0.5 bg-slate-50 border border-[#eaeaea]/80 rounded-md text-[10px] text-[#333333]">
                                                         #{t}
                                                     </span>
                                                 ))}
                                             </div>
                                         )}
 
-                                        <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-[10px] text-slate-500 font-mono">
+                                        <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-[10px] text-[#333333] font-mono">
                                             <div className="flex items-center gap-1">
-                                                <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                                                <Calendar className="w-3.5 h-3.5 text-[#333333]" />
                                                 <span>Contact: {formatDate(c.last_contacted_date)}</span>
                                             </div>
                                             <div className="flex items-center gap-1">
-                                                <TrendingUp className="w-3.5 h-3.5 text-slate-400" />
+                                                <TrendingUp className="w-3.5 h-3.5 text-[#333333]" />
                                                 <span>{momentum}</span>
                                             </div>
                                             {c.interaction_count > 0 && (
                                                 <div className="flex items-center gap-1">
-                                                    <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
+                                                    <MessageSquare className="w-3.5 h-3.5 text-[#333333]" />
                                                     <span>{c.interaction_count} log{c.interaction_count !== 1 ? 's' : ''}</span>
                                                 </div>
                                             )}
                                         </div>
                                     </div>
                                     <div className="shrink-0 flex items-center h-10 sm:h-12">
-                                        <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
+                                        <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-[#333333] transition-colors" />
                                     </div>
                                 </div>
                             </div>
@@ -983,13 +983,13 @@ export default function MarketingHub() {
             {selectedIds.size > 0 && (
                 <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-[#eaeaea] shadow-[0_-8px_30px_rgb(0,0,0,0.12)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-in slide-in-from-bottom duration-300">
                     <div className="flex items-center justify-between gap-4 mb-3">
-                        <span className="text-xs font-semibold text-slate-700">
+                        <span className="text-xs font-semibold text-[#111111]">
                             {selectedIds.size} Contact(s) Selected
                         </span>
                         <button
                             type="button"
                             onClick={clearSelection}
-                            className="text-xs font-semibold text-slate-500 hover:text-slate-800"
+                            className="text-xs font-semibold text-[#333333] hover:text-[#111111]"
                         >
                             Clear
                         </button>
@@ -1005,7 +1005,7 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkArchiveOpen(true)}
-                            className="inline-flex items-center justify-center py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-xs font-semibold text-slate-700 transition-all active:scale-[0.98]"
+                            className="inline-flex items-center justify-center py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-xs font-semibold text-[#111111] transition-all active:scale-[0.98]"
                         >
                             Archive
                         </button>
@@ -1022,12 +1022,12 @@ export default function MarketingHub() {
 
             {/* Bulk Archive Dialog */}
             <Dialog open={bulkArchiveOpen} onOpenChange={setBulkArchiveOpen}>
-                <DialogContent className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                <DialogContent className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-md rounded-2xl shadow-xl p-6">
                     <DialogHeader>
                         <DialogTitle className="text-xl font-semibold text-slate-950">
                             Archive Contacts
                         </DialogTitle>
-                        <DialogDescription className="text-slate-500 text-xs mt-1">
+                        <DialogDescription className="text-[#333333] text-xs mt-1">
                             Are you sure you want to archive {selectedIds.size} selected contact(s)?
                             Archiving will remove them from the active list but preserve their interaction logs.
                         </DialogDescription>
@@ -1036,7 +1036,7 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkArchiveOpen(false)}
-                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900"
+                            className="px-4 py-2.5 text-sm font-semibold text-[#222222] hover:text-[#111111]"
                         >
                             Cancel
                         </button>
@@ -1055,14 +1055,14 @@ export default function MarketingHub() {
 
             {/* Bulk Delete Dialog */}
             <Dialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
-                <DialogContent className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                <DialogContent className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-md rounded-2xl shadow-xl p-6">
                     <DialogHeader>
                         <DialogTitle className="text-xl font-semibold text-red-700">
                             Delete Contacts
                         </DialogTitle>
-                        <DialogDescription className="text-slate-500 text-xs mt-1">
+                        <DialogDescription className="text-[#333333] text-xs mt-1">
                             Are you sure you want to delete {selectedIds.size} selected contact(s)?
-                            This action cannot be undone. Type <strong className="text-slate-900">DELETE</strong> to proceed.
+                            This action cannot be undone. Type <strong className="text-[#111111]">DELETE</strong> to proceed.
                         </DialogDescription>
                     </DialogHeader>
                     
@@ -1072,7 +1072,7 @@ export default function MarketingHub() {
                             value={bulkDeleteConfirmInput}
                             onChange={(e) => setBulkDeleteConfirmInput(e.target.value)}
                             placeholder="Type DELETE to confirm"
-                            className="w-full px-4 py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-red-300 focus:outline-none transition-colors"
+                            className="w-full px-4 py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-sm placeholder:text-[#333333] focus:bg-white focus:border-red-300 focus:outline-none transition-colors"
                         />
                     </div>
 
@@ -1080,7 +1080,7 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkDeleteOpen(false)}
-                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900"
+                            className="px-4 py-2.5 text-sm font-semibold text-[#222222] hover:text-[#111111]"
                         >
                             Cancel
                         </button>
@@ -1099,12 +1099,12 @@ export default function MarketingHub() {
 
             {/* Bulk Tag Dialog */}
             <Dialog open={bulkTagOpen} onOpenChange={setBulkTagOpen}>
-                <DialogContent className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-md rounded-2xl shadow-xl p-6">
+                <DialogContent className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-md rounded-2xl shadow-xl p-6">
                     <DialogHeader>
                         <DialogTitle className="text-xl font-semibold text-slate-950">
                             Assign Tags
                         </DialogTitle>
-                        <DialogDescription className="text-slate-500 text-xs mt-1">
+                        <DialogDescription className="text-[#333333] text-xs mt-1">
                             Assign or create tags for {selectedIds.size} selected contact(s).
                             New tags will be merged with their existing tags.
                         </DialogDescription>
@@ -1112,7 +1112,7 @@ export default function MarketingHub() {
 
                     {/* Pre-existing tags multi select */}
                     <div className="mt-4 space-y-3">
-                        <div className="text-[10px] font-semibold tracking-wider font-mono text-slate-400 uppercase">
+                        <div className="text-[10px] font-semibold tracking-wider font-mono text-[#333333] uppercase">
                             Select Tags to Merge:
                         </div>
                         <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto pr-1">
@@ -1132,7 +1132,7 @@ export default function MarketingHub() {
                                         className={`px-3 py-1.5 border rounded-xl text-xs font-medium transition-all ${
                                             active
                                                 ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                : "bg-white text-slate-600 border-[#eaeaea] hover:border-slate-355"
+                                                : "bg-white text-[#222222] border-[#eaeaea] hover:border-slate-355"
                                         }`}
                                     >
                                         #{tag}
@@ -1144,7 +1144,7 @@ export default function MarketingHub() {
                         {/* Inline new tag creator */}
                         <div className="pt-2 border-t border-slate-100">
                             <label className="block">
-                                <span className="text-[10px] font-semibold tracking-wider font-mono text-slate-400 uppercase">
+                                <span className="text-[10px] font-semibold tracking-wider font-mono text-[#333333] uppercase">
                                     Create New Tag:
                                 </span>
                                 <input
@@ -1152,7 +1152,7 @@ export default function MarketingHub() {
                                     value={newBulkTagInput}
                                     onChange={(e) => setNewBulkTagInput(e.target.value)}
                                     placeholder="Enter new tag..."
-                                    className="mt-1.5 w-full px-4 py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-sm placeholder:text-slate-400 focus:bg-white focus:border-slate-350 focus:outline-none transition-colors"
+                                    className="mt-1.5 w-full px-4 py-2.5 bg-slate-50 border border-[#eaeaea] rounded-xl text-sm placeholder:text-[#333333] focus:bg-white focus:border-slate-350 focus:outline-none transition-colors"
                                 />
                             </label>
                         </div>
@@ -1162,7 +1162,7 @@ export default function MarketingHub() {
                         <button
                             type="button"
                             onClick={() => setBulkTagOpen(false)}
-                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900"
+                            className="px-4 py-2.5 text-sm font-semibold text-[#222222] hover:text-[#111111]"
                         >
                             Cancel
                         </button>
@@ -1250,7 +1250,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
     return (
         <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
             <DialogContent
-                className="bg-white border-[#eaeaea] text-slate-900 sm:max-w-lg rounded-2xl shadow-xl overflow-hidden p-0"
+                className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-lg rounded-2xl shadow-xl overflow-hidden p-0"
                 data-testid="marketing-add-client-dialog"
             >
                 <div className="bg-slate-50 border-b border-slate-100 p-6">
@@ -1258,7 +1258,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
                         <DialogTitle className="text-2xl font-light tracking-tight text-slate-950 font-display">
                             Create Client Record
                         </DialogTitle>
-                        <DialogDescription className="text-slate-500 text-xs">
+                        <DialogDescription className="text-[#333333] text-xs">
                             Establish a new corporate relationship file inside your executive CRM.
                         </DialogDescription>
                     </DialogHeader>
@@ -1301,13 +1301,13 @@ function AddClientDialog({ open, onClose, onCreated }) {
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <label className="block">
-                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
                                 <span>Lifecycle Stage</span>
                             </div>
                             <select
                                 value={stage}
                                 onChange={(e) => setStage(e.target.value)}
-                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
+                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                             >
                                 <option value="lead">New Lead</option>
                                 <option value="active">Active partner</option>
@@ -1325,13 +1325,13 @@ function AddClientDialog({ open, onClose, onCreated }) {
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <label className="block">
-                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
                                 <span>Contact Type</span>
                             </div>
                             <select
                                 value={contactType}
                                 onChange={(e) => setContactType(e.target.value)}
-                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
+                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                             >
                                 <option value="">Select Type (optional)</option>
                                 <optgroup label="Brand & Marketing">
@@ -1374,7 +1374,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             onClick={onClose}
                             disabled={saving}
                             data-testid="marketing-add-cancel-btn"
-                            className="px-4 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors disabled:opacity-40"
+                            className="px-4 py-2.5 text-sm font-semibold text-[#222222] hover:text-[#111111] transition-colors disabled:opacity-40"
                         >
                             Cancel
                         </button>
@@ -1586,7 +1586,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
         <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
             <SheetContent
                 side="right"
-                className="w-full sm:max-w-2xl bg-white border-l border-[#eaeaea] text-slate-900 overflow-y-auto shadow-2xl p-0 [&>button]:hidden"
+                className="w-full sm:max-w-2xl bg-white border-l border-[#eaeaea] text-[#111111] overflow-y-auto shadow-2xl p-0 [&>button]:hidden"
                 data-testid="marketing-client-drawer"
             >
                 {client && (
@@ -1600,7 +1600,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                 >
                                     {client.name}
                                 </SheetTitle>
-                                <SheetDescription className="text-slate-500 text-sm sm:text-base font-mono flex items-center gap-2 flex-wrap">
+                                <SheetDescription className="text-[#333333] text-sm sm:text-base font-mono flex items-center gap-2 flex-wrap">
                                     <span>{client.company_name || "Independent Account"}</span>
                                     {client.contact_type && (
                                         <>
@@ -1615,7 +1615,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             <div className="absolute right-5 top-6 sm:top-8 flex items-center gap-2">
                                 <button
                                     onClick={() => setIsEditing(!isEditing)}
-                                    className="p-2 text-slate-400 hover:text-slate-800 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl transition-all shadow-sm bg-white"
+                                    className="p-2 text-[#333333] hover:text-[#111111] border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl transition-all shadow-sm bg-white"
                                     title="Edit Profile"
                                 >
                                     {isEditing ? <Check className="w-4 h-4 text-[#5A7D5A]" /> : <Edit2 className="w-4 h-4" />}
@@ -1624,7 +1624,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     type="button"
                                     onClick={onClose}
                                     data-testid="marketing-drawer-close-btn"
-                                    className="p-2 text-slate-400 hover:text-slate-800 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl transition-all shadow-sm bg-white"
+                                    className="p-2 text-[#333333] hover:text-[#111111] border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl transition-all shadow-sm bg-white"
                                     title="Close Drawer"
                                 >
                                     <X className="w-4 h-4" />
@@ -1638,7 +1638,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             {/* Inline Editing Form Toggle */}
                             {isEditing ? (
                                 <form onSubmit={submitUpdate} className="bg-slate-50/50 border border-[#eaeaea] rounded-2xl p-5 space-y-4 shadow-sm animate-in fade-in duration-200">
-                                    <h4 className="text-xs font-mono font-semibold text-slate-500 uppercase tracking-wider mb-2">Edit Relationship File</h4>
+                                    <h4 className="text-xs font-mono font-semibold text-[#333333] uppercase tracking-wider mb-2">Edit Relationship File</h4>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <FieldInput label="Name" value={editName} onChange={setEditName} required />
                                         <FieldInput label="Company" value={editCompany} onChange={setEditCompany} />
@@ -1649,13 +1649,13 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     </div>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <label className="block">
-                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
                                                 <span>Lifecycle Stage</span>
                                             </div>
                                             <select
                                                 value={editStage}
                                                 onChange={(e) => setEditStage(e.target.value)}
-                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
+                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                                             >
                                                 <option value="lead">New Lead</option>
                                                 <option value="active">Active partner</option>
@@ -1663,13 +1663,13 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             </select>
                                         </label>
                                         <label className="block">
-                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-slate-500 uppercase font-mono mb-1.5 flex justify-between select-none">
+                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
                                                 <span>Contact Type</span>
                                             </div>
                                             <select
                                                 value={editContactType}
                                                 onChange={(e) => setEditContactType(e.target.value)}
-                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
+                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                                             >
                                                 <option value="">Select Type (optional)</option>
                                                 <optgroup label="Brand & Marketing">
@@ -1707,7 +1707,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                         <button
                                             type="button"
                                             onClick={() => setIsEditing(false)}
-                                            className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800"
+                                            className="px-4 py-2 text-xs font-semibold text-[#333333] hover:text-[#111111]"
                                         >
                                             Cancel
                                         </button>
@@ -1725,8 +1725,8 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                 /* Client Intelligence Summary */
                                 <div className="space-y-4">
                                     <div className="flex items-center gap-2">
-                                        <Sparkles className="w-4 h-4 text-slate-400" />
-                                        <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">Relationship Scorecard</h3>
+                                        <Sparkles className="w-4 h-4 text-[#333333]" />
+                                        <h3 className="text-xs font-mono font-semibold text-[#333333] uppercase tracking-wider">Relationship Scorecard</h3>
                                     </div>
                                     
                                     {/* Action Deck Bar (Prominent Apple/Linear-style Contact actions) */}
@@ -1745,18 +1745,18 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                 {showPhone && (
                                                     <a
                                                         href={`tel:${client.phone_number}`}
-                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#eaeaea]/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#eaeaea]/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-[#111111] shadow-sm transition-all duration-200 active:scale-[0.97]"
                                                     >
-                                                        <Phone className="w-4 h-4 text-slate-600" />
+                                                        <Phone className="w-4 h-4 text-[#222222]" />
                                                         <span>Call</span>
                                                     </a>
                                                 )}
                                                 {showEmail && (
                                                     <a
                                                         href={`mailto:${client.email}`}
-                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#eaeaea]/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-slate-800 shadow-sm transition-all duration-200 active:scale-[0.97]"
+                                                        className="flex flex-col items-center justify-center gap-1.5 py-3.5 border border-[#eaeaea]/80 bg-white hover:bg-slate-50 rounded-xl text-[11px] font-semibold text-[#111111] shadow-sm transition-all duration-200 active:scale-[0.97]"
                                                     >
-                                                        <Mail className="w-4 h-4 text-slate-600" />
+                                                        <Mail className="w-4 h-4 text-[#222222]" />
                                                         <span>Email</span>
                                                     </a>
                                                 )}
@@ -1777,7 +1777,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     {/* Mini Scorecard row */}
                                     <div className="grid grid-cols-3 gap-3">
                                         <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
-                                            <div className="text-[10px] font-semibold font-mono text-slate-400 uppercase mb-1">Status</div>
+                                            <div className="text-[10px] font-semibold font-mono text-[#333333] uppercase mb-1">Status</div>
                                             <div className="flex items-center justify-center">
                                                 {health && (
                                                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider border ${health.color}`}>
@@ -1787,11 +1787,11 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             </div>
                                         </div>
                                         <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
-                                            <div className="text-[10px] font-semibold font-mono text-slate-400 uppercase mb-1">Logs</div>
-                                            <div className="text-xs font-semibold text-slate-800">{client.interaction_count || 0} times</div>
+                                            <div className="text-[10px] font-semibold font-mono text-[#333333] uppercase mb-1">Logs</div>
+                                            <div className="text-xs font-semibold text-[#111111]">{client.interaction_count || 0} times</div>
                                         </div>
                                         <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
-                                            <div className="text-[10px] font-semibold font-mono text-slate-400 uppercase mb-1">Value</div>
+                                            <div className="text-[10px] font-semibold font-mono text-[#333333] uppercase mb-1">Value</div>
                                             <div className="text-xs font-mono font-bold text-[#B89B5E]">
                                                 {client.value ? formatCurrency(client.value) : "—"}
                                             </div>
@@ -1801,25 +1801,25 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     {/* Relationship card details */}
                                     <div className="bg-slate-50/30 border border-[#eaeaea]/60 rounded-2xl p-4 space-y-2.5 text-xs">
                                         <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
-                                            <span className="text-slate-500 font-medium">Email Address</span>
-                                            <span className="font-mono text-slate-800 font-semibold break-all">{client.email || "—"}</span>
+                                            <span className="text-[#333333] font-medium">Email Address</span>
+                                            <span className="font-mono text-[#111111] font-semibold break-all">{client.email || "—"}</span>
                                         </div>
                                         <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
-                                            <span className="text-slate-500 font-medium">Phone Number</span>
-                                            <span className="font-mono text-slate-800 font-semibold">{client.phone_number || "—"}</span>
+                                            <span className="text-[#333333] font-medium">Phone Number</span>
+                                            <span className="font-mono text-[#111111] font-semibold">{client.phone_number || "—"}</span>
                                         </div>
                                         <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
-                                            <span className="text-slate-500 font-medium">Tags Registered</span>
-                                            <span className="font-mono text-slate-600 font-medium">
+                                            <span className="text-[#333333] font-medium">Tags Registered</span>
+                                            <span className="font-mono text-[#222222] font-medium">
                                                 {client.tags && client.tags.length > 0 ? client.tags.map(t => `#${t}`).join(" ") : "—"}
                                             </span>
                                         </div>
                                         <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
-                                            <span className="text-slate-500 font-medium">Last Contacted</span>
-                                            <span className="text-slate-800 font-semibold">
+                                            <span className="text-[#333333] font-medium">Last Contacted</span>
+                                            <span className="text-[#111111] font-semibold">
                                                 {formatDateTime(client.last_contacted_date)}
                                                 {daysSince !== null && (
-                                                    <span className="ml-1.5 text-slate-400 text-[10px] font-mono">({daysSince}d ago)</span>
+                                                    <span className="ml-1.5 text-[#333333] text-[10px] font-mono">({daysSince}d ago)</span>
                                                 )}
                                             </span>
                                         </div>
@@ -1831,7 +1831,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             <AlertCircle className="w-4 h-4 text-red-600" />
                                             <span>Relationship Management</span>
                                         </div>
-                                        <p className="text-[11px] text-slate-500 leading-normal select-none">
+                                        <p className="text-[11px] text-[#333333] leading-normal select-none">
                                             Manage the visibility of this contact record. Deleting or archiving will remove it from your active workspace.
                                         </p>
                                         <div className="flex gap-2">
@@ -1840,7 +1840,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                 onClick={handleArchive}
                                                 disabled={updating}
                                                 data-testid="marketing-drawer-archive-btn"
-                                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-40"
+                                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-xl text-xs font-semibold text-[#111111] bg-white hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-40"
                                             >
                                                 Archive Client
                                             </button>
@@ -1861,8 +1861,8 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             {/* Log interaction form */}
                             <div className="space-y-4">
                                 <div className="flex items-center gap-2">
-                                    <MessageSquare className="w-4 h-4 text-slate-400" />
-                                    <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">Log Communication</h3>
+                                    <MessageSquare className="w-4 h-4 text-[#333333]" />
+                                    <h3 className="text-xs font-mono font-semibold text-[#333333] uppercase tracking-wider">Log Communication</h3>
                                 </div>
                                 <form
                                     onSubmit={submitInteraction}
@@ -1882,7 +1882,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                     className={`inline-flex items-center gap-2 px-4 py-2 text-xs rounded-xl border transition-colors duration-150 font-medium ${
                                                         active
                                                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                                                            : "bg-white text-slate-600 border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50"
+                                                            : "bg-white text-[#222222] border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50"
                                                     }`}
                                                 >
                                                     <Icon className="w-3.5 h-3.5" />
@@ -1899,9 +1899,9 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             rows={3}
                                             maxLength={4000}
                                             data-testid="marketing-interaction-notes"
-                                            className="w-full bg-slate-50/50 border border-[#eaeaea] rounded-2xl px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-[#d4d4d4] focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none shadow-inner"
+                                            className="w-full bg-slate-50/50 border border-[#eaeaea] rounded-2xl px-4 py-3 text-sm text-[#111111] placeholder:text-[#333333] focus:bg-white focus:border-[#d4d4d4] focus:ring-1 focus:ring-slate-300 focus:outline-none transition-colors resize-none shadow-inner"
                                         />
-                                        <div className="absolute right-3.5 bottom-3 text-[10px] font-mono text-slate-400">
+                                        <div className="absolute right-3.5 bottom-3 text-[10px] font-mono text-[#333333]">
                                             {notes.length}/4000
                                         </div>
                                     </div>
@@ -1919,8 +1919,8 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             {/* Interaction timeline */}
                             <div className="space-y-4 pb-6">
                                 <div className="flex items-center gap-2">
-                                    <Clock className="w-4 h-4 text-slate-400" />
-                                    <h3 className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider">
+                                    <Clock className="w-4 h-4 text-[#333333]" />
+                                    <h3 className="text-xs font-mono font-semibold text-[#333333] uppercase tracking-wider">
                                         Timeline Records ({interactions.length})
                                     </h3>
                                 </div>
@@ -1930,7 +1930,7 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     </div>
                                 ) : interactions.length === 0 ? (
                                     <div
-                                        className="text-xs text-slate-400 py-10 text-center border-2 border-dashed border-[#eaeaea] rounded-2xl bg-slate-50/20"
+                                        className="text-xs text-[#333333] py-10 text-center border-2 border-dashed border-[#eaeaea] rounded-2xl bg-slate-50/20"
                                         data-testid="marketing-history-empty"
                                     >
                                         <MessageSquare className="w-7 h-7 mx-auto mb-2 text-slate-300" />
@@ -1954,17 +1954,17 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                                     <div className="bg-white border border-[#eaeaea] rounded-2xl p-4 ml-2 shadow-[0_2px_10px_rgba(15,23,42,0.02)] hover:shadow-md transition-shadow duration-200">
                                                         <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b border-slate-50 pb-2">
                                                             <div className="flex items-center gap-1.5">
-                                                                <Icon className="w-3.5 h-3.5 text-slate-500" />
-                                                                <span className="text-xs font-semibold text-slate-700 capitalize">
+                                                                <Icon className="w-3.5 h-3.5 text-[#333333]" />
+                                                                <span className="text-xs font-semibold text-[#111111] capitalize">
                                                                     {it.type}
                                                                 </span>
                                                             </div>
-                                                            <span className="font-mono text-[9px] text-slate-400">
+                                                            <span className="font-mono text-[9px] text-[#333333]">
                                                                 {formatDateTime(it.created_at)}
                                                             </span>
                                                         </div>
                                                         {it.notes && (
-                                                            <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+                                                            <div className="text-sm text-[#111111] leading-relaxed whitespace-pre-wrap break-words">
                                                                 {it.notes}
                                                             </div>
                                                         )}

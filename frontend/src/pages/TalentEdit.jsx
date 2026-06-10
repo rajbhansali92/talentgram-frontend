@@ -32,6 +32,8 @@ import {
     FOLLOWER_TIERS,
 } from "@/lib/talentSchema";
 import WorkLinksDisplay from "@/components/WorkLinksDisplay";
+import { normalizeInstagramHandle } from "@/lib/mediaUtils";
+
 
 
 const emptyTalent = {
@@ -274,6 +276,7 @@ export default function TalentEdit() {
         try {
             const payload = {
                 ...talent,
+                instagram_handle: normalizeInstagramHandle(talent.instagram_handle) || null,
                 dob: talent.dob || null,
                 age: talent.dob
                     ? calcAge(talent.dob)
@@ -835,6 +838,11 @@ export default function TalentEdit() {
                         label="Instagram Handle"
                         value={talent.instagram_handle}
                         onChange={(v) => updateTalent({ instagram_handle: v })}
+                        onBlur={() => {
+                            if (talent.instagram_handle) {
+                                updateTalent({ instagram_handle: normalizeInstagramHandle(talent.instagram_handle) });
+                            }
+                        }}
                         placeholder="@username"
                         disabled={!isEditing}
                     />

@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 # --------------------------------------------------------------------------
 # Config
@@ -516,6 +516,30 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_instagram_handle(raw: Optional[str]) -> Optional[str]:
+    """Reduce any Instagram input to a plain raw username.
+
+    Handles every common paste format gracefully:
+      - https://www.instagram.com/username/  →  "username"
+      - instagram.com/username               →  "username"
+      - @username                            →  "username"
+      - "  username  "                       →  "username"
+      - None / ""                            →  None
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    # Strip http(s):// + optional www + instagram.com/
+    s = re.sub(r'^https?://(www\.)?instagram\.com/', '', s, flags=re.IGNORECASE)
+    # Strip bare domain without protocol
+    s = re.sub(r'^(www\.)?instagram\.com/', '', s, flags=re.IGNORECASE)
+    # Strip leading @
+    s = s.lstrip('@')
+    # Remove query params and trailing path segments
+    s = s.split('?')[0].split('/')[0].strip()
+    return s or None
+
+
 def compute_age(dob: Optional[str]) -> Optional[int]:
     """Compute age from ISO date string 'YYYY-MM-DD'. Returns None if invalid."""
     if not dob:
@@ -1008,6 +1032,12 @@ class TalentIn(BaseModel):
     interested_in: List[str] = Field(default_factory=list)
     # Internal: admin-assigned structured tags [{"id": uuid, "name": label}]
     tags: List[Dict[str, str]] = Field(default_factory=list)
+
+    @field_validator('instagram_handle', mode='before')
+    @classmethod
+    def _normalize_ig(cls, v):
+        """Auto-normalize any pasted Instagram URL/handle to a raw username."""
+        return normalize_instagram_handle(v)
 
 
 class TalentOut(TalentIn):

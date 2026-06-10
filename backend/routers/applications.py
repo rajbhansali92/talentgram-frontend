@@ -43,6 +43,7 @@ from core import (
     decode_submitter,
     make_token,
     media_url,
+    normalize_instagram_handle,
     video_poster_url,
     update_talent_cover_cache,
 )
@@ -546,7 +547,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         "location": fd.get("location") or None,
         "ethnicity": fd.get("ethnicity") or None,
         "gender": fd.get("gender") or None,
-        "instagram_handle": fd.get("instagram_handle") or None,
+        "instagram_handle": normalize_instagram_handle(fd.get("instagram_handle") or None),
         "instagram_followers": fd.get("instagram_followers") or None,
         "bio": fd.get("bio") or None,
         "work_links": [w for w in (fd.get("work_links") or []) if isinstance(w, str) and w.strip()],

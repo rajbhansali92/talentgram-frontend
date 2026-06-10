@@ -15,6 +15,7 @@ import {
     UserPlus,
     Filter,
 } from "lucide-react";
+import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 
 const STATUS_FILTERS = [
     { key: "all", label: "All" },
@@ -249,7 +250,14 @@ function ApplicationCard({ app, onReview, onDecide }) {
                     {fd.instagram_handle && (
                         <div className="flex items-center gap-1.5 truncate">
                             <Instagram className="w-3 h-3 shrink-0 text-black/45" />
-                            <span>{fd.instagram_handle}</span>
+                            <a
+                                href={instagramProfileUrl(fd.instagram_handle)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="truncate hover:underline"
+                            >
+                                {displayInstagramHandle(fd.instagram_handle)}
+                            </a>
                         </div>
                     )}
                 </div>
@@ -422,7 +430,7 @@ function ReviewModal({ app, onClose, onDecide }) {
                         <Field label="Height" value={fd.height} />
                         <Field label="Gender" value={fd.gender} />
                         <Field label="Location" value={fd.location} />
-                        <Field label="Instagram" value={fd.instagram_handle} />
+                        <Field label="Instagram" value={fd.instagram_handle ? displayInstagramHandle(fd.instagram_handle) : null} />
                         <Field label="Followers" value={fd.instagram_followers} />
                         {fd.bio && (
                             <div className="md:col-span-3 border-t border-black/[0.08] pt-4">

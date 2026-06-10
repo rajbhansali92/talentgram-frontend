@@ -233,7 +233,7 @@ const PipelineFilters = memo(function PipelineFilters({
                 <button
                     type="button"
                     onClick={() => onMobileDrawerOpenChange?.(!isMobileDrawerOpen)}
-                    className="px-4 py-2 border border-black/[0.08] rounded-xl bg-white flex items-center gap-2 text-[13px] font-semibold text-slate-700 min-h-[44px] active:scale-[0.98] transition-all shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
+                    className="px-4 py-2 border border-black/[0.08] rounded-xl bg-white flex items-center gap-2 text-[13px] font-semibold text-[#111111] min-h-[44px] active:scale-[0.98] transition-all shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
                 >
                     <svg className="w-4 h-4 text-black/55" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
@@ -259,7 +259,7 @@ const PipelineFilters = memo(function PipelineFilters({
                                 <button
                                     type="button"
                                     onClick={() => onMobileDrawerOpenChange?.(false)}
-                                    className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 focus:outline-none min-w-[36px] min-h-[36px] flex items-center justify-center bg-black/[0.02] hover:bg-black/[0.05]"
+                                    className="p-1.5 rounded-full text-[#333333] hover:text-[#222222] focus:outline-none min-w-[36px] min-h-[36px] flex items-center justify-center bg-black/[0.02] hover:bg-black/[0.05]"
                                     aria-label="Close filters"
                                 >
                                     <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -267,8 +267,8 @@ const PipelineFilters = memo(function PipelineFilters({
                                     </svg>
                                 </button>
                                 <div>
-                                    <h3 className="font-bold text-sm text-slate-800 tracking-wide uppercase font-mono">Filters</h3>
-                                    <span className="text-[10px] text-slate-400 font-mono">
+                                    <h3 className="font-bold text-sm text-[#111111] tracking-wide uppercase font-mono">Filters</h3>
+                                    <span className="text-[10px] text-[#333333] font-mono">
                                         {showingCount ? `${filteredCount.toLocaleString()}/${totalCount.toLocaleString()} matched` : `${totalCount.toLocaleString()} total`}
                                     </span>
                                 </div>
@@ -305,7 +305,7 @@ const PipelineFilters = memo(function PipelineFilters({
                                                 key={opt.value}
                                                 type="button"
                                                 onClick={() => onStatusFocus(opt.value)}
-                                                className={`px-3 py-2 rounded-xl text-[11px] font-semibold uppercase tracking-wide transition-all min-h-[38px] ${active ? "bg-neutral-900 text-white shadow-sm" : "bg-slate-50 border border-slate-200 text-slate-600 active:bg-slate-100"}`}
+                                                className={`px-3 py-2 rounded-xl text-[11px] font-semibold uppercase tracking-wide transition-all min-h-[38px] ${active ? "bg-neutral-900 text-white shadow-sm" : "bg-slate-50 border border-slate-200 text-[#222222] active:bg-slate-100"}`}
                                             >
                                                 {opt.label}
                                             </button>
@@ -327,7 +327,7 @@ const PipelineFilters = memo(function PipelineFilters({
                                                 key={opt.value}
                                                 type="button"
                                                 onClick={() => onHasSubmission(opt.value)}
-                                                className={`px-3 py-2 rounded-xl text-[11px] font-semibold uppercase tracking-wide transition-all min-h-[38px] ${active ? "bg-neutral-900 text-white shadow-sm" : "bg-slate-50 border border-slate-200 text-slate-600 active:bg-slate-100"}`}
+                                                className={`px-3 py-2 rounded-xl text-[11px] font-semibold uppercase tracking-wide transition-all min-h-[38px] ${active ? "bg-neutral-900 text-white shadow-sm" : "bg-slate-50 border border-slate-200 text-[#222222] active:bg-slate-100"}`}
                                             >
                                                 {opt.label}
                                             </button>
@@ -349,7 +349,7 @@ const PipelineFilters = memo(function PipelineFilters({
                                                 key={opt.value}
                                                 type="button"
                                                 onClick={() => onHasIg(opt.value)}
-                                                className={`px-3 py-2 rounded-xl text-[11px] font-semibold uppercase tracking-wide transition-all min-h-[38px] ${active ? "bg-neutral-900 text-white shadow-sm" : "bg-slate-50 border border-slate-200 text-slate-600 active:bg-slate-100"}`}
+                                                className={`px-3 py-2 rounded-xl text-[11px] font-semibold uppercase tracking-wide transition-all min-h-[38px] ${active ? "bg-neutral-900 text-white shadow-sm" : "bg-slate-50 border border-slate-200 text-[#222222] active:bg-slate-100"}`}
                                             >
                                                 {opt.label}
                                             </button>

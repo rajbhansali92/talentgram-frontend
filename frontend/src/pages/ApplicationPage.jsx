@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
-import { thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
+import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
 import {
     Select,
@@ -581,7 +581,7 @@ export default function ApplicationPage() {
                             <Label>
                                 Age {form.dob ? "(auto calculated)" : ""}
                             </Label>
-                            <div className="mt-2 h-11 flex items-center px-4 bg-slate-50 rounded-lg border border-[#eaeaea] text-[15px] text-slate-500 font-mono">
+                            <div className="mt-2 h-11 flex items-center px-4 bg-slate-50 rounded-lg border border-[#eaeaea] text-[15px] text-[#333333] font-mono">
                                 {form.dob ? (calcAge(form.dob) ?? "—") : "—"}
                             </div>
                         </div>
@@ -661,6 +661,14 @@ export default function ApplicationPage() {
                                         instagram_handle: e.target.value,
                                     })
                                 }
+                                onBlur={() => {
+                                    if (form.instagram_handle) {
+                                        setForm((prev) => ({
+                                            ...prev,
+                                            instagram_handle: normalizeInstagramHandle(form.instagram_handle)
+                                        }));
+                                    }
+                                }}
                                 placeholder="@yourhandle"
                                 data-testid="form-instagram"
                                 className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"

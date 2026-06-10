@@ -25,13 +25,13 @@ import {
 
 const ROLE_BADGE = {
     admin: "bg-amber-50 text-amber-700 border border-amber-200 group-hover:border-amber-300 transition-colors",
-    team: "bg-slate-50 text-slate-600 border border-slate-200 group-hover:border-slate-300 transition-colors",
+    team: "bg-slate-50 text-[#222222] border border-slate-200 group-hover:border-slate-300 transition-colors",
 };
 
 const STATUS_BADGE = {
     active: "bg-emerald-50 text-emerald-700 border border-emerald-200",
     invited: "bg-sky-50 text-sky-700 border border-sky-200",
-    disabled: "bg-slate-50 text-slate-500 border border-slate-200",
+    disabled: "bg-slate-50 text-[#333333] border border-slate-200",
 };
 
 function StatCard({ label, value, icon: Icon, testid }) {
@@ -61,14 +61,14 @@ function StatCard({ label, value, icon: Icon, testid }) {
         >
             <div className="absolute inset-0 bg-gradient-to-br from-slate-50/0 via-slate-50/0 to-slate-50/30 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
             <div className="flex items-center gap-4 relative z-10">
-                <div className="w-10 h-10 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 group-hover:text-slate-600 group-hover:border-slate-300 transition-all duration-300">
+                <div className="w-10 h-10 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-[#333333] group-hover:text-[#222222] group-hover:border-slate-300 transition-all duration-300">
                     <Icon className="w-4 h-4" />
                 </div>
                 <div>
-                    <div className="text-[10px] tracking-[0.2em] uppercase text-slate-400 group-hover:text-slate-500 transition-colors">
+                    <div className="text-[10px] tracking-[0.2em] uppercase text-[#333333] group-hover:text-[#333333] transition-colors">
                         {label}
                     </div>
-                    <div className="font-display text-3xl mt-1 tracking-tight text-slate-900">
+                    <div className="font-display text-3xl mt-1 tracking-tight text-[#111111]">
                         {displayValue}
                     </div>
                 </div>
@@ -151,20 +151,20 @@ function InviteModal({ open, onClose, onInvited }) {
                             onClose();
                             reset();
                         }}
-                        className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 transition-all hover:scale-110"
+                        className="absolute top-5 right-5 text-[#333333] hover:text-[#222222] transition-all hover:scale-110"
                         data-testid="invite-close-btn"
                     >
                         <X className="w-4 h-4" />
                     </button>
                     <p className="eyebrow mb-1 text-amber-600 text-[11px] tracking-[0.2em] uppercase font-semibold">Invite</p>
-                    <h2 className="font-display text-3xl tracking-tight mb-8 text-slate-900">
+                    <h2 className="font-display text-3xl tracking-tight mb-8 text-[#111111]">
                         Add a team member
                     </h2>
 
                     {!result ? (
                         <>
                             <label className="block mb-6">
-                                <span className="text-[11px] tracking-[0.2em] uppercase text-slate-500">
+                                <span className="text-[11px] tracking-[0.2em] uppercase text-[#333333]">
                                     Full name
                                 </span>
                                 <input
@@ -172,11 +172,11 @@ function InviteModal({ open, onClose, onInvited }) {
                                     onChange={(e) => setName(e.target.value)}
                                     placeholder="e.g. Raj Khanna"
                                     data-testid="invite-name"
-                                    className="mt-2 w-full border-b border-slate-200 focus:border-amber-400 outline-none py-3 text-sm transition-all bg-transparent text-slate-900 placeholder:text-slate-400"
+                                    className="mt-2 w-full border-b border-slate-200 focus:border-amber-400 outline-none py-3 text-sm transition-all bg-transparent text-[#111111] placeholder:text-[#333333]"
                                 />
                             </label>
                             <label className="block mb-6">
-                                <span className="text-[11px] tracking-[0.2em] uppercase text-slate-500">
+                                <span className="text-[11px] tracking-[0.2em] uppercase text-[#333333]">
                                     Email
                                 </span>
                                 <input
@@ -185,17 +185,17 @@ function InviteModal({ open, onClose, onInvited }) {
                                     onChange={(e) => setEmail(e.target.value)}
                                     placeholder="name@talentgram.com"
                                     data-testid="invite-email"
-                                    className="mt-2 w-full border-b border-slate-200 focus:border-amber-400 outline-none py-3 text-sm transition-all bg-transparent text-slate-900 placeholder:text-slate-400"
+                                    className="mt-2 w-full border-b border-slate-200 focus:border-amber-400 outline-none py-3 text-sm transition-all bg-transparent text-[#111111] placeholder:text-[#333333]"
                                 />
                             </label>
                             <label className="block mb-8">
-                                <span className="text-[11px] tracking-[0.2em] uppercase text-slate-500">
+                                <span className="text-[11px] tracking-[0.2em] uppercase text-[#333333]">
                                     Role
                                 </span>
                                 <div className="mt-2" data-testid="invite-role-wrap">
                                     <Select value={role} onValueChange={setRole}>
                                         <SelectTrigger
-                                            className="w-full bg-white border-slate-200 text-slate-900 hover:bg-slate-50 transition-all"
+                                            className="w-full bg-white border-slate-200 text-[#111111] hover:bg-slate-50 transition-all"
                                             data-testid="invite-role-trigger"
                                         >
                                             <SelectValue />
@@ -223,14 +223,14 @@ function InviteModal({ open, onClose, onInvited }) {
                                 <Check className="w-4 h-4 text-emerald-600" /> Invite created for{" "}
                                 <span className="font-medium">{result.user.email}</span>
                             </div>
-                            <p className="text-xs text-slate-600 mb-3">
+                            <p className="text-xs text-[#222222] mb-3">
                                 Send this link to the invitee. It is single-use and
                                 expires on {formatDate(result.expires_at)}.
                             </p>
                             <div className="flex items-center gap-2 border border-slate-200 bg-slate-50 rounded-lg p-3 mb-6">
-                                <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <Mail className="w-3.5 h-3.5 text-[#333333] shrink-0" />
                                 <code
-                                    className="text-xs font-mono flex-1 truncate text-slate-700"
+                                    className="text-xs font-mono flex-1 truncate text-[#111111]"
                                     data-testid="invite-url"
                                 >
                                     {inviteUrl}
@@ -238,7 +238,7 @@ function InviteModal({ open, onClose, onInvited }) {
                                 <button
                                     type="button"
                                     onClick={copy}
-                                    className="text-xs px-3 py-1.5 border border-slate-200 hover:border-slate-300 rounded-md inline-flex items-center gap-1 transition-all hover:bg-slate-100 text-slate-700"
+                                    className="text-xs px-3 py-1.5 border border-slate-200 hover:border-slate-300 rounded-md inline-flex items-center gap-1 transition-all hover:bg-slate-100 text-[#111111]"
                                     data-testid="invite-copy-btn"
                                 >
                                     <Copy className="w-3 h-3" /> Copy
@@ -249,7 +249,7 @@ function InviteModal({ open, onClose, onInvited }) {
                                     onClose();
                                     reset();
                                 }}
-                                className="w-full border border-slate-200 hover:border-slate-300 py-3.5 rounded-lg text-sm transition-all hover:bg-slate-50 text-slate-700"
+                                className="w-full border border-slate-200 hover:border-slate-300 py-3.5 rounded-lg text-sm transition-all hover:bg-slate-50 text-[#111111]"
                                 data-testid="invite-done-btn"
                             >
                                 Done
@@ -279,13 +279,13 @@ function ResetLinkModal({ open, onClose, payload }) {
                 <div className="absolute inset-0 bg-gradient-to-br from-slate-50 via-transparent to-white/40 rounded-2xl blur-xl" />
                 <div className="relative bg-white border border-slate-200 shadow-2xl rounded-2xl p-6 md:p-8">
                     <p className="eyebrow mb-1 text-amber-600 text-[11px] tracking-[0.2em] uppercase font-semibold">Password reset</p>
-                    <h2 className="font-display text-2xl tracking-tight mb-4 text-slate-900">Single-use reset link</h2>
-                    <p className="text-sm text-slate-600 mb-6 leading-relaxed">
-                        Send this link to <span className="text-slate-900 font-medium">{payload.email}</span> over a secure channel.
+                    <h2 className="font-display text-2xl tracking-tight mb-4 text-[#111111]">Single-use reset link</h2>
+                    <p className="text-sm text-[#222222] mb-6 leading-relaxed">
+                        Send this link to <span className="text-[#111111] font-medium">{payload.email}</span> over a secure channel.
                         It expires in 1 hour and can only be used once. We never store the raw token.
                     </p>
                     <div
-                        className="text-xs font-mono break-all bg-slate-50 border border-slate-200 rounded-lg p-4 mb-6 text-slate-700"
+                        className="text-xs font-mono break-all bg-slate-50 border border-slate-200 rounded-lg p-4 mb-6 text-[#111111]"
                         data-testid="reset-link-value"
                     >
                         {fullLink}
@@ -293,7 +293,7 @@ function ResetLinkModal({ open, onClose, payload }) {
                     <div className="flex gap-3">
                         <button
                             onClick={copy}
-                            className="flex-1 border border-slate-200 hover:border-slate-300 py-3.5 rounded-lg text-sm inline-flex items-center justify-center gap-2 transition-all hover:bg-slate-50 text-slate-700"
+                            className="flex-1 border border-slate-200 hover:border-slate-300 py-3.5 rounded-lg text-sm inline-flex items-center justify-center gap-2 transition-all hover:bg-slate-50 text-[#111111]"
                             data-testid="reset-link-copy-btn"
                         >
                             <Copy className="w-3.5 h-3.5" /> Copy link
@@ -427,10 +427,10 @@ export default function UserManagement() {
                             <p className="text-amber-600 text-[11px] tracking-[0.3em] uppercase mb-2 font-semibold">
                                 Settings
                             </p>
-                            <h1 className="font-display text-5xl md:text-6xl tracking-tight text-slate-900">
+                            <h1 className="font-display text-5xl md:text-6xl tracking-tight text-[#111111]">
                                 User Management
                             </h1>
-                            <p className="text-slate-500 mt-3 text-sm">
+                            <p className="text-[#333333] mt-3 text-sm">
                                 Control access, roles, and team permissions
                             </p>
                         </div>
@@ -476,7 +476,7 @@ export default function UserManagement() {
                     <div className="hidden lg:block animate-in fade-in duration-700 delay-200">
                         <div className="relative rounded-xl overflow-hidden bg-white border border-slate-200 shadow-sm">
                             {/* Table Header */}
-                            <div className="grid grid-cols-[1.5fr_2fr_0.8fr_0.8fr_1fr_1.2fr] gap-4 px-6 py-4 text-[10px] font-semibold tracking-[0.2em] uppercase text-slate-500 border-b border-slate-200 bg-slate-50/50">
+                            <div className="grid grid-cols-[1.5fr_2fr_0.8fr_0.8fr_1fr_1.2fr] gap-4 px-6 py-4 text-[10px] font-semibold tracking-[0.2em] uppercase text-[#333333] border-b border-slate-200 bg-slate-50/50">
                                 <div>Name</div>
                                 <div>Email</div>
                                 <div>Role</div>
@@ -489,7 +489,7 @@ export default function UserManagement() {
                             {loading && (
                                 <div className="p-16 text-center">
                                     <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-600" />
-                                    <p className="text-slate-500 text-sm mt-3">Loading users...</p>
+                                    <p className="text-[#333333] text-sm mt-3">Loading users...</p>
                                 </div>
                             )}
                             {!loading && sorted.length === 0 && (
@@ -497,7 +497,7 @@ export default function UserManagement() {
                                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center">
                                         <UsersIcon className="w-8 h-8 text-slate-300" />
                                     </div>
-                                    <p className="text-slate-500 text-sm">No users yet. Invite your first team member.</p>
+                                    <p className="text-[#333333] text-sm">No users yet. Invite your first team member.</p>
                                 </div>
                             )}
                             {!loading && sorted.map((u) => {
@@ -510,10 +510,10 @@ export default function UserManagement() {
                                         data-testid={`user-row-${u.id}`}
                                     >
                                         <div className="flex items-center gap-2">
-                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center text-xs font-medium text-slate-700">
+                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center text-xs font-medium text-[#111111]">
                                                 {u.name?.[0]?.toUpperCase() || u.email[0]?.toUpperCase()}
                                             </div>
-                                            <div className="truncate font-medium text-slate-900">
+                                            <div className="truncate font-medium text-[#111111]">
                                                 {u.name || "—"}
                                                 {self && (
                                                     <span className="ml-2 text-[10px] font-mono text-amber-600">
@@ -522,7 +522,7 @@ export default function UserManagement() {
                                                 )}
                                             </div>
                                         </div>
-                                        <div className="truncate font-mono text-xs text-slate-600">
+                                        <div className="truncate font-mono text-xs text-[#222222]">
                                             {u.email}
                                         </div>
                                         <div>
@@ -553,7 +553,7 @@ export default function UserManagement() {
                                                 {u.status}
                                             </span>
                                         </div>
-                                        <div className="text-xs font-mono text-slate-500">
+                                        <div className="text-xs font-mono text-[#333333]">
                                             {formatDate(u.last_login)}
                                         </div>
                                         <div className="flex items-center gap-1.5 justify-end">
@@ -562,7 +562,7 @@ export default function UserManagement() {
                                                 onClick={() => toggleDisable(u)}
                                                 title={u.status === "disabled" ? "Enable user" : "Disable user"}
                                                 data-testid={`disable-btn-${u.id}`}
-                                                className="p-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 hover:scale-105 text-slate-600"
+                                                className="p-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 hover:scale-105 text-[#222222]"
                                             >
                                                 {u.status === "disabled" ? (
                                                     <Check className="w-3.5 h-3.5" />
@@ -575,7 +575,7 @@ export default function UserManagement() {
                                                 onClick={() => resetPw(u)}
                                                 title="Reset password"
                                                 data-testid={`reset-pw-btn-${u.id}`}
-                                                className="p-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 hover:scale-105 text-slate-600"
+                                                className="p-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 hover:scale-105 text-[#222222]"
                                             >
                                                 <KeyRound className="w-3.5 h-3.5" />
                                             </button>
@@ -584,7 +584,7 @@ export default function UserManagement() {
                                                 onClick={() => remove(u)}
                                                 title="Delete user"
                                                 data-testid={`delete-btn-${u.id}`}
-                                                className="p-2 rounded-md border border-slate-200 hover:border-red-300 hover:text-red-600 bg-white hover:bg-red-50 transition-all disabled:opacity-30 hover:scale-105 text-slate-600"
+                                                className="p-2 rounded-md border border-slate-200 hover:border-red-300 hover:text-red-600 bg-white hover:bg-red-50 transition-all disabled:opacity-30 hover:scale-105 text-[#222222]"
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                             </button>
@@ -600,7 +600,7 @@ export default function UserManagement() {
                         {loading && (
                             <div className="p-16 text-center">
                                 <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-600" />
-                                <p className="text-slate-500 text-sm mt-3">Loading users...</p>
+                                <p className="text-[#333333] text-sm mt-3">Loading users...</p>
                             </div>
                         )}
                         {!loading && sorted.length === 0 && (
@@ -608,7 +608,7 @@ export default function UserManagement() {
                                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center">
                                     <UsersIcon className="w-8 h-8 text-slate-300" />
                                 </div>
-                                <p className="text-slate-500 text-sm">No users yet. Invite your first team member.</p>
+                                <p className="text-[#333333] text-sm">No users yet. Invite your first team member.</p>
                             </div>
                         )}
                         {!loading && sorted.map((u) => {
@@ -622,11 +622,11 @@ export default function UserManagement() {
                                 >
                                     <div className="flex items-start justify-between mb-4">
                                         <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center text-sm font-medium text-slate-700">
+                                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 border border-slate-200 flex items-center justify-center text-sm font-medium text-[#111111]">
                                                 {u.name?.[0]?.toUpperCase() || u.email[0]?.toUpperCase()}
                                             </div>
                                             <div>
-                                                <div className="font-semibold text-slate-900">
+                                                <div className="font-semibold text-[#111111]">
                                                     {u.name || "—"}
                                                     {self && (
                                                         <span className="ml-2 text-[10px] font-mono text-amber-600">
@@ -634,7 +634,7 @@ export default function UserManagement() {
                                                         </span>
                                                     )}
                                                 </div>
-                                                <div className="font-mono text-xs text-slate-600 mt-0.5">
+                                                <div className="font-mono text-xs text-[#222222] mt-0.5">
                                                     {u.email}
                                                 </div>
                                             </div>
@@ -648,7 +648,7 @@ export default function UserManagement() {
                                     </div>
                                     <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
                                         <div>
-                                            <div className="text-[10px] tracking-wider uppercase text-slate-500 mb-1">Role</div>
+                                            <div className="text-[10px] tracking-wider uppercase text-[#333333] mb-1">Role</div>
                                             <Select
                                                 value={u.role}
                                                 onValueChange={(r) =>
@@ -669,8 +669,8 @@ export default function UserManagement() {
                                             </Select>
                                         </div>
                                         <div>
-                                            <div className="text-[10px] tracking-wider uppercase text-slate-500 mb-1">Last login</div>
-                                            <div className="font-mono text-xs text-slate-600">
+                                            <div className="text-[10px] tracking-wider uppercase text-[#333333] mb-1">Last login</div>
+                                            <div className="font-mono text-xs text-[#222222]">
                                                 {formatDate(u.last_login)}
                                             </div>
                                         </div>
@@ -681,7 +681,7 @@ export default function UserManagement() {
                                             onClick={() => toggleDisable(u)}
                                             title={u.status === "disabled" ? "Enable user" : "Disable user"}
                                             data-testid={`disable-btn-${u.id}`}
-                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-slate-700"
+                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-[#111111]"
                                         >
                                             {u.status === "disabled" ? (
                                                 <Check className="w-3.5 h-3.5" />
@@ -695,7 +695,7 @@ export default function UserManagement() {
                                             onClick={() => resetPw(u)}
                                             title="Reset password"
                                             data-testid={`reset-pw-btn-${u.id}`}
-                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-slate-700"
+                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-[#111111]"
                                         >
                                             <KeyRound className="w-3.5 h-3.5" />
                                             Reset
@@ -705,7 +705,7 @@ export default function UserManagement() {
                                             onClick={() => remove(u)}
                                             title="Delete user"
                                             data-testid={`delete-btn-${u.id}`}
-                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-red-300 hover:text-red-600 bg-white hover:bg-red-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-slate-700"
+                                            className="flex-1 py-2 rounded-md border border-slate-200 hover:border-red-300 hover:text-red-600 bg-white hover:bg-red-50 transition-all disabled:opacity-30 text-sm inline-flex items-center justify-center gap-2 text-[#111111]"
                                         >
                                             <Trash2 className="w-3.5 h-3.5" />
                                             Delete

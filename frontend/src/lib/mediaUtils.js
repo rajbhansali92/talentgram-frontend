@@ -72,3 +72,53 @@ export function resolveTalentCover(talent) {
     
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// Instagram handle normalization utilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalizes any Instagram handle input to a raw username string (no @ or URL prefix).
+ *
+ * Handles all common paste formats:
+ *   - "https://www.instagram.com/username/"  →  "username"
+ *   - "instagram.com/username"               →  "username"
+ *   - "@username"                            →  "username"
+ *   - "  username  "                         →  "username"
+ *   - ""  / null / undefined                 →  ""
+ *
+ * Use this before storing to the backend (or inside form onChange handlers).
+ */
+export function normalizeInstagramHandle(raw) {
+    if (!raw || typeof raw !== "string") return "";
+    let s = raw.trim();
+    // Strip full URL prefixes (http/https, with or without www)
+    s = s.replace(/^https?:\/\/(www\.)?instagram\.com\//i, "");
+    // Strip bare domain prefix without protocol
+    s = s.replace(/^(www\.)?instagram\.com\//i, "");
+    // Strip leading @ symbol
+    s = s.replace(/^@/, "");
+    // Remove trailing slash and any query params
+    s = s.split("?")[0].split("/")[0].trim();
+    return s;
+}
+
+/**
+ * Formats a stored raw username for display as "@username".
+ * Returns "" if the handle is empty.
+ */
+export function displayInstagramHandle(username) {
+    if (!username || typeof username !== "string") return "";
+    const raw = normalizeInstagramHandle(username);
+    return raw ? `@${raw}` : "";
+}
+
+/**
+ * Returns the canonical Instagram profile URL for a stored raw username.
+ * Returns "" if the handle is empty.
+ */
+export function instagramProfileUrl(username) {
+    if (!username || typeof username !== "string") return "";
+    const raw = normalizeInstagramHandle(username);
+    return raw ? `https://www.instagram.com/${raw}/` : "";
+}

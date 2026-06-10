@@ -17,6 +17,7 @@ import {
     normaliseStage,
     VISIBLE_ACTIONS_PER_CARD,
 } from "./constants";
+import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 // Icons from lucide-react for consistency and maintainability
 import {
     User,
@@ -60,7 +61,7 @@ const PRIORITY_VARIANTS = {
     blue: 'bg-blue-50 text-blue-700 border-blue-200',
     purple: 'bg-purple-50 text-purple-700 border-purple-200',
     indigo: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-    gray: 'bg-gray-50 text-gray-600 border-gray-200',
+    gray: 'bg-gray-50 text-[#222222] border-gray-200',
 };
 
 const FRESHNESS_CONFIG = {
@@ -531,9 +532,14 @@ const PipelineCard = memo(function PipelineCard({
 
                         {/* IG handle — secondary identity line */}
                         {displayIg && (
-                            <p className="text-[10px] text-black/40 truncate mt-0.5">
-                                @{displayIg}
-                            </p>
+                            <a
+                                href={instagramProfileUrl(displayIg)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[10px] text-black/40 hover:text-black/60 truncate mt-0.5 transition-colors duration-100"
+                            >
+                                {displayInstagramHandle(displayIg)}
+                            </a>
                         )}
 
                         {/* Priority + Freshness row — workflow metadata, visually subordinate to identity */}

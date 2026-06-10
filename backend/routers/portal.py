@@ -2,8 +2,8 @@
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-from core import db, enrich_talent, _now, update_talent_cover_cache
+from pydantic import BaseModel, Field, field_validator
+from core import db, enrich_talent, _now, update_talent_cover_cache, normalize_instagram_handle
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["portal"])
@@ -24,6 +24,12 @@ class PortalProfileUpdateIn(BaseModel):
     instagram_handle: Optional[str] = None
     work_links: List[str] = Field(default_factory=list)
     interested_in: List[str] = Field(default_factory=list)
+
+    @field_validator('instagram_handle', mode='before')
+    @classmethod
+    def _normalize_ig(cls, v):
+        """Auto-normalize any pasted Instagram URL/handle to a raw username."""
+        return normalize_instagram_handle(v)
 
 
 @router.post("/portal/lookup")

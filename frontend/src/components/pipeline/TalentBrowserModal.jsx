@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award, List, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
+import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 
 /* ---------------------------------------------------------------------
  * TalentBrowserModal — Elite Enterprise ATS-Grade Talent Browser
@@ -836,14 +837,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     {/* Header */}
                     <div className="flex items-center justify-between px-4 sm:px-6 py-4 sm:py-5 border-b border-gray-200 shrink-0 bg-white">
                         <div>
-                            <p className="text-[10px] sm:text-xs font-medium tracking-wide text-gray-400 uppercase mb-1 inline-flex items-center gap-1.5">
+                            <p className="text-[10px] sm:text-xs font-medium tracking-wide text-[#333333] uppercase mb-1 inline-flex items-center gap-1.5">
                                 Global Roster · {filterOptions.totalCount.toLocaleString()} talents
                                 <button
                                     type="button"
                                     onClick={handleForceRefresh}
                                     data-testid="talent-browser-refresh"
                                     title="Refresh talent roster"
-                                    className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors inline-flex items-center"
+                                    className="p-1 rounded text-[#333333] hover:text-[#222222] hover:bg-gray-100 transition-colors inline-flex items-center"
                                 >
                                     <svg className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
@@ -852,7 +853,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             </p>
                             <h2
                                 id="talent-browser-title"
-                                className="text-lg sm:text-2xl font-semibold text-gray-900 tracking-tight"
+                                className="text-lg sm:text-2xl font-semibold text-[#111111] tracking-tight"
                             >
                                 Add Talents to Pipeline
                             </h2>
@@ -868,8 +869,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                         data-testid={`talent-browser-density-${mode}`}
                                         className={`px-3 py-1.5 rounded-md transition-all ${
                                             densityMode === mode
-                                                ? "bg-white text-gray-900 shadow-sm"
-                                                : "text-gray-500 hover:text-gray-700"
+                                                ? "bg-white text-[#111111] shadow-sm"
+                                                : "text-[#333333] hover:text-[#111111]"
                                         }`}
                                     >
                                         {mode === "compact" && <Minus size={14} />}
@@ -883,7 +884,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 type="button"
                                 onClick={onClose}
                                 data-testid="talent-browser-close"
-                                className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                                className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center text-[#333333] hover:text-[#222222] hover:bg-gray-100 transition-colors"
                             >
                                 <X size={16} strokeWidth={1.6} />
                             </button>
@@ -896,7 +897,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             {/* Search + Actions */}
                             <div className="flex items-center gap-2 sm:gap-3">
                                 <div className="relative flex-1">
-                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 sm:w-4 sm:h-4 text-gray-400" />
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#333333]" />
                                     <input
                                         ref={searchInputRef}
                                         type="text"
@@ -904,14 +905,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                         onChange={(e) => handleSearchChange(e.target.value)}
                                         placeholder="Search talents..."
                                         data-testid="talent-browser-search"
-                                        className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-gray-300 focus:ring-1 focus:ring-gray-200 transition-all"
+                                        className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm text-[#111111] placeholder:text-[#333333] focus:outline-none focus:border-gray-300 focus:ring-1 focus:ring-gray-200 transition-all"
                                     />
                                 </div>
                                 
                                 {/* Mobile filter button */}
                                 <button
                                     onClick={() => setShowMobileFilters(true)}
-                                    className="sm:hidden px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors"
+                                    className="sm:hidden px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-[#222222] hover:bg-gray-100 transition-colors"
                                 >
                                     <Sliders size={16} />
                                     {activeFilterCount > 0 && (
@@ -928,8 +929,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                         onClick={() => handleViewModeChange("grid")}
                                         className={`p-1.5 rounded transition-all ${
                                             viewMode === "grid"
-                                                ? "bg-white text-gray-900 shadow-sm border border-gray-205/30"
-                                                : "text-gray-500 hover:text-gray-700"
+                                                ? "bg-white text-[#111111] shadow-sm border border-gray-205/30"
+                                                : "text-[#333333] hover:text-[#111111]"
                                         }`}
                                         title="Grid View"
                                     >
@@ -940,8 +941,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                         onClick={() => handleViewModeChange("list")}
                                         className={`p-1.5 rounded transition-all ${
                                             viewMode === "list"
-                                                ? "bg-white text-gray-900 shadow-sm border border-gray-205/30"
-                                                : "text-gray-500 hover:text-gray-700"
+                                                ? "bg-white text-[#111111] shadow-sm border border-gray-205/30"
+                                                : "text-[#333333] hover:text-[#111111]"
                                         }`}
                                         title="List View"
                                     >
@@ -952,7 +953,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 {/* Advanced filters toggle */}
                                 <button
                                     onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-                                    className="hidden sm:flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 transition-colors"
+                                    className="hidden sm:flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[#222222] hover:bg-gray-100 transition-colors"
                                 >
                                     <Sliders size={14} />
                                     Filters
@@ -967,7 +968,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 {selected.size > 0 && (
                                     <button
                                         onClick={clearSelection}
-                                        className="hidden sm:block px-3 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                                        className="hidden sm:block px-3 py-2 rounded-lg text-sm text-[#222222] hover:text-[#111111] hover:bg-gray-100 transition-colors"
                                     >
                                         Clear ({selected.size})
                                     </button>
@@ -979,7 +980,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                 {/* Active filter chips */}
                                 {filtersActive && (
                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                        <span className="text-[10px] text-gray-400 hidden sm:inline">Active:</span>
+                                        <span className="text-[10px] text-[#333333] hidden sm:inline">Active:</span>
                                         {filters.gender !== "any" && <FilterChip label={`Gender: ${filters.gender}`} onRemove={() => setFilter("gender", "any")} />}
                                         {filters.ethnicity !== "any" && <FilterChip label={`Ethnicity: ${filters.ethnicity}`} onRemove={() => setFilter("ethnicity", "any")} />}
                                         {filters.location !== "any" && <FilterChip label={`Location: ${filters.location}`} onRemove={() => setFilter("location", "any")} />}
@@ -1012,7 +1013,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                                 />
                                             );
                                         })}
-                                        <button onClick={resetFilters} className="text-[10px] text-gray-400 hover:text-gray-600 underline-offset-2 hover:underline">
+                                        <button onClick={resetFilters} className="text-[10px] text-[#333333] hover:text-[#222222] underline-offset-2 hover:underline">
                                             Clear all
                                         </button>
                                     </div>
@@ -1022,7 +1023,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                     {/* Popular Tags Row (dynamic chip filter sync) */}
                                     {frequentTags.length > 0 && (
                                         <div className="flex items-center gap-1.5 flex-wrap">
-                                            <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Popular Tags:</span>
+                                            <span className="text-[10px] text-[#333333] font-medium uppercase tracking-wide">Popular Tags:</span>
                                             {frequentTags.map(tag => {
                                                 const isSelected = filters.internalTags.includes(tag.id);
                                                 return (
@@ -1039,7 +1040,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                                         className={`px-2 py-0.5 rounded-full text-[10px] font-medium tracking-tight transition-all border ${
                                                             isSelected
                                                                 ? "bg-gray-900 border-gray-900 text-white"
-                                                                : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300"
+                                                                : "bg-white border-gray-200 text-[#222222] hover:bg-gray-50 hover:border-gray-300"
                                                         }`}
                                                     >
                                                         {tag.name} <span className="text-[8px] opacity-60">({tag.count})</span>
@@ -1183,8 +1184,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             {showSaveSearch && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
                     <div className="bg-white rounded-xl max-w-md w-full p-6">
-                        <h3 className="text-lg font-semibold text-gray-900 mb-2">Save search</h3>
-                        <p className="text-sm text-gray-500 mb-4">Save current filters as a preset for quick access</p>
+                        <h3 className="text-lg font-semibold text-[#111111] mb-2">Save search</h3>
+                        <p className="text-sm text-[#333333] mb-4">Save current filters as a preset for quick access</p>
                         <input
                             type="text"
                             value={savedSearchName}
@@ -1194,7 +1195,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                             autoFocus
                         />
                         <div className="flex gap-2 justify-end">
-                            <button onClick={() => setShowSaveSearch(false)} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
+                            <button onClick={() => setShowSaveSearch(false)} className="px-4 py-2 text-sm text-[#222222]">Cancel</button>
                             <button onClick={saveCurrentSearch} className="px-4 py-2 text-sm bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors">Save</button>
                         </div>
                     </div>
@@ -1239,7 +1240,7 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
                         {selected && <Check size={10} className="text-white" strokeWidth={3} />}
                     </div>
                 ) : (
-                    <div className="text-[10px] text-gray-400 font-mono shrink-0 w-4.5 text-center">In</div>
+                    <div className="text-[10px] text-[#333333] font-mono shrink-0 w-4.5 text-center">In</div>
                 )}
 
                 {/* Profile Image */}
@@ -1247,38 +1248,44 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
                     {imageUrl ? (
                         <img src={imageUrl} alt="" className="w-full h-full object-cover" />
                     ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-xs">?</div>
+                        <div className="w-full h-full flex items-center justify-center bg-gray-200 text-[#333333] text-xs">?</div>
                     )}
                 </div>
 
                 {/* Text details */}
                 <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-gray-900 truncate">{talent.name}</span>
+                        <span className="text-sm font-semibold text-[#111111] truncate">{talent.name}</span>
                         {showIntelligence && talent.matchScore && (
-                            <span className="px-1.5 py-0.5 rounded bg-gray-100 text-[9px] font-mono text-gray-700 font-medium shrink-0">{talent.matchScore}% match</span>
+                            <span className="px-1.5 py-0.5 rounded bg-gray-100 text-[9px] font-mono text-[#111111] font-medium shrink-0">{talent.matchScore}% match</span>
                         )}
                     </div>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500 mt-0.5">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#333333] mt-0.5">
                         {talent.age && <span>{talent.age} yrs</span>}
                         {talent.height && <span>· {talent.height}</span>}
                         {talent.location && <span className="truncate">· {talent.location.split(",")[0]}</span>}
                         {talent.instagram_handle && (
-                            <span className="text-gray-400 truncate flex items-center gap-1">
-                                · <Instagram size={10} /> {talent.instagram_handle}
-                            </span>
+                            <a
+                                href={instagramProfileUrl(talent.instagram_handle)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="truncate flex items-center gap-1 hover:text-[#111111] transition-colors"
+                            >
+                                · <Instagram size={10} /> {displayInstagramHandle(talent.instagram_handle)}
+                            </a>
                         )}
                     </div>
                     {/* Tags */}
                     {talent.tags && talent.tags.length > 0 && (
                         <div className="flex items-center gap-1 flex-wrap mt-1">
                             {talent.tags.slice(0, 3).map(tag => (
-                                <span key={tag.id} className="px-1.5 py-0.5 rounded bg-gray-50 border border-gray-150 text-[9px] text-gray-600 font-medium">
+                                <span key={tag.id} className="px-1.5 py-0.5 rounded bg-gray-50 border border-gray-150 text-[9px] text-[#222222] font-medium">
                                     {tag.name}
                                 </span>
                             ))}
                             {talent.tags.length > 3 && (
-                                <span className="text-[9px] text-gray-400">+{talent.tags.length - 3}</span>
+                                <span className="text-[9px] text-[#333333]">+{talent.tags.length - 3}</span>
                             )}
                         </div>
                     )}
@@ -1293,7 +1300,7 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
                         e.stopPropagation();
                         onPreview?.(talent);
                     }}
-                    className="p-2 rounded-lg text-gray-400 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                    className="p-2 rounded-lg text-[#333333] hover:text-[#111111] hover:bg-gray-100 transition-colors"
                     title="Quick View"
                 >
                     <Eye size={16} />
@@ -1325,12 +1332,12 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0 bg-white sticky top-0 z-10">
                 <div>
-                    <span className="text-[10px] font-semibold tracking-wider text-gray-400 uppercase">Talent Preview</span>
-                    <h3 className="text-lg font-bold text-gray-900">{talent.name || "Unnamed Talent"}</h3>
+                    <span className="text-[10px] font-semibold tracking-wider text-[#333333] uppercase">Talent Preview</span>
+                    <h3 className="text-lg font-bold text-[#111111]">{talent.name || "Unnamed Talent"}</h3>
                 </div>
                 <button
                     onClick={onClose}
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                    className="p-1.5 rounded-lg text-[#333333] hover:text-[#222222] hover:bg-gray-100 transition-colors"
                 >
                     <X size={18} />
                 </button>
@@ -1350,25 +1357,30 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                 {/* Primary Stats */}
                 <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-xl p-4 border border-gray-150">
                     <div>
-                        <span className="text-[10px] text-gray-400 uppercase font-medium">Age</span>
-                        <div className="text-sm font-semibold text-gray-800">{talent.age ? `${talent.age} years` : "—"}</div>
+                        <span className="text-[10px] text-[#333333] uppercase font-medium">Age</span>
+                        <div className="text-sm font-semibold text-[#111111]">{talent.age ? `${talent.age} years` : "—"}</div>
                     </div>
                     <div>
-                        <span className="text-[10px] text-gray-400 uppercase font-medium">Height</span>
-                        <div className="text-sm font-semibold text-gray-800">{talent.height || "—"}</div>
+                        <span className="text-[10px] text-[#333333] uppercase font-medium">Height</span>
+                        <div className="text-sm font-semibold text-[#111111]">{talent.height || "—"}</div>
                     </div>
                     <div>
-                        <span className="text-[10px] text-gray-400 uppercase font-medium">Location</span>
-                        <div className="text-sm font-semibold text-gray-800">{talent.location || "—"}</div>
+                        <span className="text-[10px] text-[#333333] uppercase font-medium">Location</span>
+                        <div className="text-sm font-semibold text-[#111111]">{talent.location || "—"}</div>
                     </div>
                     <div>
-                        <span className="text-[10px] text-gray-400 uppercase font-medium">Instagram</span>
-                        <div className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
+                        <span className="text-[10px] text-[#333333] uppercase font-medium">Instagram</span>
+                        <div className="text-sm font-semibold text-[#111111] flex items-center gap-1.5">
                             {talent.instagram_handle ? (
-                                <>
-                                    <Instagram size={12} className="text-gray-500" />
-                                    <span className="truncate">{talent.instagram_handle}</span>
-                                </>
+                                <a
+                                    href={instagramProfileUrl(talent.instagram_handle)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flex items-center gap-1.5 hover:opacity-70 transition-opacity"
+                                >
+                                    <Instagram size={12} className="text-[#333333]" />
+                                    <span className="truncate">{displayInstagramHandle(talent.instagram_handle)}</span>
+                                </a>
                             ) : "—"}
                         </div>
                     </div>
@@ -1377,10 +1389,10 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                 {/* Categories */}
                 {talent.interested_in && talent.interested_in.length > 0 && (
                     <div className="space-y-2">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Categories</h4>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Categories</h4>
                         <div className="flex flex-wrap gap-1.5">
                             {talent.interested_in.map(cat => (
-                                <span key={cat} className="px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 text-xs font-medium border border-gray-200">
+                                <span key={cat} className="px-2.5 py-1 rounded-full bg-gray-100 text-[#111111] text-xs font-medium border border-gray-200">
                                     {cat}
                                 </span>
                             ))}
@@ -1391,10 +1403,10 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                 {/* Dynamic Tags */}
                 {talent.tags && talent.tags.length > 0 && (
                     <div className="space-y-2">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Talent Tags</h4>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Talent Tags</h4>
                         <div className="flex flex-wrap gap-1.5">
                             {talent.tags.map(tag => (
-                                <span key={tag.id} className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200 text-xs text-gray-600 font-medium">
+                                <span key={tag.id} className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200 text-xs text-[#222222] font-medium">
                                     {tag.name}
                                 </span>
                             ))}
@@ -1405,7 +1417,7 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                 {/* Introduction Video */}
                 {video && (
                     <div className="space-y-2">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Intro Video</h4>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Intro Video</h4>
                         <div className="aspect-video w-full rounded-xl overflow-hidden bg-black border border-gray-200 shadow-inner">
                             <video src={video.url} controls className="w-full h-full object-contain" />
                         </div>
@@ -1415,7 +1427,7 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                 {/* Portfolio images */}
                 {images.length > 0 && (
                     <div className="space-y-3">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Portfolio media ({images.length})</h4>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Portfolio media ({images.length})</h4>
                         <div className="grid grid-cols-2 gap-2">
                             {images.map((img, idx) => (
                                 <div key={idx} className="relative aspect-[3/4] rounded-lg overflow-hidden bg-gray-50 border border-gray-200">
@@ -1428,10 +1440,10 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
 
                 {/* Availability status */}
                 <div className="space-y-2">
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Availability</h4>
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Availability</h4>
                     <div className="flex items-center gap-2">
                         <span className={`w-2.5 h-2.5 rounded-full ${talent.availability_status === "available" ? "bg-green-500" : "bg-amber-500"}`} />
-                        <span className="text-xs font-medium text-gray-700 uppercase tracking-wide">
+                        <span className="text-xs font-medium text-[#111111] uppercase tracking-wide">
                             {talent.availability_status === "available" ? "Active / Available" : "Booked / Hold"}
                         </span>
                     </div>
@@ -1491,7 +1503,7 @@ class ErrorBoundary extends React.Component {
                 <div className="fixed inset-0 flex items-center justify-center bg-white z-50">
                     <div className="text-center p-8">
                         <p className="text-red-600 text-sm mb-2">Something went wrong</p>
-                        <button onClick={() => window.location.reload()} className="text-sm text-gray-600 underline">
+                        <button onClick={() => window.location.reload()} className="text-sm text-[#222222] underline">
                             Reload page
                         </button>
                     </div>
@@ -1614,7 +1626,7 @@ const TagsFilterInput = ({ selectedTagIds, globalTags, onChange }) => {
                     onFocus={() => setIsOpen(true)}
                     onKeyDown={handleKeyDown}
                     placeholder={selectedTagIds.length === 0 ? "Search internal tags..." : ""}
-                    className="flex-1 bg-transparent border-none outline-none text-sm text-gray-900 placeholder:text-gray-400 p-0.5 min-w-[120px] focus:ring-0 focus:border-none focus:outline-none"
+                    className="flex-1 bg-transparent border-none outline-none text-sm text-[#111111] placeholder:text-[#333333] p-0.5 min-w-[120px] focus:ring-0 focus:border-none focus:outline-none"
                 />
             </div>
 
@@ -1629,8 +1641,8 @@ const TagsFilterInput = ({ selectedTagIds, globalTags, onChange }) => {
                             onMouseEnter={() => setHighlightedIndex(idx)}
                             className={`w-full text-left px-4 py-2 text-sm transition-colors ${
                                 idx === highlightedIndex 
-                                    ? "bg-gray-100 text-gray-900" 
-                                    : "text-gray-700 hover:bg-gray-50"
+                                    ? "bg-gray-100 text-[#111111]" 
+                                    : "text-[#111111] hover:bg-gray-50"
                             }`}
                         >
                             {tag.name}
@@ -1640,7 +1652,7 @@ const TagsFilterInput = ({ selectedTagIds, globalTags, onChange }) => {
             )}
             
             {isOpen && query.trim() !== "" && filteredTags.length === 0 && (
-                <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl px-4 py-3 text-sm text-gray-400 text-center">
+                <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl px-4 py-3 text-sm text-[#333333] text-center">
                     No matching tags found
                 </div>
             )}
@@ -1657,19 +1669,19 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
         <div className="border-t border-gray-100 bg-gray-50/50 p-5 space-y-5 animate-slide-down">
             {/* Header row with Title & Close/Reset buttons */}
             <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Casting Filter Engine</h3>
+                <h3 className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Casting Filter Engine</h3>
                 <div className="flex items-center gap-3">
                     <button 
                         type="button"
                         onClick={resetFilters}
-                        className="text-xs text-gray-500 hover:text-gray-905 font-medium transition-colors"
+                        className="text-xs text-[#333333] hover:text-gray-905 font-medium transition-colors"
                     >
                         Reset All Filters
                     </button>
                     <button 
                         type="button"
                         onClick={onClose}
-                        className="text-xs text-gray-500 hover:text-gray-905 font-medium transition-colors"
+                        className="text-xs text-[#333333] hover:text-gray-905 font-medium transition-colors"
                     >
                         Hide Filters
                     </button>
@@ -1679,7 +1691,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
             {/* ROW 3 (Demographics) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Gender</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Gender</label>
                     <select
                         value={filters.gender}
                         onChange={(e) => setFilter("gender", e.target.value)}
@@ -1691,7 +1703,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                 </div>
                 
                 <div>
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Ethnicity</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Ethnicity</label>
                     <select
                         value={filters.ethnicity}
                         onChange={(e) => setFilter("ethnicity", e.target.value)}
@@ -1703,7 +1715,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                 </div>
                 
                 <div>
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Location</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Location</label>
                     <select
                         value={filters.location}
                         onChange={(e) => setFilter("location", e.target.value)}
@@ -1718,7 +1730,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
             {/* ROW 4 (Physical & Outreach) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Age Range</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Age Range</label>
                     <div className="flex gap-2 mt-1.5">
                         <input 
                             type="number" 
@@ -1727,7 +1739,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                             placeholder="Min" 
                             className="w-full px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300" 
                         />
-                        <span className="text-gray-400 self-center font-medium">–</span>
+                        <span className="text-[#333333] self-center font-medium">–</span>
                         <input 
                             type="number" 
                             value={filters.ageMax} 
@@ -1739,7 +1751,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                 </div>
 
                 <div>
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Height Range</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Height Range</label>
                     <div className="flex gap-2 mt-1.5">
                         <select
                             value={filters.heightMin}
@@ -1749,7 +1761,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                             <option value="">Min</option>
                             {HEIGHT_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                         </select>
-                        <span className="text-gray-400 self-center font-medium">–</span>
+                        <span className="text-[#333333] self-center font-medium">–</span>
                         <select
                             value={filters.heightMax}
                             onChange={(e) => setFilter("heightMax", e.target.value)}
@@ -1762,7 +1774,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                 </div>
 
                 <div>
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Instagram Followers</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Instagram Followers</label>
                     <select
                         value={filters.minFollowers}
                         onChange={(e) => setFilter("minFollowers", Number(e.target.value))}
@@ -1776,15 +1788,15 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
             {/* ROW 5 (Interested In Categories) */}
             <div className="pt-2 border-t border-gray-100">
                 <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Interested In</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Interested In</label>
                     <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
                         <button
                             type="button"
                             onClick={() => setFilter("interestedInMatchMode", "OR")}
                             className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
                                 filters.interestedInMatchMode === "OR" 
-                                    ? "bg-white text-gray-900 shadow-sm" 
-                                    : "text-gray-500 hover:text-gray-700"
+                                    ? "bg-white text-[#111111] shadow-sm" 
+                                    : "text-[#333333] hover:text-[#111111]"
                             }`}
                         >
                             ANY (OR)
@@ -1794,8 +1806,8 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                             onClick={() => setFilter("interestedInMatchMode", "AND")}
                             className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
                                 filters.interestedInMatchMode === "AND" 
-                                    ? "bg-white text-gray-900 shadow-sm" 
-                                    : "text-gray-500 hover:text-gray-700"
+                                    ? "bg-white text-[#111111] shadow-sm" 
+                                    : "text-[#333333] hover:text-[#111111]"
                             }`}
                         >
                             ALL (AND)
@@ -1819,7 +1831,7 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                                 className={`px-4.5 py-1.5 rounded-full text-xs font-medium border transition-all ${
                                     isSelected 
                                         ? "bg-gray-900 border-gray-900 text-white shadow-sm" 
-                                        : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300"
+                                        : "bg-white border-gray-200 text-[#222222] hover:bg-gray-50 hover:border-gray-300"
                                 }`}
                             >
                                 {cat}
@@ -1832,15 +1844,15 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
             {/* ROW 6 (Internal Tags Autocomplete) */}
             <div className="pt-2 border-t border-gray-100">
                 <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Internal Tags Filter</label>
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Internal Tags Filter</label>
                     <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
                         <button
                             type="button"
                             onClick={() => setFilter("tagMatchMode", "OR")}
                             className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
                                 filters.tagMatchMode === "OR" 
-                                    ? "bg-white text-gray-900 shadow-sm" 
-                                    : "text-gray-500 hover:text-gray-700"
+                                    ? "bg-white text-[#111111] shadow-sm" 
+                                    : "text-[#333333] hover:text-[#111111]"
                             }`}
                         >
                             ANY (OR)
@@ -1850,8 +1862,8 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                             onClick={() => setFilter("tagMatchMode", "AND")}
                             className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
                                 filters.tagMatchMode === "AND" 
-                                    ? "bg-white text-gray-900 shadow-sm" 
-                                    : "text-gray-500 hover:text-gray-700"
+                                    ? "bg-white text-[#111111] shadow-sm" 
+                                    : "text-[#333333] hover:text-[#111111]"
                             }`}
                         >
                             ALL (AND)
@@ -1888,7 +1900,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
         <div className="fixed inset-0 z-50 flex items-end bg-black/50">
             <div className="bg-white rounded-t-2xl w-full max-h-[85vh] overflow-y-auto animate-slide-up flex flex-col">
                 <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-4 flex justify-between items-center shrink-0">
-                    <h3 className="font-semibold text-gray-900 text-base">Filters</h3>
+                    <h3 className="font-semibold text-[#111111] text-base">Filters</h3>
                     <div className="flex gap-3">
                         <button 
                             type="button"
@@ -1896,14 +1908,14 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                                 onReset();
                                 setLocalFilters(FILTER_DEFAULTS);
                             }} 
-                            className="text-xs text-gray-500 hover:text-gray-900 font-medium"
+                            className="text-xs text-[#333333] hover:text-[#111111] font-medium"
                         >
                             Reset
                         </button>
                         <button 
                             type="button"
                             onClick={onClose} 
-                            className="w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
+                            className="w-8 h-8 rounded-full flex items-center justify-center text-[#333333] hover:text-[#222222] hover:bg-gray-100 transition-all"
                         >
                             <X size={18} />
                         </button>
@@ -1913,7 +1925,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                 <div className="p-4 space-y-5 overflow-y-auto flex-1 pb-10">
                     {/* Gender */}
                     <div>
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Gender</label>
+                        <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Gender</label>
                         <div className="flex flex-wrap gap-2 mt-1.5">
                             {["any", ...filterOptions.genders].map(g => (
                                 <button 
@@ -1923,7 +1935,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                                     className={`px-4 py-1.5 rounded-full text-xs font-medium border transition-all ${
                                         localFilters.gender === g 
                                             ? "bg-gray-900 border-gray-900 text-white shadow-sm" 
-                                            : "bg-white border-gray-200 text-gray-600"
+                                            : "bg-white border-gray-200 text-[#222222]"
                                     }`}
                                 >
                                     {g === "any" ? "Any" : g}
@@ -1934,7 +1946,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                     
                     {/* Ethnicity */}
                     <div>
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Ethnicity</label>
+                        <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Ethnicity</label>
                         <select 
                             value={localFilters.ethnicity} 
                             onChange={(e) => setLocalFilter("ethnicity", e.target.value)} 
@@ -1947,7 +1959,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
 
                     {/* Location */}
                     <div>
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Location</label>
+                        <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Location</label>
                         <select 
                             value={localFilters.location} 
                             onChange={(e) => setLocalFilter("location", e.target.value)} 
@@ -1960,7 +1972,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                     
                     {/* Age Range */}
                     <div>
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Age Range</label>
+                        <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Age Range</label>
                         <div className="flex gap-2 mt-1.5">
                             <input 
                                 type="number" 
@@ -1969,7 +1981,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                                 placeholder="Min" 
                                 className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm" 
                             />
-                            <span className="text-gray-400 self-center font-medium">–</span>
+                            <span className="text-[#333333] self-center font-medium">–</span>
                             <input 
                                 type="number" 
                                 value={localFilters.ageMax} 
@@ -1982,7 +1994,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
 
                     {/* Height Range */}
                     <div>
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Height Range</label>
+                        <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Height Range</label>
                         <div className="flex gap-2 mt-1.5">
                             <select
                                 value={localFilters.heightMin}
@@ -1992,7 +2004,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                                 <option value="">Min</option>
                                 {HEIGHT_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                             </select>
-                            <span className="text-gray-400 self-center font-medium">–</span>
+                            <span className="text-[#333333] self-center font-medium">–</span>
                             <select
                                 value={localFilters.heightMax}
                                 onChange={(e) => setLocalFilter("heightMax", e.target.value)}
@@ -2006,7 +2018,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                     
                     {/* Followers */}
                     <div>
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Instagram Followers</label>
+                        <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Instagram Followers</label>
                         <select 
                             value={localFilters.minFollowers} 
                             onChange={(e) => setLocalFilter("minFollowers", Number(e.target.value))} 
@@ -2019,11 +2031,11 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                     {/* Interested In */}
                     <div>
                         <div className="flex items-center justify-between mb-1.5">
-                            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Interested In</label>
+                            <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Interested In</label>
                             <button
                                 type="button"
                                 onClick={() => setLocalFilter("interestedInMatchMode", localFilters.interestedInMatchMode === "OR" ? "AND" : "OR")}
-                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-gray-700 font-semibold"
+                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-[#111111] font-semibold"
                             >
                                 Mode: {localFilters.interestedInMatchMode}
                             </button>
@@ -2045,7 +2057,7 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                                         className={`px-4 py-1.5 rounded-full text-xs font-medium border transition-all ${
                                             isSelected 
                                                 ? "bg-gray-900 border-gray-900 text-white shadow-sm" 
-                                                : "bg-white border-gray-200 text-gray-600"
+                                                : "bg-white border-gray-200 text-[#222222]"
                                         }`}
                                     >
                                         {cat}
@@ -2058,11 +2070,11 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                     {/* Internal Tags */}
                     <div>
                         <div className="flex items-center justify-between mb-1.5">
-                            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Internal Tags</label>
+                            <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Internal Tags</label>
                             <button
                                 type="button"
                                 onClick={() => setLocalFilter("tagMatchMode", localFilters.tagMatchMode === "OR" ? "AND" : "OR")}
-                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-gray-700 font-semibold"
+                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-[#111111] font-semibold"
                             >
                                 Mode: {localFilters.tagMatchMode}
                             </button>
@@ -2094,9 +2106,9 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
 // ============================================================================
 
 const FilterChip = ({ label, onRemove }) => (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 text-[11px]">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-[#111111] text-[11px]">
         {label}
-        <button onClick={onRemove} className="hover:text-gray-900"><X size={10} /></button>
+        <button onClick={onRemove} className="hover:text-[#111111]"><X size={10} /></button>
     </span>
 );
 
@@ -2162,7 +2174,7 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
                                 e.stopPropagation();
                                 onPreview?.(talent);
                             }}
-                            className="px-3 py-1.5 bg-white text-gray-900 rounded-lg text-xs font-semibold hover:bg-gray-100 transition-colors shadow-md flex items-center gap-1.5 active:scale-95 transform"
+                            className="px-3 py-1.5 bg-white text-[#111111] rounded-lg text-xs font-semibold hover:bg-gray-100 transition-colors shadow-md flex items-center gap-1.5 active:scale-95 transform"
                         >
                             <Eye size={12} />
                             <span>Quick View</span>
@@ -2178,7 +2190,7 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
                             e.stopPropagation();
                             onPreview?.(talent);
                         }}
-                        className="absolute bottom-2 left-2 w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm shadow flex items-center justify-center text-gray-700 active:scale-95 transition-all z-10 animate-fade-in"
+                        className="absolute bottom-2 left-2 w-7 h-7 rounded-full bg-white/90 backdrop-blur-sm shadow flex items-center justify-center text-[#111111] active:scale-95 transition-all z-10 animate-fade-in"
                         aria-label="Preview talent"
                     >
                         <Eye size={14} />
@@ -2206,31 +2218,37 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
             
             {/* Content */}
             <div className={config.padding}>
-                <h3 className={`${config.titleSize} font-medium text-gray-900 truncate mb-0.5`}>{talent.name || "Unnamed Talent"}</h3>
+                <h3 className={`${config.titleSize} font-medium text-[#111111] truncate mb-0.5`}>{talent.name || "Unnamed Talent"}</h3>
                 {(talent.age || talent.height) && (
-                    <div className="flex items-center gap-1.5 text-[10px] text-gray-500 mb-1">
+                    <div className="flex items-center gap-1.5 text-[10px] text-[#333333] mb-1">
                         {talent.age && <span>{talent.age} yrs</span>}
                         {talent.height && <span>{talent.height}</span>}
                         {talent.location && !isMobile && <span className="truncate">· {talent.location.split(",")[0]}</span>}
                     </div>
                 )}
                 {(talent.instagram_handle) && (
-                    <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                    <a
+                        href={instagramProfileUrl(talent.instagram_handle)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center gap-1.5 text-[10px] text-[#333333] hover:text-[#111111] transition-colors"
+                    >
                         <Instagram size={10} />
-                        {!isMobile && <span className="truncate">{talent.instagram_handle}</span>}
-                    </div>
+                        {!isMobile && <span className="truncate">{displayInstagramHandle(talent.instagram_handle)}</span>}
+                    </a>
                 )}
                 
                 {/* Metrics */}
                 {showIntelligence && !isMobile && (
                     <div className="flex items-center gap-2 mt-1.5 pt-1 border-t border-gray-100">
                         <div className="flex items-center gap-1">
-                            <Briefcase size={8} className="text-gray-400" />
-                            <span className="text-[8px] text-gray-500">{talent.prior_projects || 0} projects</span>
+                            <Briefcase size={8} className="text-[#333333]" />
+                            <span className="text-[8px] text-[#333333]">{talent.prior_projects || 0} projects</span>
                         </div>
                         <div className="flex items-center gap-1">
-                            <CheckCircle size={8} className="text-gray-400" />
-                            <span className="text-[8px] text-gray-500">{Math.round((talent.conversion_rate || 0) * 100)}%</span>
+                            <CheckCircle size={8} className="text-[#333333]" />
+                            <span className="text-[8px] text-[#333333]">{Math.round((talent.conversion_rate || 0) * 100)}%</span>
                         </div>
                     </div>
                 )}
@@ -2266,13 +2284,13 @@ const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit
             <div className="px-4 sm:px-6 py-3 sm:py-4">
                 <div className="flex items-center justify-between gap-2 sm:gap-4">
                     <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
-                        <span className="text-xs sm:text-sm font-medium text-gray-700 whitespace-nowrap flex items-center">
+                        <span className="text-xs sm:text-sm font-medium text-[#111111] whitespace-nowrap flex items-center">
                             {selectedCount} selected
                             <button
                                 type="button"
                                 onClick={onClear}
                                 aria-label="Clear all selections"
-                                className="text-xs text-gray-400 hover:text-gray-600 underline ml-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 rounded px-1 shrink-0"
+                                className="text-xs text-[#333333] hover:text-[#222222] underline ml-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 rounded px-1 shrink-0"
                             >
                                 Clear all
                             </button>
@@ -2291,7 +2309,7 @@ const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit
                                                 className="w-full h-full object-cover"
                                             />
                                         ) : (
-                                            <div className="w-full h-full flex items-center justify-center bg-gray-200 text-gray-400 text-[10px]">?</div>
+                                            <div className="w-full h-full flex items-center justify-center bg-gray-200 text-[#333333] text-[10px]">?</div>
                                         )}
                                     </div>
                                     <button
@@ -2299,14 +2317,14 @@ const SelectionTray = memo(({ selectedTalents, onRemove, selectedCount, onSubmit
                                         aria-label={`Remove ${talent.name || "Unnamed Talent"} from selection`}
                                         className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white border border-gray-200 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 transition-opacity shadow-sm"
                                     >
-                                        <X size={8} className="text-gray-500" />
+                                        <X size={8} className="text-[#333333]" />
                                     </button>
                                 </div>
                             ))}
-                            {selectedTalents.length > 8 && <div className="shrink-0 w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-xs font-medium text-gray-600">+{selectedTalents.length - 8}</div>}
+                            {selectedTalents.length > 8 && <div className="shrink-0 w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-xs font-medium text-[#222222]">+{selectedTalents.length - 8}</div>}
                         </div>
                         
-                        {isMobile && selectedTalents.length > 0 && <div className="px-2 py-1 rounded-full bg-gray-100 text-xs text-gray-600">{selectedTalents.length}</div>}
+                        {isMobile && selectedTalents.length > 0 && <div className="px-2 py-1 rounded-full bg-gray-100 text-xs text-[#222222]">{selectedTalents.length}</div>}
                     </div>
                     
                     <button
@@ -2361,10 +2379,10 @@ function EmptyResults({ onReset, hasFilters }) {
     return (
         <div className="flex flex-col items-center justify-center text-center h-full min-h-[400px]">
             <div className="w-12 h-px bg-gradient-to-r from-transparent via-gray-300 to-transparent mb-4" />
-            <p className="text-xs tracking-[0.22em] uppercase text-gray-400 mb-2">
+            <p className="text-xs tracking-[0.22em] uppercase text-[#333333] mb-2">
                 {hasFilters ? "No matches found" : "No talents available"}
             </p>
-            <p className="text-sm text-gray-500 max-w-sm px-6 mb-5">
+            <p className="text-sm text-[#333333] max-w-sm px-6 mb-5">
                 {hasFilters 
                     ? "No talents match the current casting filters." 
                     : "Add talents from the global roster page first to populate this campaign."}
@@ -2373,7 +2391,7 @@ function EmptyResults({ onReset, hasFilters }) {
                 <button 
                     type="button"
                     onClick={onReset} 
-                    className="px-4 py-2 border border-gray-900 rounded-lg text-xs font-semibold text-gray-900 hover:bg-gray-50 transition-all shadow-sm"
+                    className="px-4 py-2 border border-gray-900 rounded-lg text-xs font-semibold text-[#111111] hover:bg-gray-50 transition-all shadow-sm"
                 >
                     Reset Filters
                 </button>

@@ -4,6 +4,7 @@ import { ArrowLeft, Sparkles, Instagram, Save } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { api as axios } from "@/lib/api";
+import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 
 // ---------------------------------------------------------------------------
 // Work-links helpers (shared with ApplicationPage)
@@ -265,6 +266,14 @@ export default function PortalProfile() {
                                             name="instagram_handle"
                                             value={profile.instagram_handle || ""}
                                             onChange={handleFieldChange}
+                                            onBlur={() => {
+                                                if (profile.instagram_handle) {
+                                                    setProfile((prev) => ({
+                                                        ...prev,
+                                                        instagram_handle: normalizeInstagramHandle(profile.instagram_handle)
+                                                    }));
+                                                }
+                                            }}
                                             placeholder="e.g. elenarostova"
                                             style={{ fontSize: "16px" }}
                                             className="w-full pl-9 pr-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"

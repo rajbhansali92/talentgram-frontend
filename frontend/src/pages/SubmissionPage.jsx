@@ -1116,7 +1116,7 @@ function SubmissionPage() {
         const feedback = submission?.client_feedback || [];
         return (
             <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden">
-                <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-amber-200/20" />
+                <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-[#0c2340]/20" />
                 <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
                 </div>
@@ -1184,7 +1184,7 @@ function SubmissionPage() {
         <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
-                <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-amber-200/40 mix-blend-multiply animate-blob" />
+                <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-[#0c2340]/10 mix-blend-multiply animate-blob" />
                 <div className="absolute bottom-0 -right-40 w-80 h-80 rounded-full bg-slate-200/40 mix-blend-multiply animate-blob animation-delay-2000" />
             </div>
 
@@ -1342,7 +1342,7 @@ function SubmissionPage() {
                     data-step="1-2"
                 >
                     <div className="bg-white rounded-3xl p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
-                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4" data-step="1">Talent Details</p>
+                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70 mb-4" data-step="1">Talent Details</p>
                     <h2 className="font-display text-2xl md:text-3xl tracking-tight text-[#111111] mb-3 leading-[1.05]" data-step="1">
                         Your profile.
                     </h2>
@@ -1575,7 +1575,7 @@ function SubmissionPage() {
                                         />
                                         
                                         {/* Project-specific age override checkbox and input */}
-                                        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-[#eaeaea]/50 focus-within:border-amber-300 focus-within:ring-4 focus-within:ring-amber-50/50 transition-all duration-300 col-span-1 md:col-span-2">
+                                        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-[#eaeaea]/50 focus-within:border-[#0c2340]/40 focus-within:ring-4 focus-within:ring-[#0c2340]/5 transition-all duration-300 col-span-1 md:col-span-2">
                                             <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
                                                 <input
                                                     type="checkbox"
@@ -1590,7 +1590,7 @@ function SubmissionPage() {
                                                         setTimeout(saveForm, 0);
                                                     }}
                                                     data-testid="form-override-age-checkbox"
-                                                    className="w-5 h-5 rounded border-[#d4d4d4] text-amber-600 focus:ring-amber-500 focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
+                                                    className="w-5 h-5 rounded border-[#d4d4d4] text-[#0c2340] focus:ring-[#0c2340] focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
                                                 />
                                                 <span className="text-sm font-medium text-[#111111] select-none">
                                                     Use different age for this project?
@@ -1618,7 +1618,7 @@ function SubmissionPage() {
                                                         max={80}
                                                         placeholder="e.g. 25"
                                                         data-testid="form-override-age-input"
-                                                        className="mt-2 w-full bg-white rounded-xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                        className="mt-2 w-full bg-white rounded-xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                     />
                                                     <p className="text-[10px] text-[#333333] font-mono mt-1.5">
                                                         Only use this if you wish to be presented as a different age range for this project. This override is isolated to this submission only.
@@ -1645,10 +1645,7 @@ function SubmissionPage() {
                                                 className="mt-2 w-full bg-slate-100 rounded-2xl border border-[#eaeaea] outline-none py-3 px-4 text-[15px] text-[#333333] shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         </div>
-                                        <div className="col-span-1 md:col-span-2 pt-4 border-t border-slate-100">
-                                            <h4 className="text-xs font-semibold text-[#111111] tracking-wider uppercase font-mono">Measurements</h4>
-                                            <p className="text-[11px] text-[#333333] mt-1">Accurate measurements help casting teams shortlist appropriately.</p>
-                                        </div>
+
                                         <div data-testid="form-height-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Height *
@@ -1663,7 +1660,7 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-height-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select height" />
                                                     </SelectTrigger>
@@ -1764,7 +1761,7 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-ethnicity-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select ethnicity" />
                                                     </SelectTrigger>
@@ -1829,7 +1826,7 @@ function SubmissionPage() {
                                                 >
                                                     <SelectTrigger
                                                         data-testid="form-instagram-followers-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
+                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
                                                     >
                                                         <SelectValue placeholder="Select range" />
                                                     </SelectTrigger>
@@ -1870,7 +1867,7 @@ function SubmissionPage() {
                                                 rows={3}
                                                 maxLength={600}
                                                 data-testid="form-bio"
-                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                 placeholder="A short note about you (max 600 chars)"
                                             />
                                         </label>
@@ -1925,7 +1922,7 @@ function SubmissionPage() {
                                                         if (!trimmed) return null;
                                                         return (
                                                             <div key={idx} className="flex items-start gap-2.5 text-[15px] font-medium text-[#111111]">
-                                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0 mt-2.5" />
+                                                                <span className="w-1.5 h-1.5 rounded-full bg-[#0c2340] shrink-0 mt-2.5" />
                                                                 <span>{trimmed}</span>
                                                             </div>
                                                         );
@@ -1981,7 +1978,7 @@ function SubmissionPage() {
                                                 rows={3}
                                                 placeholder="Please specify reason / alternate availability"
                                                 data-testid="availability-note-input"
-                                                className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
                                         )}
                                     </div>
@@ -2051,7 +2048,7 @@ function SubmissionPage() {
                                                     data-testid="budget-accept-btn"
                                                     className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                         form.budget.status === "accept"
-                                                            ? "bg-slate-950 text-white border-slate-955 shadow-sm"
+                                                            ? "bg-[#0c2340] text-white border-[#0c2340] shadow-sm"
                                                             : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                     }`}
                                                 >
@@ -2072,7 +2069,7 @@ function SubmissionPage() {
                                                     data-testid="budget-custom-btn"
                                                     className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
                                                         form.budget.status === "custom"
-                                                            ? "bg-slate-955 text-white border-slate-955 shadow-sm"
+                                                            ? "bg-[#0c2340] text-white border-[#0c2340] shadow-sm"
                                                             : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                     }`}
                                                 >
@@ -2095,7 +2092,7 @@ function SubmissionPage() {
                                                     onBlur={saveForm}
                                                     placeholder="Enter your expected budget per day"
                                                     data-testid="budget-value-input"
-                                                    className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                    className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                 />
                                             )}
                                         </div>
@@ -2103,7 +2100,7 @@ function SubmissionPage() {
 
                                     {project.medium_usage && (
                                         <div className="border-t border-slate-100 pt-8" data-step="2">
-                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Medium / Usage</p>
+                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70 mb-4">Medium / Usage</p>
                                             <p className="text-[13px] leading-relaxed text-[#222222]">
                                                 {project.medium_usage}
                                             </p>
@@ -2112,7 +2109,7 @@ function SubmissionPage() {
 
                                     {(project.custom_questions || []).length > 0 && (
                                         <div className="border-t border-slate-100 pt-8 space-y-6" data-step="2">
-                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">Additional Questions</p>
+                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70">Additional Questions</p>
                                             {project.custom_questions.map((q) => (
                                                 <PremiumFormField
                                                     key={q.id}
@@ -2307,7 +2304,7 @@ function SubmissionPage() {
                                             <div key={key} className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] text-left">
                                                 <div className="flex items-center justify-between">
                                                     <div>
-                                                        <span className="text-[11px] font-mono text-amber-600/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
+                                                        <span className="text-[11px] font-mono text-[#0c2340]/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
                                                         <span className="text-sm font-semibold text-[#111111]">{state.label}</span>
                                                     </div>
                                                     <span className="text-[10px] font-mono text-[#333333]">
@@ -2328,7 +2325,7 @@ function SubmissionPage() {
                                                 ) : (
                                                     <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden mt-1">
                                                         <div
-                                                            className={`h-full bg-amber-500 transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`}
+                                                            className={`h-full bg-[#0c2340] transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`}
                                                             style={{ width: `${state.pct}%` }}
                                                         />
                                                     </div>
@@ -2526,7 +2523,7 @@ function SubmissionPage() {
                                                         .filter(([key, state]) => state.category === "image")
                                                         .map(([key, state]) => (
                                                             <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                                                                <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
+                                                                <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
                                                                 <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
                                                                 <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
                                                                     {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
@@ -2541,7 +2538,7 @@ function SubmissionPage() {
                                                                     </button>
                                                                 ) : (
                                                                     <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                                                        <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
+                                                                        <div className={`bg-[#0c2340] h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -2554,7 +2551,7 @@ function SubmissionPage() {
                                                                 imagesRef.current?.click()
                                                             }
                                                             data-testid="add-image-btn"
-                                                            className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-[#333333] hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                                            className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-[#0c2340]/30 hover:bg-[#0c2340]/5 flex items-center justify-center text-[#333333] hover:text-[#0c2340] transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                                                         >
                                                             <div className="relative flex flex-col items-center gap-1">
                                                                 <Camera className="w-5 h-5" />
@@ -2702,11 +2699,11 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
             <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3 cursor-pointer" onClick={() => setCollapsed(!collapsed)}>
                 <div className="flex items-center gap-2">
                     <div className="relative">
-                        <Upload className="w-4 h-4 text-amber-600 animate-pulse" />
+                        <Upload className="w-4 h-4 text-[#0c2340] animate-pulse" />
                         {activeCount > 0 && (
                             <span className="absolute -top-1 -right-1 flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#0c2340]/40 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#0c2340]"></span>
                             </span>
                         )}
                     </div>
@@ -2741,7 +2738,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
                                         {cleanLabel}
                                     </span>
                                     <div className="flex items-center gap-1">
-                                        <span className={`font-mono text-[10px] font-semibold ${u.status === "failed" ? "text-rose-500" : u.status === "completed" ? "text-emerald-600" : "text-amber-600"}`}>
+                                        <span className={`font-mono text-[10px] font-semibold ${u.status === "failed" ? "text-rose-500" : u.status === "completed" ? "text-emerald-600" : "text-[#0c2340]"}`}>
                                             {u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed"}
                                         </span>
                                         <button
@@ -2768,7 +2765,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
                                 ) : (
                                     <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
                                         <div
-                                            className={`h-full bg-amber-500 transition-all duration-300 ${u.status === "completed" ? "bg-emerald-500" : u.status === "processing" ? "bg-emerald-400 animate-pulse" : ""}`}
+                                            className={`h-full bg-[#0c2340] transition-all duration-300 ${u.status === "completed" ? "bg-emerald-500" : u.status === "processing" ? "bg-emerald-400 animate-pulse" : ""}`}
                                             style={{ width: `${u.pct}%` }}
                                         />
                                     </div>
@@ -2931,7 +2928,7 @@ function PremiumPortfolioGroup({
                             .filter(([key, state]) => state.category === category)
                             .map(([key, state]) => (
                                 <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                                    <Loader2 className="w-5 h-5 animate-spin text-amber-500 mb-1" />
+                                    <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
                                     <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
                                     <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
                                         {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
@@ -2946,7 +2943,7 @@ function PremiumPortfolioGroup({
                                         </button>
                                     ) : (
                                         <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                            <div className={`bg-amber-500 h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
+                                            <div className={`bg-[#0c2340] h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
                                         </div>
                                     )}
                                 </div>
@@ -2957,7 +2954,7 @@ function PremiumPortfolioGroup({
                                 type="button"
                                 onClick={() => inputRef.current?.click()}
                                 data-testid={`add-${testidPrefix}-image-btn`}
-                                className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-amber-300 hover:bg-amber-50/20 flex items-center justify-center text-[#333333] hover:text-amber-600 transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-[#0c2340]/30 hover:bg-[#0c2340]/5 flex items-center justify-center text-[#333333] hover:text-[#0c2340] transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
                             >
                                 <div className="relative flex flex-col items-center gap-1">
                                     <Plus className="w-5 h-5" />
@@ -3061,7 +3058,7 @@ function WorkLinksEditor({ links, onChange }) {
                     "Pepsi - https://youtu.be/xyz\n" +
                     "https://vimeo.com/showreel"
                 }
-                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[14px] text-[#111111] placeholder:text-[#333333] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[14px] text-[#111111] placeholder:text-[#333333] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
             />
             <div className="flex items-center gap-2">
                 <span
@@ -3180,7 +3177,7 @@ function PremiumFormField({
                           : undefined
                 }
                 data-testid={testid}
-                className={`mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${className}`}
+                className={`mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${className}`}
             />
             {hint && (
                 <span className="block text-[10.5px] text-[#333333] mt-1 font-mono">
@@ -3221,7 +3218,7 @@ function PremiumUploadSlot({
         <div className={compact ? "mb-4" : "mb-10"}>
             {!compact && (
                 <div className="flex items-center justify-between mb-3">
-                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70">
+                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70">
                         {title}
                         {required && (
                             <span className="text-rose-500"> *</span>
@@ -3302,7 +3299,7 @@ function PremiumUploadSlot({
                                         <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
                                     </div>
                                     <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                                        <div className={`h-full bg-amber-500 transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
+                                        <div className={`h-full bg-[#0c2340] transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
                                     </div>
                                 </div>
                             ) : (
@@ -3389,12 +3386,12 @@ function PremiumUploadSlot({
                         onClick={() => inputRef.current?.click()}
                         disabled={isPending}
                         data-testid={`${testid}-btn`}
-                        className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-amber-200 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
+                        className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-[#0c2340]/30 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
                     >
                         {uploadState && uploadState.status !== "failed" && uploadState.pct > 0 && (
                             <span
                                 aria-hidden
-                                className="absolute inset-y-0 left-0 bg-amber-200/30 transition-[width] duration-300"
+                                className="absolute inset-y-0 left-0 bg-[#0c2340]/30 transition-[width] duration-300"
                                 style={{ width: `${uploadState.pct}%` }}
                             />
                         )}
@@ -3506,7 +3503,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
 
             <div className="flex-1 min-w-0 px-1">
                 <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-mono text-amber-600/70 font-semibold uppercase tracking-wider">Label:</span>
+                    <span className="text-[11px] font-mono text-[#0c2340]/70 font-semibold uppercase tracking-wider">Label:</span>
                     {canRename ? (
                         <input
                             value={label}
@@ -3522,7 +3519,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
                                 }
                             }}
                             placeholder={`Take ${index}`}
-                            className={`bg-transparent outline-none text-[13px] font-semibold flex-1 py-1 px-2 rounded-lg border transition-all duration-200 ${dirty ? "border-amber-300 bg-amber-50/30" : "border-slate-100 bg-slate-50/50"} focus:border-amber-200 text-[#111111]`}
+                            className={`bg-transparent outline-none text-[13px] font-semibold flex-1 py-1 px-2 rounded-lg border transition-all duration-200 ${dirty ? "border-[#0c2340]/30 bg-[#0c2340]/5" : "border-slate-100 bg-slate-50/50"} focus:border-[#0c2340]/40 text-[#111111]`}
                             data-testid={`take-label-${index}`}
                         />
                     ) : (
@@ -3551,7 +3548,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
                             <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
                         </div>
                         <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                            <div className={`h-full bg-amber-500 transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
+                            <div className={`h-full bg-[#0c2340] transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
                         </div>
                     </div>
                 ) : (
@@ -3604,7 +3601,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
 
     return (
         <div
-            className="bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-amber-200 rounded-2xl p-3 relative overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 hover:-translate-y-[1px]"
+            className="bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-[#0c2340]/30 rounded-2xl p-3 relative overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 hover:-translate-y-[1px]"
             data-testid={`add-take-${number}`}
         >
             <div className="flex items-center gap-2 relative">
@@ -3612,7 +3609,7 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                     placeholder={`${fallback} — add a label`}
-                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-[#eaeaea] focus:border-amber-200 focus:ring-2 focus:ring-amber-100/50 transition-all duration-200 text-[#111111]"
+                    className="flex-1 bg-transparent outline-none text-[16px] md:text-[13px] py-1.5 px-3 rounded-xl border border-[#eaeaea] focus:border-[#0c2340]/40 focus:ring-2 focus:ring-[#0c2340]/10 transition-all duration-200 text-[#111111]"
                     enterKeyHint="done"
                     data-testid={`new-take-label-${number}`}
                 />

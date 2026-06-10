@@ -1129,15 +1129,19 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
     pdf = FPDF()
     pdf.add_page()
     
-    # Header - Branding
-    pdf.set_font("Helvetica", "B", 24)
-    pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, "TALENTGRAM", ln=True, align="L")
-    
-    pdf.set_font("Helvetica", "", 14)
-    pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 8, "Talent Profile", ln=True, align="L")
-    pdf.ln(10)
+    # Header - Branding Logo
+    import os
+    logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../assets/talentgram-black.png"))
+    if os.path.exists(logo_path):
+        # Center the logo (w=50). A4 width is 210, so x = (210-50)/2 = 80
+        pdf.image(logo_path, x=80, w=50)
+        pdf.ln(15) # Add space below logo
+    else:
+        # Fallback if logo file goes missing
+        pdf.set_font("Helvetica", "B", 24)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, "TALENTGRAM", ln=True, align="C")
+        pdf.ln(10)
     
     # Metadata sections
     pdf.set_font("Helvetica", "B", 11)
@@ -1194,33 +1198,6 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
         pdf.multi_cell(0, 7, _safe_text(val))
         pdf.ln(1)
         
-    # Media and Links
-    work_links = talent_doc.get("work_links") or []
-    videos = [m for m in (talent_doc.get("media") or []) if m.get("category") == "video"]
-    
-    if work_links or videos:
-        pdf.ln(5)
-        pdf.set_font("Helvetica", "B", 11)
-        pdf.set_text_color(138, 138, 138)
-        pdf.cell(0, 6, "WORK LINKS & MEDIA", ln=True)
-        pdf.line(pdf.get_x(), pdf.get_y(), pdf.get_x() + 190, pdf.get_y())
-        pdf.ln(4)
-        
-        pdf.set_font("Helvetica", "", 10)
-        idx = 1
-        for v in videos:
-            pdf.set_text_color(0, 102, 204)
-            url = v.get("url") or ""
-            if url:
-                pdf.cell(0, 6, f"{idx}. Introduction Video", ln=True, link=url)
-                idx += 1
-                
-        for wl in work_links:
-            pdf.set_text_color(0, 102, 204)
-            lbl = _get_link_label(wl)
-            pdf.cell(0, 6, f"{idx}. {lbl}", ln=True, link=wl)
-            idx += 1
-            
     # Additional Questions
     custom_answers = talent_doc.get("custom_answers") or []
     if custom_answers:
@@ -1387,7 +1364,18 @@ async def download_talent_zip(
         try:
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 # Add dynamic PDF details first
-                zf.writestr("Talent_Details.pdf", pdf_bytes)
+                pdf_filename = "Talent Form.pdf"
+                if project_doc and project_doc.get("brand_name"):
+                    pdf_filename = f"{project_doc.get('brand_name')} - Talent Form.pdf"
+                elif project_doc and project_doc.get("title"):
+                    pdf_filename = f"{project_doc.get('title')} - Talent Form.pdf"
+                elif link.get("title"):
+                    pdf_filename = f"{link.get('title')} - Talent Form.pdf"
+                
+                # Sanitize filename
+                pdf_filename = "".join(c for c in pdf_filename if c.isalnum() or c in (" ", "-", "_", ".")).strip()
+
+                zf.writestr(pdf_filename, pdf_bytes)
 
                 # Intro video download
                 try:

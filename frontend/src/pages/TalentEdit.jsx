@@ -33,6 +33,7 @@ import {
 } from "@/lib/talentSchema";
 import WorkLinksDisplay from "@/components/WorkLinksDisplay";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
+import SkillsSelector from "@/components/SkillsSelector";
 
 
 
@@ -52,6 +53,7 @@ const emptyTalent = {
     work_links: [],
     interested_in: [],
     tags: [],
+    skills: [],
 };
 
 // ISSUE 2: File validation constants
@@ -888,6 +890,18 @@ export default function TalentEdit() {
                         </div>
                     </div>
                 </div>
+                
+                <div className="mt-6">
+                    <span className="text-[11px] text-black/45 tracking-widest uppercase block mb-2.5">
+                        Skills & Special Abilities
+                    </span>
+                    <SkillsSelector
+                        selectedSkills={talent.skills || []}
+                        onChange={(arr) => updateTalent({ skills: arr })}
+                        readOnly={!isEditing}
+                    />
+                </div>
+
                 <div className="mt-6">
                     <span className="text-[11px] text-black/45 tracking-widest uppercase">
                         Bio

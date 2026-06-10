@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
+import SkillsSelector from "@/components/SkillsSelector";
 import {
     Select,
     SelectContent,
@@ -67,6 +68,7 @@ export default function ApplicationPage() {
         bio: "",
         work_links: [],
         interested_in: [],
+        skills: [],
     });
     const [media, setMedia] = useState([]);
     const [uploading, setUploading] = useState(null);
@@ -193,6 +195,10 @@ export default function ApplicationPage() {
                 f.work_links && f.work_links.length
                     ? f.work_links
                     : (d.work_links || []),
+            skills:
+                f.skills && f.skills.length
+                    ? f.skills
+                    : (d.skills || []),
         }));
         setApplyPrefill(null);
         setEmailGateUnlocked(true);
@@ -732,6 +738,15 @@ export default function ApplicationPage() {
                                     ))}
                                 </SelectContent>
                             </Select>
+                        </div>
+                        <div className="md:col-span-2">
+                            <Label>Skills & Special Abilities</Label>
+                            <div className="mt-2">
+                                <SkillsSelector
+                                    selectedSkills={form.skills || []}
+                                    onChange={(arr) => setForm({ ...form, skills: arr })}
+                                />
+                            </div>
                         </div>
                         <div className="md:col-span-2">
                             <Label>Short Bio</Label>

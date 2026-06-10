@@ -24,6 +24,7 @@ class PortalProfileUpdateIn(BaseModel):
     instagram_handle: Optional[str] = None
     work_links: List[str] = Field(default_factory=list)
     interested_in: List[str] = Field(default_factory=list)
+    skills: List[str] = Field(default_factory=list)
 
     @field_validator('instagram_handle', mode='before')
     @classmethod
@@ -53,6 +54,7 @@ async def portal_lookup(payload: PortalLookupIn):
             "instagram_handle": enriched.get("instagram_handle"),
             "image_url": enriched.get("image_url") or enriched.get("cover_url"),
             "interested_in": enriched.get("interested_in") or [],
+            "skills": enriched.get("skills") or [],
         }
     }
 
@@ -83,6 +85,7 @@ async def portal_update_profile(payload: PortalProfileUpdateIn):
         "instagram_handle": payload.instagram_handle,
         "work_links": [w.strip() for w in payload.work_links if w.strip()],
         "interested_in": payload.interested_in,
+        "skills": payload.skills,
         "last_portal_login": _now(),
     }
 

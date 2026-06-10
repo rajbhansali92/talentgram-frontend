@@ -827,6 +827,14 @@ async def seed_admin() -> None:
     except Exception as e:
         logger.warning(f"talents interested_in index: {e}")
 
+    # talents.skills: enables future faceted skills search.
+    try:
+        await db.talents.create_index(
+            "skills", name="talents_skills_index"
+        )
+    except Exception as e:
+        logger.warning(f"talents skills index: {e}")
+
     # Password reset tokens — lookup by hashed token, TTL auto-prune on expiry.
     try:
         await db.password_reset_tokens.create_index("token_hash", unique=True)
@@ -985,6 +993,7 @@ CLIENT_ALLOWED_FIELDS = {
     "project_id",
     "effective_age",
     "submitted_age_override",
+    "skills",
 }
 
 
@@ -1030,6 +1039,8 @@ class TalentIn(BaseModel):
     cover_media_id: Optional[str] = None
     # Public: self-selected work categories (set during onboarding /apply)
     interested_in: List[str] = Field(default_factory=list)
+    # Categorized multi-select skills and special abilities
+    skills: List[str] = Field(default_factory=list)
     # Internal: admin-assigned structured tags [{"id": uuid, "name": label}]
     tags: List[Dict[str, str]] = Field(default_factory=list)
 

@@ -432,6 +432,23 @@ function ReviewModal({ app, onClose, onDecide }) {
                         <Field label="Location" value={fd.location} />
                         <Field label="Instagram" value={fd.instagram_handle ? displayInstagramHandle(fd.instagram_handle) : null} />
                         <Field label="Followers" value={fd.instagram_followers} />
+                        {fd.skills && fd.skills.length > 0 && (
+                            <div className="md:col-span-3 border-t border-black/[0.08] pt-4">
+                                <p className="text-xs font-medium text-black/45 uppercase tracking-wide mb-2">
+                                    Skills & Abilities
+                                </p>
+                                <div className="flex flex-wrap gap-1.5 mt-1">
+                                    {fd.skills.map((skill) => (
+                                        <span
+                                            key={skill}
+                                            className="px-2.5 py-1 text-xs rounded-full border border-black/10 bg-black/5 text-black/85"
+                                        >
+                                            {skill}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         {fd.bio && (
                             <div className="md:col-span-3 border-t border-black/[0.08] pt-4">
                                 <p className="text-xs font-medium text-black/45 uppercase tracking-wide mb-2">

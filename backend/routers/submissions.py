@@ -812,7 +812,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             update: Dict[str, Any] = {}
             unified_fields = (
                 "phone", "dob", "height", "location", "ethnicity",
-                "gender", "instagram_handle", "instagram_followers", "bio",
+                "gender", "instagram_handle", "instagram_followers", "bio", "skills",
             )
             for key in unified_fields:
                 if not talent_doc.get(key):
@@ -862,6 +862,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 "instagram_handle": normalize_instagram_handle(form.get("instagram_handle") or None),
                 "instagram_followers": (form.get("instagram_followers") or None),
                 "bio": (form.get("bio") or None),
+                "skills": [s for s in (form.get("skills") or []) if isinstance(s, str) and s.strip()],
                 "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
                 "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
                 # Phase 0 — `source` is ALWAYS an object with the exact shape

@@ -4,6 +4,7 @@ import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
+import SkillsSelector from "@/components/SkillsSelector";
 import ThemeToggle from "@/components/ThemeToggle";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import {
@@ -133,6 +134,7 @@ function SubmissionPage() {
             instagram_followers: "",
             bio: "",
             work_links: [],
+            skills: [],
             competitive_brand: "",
             availability: { status: "", note: "" },
             budget: { status: "", value: "" },
@@ -475,6 +477,7 @@ function SubmissionPage() {
                     competitive_brand: form.competitive_brand || null,
                     availability: form.availability,
                     budget: form.budget,
+                    skills: form.skills || [],
                     custom_answers: form.custom_answers,
                     commission_percent: form.commission || null,
                 },
@@ -534,6 +537,10 @@ function SubmissionPage() {
                 f.work_links && f.work_links.length
                     ? f.work_links
                     : (data.work_links || []),
+            skills:
+                f.skills && f.skills.length
+                    ? f.skills
+                    : (data.skills || []),
         }));
     }
 
@@ -585,6 +592,7 @@ function SubmissionPage() {
             instagram_followers: "",
             bio: "",
             work_links: [],
+            skills: [],
             competitive_brand: "",
             availability: { status: "", note: "" },
             budget: { status: "", value: "" },
@@ -690,6 +698,7 @@ function SubmissionPage() {
                     instagram_followers: form.instagram_followers || "",
                     bio: form.bio || "",
                     work_links: form.work_links || [],
+                    skills: form.skills || [],
                     competitive_brand: project.competitive_brand_enabled
                         ? form.competitive_brand
                         : "",
@@ -1850,6 +1859,18 @@ function SubmissionPage() {
                                                     </SelectContent>
                                                 </Select>
                                             </div>
+                                        </div>
+                                        <div className="md:col-span-2">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono block mb-2">
+                                                Skills & Special Abilities
+                                            </span>
+                                            <SkillsSelector
+                                                selectedSkills={form.skills || []}
+                                                onChange={(arr) => {
+                                                    setForm((prev) => ({ ...prev, skills: arr }));
+                                                    setTimeout(saveForm, 0);
+                                                }}
+                                            />
                                         </div>
                                         <label className="block md:col-span-2" data-testid="form-bio-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">

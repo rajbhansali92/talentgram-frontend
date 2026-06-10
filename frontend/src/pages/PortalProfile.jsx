@@ -5,6 +5,7 @@ import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { api as axios } from "@/lib/api";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
+import SkillsSelector from "@/components/SkillsSelector";
 
 // ---------------------------------------------------------------------------
 // Work-links helpers (shared with ApplicationPage)
@@ -64,6 +65,7 @@ export default function PortalProfile() {
         instagram_handle: "",
         work_links: [],
         interested_in: [],
+        skills: [],
     });
 
     const [linksDraft, setLinksDraft] = useState("");
@@ -90,6 +92,7 @@ export default function PortalProfile() {
                     instagram_handle: data.instagram_handle || "",
                     work_links: data.work_links || [],
                     interested_in: data.interested_in || [],
+                    skills: data.skills || [],
                 });
                 setLinksDraft(linksToText(data.work_links || []));
             } catch (err) {
@@ -280,6 +283,14 @@ export default function PortalProfile() {
                                         />
                                     </div>
                                 </div>
+                            </div>
+
+                            <div className="flex flex-col gap-1.5 mt-2">
+                                <label className="text-xs text-black/60 font-medium">Skills & Special Abilities</label>
+                                <SkillsSelector
+                                    selectedSkills={profile.skills || []}
+                                    onChange={(arr) => setProfile((prev) => ({ ...prev, skills: arr }))}
+                                />
                             </div>
 
                             <div className="flex flex-col gap-1.5">

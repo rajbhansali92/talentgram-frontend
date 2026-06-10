@@ -459,7 +459,7 @@ async def set_application_decision(
                 m for m in talent["media"] if m["id"] not in {x["id"] for x in existing.get("media", [])}
             ]
             update = {"media": new_media}
-            for key in ("email", "phone", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio"):
+            for key in ("email", "phone", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio", "skills"):
                 if not existing.get(key) and talent.get(key):
                     update[key] = talent[key]
             # work_links: extend (dedupe) only if existing list is empty.
@@ -551,6 +551,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         "instagram_followers": fd.get("instagram_followers") or None,
         "bio": fd.get("bio") or None,
         "work_links": [w for w in (fd.get("work_links") or []) if isinstance(w, str) and w.strip()],
+        "skills": [s for s in (fd.get("skills") or []) if isinstance(s, str) and s.strip()],
         "cover_media_id": cover_mid,
         "interested_in": interested_in,
         "tags": [],

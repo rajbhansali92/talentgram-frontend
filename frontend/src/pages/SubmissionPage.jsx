@@ -148,18 +148,10 @@ function SubmissionPage() {
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
-    // Mobile-only 3-step wizard state. Desktop ignores this entirely (the
-    // markup is unchanged for `md+`; we just toggle visibility classes for
-    // `<md`). Step transitions auto-validate the relevant fields and persist
-    // a draft on every advance.
-    //   1 = Profile  · 2 = Brief / Questions  · 3 = Uploads
-    const [mobileStep, setMobileStep] = useState(1);
-
     // Collapsible sections state
     const [collapsedSections, setCollapsedSections] = useState({
         profile: false,           // open by default
         projectQuestions: false,   // open by default
-        workLinks: false,          // open by default
         uploads: false,            // open by default
     });
     const [isGenericPortfolioCollapsed, setIsGenericPortfolioCollapsed] = useState(() => {
@@ -444,19 +436,6 @@ function SubmissionPage() {
         return null;
     };
 
-    // Auto-scroll to top or uploads section whenever step changes.
-    useEffect(() => {
-        if (typeof window !== "undefined") {
-            if (mobileStep === 3 && uploadsSectionRef.current) {
-                setTimeout(() => {
-                    uploadsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                }, 100);
-            } else {
-                window.scrollTo({ top: 0, behavior: "smooth" });
-            }
-        }
-    }, [mobileStep]);
-
     // Persist a debounced draft of the form so a refresh / app-switch never
     // loses progress before the talent record is created on the backend.
     useEffect(() => {
@@ -467,63 +446,12 @@ function SubmissionPage() {
         }, 1200);
         return () => clearTimeout(t);
     }, [form, slug]);
-
-    // Auto-jump to step 3 once we have a backend submission record (i.e.
-    // the talent has finished steps 1+2). Keeps mobile users from
-    // re-seeing the profile step on a return visit.
-    useEffect(() => {
-        if (saved && mobileStep < 3) setMobileStep(3);
-    // `mobileStep` and `setMobileStep` are intentionally omitted: this
-    // effect is meant to fire ONLY when `saved` transitions (e.g. talent
-    // record just got created). Including `mobileStep` would re-trigger
-    // every time the user manually navigates back to step 1/2 via
-    // `goToStep` and force them forward again — the exact UX bug we
-    // designed this guard to avoid.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [saved]);
-
-    const goToStep = async (n) => {
-        if (n === mobileStep) return;
-        // Forward navigation must validate; backward is free.
-        if (n > mobileStep) {
-            if (mobileStep === 1) {
-                const err = validateStep1();
-                if (err) {
-                    toast.error(err);
-                    return;
-                }
-                // Persist draft on every advance so a refresh / app-switch
-                // never loses progress (combined with backend upsert).
-                // (`saveForm` / `startSubmissionDirect` are declared later
-                // in the component body — safe here because goToStep only
-                // fires from button clicks AFTER render. See validateForm.)
-                await saveForm();
-            } else if (mobileStep === 2) {
-                const err = validateStep2();
-                if (err) {
-                    toast.error(err);
-                    return;
-                }
-                if (!saved) {
-                    // First time crossing from step 2 → 3 finalises the
-                    // talent-details and creates the submission shell.
-                    const ok = await startSubmissionDirect();
-                    if (!ok) return;
-                } else {
-                    await saveForm();
-                }
-            }
-        }
-        setMobileStep(n);
-    };
     // Convenience wrapper that returns a boolean (vs the form-handler version).
-    // Function declaration (not `const = async () =>`) so it's fully hoisted
-    // and `goToStep` above can call it without a TDZ reference.
     async function startSubmissionDirect() {
         const err = validateForm();
         if (err) {
             toast.error(err);
-            return false;
+            return null;
         }
         setStarting(true);
         try {
@@ -562,11 +490,11 @@ function SubmissionPage() {
             setSaved(next);
             setSubmission(data);
             setCollapsedSections((prev) => ({ ...prev, uploads: false }));
-            toast.success("✓ Details saved successfully. Next step: Upload your introduction video, audition takes and portfolio images.");
-            return true;
+            toast.success("✓ Details saved successfully.");
+            return next;
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Could not save profile");
-            return false;
+            return null;
         } finally {
             setStarting(false);
         }
@@ -843,6 +771,20 @@ function SubmissionPage() {
                 }
             }
         }
+
+        let currentSaved = saved;
+        if (!currentSaved) {
+            const err = validateStep1();
+            if (err) {
+                toast.error("Please complete the required Profile fields first before uploading files.");
+                setCollapsedSections((prev) => ({ ...prev, profile: false }));
+                return;
+            }
+            const next = await startSubmissionDirect();
+            if (!next) return;
+            currentSaved = next;
+        }
+
         const slotKey = label ? `${category}:${label}` : category;
         setActiveUploads((prev) => ({
             ...prev,
@@ -870,12 +812,11 @@ function SubmissionPage() {
                 fd.append("category", category);
                 if (label && category === "take") fd.append("label", label);
                 const { data } = await axios.post(
-                    `${API}/public/submissions/${saved.id}/upload`,
+                    `${API}/public/submissions/${currentSaved.id}/upload`,
                     fd,
                     {
-                        ...authCfg,
                         headers: {
-                            ...authCfg.headers,
+                            Authorization: `Bearer ${currentSaved.token}`,
                             "Content-Type": "multipart/form-data",
                         },
                         timeout: 0, // no per-request timeout — let mobile networks breathe
@@ -1059,17 +1000,32 @@ function SubmissionPage() {
     };
 
     const finalize = async () => {
-        await saveForm();
+        let currentSaved = saved;
+        if (!currentSaved) {
+            const next = await startSubmissionDirect();
+            if (!next) return;
+            currentSaved = next;
+        } else {
+            await saveForm();
+        }
         setFinalizing(true);
         try {
             await axios.post(
-                `${API}/public/submissions/${saved.id}/finalize`,
+                `${API}/public/submissions/${currentSaved.id}/finalize`,
                 {},
-                authCfg,
+                {
+                    headers: {
+                        Authorization: `Bearer ${currentSaved.token}`,
+                    }
+                },
             );
             const { data } = await axios.get(
-                `${API}/public/submissions/${saved.id}`,
-                authCfg,
+                `${API}/public/submissions/${currentSaved.id}`,
+                {
+                    headers: {
+                        Authorization: `Bearer ${currentSaved.token}`,
+                    }
+                },
             );
             setSubmission(data);
             // Once the user finalises, clear the local draft — the
@@ -1225,7 +1181,7 @@ function SubmissionPage() {
     }
 
     return (
-        <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page" data-mobile-step={mobileStep}>
+        <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
                 <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-amber-200/40 mix-blend-multiply animate-blob" />
@@ -1277,47 +1233,6 @@ function SubmissionPage() {
                         </p>
                     </div>
                 </div>
-
-                {/* Mobile-only 3-step indicator below the centered branding */}
-                {emailGateUnlocked && (
-                    <div
-                        className="md:hidden mt-6 max-w-2xl mx-auto border-t border-[#eaeaea]/40 pt-4"
-                        data-testid="wizard-stepbar"
-                    >
-                        <div className="flex items-center gap-3">
-                            {[1, 2, 3].map((n, i) => {
-                                const labels = ["Profile", "Brief", "Uploads"];
-                                const reached = mobileStep >= n;
-                                const active = mobileStep === n;
-                                return (
-                                    <button
-                                        key={n}
-                                        type="button"
-                                        onClick={() => goToStep(n)}
-                                        data-testid={`wizard-step-${n}`}
-                                        className={`flex-1 flex items-center gap-2 py-1 text-left transition-all active:scale-[0.97] ${active ? "opacity-100" : reached ? "opacity-80" : "opacity-50"}`}
-                                    >
-                                        <span
-                                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-[10px] font-mono shrink-0 ${active ? "bg-slate-900 text-white" : reached ? "bg-slate-200 text-[#111111] border border-[#d4d4d4]" : "border border-[#d4d4d4] text-[#333333]"}`}
-                                        >
-                                            {reached && !active ? <Check className="w-3 h-3" /> : n}
-                                        </span>
-                                        <span className={`text-[11px] tracking-wider uppercase font-medium ${active ? "text-[#111111]" : "text-[#333333]"}`}>
-                                            {labels[i]}
-                                        </span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        <div className="h-0.5 bg-slate-200/60 mt-3">
-                            <div
-                                className="h-full bg-slate-800 transition-all duration-300"
-                                style={{ width: `${(mobileStep - 1) * 50}%` }}
-                                data-testid="wizard-progress-bar"
-                            />
-                        </div>
-                    </div>
-                )}
             </header>
 
             <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10">
@@ -1379,13 +1294,20 @@ function SubmissionPage() {
                 {emailGateUnlocked && (
                     <section className="mb-10 bg-white rounded-3xl p-6 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
                         <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-3">Submission Progress</p>
-                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             {[
-                                { label: "Profile", completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.location?.trim()) },
-                                { label: "Measurements", completed: !!form.height },
-                                { label: "Portfolio", completed: allImages.length > 0 },
-                                { label: "Videos", completed: !!(intro || takes.length > 0) },
-                                { label: "Availability", completed: !!(form.availability?.status && (form.availability.status !== "no" || form.availability.note?.trim())) }
+                                { 
+                                    label: "Your Profile", 
+                                    completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.height && form.location?.trim()) 
+                                },
+                                { 
+                                    label: "Project Questions", 
+                                    completed: !!(form.availability?.status && (form.availability.status !== "no" || form.availability.note?.trim()) && form.budget?.status && (form.budget.status !== "custom" || form.budget.value?.trim())) 
+                                },
+                                { 
+                                    label: "Uploads (Optional)", 
+                                    completed: true 
+                                }
                             ].map((item, idx) => (
                                 <div 
                                     key={idx} 
@@ -2281,8 +2203,8 @@ function SubmissionPage() {
                     </div>
                 </section>
 
-                {/* SECTION 3 — UPLOADS (gated on saved + email-first gate) */}
-                {emailGateUnlocked && saved && (
+                {/* SECTION 3 — UPLOADS (gated on email-first gate) */}
+                {emailGateUnlocked && (
                     <section
                         ref={uploadsSectionRef}
                         className="pt-4"
@@ -2751,39 +2673,6 @@ function SubmissionPage() {
                 </div>
             )}
 
-            {/* Mobile-only sticky bottom action bar for steps 1 & 2.
-                Step 3 uses the in-section "Submit Audition" sticky button. */}
-            {emailGateUnlocked && mobileStep < 3 && (
-                <div
-                    className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-xl border-t border-[#eaeaea]/60 px-4 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
-                    data-testid="wizard-bottom-bar"
-                >
-                    <div className="flex items-center gap-2 max-w-3xl mx-auto">
-                        {mobileStep > 1 && (
-                            <button
-                                type="button"
-                                onClick={() => goToStep(mobileStep - 1)}
-                                data-testid="wizard-back-btn"
-                                className="px-5 py-3 border border-[#eaeaea] text-[#222222] rounded-full text-[13px] min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                style={{ WebkitTapHighlightColor: "transparent" }}
-                            >
-                                Back
-                            </button>
-                        )}
-                        <button
-                            type="button"
-                            onClick={() => goToStep(mobileStep + 1)}
-                            disabled={starting}
-                            data-testid="wizard-next-btn"
-                            className="flex-1 bg-slate-900 text-white py-3 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] inline-flex items-center justify-center gap-2 min-h-[48px] transition-all duration-200 disabled:opacity-50"
-                            style={{ WebkitTapHighlightColor: "transparent" }}
-                        >
-                            {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                            {mobileStep === 1 ? "Continue to Brief" : "Continue to Uploads"}
-                        </button>
-                    </div>
-                </div>
-            )}
             <FloatingUploadManager
                 activeUploads={activeUploads}
                 onRetry={retryUpload}

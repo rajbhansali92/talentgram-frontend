@@ -210,7 +210,25 @@ async def list_talents(
 ):
     query: Dict[str, Any] = {}
     if q:
-        query["name"] = {"$regex": q, "$options": "i"}
+        needle = q.strip()
+        terms = [t for t in re.split(r"[\s+\-,;]+", needle) if t]
+        if terms:
+            and_clauses = []
+            for term in terms:
+                rgx = {"$regex": re.escape(term), "$options": "i"}
+                and_clauses.append({
+                    "$or": [
+                        {"name": rgx},
+                        {"email": rgx},
+                        {"instagram_handle": rgx},
+                        {"location": rgx},
+                        {"gender": rgx},
+                        {"category": rgx},
+                        {"skills": rgx},
+                        {"interested_in": rgx},
+                    ]
+                })
+            query["$and"] = and_clauses
     # List projection: scalar fields only — no media[] fetch.
     # cover_url is the denormalized cover scalar maintained by set_cover /
     # add_media / delete_media. Zero array walk per roster row.
@@ -271,6 +289,11 @@ async def search_talents(
             {"email": rgx},
             {"phone": rgx},
             {"instagram_handle": rgx},
+            {"location": rgx},
+            {"gender": rgx},
+            {"category": rgx},
+            {"skills": rgx},
+            {"interested_in": rgx},
         ]
     }
     cursor = db.talents.find(

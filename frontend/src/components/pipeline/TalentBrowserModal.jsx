@@ -553,11 +553,27 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return talents.filter((t) => {
             // 1. Text Search
             if (searchLower) {
-                const haystack = [t.name, t.email, t.instagram_handle, t.location]
+                const skillStr = (t.skills || []).join(" ");
+                const interestStr = (t.interested_in || []).join(" ");
+                const haystack = [
+                    t.name, 
+                    t.email, 
+                    t.instagram_handle, 
+                    t.location, 
+                    t.gender, 
+                    t.category, 
+                    skillStr, 
+                    interestStr
+                ]
                     .filter(Boolean)
                     .join(" ")
                     .toLowerCase();
-                if (!haystack.includes(searchLower)) return false;
+                
+                const searchTerms = searchLower.split(/[\s+\-,;]+/).filter(Boolean);
+                if (searchTerms.length > 0) {
+                    const matchesAll = searchTerms.every(term => haystack.includes(term));
+                    if (!matchesAll) return false;
+                }
             }
             
             // 2. Demographics

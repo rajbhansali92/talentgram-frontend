@@ -3,26 +3,28 @@ import { Check } from "lucide-react";
 
 export const SKILLS_CATEGORIES = {
     "Dance": [
-        "Hip Hop", "Contemporary", "Jazz", "Bollywood", "Bharatanatyam",
-        "Kathak", "Salsa", "Ballet", "Freestyle", "Other"
+        "Hip Hop", "Contemporary", "Bollywood", "Bharatanatyam", "Kathak",
+        "Salsa", "Ballet"
     ],
     "Music": [
         "Singer", "Piano", "Keyboard", "Guitar", "Violin", "Drums",
-        "Flute", "Ukulele", "DJ", "Other Instrument"
+        "Flute", "Ukulele", "DJ", "Beatboxing", "Rapper", "Composer",
+        "Music Producer"
     ],
     "Sports & Fitness": [
-        "Athlete", "Gymnastics", "Yoga", "Swimming", "Running",
-        "Cycling", "Boxing", "Kickboxing", "Wrestling", "CrossFit",
-        "Calisthenics", "Other"
+        "Athlete", "Gymnastics", "Yoga", "Swimming", "Cycling", "Boxing",
+        "Kickboxing", "Wrestling", "CrossFit", "Calisthenics", "Cricket",
+        "Football", "Basketball", "Tennis", "Badminton"
     ],
     "Action & Stunts": [
         "Martial Arts", "Karate", "Taekwondo", "Judo", "Kung Fu",
-        "Fight Choreography", "Weapons Training", "Horse Riding",
-        "Rock Climbing", "Parkour"
+        "Fight Choreography", "Horse Riding", "Rock Climbing", "Parkour",
+        "Sword Fighting"
     ],
     "Vehicle Skills": [
-        "Drive Car", "Manual Car", "Automatic Car", "Ride Motorcycle",
-        "Scooter", "Bicycle", "Truck", "Boat", "Jet Ski"
+        "Drive Manual Car", "Drive Automatic Car", "Ride Motorcycle",
+        "Ride Scooter", "Ride Bicycle", "Drive Truck", "Operate Boat",
+        "Ride Jet Ski"
     ],
     "Performance": [
         "Actor", "Voice Artist", "Dancer", "Singer", "Host", "Anchor",
@@ -30,12 +32,12 @@ export const SKILLS_CATEGORIES = {
     ],
     "Special Skills": [
         "Skateboarding", "Roller Skating", "Ice Skating", "Surfing",
-        "Scuba Diving", "Photography", "Cooking", "Painting",
-        "Magic Tricks", "Fire Performance", "Juggling"
+        "Scuba Diving", "Fire Performance", "Juggling"
     ],
     "Languages": [
-        "Hindi", "English", "Marathi", "Gujarati", "Punjabi",
-        "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali",
+        "English", "Hindi", "Spanish", "French", "Mandarin Chinese",
+        "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati",
+        "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali",
         "Urdu", "Other"
     ]
 };
@@ -43,8 +45,9 @@ export const SKILLS_CATEGORIES = {
 export default function SkillsSelector({ selectedSkills = [], onChange, readOnly = false }) {
     const handleToggleSkill = (skill) => {
         if (readOnly) return;
-        const index = selectedSkills.indexOf(skill);
-        const updated = [...selectedSkills];
+        const currentSelected = selectedSkills || [];
+        const index = currentSelected.indexOf(skill);
+        const updated = [...currentSelected];
         if (index > -1) {
             updated.splice(index, 1);
         } else {
@@ -52,6 +55,8 @@ export default function SkillsSelector({ selectedSkills = [], onChange, readOnly
         }
         if (onChange) onChange(updated);
     };
+
+    const currentSelected = selectedSkills || [];
 
     return (
         <div className="space-y-6 text-left" data-testid="skills-selector">
@@ -62,7 +67,7 @@ export default function SkillsSelector({ selectedSkills = [], onChange, readOnly
                     </h4>
                     <div className="flex flex-wrap gap-2">
                         {skills.map((skill) => {
-                            const isSelected = selectedSkills.includes(skill);
+                            const isSelected = currentSelected.includes(skill);
                             return (
                                 <button
                                     key={skill}

@@ -951,6 +951,37 @@ function SubmissionPage() {
     const westernImages = media.filter((m) => m.category === "western");
     const allImages = [...images, ...indianImages, ...westernImages];
 
+    const intro = media.find((m) => m.category === "intro_video");
+    const takes = media
+        .filter(
+            (m) =>
+                m.category === "take" ||
+                m.category === "take_1" ||
+                m.category === "take_2" ||
+                m.category === "take_3",
+        )
+        .map((m) => {
+            if (m.category === "take") return m;
+            const n = m.category.replace("take_", "");
+            return { ...m, _legacy: true, label: m.label || `Take ${n}` };
+        });
+
+    const activeConditionalVideoRules = useMemo(() => {
+        if (!project || !project.conditional_video_rules) return [];
+        return project.conditional_video_rules.filter((rule) => {
+            const ans = (form.custom_answers || {})[rule.question_id];
+            return (
+                ans &&
+                String(ans).trim().toLowerCase() ===
+                    String(rule.trigger_value).trim().toLowerCase()
+            );
+        });
+    }, [project, form.custom_answers]);
+
+    const regularTakes = takes.filter(
+        (t) => !activeConditionalVideoRules.some((r) => r.video_label === t.label),
+    );
+
     const uploadImages = async (files, imageCategory = "image") => {
         // Phase 3 — per-category cap (10 each), not combined. Look up the
         // current count of THIS category and refuse uploads that would
@@ -1079,22 +1110,6 @@ function SubmissionPage() {
             </div>
         );
     }
-
-    const intro = media.find((m) => m.category === "intro_video");
-    // Renamable takes: new `take` category + legacy `take_1/2/3` (auto-labelled)
-    const takes = media
-        .filter(
-            (m) =>
-                m.category === "take" ||
-                m.category === "take_1" ||
-                m.category === "take_2" ||
-                m.category === "take_3",
-        )
-        .map((m) => {
-            if (m.category === "take") return m;
-            const n = m.category.replace("take_", "");
-            return { ...m, _legacy: true, label: m.label || `Take ${n}` };
-        });
     const MAX_TAKES = 5;
     const canAddTake = takes.length < MAX_TAKES;
     const isSubmitted =

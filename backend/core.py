@@ -1124,6 +1124,49 @@ class DownloadIn(BaseModel):
     media_id: str
 
 
+def default_submission_requirements() -> Dict[str, Any]:
+    return {
+        "strictness": "strict",
+        "fields": {
+            "name": "required",
+            "email": "required",
+            "phone": "optional",
+            "dob": "optional",
+            "age": "optional",
+            "height": "optional",
+            "location": "optional",
+            "gender": "optional",
+            "ethnicity": "optional",
+            "instagram_handle": "optional",
+            "instagram_followers": "optional",
+            "bio": "optional",
+            "competitive_brand": "optional",
+            "availability": "optional",
+            "budget_expectation": "optional",
+            "work_links": "optional"
+        },
+        "custom_questions": {},
+        "intro_video": "optional",
+        "min_audition_takes": 0,
+        "portfolio": {
+            "indian": 0,
+            "western": 0,
+            "image": 0
+        },
+        "min_work_links": 0,
+        "skills": {
+            "language": False,
+            "performance": False,
+            "sports": False,
+            "action": False,
+            "vehicle": False,
+            "special": False
+        },
+        "interested_in": "optional",
+        "conditional_rules": []
+    }
+
+
 class ProjectIn(BaseModel):
     brand_name: str
     brand_link: Optional[str] = None
@@ -1149,6 +1192,7 @@ class ProjectIn(BaseModel):
     require_reapproval_on_edit: bool = True
     hide_budget_from_talent: bool = False
     status: str = "ongoing"
+    submission_requirements: Optional[Dict[str, Any]] = Field(default_factory=default_submission_requirements)
 
 
 

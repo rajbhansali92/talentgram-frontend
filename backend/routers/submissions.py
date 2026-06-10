@@ -753,26 +753,161 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
-    form = sub.get("form_data") or {}
-    for field in ("first_name", "last_name", "height", "location"):
-        if not (form.get(field) or "").strip():
-            raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
-    avail = form.get("availability") or {}
-    if isinstance(avail, str):
-        avail = {"status": "yes" if avail else "", "note": avail}
-    status = (avail.get("status") or "").strip()
-    if status not in {"yes", "no"}:
-        raise HTTPException(400, "Please confirm your availability")
-    if status == "no" and not (avail.get("note") or "").strip():
-        raise HTTPException(400, "Please share your alternate availability")
-    budget = form.get("budget") or {}
-    if isinstance(budget, str):
-        budget = {"status": "accept" if budget else "", "value": budget}
-    bstatus = (budget.get("status") or "").strip()
-    if bstatus not in {"accept", "custom"}:
-        raise HTTPException(400, "Please confirm the budget")
-    if bstatus == "custom" and not (budget.get("value") or "").strip():
-        raise HTTPException(400, "Please enter your expected budget")
+    project = await db.projects.find_one({"id": sub["project_id"]})
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    requirements = project.get("submission_requirements")
+    if requirements and requirements.get("strictness") == "strict":
+        fields_config = requirements.get("fields") or {}
+
+        # 1. Standard Profile Fields
+        if fields_config.get("name") == "required":
+            if not (form.get("first_name") or "").strip() or not (form.get("last_name") or "").strip():
+                raise HTTPException(400, "First and Last Name are required")
+        if fields_config.get("email") == "required" and not (sub.get("talent_email") or "").strip():
+            raise HTTPException(400, "Email is required")
+        if fields_config.get("phone") == "required" and not (form.get("phone") or "").strip():
+            raise HTTPException(400, "Phone is required")
+        if fields_config.get("dob") == "required" and not (form.get("dob") or "").strip():
+            raise HTTPException(400, "Date of Birth is required")
+        if fields_config.get("age") == "required" and form.get("age") is None:
+            raise HTTPException(400, "Age is required")
+        if fields_config.get("height") == "required" and not (form.get("height") or "").strip():
+            raise HTTPException(400, "Height is required")
+        if fields_config.get("location") == "required" and not (form.get("location") or "").strip():
+            raise HTTPException(400, "Current Location is required")
+        if fields_config.get("gender") == "required" and not (form.get("gender") or "").strip():
+            raise HTTPException(400, "Gender is required")
+        if fields_config.get("ethnicity") == "required" and not (form.get("ethnicity") or "").strip():
+            raise HTTPException(400, "Ethnicity is required")
+        if fields_config.get("instagram_handle") == "required" and not (form.get("instagram_handle") or "").strip():
+            raise HTTPException(400, "Instagram Handle is required")
+        if fields_config.get("instagram_followers") == "required" and not (form.get("instagram_followers") or "").strip():
+            raise HTTPException(400, "Instagram Followers is required")
+        if fields_config.get("bio") == "required" and not (form.get("bio") or "").strip():
+            raise HTTPException(400, "Bio is required")
+        if fields_config.get("competitive_brand") == "required" and not (form.get("competitive_brand") or "").strip():
+            raise HTTPException(400, "Competitive Brand is required")
+
+        if fields_config.get("availability") == "required":
+            avail = form.get("availability") or {}
+            if isinstance(avail, str):
+                avail = {"status": "yes" if avail else "", "note": avail}
+            status = (avail.get("status") or "").strip()
+            if status not in {"yes", "no"}:
+                raise HTTPException(400, "Please confirm your availability")
+            if status == "no" and not (avail.get("note") or "").strip():
+                raise HTTPException(400, "Please share your alternate availability")
+
+        if fields_config.get("budget_expectation") == "required":
+            budget = form.get("budget") or {}
+            if isinstance(budget, str):
+                budget = {"status": "accept" if budget else "", "value": budget}
+            bstatus = (budget.get("status") or "").strip()
+            if bstatus not in {"accept", "custom"}:
+                raise HTTPException(400, "Please confirm the budget")
+            if bstatus == "custom" and not (budget.get("value") or "").strip():
+                raise HTTPException(400, "Please enter your expected budget")
+
+        if requirements.get("interested_in") == "required":
+            if not form.get("interested_in"):
+                raise HTTPException(400, "Please select at least one casting interest")
+
+        # 2. Custom Questions
+        custom_reqs = requirements.get("custom_questions") or {}
+        custom_answers = form.get("custom_answers") or {}
+        for cq in project.get("custom_questions") or []:
+            qid = cq.get("id")
+            if qid and custom_reqs.get(qid) == "required":
+                if not str(custom_answers.get(qid) or "").strip():
+                    raise HTTPException(400, f"Question '{cq.get('question')}' is required")
+
+        # 3. Media
+        media_list = sub.get("media") or []
+        intro_req = requirements.get("intro_video")
+        if intro_req == "required":
+            has_intro = any(m.get("category") == "intro_video" for m in media_list)
+            if not has_intro:
+                raise HTTPException(400, "Introduction Video is required")
+
+        min_takes = int(requirements.get("min_audition_takes") or 0)
+        if min_takes > 0:
+            takes_count = sum(1 for m in media_list if m.get("category") in {"take", "take_1", "take_2", "take_3"})
+            if takes_count < min_takes:
+                raise HTTPException(400, f"Please upload at least {min_takes} audition take(s)")
+
+        portfolio_reqs = requirements.get("portfolio") or {}
+        for category, label_name in [("image", "Portfolio (General)"), ("indian", "Indian Look"), ("western", "Western Look")]:
+            min_count = int(portfolio_reqs.get(category) or 0)
+            if min_count > 0:
+                count = sum(1 for m in media_list if m.get("category") == category)
+                if count < min_count:
+                    raise HTTPException(400, f"{label_name} requires at least {min_count} image(s)")
+
+        # 4. Work Links
+        min_links = int(requirements.get("min_work_links") or 0)
+        if min_links > 0:
+            links_count = len(form.get("work_links") or [])
+            if links_count < min_links:
+                raise HTTPException(400, f"Please add at least {min_links} work link(s)")
+
+        # 5. Skills & Special Abilities
+        skills_reqs = requirements.get("skills") or {}
+        user_skills = form.get("skills") or []
+        SKILLS_CATEGORIES = {
+            "Dance": ["Hip Hop", "Contemporary", "Bollywood", "Bharatanatyam", "Kathak", "Salsa", "Ballet"],
+            "Music": ["Singer", "Piano", "Keyboard", "Guitar", "Violin", "Drums", "Flute", "Ukulele", "DJ", "Beatboxing", "Rapper", "Composer", "Music Producer"],
+            "Sports & Fitness": ["Athlete", "Gymnastics", "Yoga", "Swimming", "Cycling", "Boxing", "Kickboxing", "Wrestling", "CrossFit", "Calisthenics", "Cricket", "Football", "Basketball", "Tennis", "Badminton"],
+            "Action & Stunts": ["Martial Arts", "Karate", "Taekwondo", "Judo", "Kung Fu", "Fight Choreography", "Horse Riding", "Rock Climbing", "Parkour", "Sword Fighting"],
+            "Vehicle Skills": ["Drive Manual Car", "Drive Automatic Car", "Ride Motorcycle", "Ride Scooter", "Ride Bicycle", "Drive Truck", "Operate Boat", "Ride Jet Ski"],
+            "Performance": ["Actor", "Voice Artist", "Dancer", "Singer", "Host", "Anchor", "Model", "Theatre Artist", "Improvisation", "Stand-up Comedy"],
+            "Special Skills": ["Skateboarding", "Roller Skating", "Ice Skating", "Surfing", "Scuba Diving", "Fire Performance", "Juggling"],
+            "Languages": ["English", "Hindi", "Spanish", "French", "Mandarin Chinese", "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Urdu", "Other"]
+        }
+        for cat, req in skills_reqs.items():
+            if req:
+                valid_skills = SKILLS_CATEGORIES.get(cat) or []
+                if not any(s in valid_skills for s in user_skills):
+                    raise HTTPException(400, f"At least one skill from category '{cat}' is required")
+
+        # 6. Conditional Rules
+        conditional_rules = requirements.get("conditional_rules") or []
+        for rule in conditional_rules:
+            qid = rule.get("question_id")
+            trigger = rule.get("trigger_value")
+            video_label = rule.get("video_label")
+            if qid and trigger and video_label:
+                ans = str(custom_answers.get(qid) or "").strip().lower()
+                if ans == str(trigger).strip().lower():
+                    has_cond_video = any(
+                        m.get("category") in {"take", "intro_video", "take_1", "take_2", "take_3"}
+                        and str(m.get("label") or "").strip().lower() == video_label.strip().lower()
+                        for m in media_list
+                    )
+                    if not has_cond_video:
+                        raise HTTPException(400, f"Conditional requirement '{video_label}' is missing")
+    else:
+        # Fallback legacy validation rules
+        for field in ("first_name", "last_name", "height", "location"):
+            if not (form.get(field) or "").strip():
+                raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
+        avail = form.get("availability") or {}
+        if isinstance(avail, str):
+            avail = {"status": "yes" if avail else "", "note": avail}
+        status = (avail.get("status") or "").strip()
+        if status not in {"yes", "no"}:
+            raise HTTPException(400, "Please confirm your availability")
+        if status == "no" and not (avail.get("note") or "").strip():
+            raise HTTPException(400, "Please share your alternate availability")
+        budget = form.get("budget") or {}
+        if isinstance(budget, str):
+            budget = {"status": "accept" if budget else "", "value": budget}
+        bstatus = (budget.get("status") or "").strip()
+        if bstatus not in {"accept", "custom"}:
+            raise HTTPException(400, "Please confirm the budget")
+        if bstatus == "custom" and not (budget.get("value") or "").strip():
+            raise HTTPException(400, "Please enter your expected budget")
     # Phase 1 v37c: media is fully optional on the audition submission
     # flow. Talents can ship a "form-only" submission and add intro
     # video / takes / portfolio images later via Refine. Caps on the

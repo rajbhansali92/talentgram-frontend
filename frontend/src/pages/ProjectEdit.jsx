@@ -127,6 +127,7 @@ export default function ProjectEdit() {
         additionalDetails: false,
         auditionMaterial: false,
         formConfig: false,
+        submissionRequirements: false,
         submissionLink: false,
         submissions: false,
     });
@@ -1069,6 +1070,441 @@ export default function ProjectEdit() {
                             </div>
                         </>
                     )}
+                </section>
+            )}
+
+            {/* Submission Requirements Section */}
+            {isEdit && (
+                <section
+                    className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mt-6"
+                    data-testid="submission-requirements-section"
+                >
+                    <div className="flex items-center justify-between mb-6">
+                        <div>
+                            <p className="eyebrow">Submission Requirements Engine</p>
+                            <p className="text-xs text-black/45 mt-1">
+                                Enforce profile fields, portfolio counts, specific skills, and conditional video tasks.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setCollapsedSections(prev => ({ ...prev, submissionRequirements: !prev.submissionRequirements }))}
+                            className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-black/[0.02] rounded-md text-black/55 hover:text-black transition-colors shrink-0"
+                            aria-label={collapsedSections.submissionRequirements ? "Expand requirements" : "Collapse requirements"}
+                        >
+                            <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${collapsedSections.submissionRequirements ? "-rotate-90" : ""}`} />
+                        </button>
+                    </div>
+
+                    {!collapsedSections.submissionRequirements && (() => {
+                        const defaultRequirements = {
+                            strictness: "strict",
+                            fields: {
+                                name: "required",
+                                email: "required",
+                                phone: "optional",
+                                dob: "optional",
+                                age: "optional",
+                                height: "optional",
+                                location: "optional",
+                                gender: "optional",
+                                ethnicity: "optional",
+                                instagram_handle: "optional",
+                                instagram_followers: "optional",
+                                bio: "optional",
+                                competitive_brand: "optional",
+                                availability: "optional",
+                                budget_expectation: "optional",
+                                work_links: "optional",
+                            },
+                            custom_questions: {},
+                            intro_video: "optional",
+                            min_audition_takes: 0,
+                            portfolio: {
+                                indian: 0,
+                                western: 0,
+                                image: 0,
+                            },
+                            min_work_links: 0,
+                            skills: {
+                                Dance: false,
+                                Music: false,
+                                "Sports & Fitness": false,
+                                "Action & Stunts": false,
+                                "Vehicle Skills": false,
+                                Performance: false,
+                                "Special Skills": false,
+                                Languages: false,
+                            },
+                            interested_in: "optional",
+                            conditional_rules: [],
+                        };
+
+                        const reqs = {
+                            ...defaultRequirements,
+                            ...(project.submission_requirements || {}),
+                            fields: {
+                                ...defaultRequirements.fields,
+                                ...((project.submission_requirements || {}).fields || {}),
+                            },
+                            portfolio: {
+                                ...defaultRequirements.portfolio,
+                                ...((project.submission_requirements || {}).portfolio || {}),
+                            },
+                            skills: {
+                                ...defaultRequirements.skills,
+                                ...((project.submission_requirements || {}).skills || {}),
+                            },
+                            custom_questions: {
+                                ...((project.submission_requirements || {}).custom_questions || {}),
+                            },
+                            conditional_rules: [
+                                ...((project.submission_requirements || {}).conditional_rules || []),
+                            ],
+                        };
+
+                        const updateReqs = (patch) => {
+                            updateProject({
+                                submission_requirements: {
+                                    ...reqs,
+                                    ...patch,
+                                }
+                            });
+                        };
+
+                        const updateField = (field, value) => {
+                            updateReqs({
+                                fields: {
+                                    ...reqs.fields,
+                                    [field]: value,
+                                }
+                            });
+                        };
+
+                        const updatePortfolio = (cat, value) => {
+                            updateReqs({
+                                portfolio: {
+                                    ...reqs.portfolio,
+                                    [cat]: parseInt(value) || 0,
+                                }
+                            });
+                        };
+
+                        const updateSkill = (cat, checked) => {
+                            updateReqs({
+                                skills: {
+                                    ...reqs.skills,
+                                    [cat]: checked,
+                                }
+                            });
+                        };
+
+                        const updateCustomQuestionReq = (qid, value) => {
+                            updateReqs({
+                                custom_questions: {
+                                    ...reqs.custom_questions,
+                                    [qid]: value,
+                                }
+                            });
+                        };
+
+                        return (
+                            <div className="space-y-8" data-testid="requirements-engine-container">
+                                {/* Strictness & Global settings */}
+                                <div className="grid md:grid-cols-2 gap-6 pb-6 border-b border-[#eaeaea]">
+                                    <div>
+                                        <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                            Strictness Mode
+                                        </label>
+                                        <Select
+                                            value={reqs.strictness}
+                                            onValueChange={(v) => isEditing && updateReqs({ strictness: v })}
+                                            disabled={!isEditing}
+                                        >
+                                            <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                <SelectItem value="strict">Strict (Blocks submission on validation fail)</SelectItem>
+                                                <SelectItem value="standard">Standard (Warnings only, non-blocking)</SelectItem>
+                                                <SelectItem value="flexible">Flexible (Validation disabled)</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                            Interested In Field
+                                        </label>
+                                        <Select
+                                            value={reqs.interested_in}
+                                            onValueChange={(v) => isEditing && updateReqs({ interested_in: v })}
+                                            disabled={!isEditing}
+                                        >
+                                            <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                <SelectItem value="required">Required (At least 1 selected)</SelectItem>
+                                                <SelectItem value="optional">Optional</SelectItem>
+                                                <SelectItem value="hidden">Hidden</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                </div>
+
+                                {/* Standard Profile Fields Configuration */}
+                                <div>
+                                    <h3 className="text-sm font-semibold text-black/85 mb-4">Profile Fields Configuration</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-4">
+                                        {Object.keys(defaultRequirements.fields).map((f) => {
+                                            const val = reqs.fields[f] || "optional";
+                                            return (
+                                                <div key={f} className="flex items-center justify-between border-b border-black/[0.04] pb-2 text-xs">
+                                                    <span className="font-mono text-black/75 capitalize">
+                                                        {f.replace("_", " ")}
+                                                    </span>
+                                                    <div className="flex gap-2">
+                                                        {["required", "optional", "hidden"].map((opt) => (
+                                                            <button
+                                                                key={opt}
+                                                                type="button"
+                                                                disabled={!isEditing}
+                                                                onClick={() => updateField(f, opt)}
+                                                                className={`px-2 py-1 rounded text-[10px] uppercase font-mono tracking-wider transition-colors ${
+                                                                    val === opt
+                                                                        ? "bg-black text-white"
+                                                                        : "bg-black/[0.04] hover:bg-black/[0.08] text-black/60"
+                                                                }`}
+                                                            >
+                                                                {opt}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {/* Custom Questions Validation Configuration */}
+                                {(project.custom_questions || []).length > 0 && (
+                                    <div className="border-t border-[#eaeaea] pt-6">
+                                        <h3 className="text-sm font-semibold text-black/85 mb-4">Custom Questions Validation</h3>
+                                        <div className="space-y-3">
+                                            {(project.custom_questions || []).map((q) => {
+                                                const val = reqs.custom_questions[q.id] || "optional";
+                                                return (
+                                                    <div key={q.id} className="flex items-center justify-between border-b border-black/[0.04] pb-2 text-xs">
+                                                        <span className="text-black/75 truncate flex-1 pr-4">
+                                                            {q.question}
+                                                        </span>
+                                                        <div className="flex gap-2">
+                                                            {["required", "optional"].map((opt) => (
+                                                                <button
+                                                                    key={opt}
+                                                                    type="button"
+                                                                    disabled={!isEditing}
+                                                                    onClick={() => updateCustomQuestionReq(q.id, opt)}
+                                                                    className={`px-2 py-1 rounded text-[10px] uppercase font-mono tracking-wider transition-colors ${
+                                                                        val === opt
+                                                                            ? "bg-black text-white"
+                                                                            : "bg-black/[0.04] hover:bg-black/[0.08] text-black/60"
+                                                                    }`}
+                                                                >
+                                                                    {opt}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Media & Portfolio Limits */}
+                                <div className="border-t border-[#eaeaea] pt-6">
+                                    <h3 className="text-sm font-semibold text-black/85 mb-4">Media & Portfolio Requirements</h3>
+                                    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                        <div>
+                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                                Introduction Video
+                                            </label>
+                                            <Select
+                                                value={reqs.intro_video}
+                                                onValueChange={(v) => isEditing && updateReqs({ intro_video: v })}
+                                                disabled={!isEditing}
+                                            >
+                                                <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                    <SelectItem value="required">Required</SelectItem>
+                                                    <SelectItem value="optional">Optional</SelectItem>
+                                                    <SelectItem value="hidden">Hidden</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                                Min Audition Takes
+                                            </label>
+                                            <Select
+                                                value={String(reqs.min_audition_takes || 0)}
+                                                onValueChange={(v) => isEditing && updateReqs({ min_audition_takes: parseInt(v) })}
+                                                disabled={!isEditing}
+                                            >
+                                                <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                    {[0, 1, 2, 3, 4, 5].map((n) => (
+                                                        <SelectItem key={n} value={String(n)}>{n} Take(s)</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                                Min Work Links
+                                            </label>
+                                            <Select
+                                                value={String(reqs.min_work_links || 0)}
+                                                onValueChange={(v) => isEditing && updateReqs({ min_work_links: parseInt(v) })}
+                                                disabled={!isEditing}
+                                            >
+                                                <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                    {[0, 1, 2, 3, 4, 5].map((n) => (
+                                                        <SelectItem key={n} value={String(n)}>{n} Link(s)</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                                Min Portfolio (General) Images
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="10"
+                                                value={reqs.portfolio.image}
+                                                onChange={(e) => updatePortfolio("image", e.target.value)}
+                                                disabled={!isEditing}
+                                                className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                                Min Indian Look Images
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="10"
+                                                value={reqs.portfolio.indian}
+                                                onChange={(e) => updatePortfolio("indian", e.target.value)}
+                                                disabled={!isEditing}
+                                                className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
+                                                Min Western Look Images
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="10"
+                                                value={reqs.portfolio.western}
+                                                onChange={(e) => updatePortfolio("western", e.target.value)}
+                                                disabled={!isEditing}
+                                                className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Required Skill Categories */}
+                                <div className="border-t border-[#eaeaea] pt-6">
+                                    <h3 className="text-sm font-semibold text-black/85 mb-2">Mandatory Skill Categories</h3>
+                                    <p className="text-xs text-black/45 mb-4">
+                                        If active, the talent must select at least one skill in that category.
+                                    </p>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        {Object.keys(defaultRequirements.skills).map((cat) => (
+                                            <label key={cat} className="flex items-center gap-2.5 text-xs text-black/75 cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={reqs.skills[cat] || false}
+                                                    onChange={(e) => isEditing && updateSkill(cat, e.target.checked)}
+                                                    disabled={!isEditing}
+                                                    className="w-4 h-4 accent-black disabled:opacity-60"
+                                                />
+                                                <span>{cat}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Conditional Rules Builder */}
+                                <div className="border-t border-[#eaeaea] pt-6">
+                                    <h3 className="text-sm font-semibold text-black/85 mb-2">Conditional Rules Engine</h3>
+                                    <p className="text-xs text-black/45 mb-4">
+                                        Require specific video tasks based on the talent's custom question answers.
+                                    </p>
+
+                                    {/* Existing Rules List */}
+                                    <div className="space-y-3 mb-4">
+                                        {reqs.conditional_rules.map((rule, idx) => {
+                                            const q = (project.custom_questions || []).find((cq) => cq.id === rule.question_id);
+                                            return (
+                                                <div key={idx} className="flex items-center gap-3 bg-black/[0.02] border border-black/[0.05] rounded-lg p-3 text-xs">
+                                                    <span className="flex-1">
+                                                        If <strong>"{q ? q.question : "Deleted Question"}"</strong> equals <strong>"{rule.trigger_value}"</strong>,
+                                                        then require video upload labeled <strong>"{rule.video_label}"</strong>.
+                                                    </span>
+                                                    {isEditing && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                updateReqs({
+                                                                    conditional_rules: reqs.conditional_rules.filter((_, i) => i !== idx),
+                                                                });
+                                                            }}
+                                                            className="text-black/40 hover:text-red-600 transition-colors"
+                                                        >
+                                                            <X className="w-4 h-4" />
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Add New Rule Form */}
+                                    {isEditing && (project.custom_questions || []).length > 0 && (
+                                        <ConditionalRuleForm
+                                            questions={project.custom_questions}
+                                            onAdd={(newRule) => {
+                                                updateReqs({
+                                                    conditional_rules: [...reqs.conditional_rules, newRule],
+                                                });
+                                            }}
+                                        />
+                                    )}
+                                    {isEditing && (project.custom_questions || []).length === 0 && (
+                                        <p className="text-xs text-black/45 italic">
+                                            Create custom questions above first to define conditional rules.
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })()}
                 </section>
             )}
 
@@ -2934,3 +3370,76 @@ function UploadTile({
         </button>
     );
 }
+
+function ConditionalRuleForm({ questions, onAdd }) {
+    const [questionId, setQuestionId] = useState(questions[0]?.id || "");
+    const [triggerValue, setTriggerValue] = useState("");
+    const [videoLabel, setVideoLabel] = useState("");
+
+    const handleAdd = () => {
+        if (!questionId || !triggerValue.trim() || !videoLabel.trim()) {
+            toast.error("Please fill in all conditional rule fields");
+            return;
+        }
+        onAdd({
+            question_id: questionId,
+            trigger_value: triggerValue.trim(),
+            video_label: videoLabel.trim(),
+        });
+        setTriggerValue("");
+        setVideoLabel("");
+    };
+
+    return (
+        <div className="flex flex-wrap gap-4 items-end bg-black/[0.01] border border-dashed border-black/[0.1] rounded-xl p-4 mt-2">
+            <div className="flex-1 min-w-[200px]">
+                <label className="block text-[10px] text-black/45 uppercase tracking-wider mb-1">
+                    If Question
+                </label>
+                <select
+                    value={questionId}
+                    onChange={(e) => setQuestionId(e.target.value)}
+                    className="w-full bg-white border border-[#eaeaea] rounded-lg px-3 h-9 text-xs"
+                >
+                    {questions.map((q) => (
+                        <option key={q.id} value={q.id}>
+                            {q.question}
+                        </option>
+                    ))}
+                </select>
+            </div>
+            <div className="w-[120px]">
+                <label className="block text-[10px] text-black/45 uppercase tracking-wider mb-1">
+                    Answer Equals
+                </label>
+                <input
+                    type="text"
+                    value={triggerValue}
+                    onChange={(e) => setTriggerValue(e.target.value)}
+                    placeholder="e.g. YES"
+                    className="w-full bg-white border border-[#eaeaea] rounded-lg px-3 h-9 text-xs"
+                />
+            </div>
+            <div className="flex-1 min-w-[200px]">
+                <label className="block text-[10px] text-black/45 uppercase tracking-wider mb-1">
+                    Require Video Labeled
+                </label>
+                <input
+                    type="text"
+                    value={videoLabel}
+                    onChange={(e) => setVideoLabel(e.target.value)}
+                    placeholder="e.g. Driving Reference"
+                    className="w-full bg-white border border-[#eaeaea] rounded-lg px-3 h-9 text-xs"
+                />
+            </div>
+            <button
+                type="button"
+                onClick={handleAdd}
+                className="bg-black text-white hover:bg-black/90 px-4 h-9 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 shrink-0"
+            >
+                <Plus className="w-3.5 h-3.5" /> Add Rule
+            </button>
+        </div>
+    );
+}
+

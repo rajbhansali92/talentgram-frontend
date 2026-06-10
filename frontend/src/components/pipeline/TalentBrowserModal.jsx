@@ -4,6 +4,7 @@ import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2,
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
+import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
 
 /* ---------------------------------------------------------------------
  * TalentBrowserModal — Elite Enterprise ATS-Grade Talent Browser
@@ -140,7 +141,9 @@ const FILTER_DEFAULTS = {
     tagMatchMode: "OR",
     interestedInMatchMode: "OR",
     availability: "any",
-    showIntelligence: true
+    showIntelligence: true,
+    skills: [],
+    skillsMatchMode: "OR"
 };
 
 // Saved searches presets
@@ -363,13 +366,15 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                     const validTags = (talent.tags || []).filter(tag => tag && typeof tag === 'object' && tag.id && tag.name);
                     const tagIdsSet = new Set(validTags.map(tag => tag.id));
                     const interestedInSet = new Set((talent.interested_in || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
-
+                    const skillsSet = new Set((talent.skills || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
+ 
                     return {
                         ...talent,
                         tags: validTags, // Overwrite to ensure zero card rendering bugs with legacy/deleted tags
                         _heightInches: parsedHeight,
                         _tagIdsSet: tagIdsSet,
                         _interestedInSet: interestedInSet,
+                        _skillsSet: skillsSet,
                         instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
                         response_rate: talent.response_rate || 75,
                         conversion_rate: talent.conversion_rate || 68,
@@ -600,6 +605,18 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 }
             }
             
+            // 8. Skills & Special Abilities (Multi-select AND/OR matching)
+            if (skills && skills.length > 0) {
+                const lowerSelected = skills.map(s => s.toLowerCase());
+                if (skillsMatchMode === "AND") {
+                    const hasAll = lowerSelected.every(s => t._skillsSet.has(s));
+                    if (!hasAll) return false;
+                } else {
+                    const hasAny = lowerSelected.some(s => t._skillsSet.has(s));
+                    if (!hasAny) return false;
+                }
+            }
+            
             return true;
         }).map(t => ({
             ...t,
@@ -619,7 +636,8 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             filters.heightMax !== "" ||
             filters.minFollowers > 0 ||
             filters.interestedIn.length > 0 ||
-            filters.internalTags.length > 0
+            filters.internalTags.length > 0 ||
+            (filters.skills && filters.skills.length > 0)
         );
     }, [filters]);
     
@@ -633,6 +651,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         if (filters.minFollowers > 0) count++;
         if (filters.interestedIn.length > 0) count++;
         if (filters.internalTags.length > 0) count++;
+        if (filters.skills && filters.skills.length > 0) count++;
         return count;
     }, [filters]);
     
@@ -1001,6 +1020,13 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                                 key={cat} 
                                                 label={`Category: ${cat}`} 
                                                 onRemove={() => setFilter("interestedIn", filters.interestedIn.filter(x => x !== cat))} 
+                                            />
+                                        ))}
+                                        {filters.skills && filters.skills.map(skill => (
+                                            <FilterChip 
+                                                key={skill} 
+                                                label={`Skill: ${skill}`} 
+                                                onRemove={() => setFilter("skills", filters.skills.filter(x => x !== skill))} 
                                             />
                                         ))}
                                         {filters.internalTags.map(tagId => {
@@ -1841,6 +1867,71 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                 </div>
             </div>
 
+            {/* Skills & Special Abilities Filter */}
+            <div className="pt-2 border-t border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Skills & Special Abilities</label>
+                    <div className="flex items-center gap-1 bg-gray-100 rounded-md p-0.5">
+                        <button
+                            type="button"
+                            onClick={() => setFilter("skillsMatchMode", "OR")}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                filters.skillsMatchMode === "OR" 
+                                    ? "bg-white text-[#111111] shadow-sm" 
+                                    : "text-[#333333] hover:text-[#111111]"
+                            }`}
+                        >
+                            ANY (OR)
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setFilter("skillsMatchMode", "AND")}
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                filters.skillsMatchMode === "AND" 
+                                    ? "bg-white text-[#111111] shadow-sm" 
+                                    : "text-[#333333] hover:text-[#111111]"
+                            }`}
+                        >
+                            ALL (AND)
+                        </button>
+                    </div>
+                </div>
+                <div className="space-y-3 max-h-60 overflow-y-auto pr-1">
+                    {Object.entries(SKILLS_CATEGORIES).map(([catName, skillList]) => (
+                        <div key={catName} className="space-y-1">
+                            <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider block">
+                                {catName}
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                                {skillList.map(skill => {
+                                    const isSelected = filters.skills && filters.skills.includes(skill);
+                                    return (
+                                        <button
+                                            key={skill}
+                                            type="button"
+                                            onClick={() => {
+                                                if (isSelected) {
+                                                    setFilter("skills", filters.skills.filter(x => x !== skill));
+                                                } else {
+                                                    setFilter("skills", [...(filters.skills || []), skill]);
+                                                }
+                                            }}
+                                            className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all active:scale-[0.98] ${
+                                                isSelected 
+                                                    ? "bg-[#0c2340] border-[#0c2340] text-white shadow-sm" 
+                                                    : "bg-white border-[#0c2340]/40 text-[#0c2340] hover:bg-[#0c2340]/5"
+                                            }`}
+                                        >
+                                            {skill}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
             {/* ROW 6 (Internal Tags Autocomplete) */}
             <div className="pt-2 border-t border-gray-100">
                 <div className="flex items-center justify-between mb-2">
@@ -2064,6 +2155,54 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                                     </button>
                                 );
                             })}
+                        </div>
+                    </div>
+
+                    {/* Skills & Special Abilities (Mobile View) */}
+                    <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                            <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Skills & Special Abilities</label>
+                            <button
+                                type="button"
+                                onClick={() => setLocalFilter("skillsMatchMode", localFilters.skillsMatchMode === "OR" ? "AND" : "OR")}
+                                className="px-2 py-0.5 bg-gray-100 rounded text-[10px] font-medium text-[#111111] font-semibold"
+                            >
+                                Mode: {localFilters.skillsMatchMode || "OR"}
+                            </button>
+                        </div>
+                        <div className="space-y-3 max-h-48 overflow-y-auto mt-1.5 pr-1 border border-gray-100 rounded-lg p-2 bg-gray-50/50">
+                            {Object.entries(SKILLS_CATEGORIES).map(([catName, skillList]) => (
+                                <div key={catName} className="space-y-1">
+                                    <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider block">
+                                        {catName}
+                                    </span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {skillList.map(skill => {
+                                            const isSelected = localFilters.skills && localFilters.skills.includes(skill);
+                                            return (
+                                                <button
+                                                    key={skill}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        if (isSelected) {
+                                                            setLocalFilter("skills", localFilters.skills.filter(x => x !== skill));
+                                                        } else {
+                                                            setLocalFilter("skills", [...(localFilters.skills || []), skill]);
+                                                        }
+                                                    }}
+                                                    className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all active:scale-[0.98] ${
+                                                        isSelected 
+                                                            ? "bg-[#0c2340] border-[#0c2340] text-white shadow-sm" 
+                                                            : "bg-white border-[#0c2340]/40 text-[#0c2340]"
+                                                    }`}
+                                                >
+                                                    {skill}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))}
                         </div>
                     </div>
 

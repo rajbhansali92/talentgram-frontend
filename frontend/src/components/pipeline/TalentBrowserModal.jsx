@@ -1271,9 +1271,12 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
         <div
             ref={(el) => registerRef(globalIndex, el)}
             className={`
-                flex items-center justify-between p-3 transition-all duration-200 border-b border-gray-100
-                ${alreadyInPipeline ? "opacity-60 bg-gray-50/50" : "hover:bg-gray-50/80 cursor-pointer"}
-                ${selected ? "bg-gray-100/60 font-medium" : "bg-white"}
+                flex items-center justify-between p-3 transition-all duration-200 border
+                ${alreadyInPipeline 
+                    ? "bg-[#0c2340]/[0.02] border-[#0c2340] border-l-4 shadow-[inset_1px_0_0_0_#0c2340] opacity-95" 
+                    : "border-transparent border-b-gray-100 hover:bg-gray-50/80 cursor-pointer bg-white"
+                }
+                ${selected ? "bg-gray-100/60 font-medium" : ""}
                 ${isFocused && !alreadyInPipeline ? "ring-2 ring-blue-500" : ""}
             `}
             onClick={handleToggle}
@@ -2299,10 +2302,12 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
             }}
             className={`
                 relative text-left rounded-xl overflow-hidden transition-all duration-200 group
-                ${alreadyInPipeline ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:shadow-lg hover:-translate-y-0.5"}
-                ${selected ? "ring-[3px] ring-gray-900 shadow-md bg-gray-100/60" : "ring-1 ring-gray-200"}
+                ${alreadyInPipeline 
+                    ? "ring-2 ring-[#0c2340] bg-[#0c2340]/[0.02] shadow-sm cursor-not-allowed opacity-95" 
+                    : "cursor-pointer hover:shadow-lg hover:-translate-y-0.5 bg-white"
+                }
+                ${selected ? "ring-[3px] ring-gray-900 shadow-md bg-gray-100/60" : (!alreadyInPipeline ? "ring-1 ring-gray-200 bg-white" : "")}
                 ${isFocused && !alreadyInPipeline ? "ring-[3px] ring-blue-500 shadow-lg" : ""}
-                bg-white
                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2
             `}
         >

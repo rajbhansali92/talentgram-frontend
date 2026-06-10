@@ -1237,8 +1237,8 @@ function SubmissionPage() {
 
             <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10">
                 {/* SECTION 1 — Project Info */}
-                <section className="mb-8 bg-white/60 rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)] bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.05),transparent_60%)]" data-testid="project-info-section" data-step="1">
-                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-amber-600/70 mb-4">Audition Brief</p>
+                <section className="mb-8 bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)]" data-testid="project-info-section" data-step="1">
+                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-4">Audition Brief</p>
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
                         <div className="flex flex-col gap-1">
                             <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">PROJECT</p>
@@ -1293,7 +1293,7 @@ function SubmissionPage() {
                 {/* SUBMISSION PROGRESS CHECKLIST */}
                 {emailGateUnlocked && (
                     <section className="mb-10 bg-white rounded-3xl p-6 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-3">Submission Progress</p>
+                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-black font-semibold mb-3">Submission Progress</p>
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             {[
                                 { 
@@ -1313,8 +1313,8 @@ function SubmissionPage() {
                                     key={idx} 
                                     className={`flex items-center gap-2.5 px-3 py-2.5 rounded-2xl border transition-all duration-300 ${
                                         item.completed 
-                                            ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-800" 
-                                            : "bg-slate-50/50 border-slate-100 text-[#333333]"
+                                            ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-900 font-semibold" 
+                                            : "bg-slate-50/50 border-slate-100 text-black font-semibold"
                                     }`}
                                 >
                                     <span className="shrink-0">
@@ -1500,11 +1500,12 @@ function SubmissionPage() {
                         {emailGateUnlocked && (
                         <>
                         {/* Section 1: Your Profile */}
-                        <div className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
+                        <div className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
-                                    <h3 className="text-base font-bold text-[#111111] tracking-tight">Your Profile</h3>
-                                    <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
+                                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
+                                    <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">Your Profile</h2>
+                                    <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -1879,11 +1880,12 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 2: Project Questions */}
-                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
+                        <div data-step="2" className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
-                                    <h3 className="text-base font-bold text-[#111111] tracking-tight">Project Questions</h3>
-                                    <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
+                                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Project Questions</p>
+                                    <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">Project Questions</h2>
+                                    <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -2211,12 +2213,12 @@ function SubmissionPage() {
                         data-testid="uploads-section"
                         data-step="3"
                     >
-                        <div className="bg-white rounded-3xl p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
+                        <div className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                         <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                             <div>
-                                <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-amber-800 mb-1">Uploads</p>
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Audition Uploads</p>
                                 <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">
-                                    Show us your work
+                                    Uploads
                                 </h2>
                                 <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Upload audition takes and portfolio images.</p>
                             </div>

@@ -439,32 +439,8 @@ export default function SubmissionReviewCenter() {
         }
     }, [selectedId, id]);
 
-    // Keyboard navigation shortcuts
-    useEffect(() => {
-        const handleKeyDown = (e) => {
-            if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
-                return;
-            }
-
-            if (e.key === "ArrowLeft") {
-                handlePrev();
-            } else if (e.key === "ArrowRight") {
-                handleNext();
-            } else if (e.key.toLowerCase() === "a") {
-                handleDecision("approved");
-            } else if (e.key.toLowerCase() === "r") {
-                handleDecision("rejected");
-            } else if (e.key.toLowerCase() === "h") {
-                handleDecision("hold");
-            }
-        };
-
-        window.addEventListener("keydown", handleKeyDown);
-        return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [filteredSubmissions, currentIndex, selectedId, handlePrev, handleNext, handleDecision]);
-
     // Action handlers
-    const handleDecision = async (decision) => {
+    const handleDecision = useCallback(async (decision) => {
         if (!selectedId) return;
         setSaving(true);
         try {
@@ -497,7 +473,7 @@ export default function SubmissionReviewCenter() {
         } finally {
             setSaving(false);
         }
-    };
+    }, [selectedId, id, decisionNote, submissions, currentIndex, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
 
     const handleSaveCuration = async () => {
         if (!selectedId) return;
@@ -684,25 +660,49 @@ export default function SubmissionReviewCenter() {
     // Navigation indexes
     const currentIndex = filteredSubmissions.findIndex(s => s.id === selectedId);
     
-    const handlePrev = () => {
+    const handlePrev = useCallback(() => {
         if (filteredSubmissions.length <= 1) return;
         const newIndex = currentIndex <= 0 ? filteredSubmissions.length - 1 : currentIndex - 1;
         setSelectedId(filteredSubmissions[newIndex].id);
         setIsEndOfList(false);
-    };
+    }, [filteredSubmissions, currentIndex, setSelectedId, setIsEndOfList]);
 
-    const handleNext = () => {
+    const handleNext = useCallback(() => {
         if (filteredSubmissions.length <= 1) return;
         const newIndex = currentIndex >= filteredSubmissions.length - 1 ? 0 : currentIndex + 1;
         setSelectedId(filteredSubmissions[newIndex].id);
         setIsEndOfList(false);
-    };
+    }, [filteredSubmissions, currentIndex, setSelectedId, setIsEndOfList]);
 
-    const handleSelectRow = (sid) => {
+    const handleSelectRow = useCallback((sid) => {
         setSelectedId(sid);
         setIsEndOfList(false);
         setIsMobileDetailOpen(true);
-    };
+    }, [setSelectedId, setIsEndOfList, setIsMobileDetailOpen]);
+
+    // Keyboard navigation shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+                return;
+            }
+
+            if (e.key === "ArrowLeft") {
+                handlePrev();
+            } else if (e.key === "ArrowRight") {
+                handleNext();
+            } else if (e.key.toLowerCase() === "a") {
+                handleDecision("approved");
+            } else if (e.key.toLowerCase() === "r") {
+                handleDecision("rejected");
+            } else if (e.key.toLowerCase() === "h") {
+                handleDecision("hold");
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [handlePrev, handleNext, handleDecision]);
 
     // Media grouping helper
     const getCuratedMedia = (categoryGroup) => {

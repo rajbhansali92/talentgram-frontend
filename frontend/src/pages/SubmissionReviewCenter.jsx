@@ -439,41 +439,7 @@ export default function SubmissionReviewCenter() {
         }
     }, [selectedId, id]);
 
-    // Action handlers
-    const handleDecision = useCallback(async (decision) => {
-        if (!selectedId) return;
-        setSaving(true);
-        try {
-            await adminApi.post(`/projects/${id}/submissions/${selectedId}/decision`, {
-                decision,
-                note: decisionNote,
-            });
-            
-            const toastMessages = {
-                approved: "Approved and moved to next submission",
-                hold: "Held and moved to next submission",
-                rejected: "Rejected and moved to next submission",
-            };
-            toast.success(toastMessages[decision] || `${decision} registered`);
-            
-            // Reload submission lists and update statuses locally
-            const updatedList = submissions.map(s => s.id === selectedId ? { ...s, decision } : s);
-            setSubmissions(updatedList);
 
-            // Move to next submission automatically if exists, otherwise show completion view
-            if (currentIndex === filteredSubmissions.length - 1) {
-                setIsEndOfList(true);
-            } else {
-                const nextIndex = currentIndex >= filteredSubmissions.length - 1 ? 0 : currentIndex + 1;
-                setSelectedId(filteredSubmissions[nextIndex].id);
-                setIsEndOfList(false);
-            }
-        } catch (e) {
-            toast.error("Failed to register decision");
-        } finally {
-            setSaving(false);
-        }
-    }, [selectedId, id, decisionNote, submissions, currentIndex, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
 
     const handleSaveCuration = async () => {
         if (!selectedId) return;
@@ -679,6 +645,42 @@ export default function SubmissionReviewCenter() {
         setIsEndOfList(false);
         setIsMobileDetailOpen(true);
     }, [setSelectedId, setIsEndOfList, setIsMobileDetailOpen]);
+
+    // Action handlers
+    const handleDecision = useCallback(async (decision) => {
+        if (!selectedId) return;
+        setSaving(true);
+        try {
+            await adminApi.post(`/projects/${id}/submissions/${selectedId}/decision`, {
+                decision,
+                note: decisionNote,
+            });
+            
+            const toastMessages = {
+                approved: "Approved and moved to next submission",
+                hold: "Held and moved to next submission",
+                rejected: "Rejected and moved to next submission",
+            };
+            toast.success(toastMessages[decision] || `${decision} registered`);
+            
+            // Reload submission lists and update statuses locally
+            const updatedList = submissions.map(s => s.id === selectedId ? { ...s, decision } : s);
+            setSubmissions(updatedList);
+
+            // Move to next submission automatically if exists, otherwise show completion view
+            if (currentIndex === filteredSubmissions.length - 1) {
+                setIsEndOfList(true);
+            } else {
+                const nextIndex = currentIndex >= filteredSubmissions.length - 1 ? 0 : currentIndex + 1;
+                setSelectedId(filteredSubmissions[nextIndex].id);
+                setIsEndOfList(false);
+            }
+        } catch (e) {
+            toast.error("Failed to register decision");
+        } finally {
+            setSaving(false);
+        }
+    }, [selectedId, id, decisionNote, submissions, currentIndex, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
 
     // Keyboard navigation shortcuts
     useEffect(() => {

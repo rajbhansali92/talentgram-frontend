@@ -229,3 +229,343 @@ async def upload_file(
         "content_type": file.content_type or "application/octet-stream",
         "original_filename": file.filename,
     }
+
+
+# --------------------------------------------------------------------------
+# Email OTP Authentication
+# --------------------------------------------------------------------------
+import os
+import random
+import hashlib
+import httpx
+import boto3
+from datetime import datetime, timezone, timedelta
+
+class OtpSendIn(BaseModel):
+    email: str
+
+class OtpVerifyIn(BaseModel):
+    email: str
+    otp: str
+    slug: str
+
+def get_client_ip(request: Request) -> str:
+    return (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or (request.client.host if request.client else "127.0.0.1")
+    )
+
+async def send_otp_email(email: str, otp: str) -> bool:
+    subject = "Your Talentgram Verification Code"
+    body = (
+        f"Your verification code is:\n\n"
+        f"{otp}\n\n"
+        f"This code expires in 10 minutes.\n\n"
+        f"If you did not request this code, please ignore this email.\n\n"
+        f"– Talentgram"
+    )
+
+    # 1. Resend
+    resend_key = os.environ.get("RESEND_API_KEY")
+    if resend_key and resend_key != "dummy":
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {resend_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "from": "Talentgram <verification@talentgram.app>",
+                        "to": email,
+                        "subject": subject,
+                        "text": body
+                    },
+                    timeout=10.0
+                )
+                if res.status_code in (200, 201):
+                    logger.info(f"OTP sent to {email} via Resend")
+                    return True
+                else:
+                    logger.warning(f"Resend custom domain failed ({res.status_code}): {res.text}, retrying with onboarding@resend.dev...")
+                    res = await client.post(
+                        "https://api.resend.com/emails",
+                        headers={
+                            "Authorization": f"Bearer {resend_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "from": "Talentgram <onboarding@resend.dev>",
+                            "to": email,
+                            "subject": subject,
+                            "text": body
+                        },
+                        timeout=10.0
+                    )
+                    if res.status_code in (200, 201):
+                        logger.info(f"OTP sent to {email} via Resend (onboarding sender)")
+                        return True
+                    logger.error(f"Resend failed: {res.text}")
+        except Exception as e:
+            logger.error(f"Resend error: {e}")
+
+    # 2. SendGrid
+    sendgrid_key = os.environ.get("SENDGRID_API_KEY")
+    if sendgrid_key and sendgrid_key != "dummy":
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.post(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    headers={
+                        "Authorization": f"Bearer {sendgrid_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "personalizations": [{"to": [{"email": email}]}],
+                        "from": {"email": "noreply@talentgram.app", "name": "Talentgram"},
+                        "subject": subject,
+                        "content": [{"type": "text/plain", "value": body}]
+                    },
+                    timeout=10.0
+                )
+                if res.status_code in (200, 201, 202):
+                    logger.info(f"OTP sent to {email} via SendGrid")
+                    return True
+                logger.error(f"SendGrid failed: {res.text}")
+        except Exception as e:
+            logger.error(f"SendGrid error: {e}")
+
+    # 3. AWS SES
+    try:
+        if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_DEFAULT_REGION"):
+            ses = boto3.client('ses', region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+            res = ses.send_email(
+                Source="Talentgram <noreply@talentgram.app>",
+                Destination={"ToAddresses": [email]},
+                Message={
+                    "Subject": {"Data": subject},
+                    "Body": {"Text": {"Data": body}}
+                }
+            )
+            if res.get("MessageId"):
+                logger.info(f"OTP sent to {email} via AWS SES")
+                return True
+    except Exception as e:
+        logger.error(f"AWS SES error: {e}")
+
+    # Dev/Test Mock
+    if os.environ.get("MONGO_URL") == "mongodb://localhost:27017" or os.environ.get("DB_NAME") == "test":
+        logger.info(f"[DEV MOCK] Sent OTP email to {email} with code {otp}")
+        return True
+
+    return False
+
+def _get_talent_profile_response(talent: dict) -> dict:
+    name_parts = talent.get("name", "").split(" ", 1)
+    first_name = name_parts[0] if name_parts else ""
+    last_name = name_parts[1] if len(name_parts) > 1 else ""
+    return {
+        "email": talent.get("email"),
+        "first_name": first_name,
+        "last_name": last_name,
+        "location": talent.get("location", ""),
+        "phone": talent.get("phone", ""),
+        "height": talent.get("height", ""),
+        "dob": talent.get("dob", ""),
+        "gender": talent.get("gender", ""),
+        "ethnicity": talent.get("ethnicity", ""),
+        "bio": talent.get("bio", ""),
+        "instagram_handle": talent.get("instagram_handle", ""),
+        "instagram_followers": talent.get("instagram_followers", ""),
+        "skills": talent.get("skills", []),
+        "work_links": talent.get("work_links", []),
+    }
+
+@router.post("/auth/otp/send")
+async def send_otp(payload: OtpSendIn, request: Request):
+    email = payload.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+
+    ip = get_client_ip(request)
+    now = datetime.now(timezone.utc)
+    one_hour_ago = now - timedelta(hours=1)
+
+    # Rate Limiting: max 5 resend/send requests per hour per email/IP
+    email_sends = await db.otp_audit_logs.count_documents({
+        "email": email,
+        "action": {"$in": ["sent", "resent"]},
+        "timestamp": {"$gte": one_hour_ago.isoformat()}
+    })
+    ip_sends = await db.otp_audit_logs.count_documents({
+        "ip_address": ip,
+        "action": {"$in": ["sent", "resent"]},
+        "timestamp": {"$gte": one_hour_ago.isoformat()}
+    })
+
+    if email_sends >= 5 or ip_sends >= 5:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many verification requests. Please try again in an hour."
+        )
+
+    # Invalidate previous unused OTP codes for this email
+    await db.otp_codes.update_many(
+        {"email": email, "used": False},
+        {"$set": {"used": True}}
+    )
+
+    # Generate 6-digit numeric OTP
+    otp = f"{random.randint(100000, 999999)}"
+    hashed_otp = hashlib.sha256(otp.encode()).hexdigest()
+
+    expires_at = now + timedelta(minutes=10)
+
+    await db.otp_codes.insert_one({
+        "email": email,
+        "hashed_otp": hashed_otp,
+        "expires_at": expires_at,
+        "attempts": 0,
+        "used": False,
+        "ip_address": ip,
+        "created_at": now
+    })
+
+    has_previous = await db.otp_audit_logs.find_one({"email": email})
+    action = "resent" if has_previous else "sent"
+
+    success = await send_otp_email(email, otp)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send verification email. Please try again.")
+
+    await db.otp_audit_logs.insert_one({
+        "email": email,
+        "action": action,
+        "timestamp": now.isoformat(),
+        "ip_address": ip
+    })
+
+    return {"message": "Verification code sent successfully."}
+
+@router.post("/auth/otp/verify")
+async def verify_otp(payload: OtpVerifyIn, request: Request):
+    email = payload.email.strip().lower()
+    otp = payload.otp.strip()
+    slug = payload.slug.strip()
+
+    if not email or not otp:
+        raise HTTPException(status_code=400, detail="Email and verification code are required.")
+
+    ip = get_client_ip(request)
+    now = datetime.now(timezone.utc)
+
+    otp_record = await db.otp_codes.find_one(
+        {"email": email, "used": False},
+        sort=[("created_at", -1)]
+    )
+
+    if not otp_record:
+        await db.otp_audit_logs.insert_one({
+            "email": email,
+            "action": "failed",
+            "timestamp": now.isoformat(),
+            "ip_address": ip
+        })
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+
+    expires_at = otp_record["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if now > expires_at:
+        await db.otp_codes.update_one({"_id": otp_record["_id"]}, {"$set": {"used": True}})
+        await db.otp_audit_logs.insert_one({
+            "email": email,
+            "action": "expired",
+            "timestamp": now.isoformat(),
+            "ip_address": ip
+        })
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+
+    if otp_record.get("attempts", 0) >= 5:
+        await db.otp_codes.update_one({"_id": otp_record["_id"]}, {"$set": {"used": True}})
+        await db.otp_audit_logs.insert_one({
+            "email": email,
+            "action": "failed",
+            "timestamp": now.isoformat(),
+            "ip_address": ip
+        })
+        raise HTTPException(status_code=400, detail="Too many failed attempts. Please request a new code.")
+
+    hashed_input = hashlib.sha256(otp.encode()).hexdigest()
+    if hashed_input != otp_record["hashed_otp"]:
+        await db.otp_codes.update_one(
+            {"_id": otp_record["_id"]},
+            {"$inc": {"attempts": 1}}
+        )
+        await db.otp_audit_logs.insert_one({
+            "email": email,
+            "action": "failed",
+            "timestamp": now.isoformat(),
+            "ip_address": ip
+        })
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code.")
+
+    await db.otp_codes.update_one({"_id": otp_record["_id"]}, {"$set": {"used": True}})
+
+    await db.otp_audit_logs.insert_one({
+        "email": email,
+        "action": "verified",
+        "timestamp": now.isoformat(),
+        "ip_address": ip
+    })
+
+    project = await db.projects.find_one({"slug": slug})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    submission = await db.submissions.find_one({"project_id": project["id"], "talent_email": email})
+    
+    if submission:
+        token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
+        talent = await db.talents.find_one({"email": email})
+        return {
+            "existing": True,
+            "email": email,
+            "token": token,
+            "submission_id": submission["id"],
+            "status": submission.get("status", "draft"),
+            "talent": _get_talent_profile_response(talent) if talent else None
+        }
+
+    talent = await db.talents.find_one({"email": email})
+    if talent:
+        return {
+            "existing": True,
+            "email": email,
+            "talent": _get_talent_profile_response(talent)
+        }
+
+    new_talent_id = str(uuid.uuid4())
+    new_talent = {
+        "id": new_talent_id,
+        "email": email,
+        "auth_method": "otp",
+        "created_at": now.isoformat(),
+        "name": "",
+        "phone": "",
+        "location": "",
+        "dob": "",
+        "gender": "",
+        "media": [],
+        "work_links": [],
+        "skills": []
+    }
+    await db.talents.insert_one(new_talent)
+
+    return {
+        "existing": False,
+        "email": email,
+        "message": "New profile created successfully."
+    }

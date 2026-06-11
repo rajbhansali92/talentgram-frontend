@@ -234,6 +234,16 @@ async def on_startup():
             [("link_id", 1), ("viewer_email", 1)], unique=True
         )
 
+        # OTP login indexes
+        try:
+            await db.otp_codes.create_index([("email", 1), ("used", 1)])
+            await db.otp_codes.create_index("expires_at", expireAfterSeconds=0)
+            await db.otp_audit_logs.create_index([("email", 1), ("timestamp", -1)])
+            await db.otp_audit_logs.create_index([("ip_address", 1), ("timestamp", -1)])
+            logger.info("OTP verification indexes ready")
+        except Exception as _e:
+            logger.warning("OTP indexes creation failed: %s", _e)
+
         await db.feedback.create_index([("submission_id", 1), ("status", 1)])
         await db.feedback.create_index([("project_id", 1), ("status", 1)])
         await db.feedback.create_index([("created_at", -1)])

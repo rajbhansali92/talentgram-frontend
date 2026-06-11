@@ -192,6 +192,10 @@ function SubmissionPage() {
     const [gatewayEmail, setGatewayEmail] = useState("");
     const [gatewayLoading, setGatewayLoading] = useState(false);
     const [gatewayRecognition, setGatewayRecognition] = useState(null);
+    const [otpSent, setOtpSent] = useState(false);
+    const [otpValue, setOtpValue] = useState("");
+    const [otpLoading, setOtpLoading] = useState(false);
+    const [otpResending, setOtpResending] = useState(false);
 
 
     const introRef = useRef();
@@ -685,28 +689,85 @@ function SubmissionPage() {
         if (gatewayLoading) return;
         const trimmedEmail = gatewayEmail.trim().toLowerCase();
         if (!trimmedEmail || !trimmedEmail.includes("@")) {
-            toast.error("Please enter a valid email address");
+            toast.error("Please enter a valid email address.");
             return;
         }
 
         setGatewayLoading(true);
         try {
-            const { data } = await axios.post("/portal/lookup", { email: trimmedEmail });
-            
-            if (data.exists) {
-                setGatewayRecognition(data.talent);
-            } else {
-                // New talent: proceed seamlessly
-                toast.success("Welcome! Let's get started with your audition.");
-                setForm((f) => ({ ...f, email: trimmedEmail }));
-                setPrefillEmail(trimmedEmail);
-                setEmailGateUnlocked(true);
-            }
+            await axios.post(`${API}/auth/otp/send`, { email: trimmedEmail });
+            setOtpSent(true);
+            toast.success("Verification code sent!");
         } catch (error) {
-            console.error("Inline lookup error:", error);
-            toast.error("An error occurred. Please try again.");
+            console.error("OTP send error:", error);
+            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
         } finally {
             setGatewayLoading(false);
+        }
+    };
+
+    const handleVerifyOtp = async (e) => {
+        if (e) e.preventDefault();
+        if (otpLoading) return;
+        const code = otpValue.trim();
+        if (code.length !== 6 || !/^\d+$/.test(code)) {
+            toast.error("Please enter a valid 6-digit verification code.");
+            return;
+        }
+
+        setOtpLoading(true);
+        try {
+            const trimmedEmail = gatewayEmail.trim().toLowerCase();
+            const { data } = await axios.post(`${API}/auth/otp/verify`, {
+                email: trimmedEmail,
+                otp: code,
+                slug: slug
+            });
+
+            if (data.existing) {
+                if (data.token && data.submission_id) {
+                    const ref = { id: data.submission_id, token: data.token };
+                    localStorage.setItem(`tg_submission_${slug}`, JSON.stringify(ref));
+                    localStorage.setItem(`tg_atk_${slug}`, data.token);
+                    setSaved(ref);
+                    toast.success("Welcome back!");
+                } else {
+                    toast.success("Welcome back!");
+                }
+                if (data.talent) {
+                    populatePrefillData(data.talent);
+                    setPrefillSuggestion({ data: data.talent });
+                    setPrefillTried(true);
+                }
+            } else {
+                toast.success("Successfully authenticated. Welcome to Talentgram!");
+            }
+
+            localStorage.setItem("talentgram_portal_email", trimmedEmail);
+            setForm((f) => ({ ...f, email: trimmedEmail }));
+            setPrefillEmail(trimmedEmail);
+            setEmailGateUnlocked(true);
+            setOtpSent(false);
+        } catch (error) {
+            console.error("OTP verify error:", error);
+            toast.error(error?.response?.data?.detail || "Invalid or expired verification code.");
+        } finally {
+            setOtpLoading(false);
+        }
+    };
+
+    const handleResendOtp = async () => {
+        if (otpResending) return;
+        const trimmedEmail = gatewayEmail.trim().toLowerCase();
+        setOtpResending(true);
+        try {
+            await axios.post(`${API}/auth/otp/send`, { email: trimmedEmail });
+            toast.success("Verification code resent.");
+        } catch (error) {
+            console.error("OTP resend error:", error);
+            toast.error(error?.response?.data?.detail || "Failed to resend code. Please try again.");
+        } finally {
+            setOtpResending(false);
         }
     };
 
@@ -1755,7 +1816,67 @@ function SubmissionPage() {
                             BEFORE they retype everything. */}
                         <div data-step="1">
                             {!emailGateUnlocked ? (
-                                !gatewayRecognition ? (
+                                otpSent ? (
+                                    /* Step A.5: OTP Verification Input */
+                                    <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
+                                        <div className="flex flex-col gap-1.5">
+                                            <label className="text-xs font-semibold text-[#111111] uppercase tracking-wider">
+                                                Enter Verification Code
+                                            </label>
+                                            <p className="text-xs text-[#333333] leading-normal">
+                                                We've sent a verification code to <span className="font-semibold text-slate-900">{gatewayEmail}</span>
+                                            </p>
+                                        </div>
+                                        <div className="flex flex-col sm:flex-row gap-3">
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                pattern="[0-9]*"
+                                                maxLength={6}
+                                                value={otpValue}
+                                                onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ''))}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter") {
+                                                        e.preventDefault();
+                                                        handleVerifyOtp();
+                                                    }
+                                                }}
+                                                placeholder="6-digit code"
+                                                style={{ fontSize: "16px" }}
+                                                className="flex-1 px-4 py-2.5 bg-white border border-[#eaeaea] rounded-xl text-[#111111] placeholder:text-[#333333] focus:border-slate-500 focus:outline-none transition duration-150 h-[44px]"
+                                                disabled={otpLoading}
+                                            />
+                                            <div className="flex gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={handleVerifyOtp}
+                                                    disabled={otpLoading}
+                                                    className="bg-slate-900 text-white px-5 py-2.5 rounded-xl text-xs font-medium hover:bg-slate-800 active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 min-w-[100px] h-[44px] cursor-pointer"
+                                                >
+                                                    {otpLoading ? "Verifying..." : "Verify"}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleResendOtp}
+                                                    disabled={otpResending || otpLoading}
+                                                    className="bg-white border border-[#eaeaea] hover:bg-slate-50 text-[#111111] text-xs font-medium px-4 py-2.5 rounded-xl transition duration-150 h-[44px] cursor-pointer"
+                                                >
+                                                    {otpResending ? "Resending..." : "Resend OTP"}
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setOtpSent(false);
+                                                setOtpValue("");
+                                            }}
+                                            className="text-left text-xs text-slate-500 hover:text-slate-900 transition underline cursor-pointer"
+                                        >
+                                            Change email address
+                                        </button>
+                                    </div>
+                                ) : !gatewayRecognition ? (
                                     /* Step A: Inline Email Lookup */
                                     <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
                                         <button

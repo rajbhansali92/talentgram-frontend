@@ -39,6 +39,14 @@ img {
   --tg-danger: #dc2626;
   --tg-warning: #ca8a04;
 
+  /* Talentgram Navy Theme Centralized Variables */
+  --tg-navy-primary: #1e293b;
+  --tg-navy-hover: #0f172a;
+  --tg-navy-light: #f1f5f9;
+  --tg-navy-border: #cbd5e1;
+  --tg-navy-accent: #334155;
+  --tg-navy-badge-bg: rgba(30, 41, 59, 0.08);
+
   /* Scrollbar tokens (operational only) */
   --tg-scrollbar: rgba(0, 0, 0, 0.08);
   --tg-scrollbar-hover: rgba(0, 0, 0, 0.16);
@@ -51,7 +59,7 @@ img {
   --card-foreground: 0 0% 4%;
   --popover: 0 0% 100%;
   --popover-foreground: 0 0% 4%;
-  --primary: 0 0% 8%;
+  --primary: 215 25% 27%; /* Slate / Navy */
   --primary-foreground: 0 0% 98%;
   --secondary: 0 0% 95%;
   --secondary-foreground: 0 0% 10%;
@@ -63,7 +71,7 @@ img {
   --destructive-foreground: 0 0% 100%;
   --border: 0 0% 88%;
   --input: 0 0% 88%;
-  --ring: 0 0% 10%;
+  --ring: 215 25% 27%;
   --radius: 0.5rem;
 
   color-scheme: light;

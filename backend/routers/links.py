@@ -749,6 +749,77 @@ async def record_action(
     return {"ok": True}
 
 
+class BulkActionIn(BaseModel):
+    talent_ids: List[str]
+    action: Optional[str] = None  # shortlist | interested | not_for_this | lock | not_sure | null
+
+
+@router.post("/public/links/{slug}/bulk-action")
+async def record_bulk_action(
+    slug: str,
+    payload: BulkActionIn,
+    authorization: Optional[str] = Header(None),
+):
+    viewer = decode_viewer(authorization)
+    if not viewer or viewer.get("slug") != slug:
+        raise HTTPException(401, "Identity required")
+    link = await db.links.find_one({"slug": slug}, {"_id": 0})
+    if not link:
+        raise HTTPException(404, "Link not found")
+    _require_active_link(link)
+
+    talent_ids = payload.talent_ids
+    if not talent_ids:
+        return {"ok": True, "count": 0}
+
+    now = _now()
+    bulk_ops = []
+    from pymongo import UpdateOne
+    for tid in talent_ids:
+        filt = {
+            "link_id": link["id"],
+            "viewer_email": viewer["email"],
+            "talent_id": tid,
+        }
+        # Update existing or insert new.
+        # Since we use update_one with upsert, we need to specify setOnInsert for id/created_at
+        bulk_ops.append(
+            UpdateOne(
+                filt,
+                {
+                    "$set": {
+                        "viewer_name": viewer["name"],
+                        "action": payload.action,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {
+                        "id": str(uuid.uuid4()),
+                        "created_at": now,
+                    }
+                },
+                upsert=True
+            )
+        )
+
+    if bulk_ops:
+        await db.link_actions.bulk_write(bulk_ops)
+
+    # Also make sure we update reviewed/seen status for these talents in client state
+    await db.client_states.update_one(
+        {"link_id": link["id"], "viewer_email": viewer["email"]},
+        {
+            "$addToSet": {
+                "seen_talent_ids": {"$each": talent_ids},
+                "reviewed_talent_ids": {"$each": talent_ids},
+            },
+            "$set": {"updated_at": now},
+        },
+        upsert=True,
+    )
+
+    return {"ok": True, "count": len(talent_ids)}
+
+
 @router.post("/public/links/{slug}/download-log")
 async def log_download(
     slug: str,

@@ -128,7 +128,7 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
                     {(() => {
                         const lbl = availabilityLabel(talent.availability);
                         if (!lbl) return null;
-                        const colorClass = lbl === "Available" ? "text-[#5A7D5A]" : lbl === "Not Available" ? "text-[#9E4A4A]" : "text-[#B89B5E]";
+                        const colorClass = lbl === "Available" ? "text-[#5A7D5A]" : lbl === "Not Available" ? "text-[#9E4A4A]" : "text-[var(--tg-navy-primary)]";
                         return (
                             <div className="text-sm">
                                 <p className="flex justify-end">
@@ -161,11 +161,11 @@ function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, v
                                     )}
                                     <p className="flex justify-between gap-4 border-t border-black/[0.03] pt-1.5">
                                         <span className="text-[#4A4A4A] font-medium">Counter Budget</span>
-                                        <span className="font-semibold text-[#B89B5E] font-mono">{talent.budget.value}</span>
+                                        <span className="font-semibold text-[var(--tg-navy-primary)] font-mono">{talent.budget.value}</span>
                                     </p>
                                     <p className="flex justify-between gap-4 mt-2">
                                         <span className="text-[#4A4A4A]">Status</span>
-                                        <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#B89B5E]/8 text-[#B89B5E] font-medium">Counter-Offer</span>
+                                        <span className="inline-block px-2 py-0.5 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[var(--tg-navy-badge-bg)] text-[var(--tg-navy-primary)] font-medium">Counter-Offer</span>
                                     </p>
                                     {lines.filter(l => l !== budgetLine).map((ln) => (
                                         <p key={`${ln.label}-${ln.value}`} className="flex justify-between gap-4 text-xs text-[#8A8A8A] mt-1">
@@ -331,6 +331,7 @@ export default function ClientView() {
     const [commentDrafts, setCommentDrafts] = useState({});
     const [seenIds, setSeenIds] = useState(new Set());
     const [reviewedIds, setReviewedIds] = useState(new Set());
+    const [selectedIds, setSelectedIds] = useState(new Set());
     const [activeTab, setActiveTab] = useState("pending_action");
     const [showResumeBanner, setShowResumeBanner] = useState(false);
 
@@ -574,6 +575,53 @@ export default function ClientView() {
         }
     }, [slug, updateLocalAction, viewerActions, markReviewed]);
 
+    const setBulkAction = useCallback(async (talentIds, action) => {
+        // Optimistic local state update
+        setData(prev => {
+            if (!prev) return prev;
+            const actions = prev.actions || [];
+            let newActions = [...actions];
+            talentIds.forEach(talentId => {
+                const idx = newActions.findIndex(a => a.talent_id === talentId);
+                if (idx >= 0) {
+                    if (action === null) {
+                        newActions.splice(idx, 1);
+                    } else {
+                        newActions[idx] = { ...newActions[idx], action };
+                    }
+                } else if (action !== null) {
+                    newActions.push({ talent_id: talentId, action, comment: "" });
+                }
+            });
+            return { ...prev, actions: newActions };
+        });
+
+        setReviewedIds(prev => {
+            const n = new Set(prev);
+            talentIds.forEach(id => n.add(id));
+            return n;
+        });
+
+        try {
+            await axios.post(
+                `${API}/public/links/${slug}/bulk-action`,
+                { talent_ids: talentIds, action },
+                {
+                    headers: {
+                        Authorization: `Bearer ${getViewerToken(slug)}`,
+                    },
+                },
+            );
+            toast.success(`Bulk action successfully updated for ${talentIds.length} talent(s)`);
+            setSelectedIds(new Set()); // Clear selection
+        } catch (e) {
+            console.error(e);
+            toast.error("Bulk action failed");
+            // Reload original state from backend
+            loadData();
+        }
+    }, [slug, loadData]);
+
     const saveComment = useCallback(async (talentId) => {
         const text = commentDrafts[talentId];
         if (text === undefined) return;
@@ -732,7 +780,7 @@ export default function ClientView() {
         if (loadingShare) {
             return (
                 <div className="min-h-screen bg-white flex items-center justify-center">
-                    <Loader2 className="w-8 h-8 animate-spin text-[#B89B5E]" />
+                    <Loader2 className="w-8 h-8 animate-spin text-[var(--tg-navy-primary)]" />
                 </div>
             );
         }
@@ -952,7 +1000,7 @@ export default function ClientView() {
                     </div>
                     <div className="md:hidden mt-3 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
                         <div
-                            className="h-full bg-[#B89B5E] transition-all duration-500"
+                            className="h-full bg-[var(--tg-navy-primary)] transition-all duration-500"
                             style={{ width: `${reviewedPct}%` }}
                             data-testid="review-progress-bar-mobile"
                         />
@@ -970,9 +1018,9 @@ export default function ClientView() {
                     if (!lastTalent) return null;
                     return (
                         <div className="mb-6 animate-fade-in" data-testid="resume-review-banner">
-                            <div className="bg-[#B89B5E]/5 border border-[#B89B5E]/15 rounded-xl p-4 flex items-center justify-between gap-4 backdrop-blur-sm shadow-[0_4px_12px_-6px_rgba(184,155,94,0.06)]">
+                            <div className="bg-[var(--tg-navy-light)] border border-[var(--tg-navy-border)] rounded-xl p-4 flex items-center justify-between gap-4 backdrop-blur-sm shadow-[0_4px_12px_-6px_rgba(30,41,59,0.06)]">
                                 <div className="flex items-center gap-3">
-                                    <Clock className="w-4 h-4 text-[#B89B5E]" />
+                                    <Clock className="w-4 h-4 text-[var(--tg-navy-primary)]" />
                                     <span className="text-sm text-[#111111] font-medium">
                                         Continue reviewing <span className="underline font-semibold">{privatizeName(lastTalent.name)}</span> where you left off?
                                     </span>
@@ -1010,7 +1058,7 @@ export default function ClientView() {
                 >
                     <div className="flex-1 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
                         <div
-                            className="h-full bg-[#B89B5E] transition-all duration-500"
+                            className="h-full bg-[var(--tg-navy-primary)] transition-all duration-500"
                             style={{ width: `${reviewedPct}%` }}
                             data-testid="review-progress-bar"
                         />
@@ -1021,35 +1069,78 @@ export default function ClientView() {
                     const visibleTabs = TABS.filter(t => t.key !== "ask_for_test" || link.requires_test === true);
                     return (
                         <div
-                            className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 flex items-center gap-3 overflow-x-auto md:flex-wrap whitespace-nowrap border-b border-black/[0.04] pb-4"
-                            style={{ scrollbarWidth: "none" }}
+                            className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 flex flex-wrap items-center justify-between gap-4 border-b border-black/[0.04] pb-4"
                             data-testid="client-view-tabs"
                         >
-                            {visibleTabs.map((tab) => {
-                                const count = buckets[tab.key]?.length || 0;
-                                const active = activeTab === tab.key;
-                                return (
-                                    <button
-                                        key={tab.key}
-                                        type="button"
-                                        onClick={() => setActiveTab(tab.key)}
-                                        data-testid={`client-tab-${tab.key}`}
-                                        className={`inline-flex items-center gap-2 px-4 md:px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
-                                            active
-                                                ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
-                                                : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
-                                        }`}
-                                    >
-                                        <tab.icon className="w-3.5 h-3.5" />
-                                        {tab.label}
-                                        <span
-                                            className={`font-mono text-[10px] ${active ? "text-white/60" : "text-[#8A8A8A]"}`}
+                            <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap" style={{ scrollbarWidth: "none" }}>
+                                {visibleTabs.map((tab) => {
+                                    const count = buckets[tab.key]?.length || 0;
+                                    const active = activeTab === tab.key;
+                                    return (
+                                        <button
+                                            key={tab.key}
+                                            type="button"
+                                            onClick={() => setActiveTab(tab.key)}
+                                            data-testid={`client-tab-${tab.key}`}
+                                            className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
+                                                active
+                                                    ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
+                                                    : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
+                                            }`}
                                         >
-                                            {count}
-                                        </span>
+                                            <tab.icon className="w-3.5 h-3.5" />
+                                            {tab.label}
+                                            <span
+                                                className={`font-mono text-[10px] ${active ? "text-white/60" : "text-[#8A8A8A]"}`}
+                                            >
+                                                {count}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-wrap text-xs">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        // Select All Visible - currently filtered talents
+                                        const visibleIds = filteredTalents.map(t => t.id);
+                                        setSelectedIds(new Set(visibleIds));
+                                        toast.success(`Selected all ${visibleIds.length} visible talent(s)`);
+                                    }}
+                                    data-testid="select-all-visible"
+                                    className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
+                                >
+                                    Select All Visible
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        // Select All Filtered - all talents loaded in the link
+                                        const allIds = talents.map(t => t.id);
+                                        setSelectedIds(new Set(allIds));
+                                        toast.success(`Selected all ${allIds.length} filtered talent(s)`);
+                                    }}
+                                    data-testid="select-all-filtered"
+                                    className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
+                                >
+                                    Select All Filtered
+                                </button>
+                                {selectedIds.size > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setSelectedIds(new Set());
+                                            toast.success("Selection cleared");
+                                        }}
+                                        data-testid="clear-selection"
+                                        className="px-3 py-1.5 text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors font-semibold"
+                                    >
+                                        Clear Selection
                                     </button>
-                                );
-                            })}
+                                )}
+                            </div>
                         </div>
                     );
                 })()}
@@ -1085,6 +1176,15 @@ export default function ClientView() {
                                 slug={slug}
                                 setActiveTalent={setActiveTalent}
                                 markSeen={markSeen}
+                                selected={selectedIds.has(t.id)}
+                                onSelect={(id, checked) => {
+                                    setSelectedIds(prev => {
+                                        const n = new Set(prev);
+                                        if (checked) n.add(id);
+                                        else n.delete(id);
+                                        return n;
+                                    });
+                                }}
                             />
                         ))
                     )}
@@ -1129,8 +1229,79 @@ export default function ClientView() {
                     logDownload={logDownload}
                     onShare={handleShare}
                     saveVoiceNote={saveVoiceNote}
-                    sendingVoice={sendingVoice}
                 />
+            )}
+
+            {/* Floating Bulk Action Bar */}
+            {selectedIds.size > 0 && (
+                <div 
+                    data-testid="bulk-action-bar" 
+                    className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-[var(--tg-navy-primary)] text-white border border-[var(--tg-navy-border)] shadow-2xl rounded-2xl px-6 py-4 flex items-center justify-between gap-6 z-40 animate-fade-in max-w-[90vw] md:max-w-3xl"
+                >
+                    <div className="flex items-center gap-2.5">
+                        <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs font-mono font-semibold">
+                            {selectedIds.size}
+                        </div>
+                        <span className="text-sm font-medium tracking-wide">Selected</span>
+                    </div>
+
+                    <div className="h-6 w-px bg-white/10" />
+
+                    <div className="flex flex-wrap items-center gap-2">
+                        <button
+                            onClick={() => setBulkAction(Array.from(selectedIds), "interested")}
+                            data-testid="bulk-action-interested"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                        >
+                            <ThumbsUp className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Audition Approved</span>
+                            <span className="sm:hidden">Approve</span>
+                        </button>
+                        <button
+                            onClick={() => setBulkAction(Array.from(selectedIds), "shortlist")}
+                            data-testid="bulk-action-shortlist"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                        >
+                            <Star className="w-3.5 h-3.5" />
+                            Shortlist
+                        </button>
+                        <button
+                            onClick={() => setBulkAction(Array.from(selectedIds), "not_for_this")}
+                            data-testid="bulk-action-not_for_this"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-rose-950/40 hover:bg-rose-900/60 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-rose-500/20 text-rose-200"
+                        >
+                            <XCircle className="w-3.5 h-3.5" />
+                            <span className="hidden md:inline">Does Not Work</span>
+                            <span className="md:hidden">Reject</span>
+                        </button>
+                        <button
+                            onClick={() => setBulkAction(Array.from(selectedIds), "lock")}
+                            data-testid="bulk-action-lock"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                        >
+                            <Lock className="w-3.5 h-3.5" />
+                            Lock
+                        </button>
+                        <button
+                            onClick={() => setBulkAction(Array.from(selectedIds), "not_sure")}
+                            data-testid="bulk-action-not_sure"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                        >
+                            <HelpCircle className="w-3.5 h-3.5" />
+                            Unsure
+                        </button>
+                    </div>
+
+                    <div className="h-6 w-px bg-white/10" />
+
+                    <button
+                        onClick={() => setSelectedIds(new Set())}
+                        className="p-1.5 hover:bg-white/10 rounded-full transition-colors"
+                        aria-label="Cancel selection"
+                    >
+                        <X className="w-4 h-4 text-white/60 hover:text-white" />
+                    </button>
+                </div>
             )}
         </div>
     );
@@ -1532,13 +1703,13 @@ function TalentDetail({
                         </h2>
                         <span className={`hidden md:inline-flex items-center text-[10px] px-2.5 py-1 rounded-full border font-mono uppercase tracking-wider ${
                             viewerAction?.action === "shortlist"
-                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                ? "bg-[var(--tg-navy-light)] text-[var(--tg-navy-primary)] border-[var(--tg-navy-border)]"
                                 : viewerAction?.action === "interested"
                                 ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                                 : viewerAction?.action === "not_for_this"
                                 ? "bg-rose-50 text-rose-700 border-rose-200"
                                 : viewerAction?.action === "not_sure"
-                                ? "bg-orange-50 text-orange-700 border-orange-200"
+                                ? "bg-slate-100 text-[#4A4A4A] border-slate-200"
                                 : "bg-slate-50 text-[#333333] border-[#eaeaea]"
                         }`}>
                             {{
@@ -1554,13 +1725,13 @@ function TalentDetail({
                         {/* Mobile action indicator */}
                         <span className={`md:hidden inline-flex items-center text-[9px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-wider ${
                             viewerAction?.action === "shortlist"
-                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                ? "bg-[var(--tg-navy-light)] text-[var(--tg-navy-primary)] border-[var(--tg-navy-border)]"
                                 : viewerAction?.action === "interested"
                                 ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                                 : viewerAction?.action === "not_for_this"
                                 ? "bg-rose-50 text-rose-700 border-rose-200"
                                 : viewerAction?.action === "not_sure"
-                                ? "bg-orange-50 text-orange-700 border-orange-200"
+                                ? "bg-slate-100 text-[#4A4A4A] border-slate-200"
                                 : "bg-slate-50 text-[#333333] border-[#eaeaea]"
                         }`}>
                             {{
@@ -1763,7 +1934,7 @@ function TalentDetail({
                                                         )}
                                                     </span>
                                                     {t.primary_take && (
-                                                        <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider shrink-0">
+                                                        <span className="text-[8px] bg-[var(--tg-navy-primary)] text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider shrink-0">
                                                             ★ Primary
                                                         </span>
                                                     )}
@@ -1871,7 +2042,7 @@ function TalentDetail({
                                         <button
                                             key={m.id}
                                             onClick={() => setIdx(i)}
-                                            className={`shrink-0 w-20 h-28 border-2 ${i === idx ? "border-[#B89B5E]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
+                                            className={`shrink-0 w-20 h-28 border-2 ${i === idx ? "border-[var(--tg-navy-primary)]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
                                         >
                                             <img
                                                 src={thumbnailUrl(m)}
@@ -2080,7 +2251,7 @@ function TalentDetail({
 
                             {isSharePreview && (
                                 <div className="mt-8 p-5 bg-white border border-black/[0.04] rounded-2xl flex flex-col items-center text-center">
-                                    <span className="inline-block px-2.5 py-1 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[#B89B5E]/8 text-[#B89B5E] font-medium mb-3">
+                                    <span className="inline-block px-2.5 py-1 text-[10px] font-mono tracking-[0.08em] uppercase rounded-full bg-[var(--tg-navy-badge-bg)] text-[var(--tg-navy-primary)] font-medium mb-3">
                                         Shared Audition Showcase
                                     </span>
                                     <p className="text-xs text-[#333333] max-w-xs leading-relaxed">
@@ -2119,7 +2290,7 @@ function TalentDetail({
  *   eliminating the observer disconnect/reconnect churn on every parent re-render.
  * - `transition-all` on cover image replaced with `transition-transform` (cheaper).
  */
-const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, isNew, slug, setActiveTalent, markSeen }) {
+const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, isNew, slug, setActiveTalent, markSeen, selected, onSelect }) {
     const ref = useRef(null);
     const timerRef = useRef(null);
 
@@ -2168,14 +2339,28 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
     }, [seen, talent.id, markSeen]);
 
     return (
-        <button
-            ref={ref}
-            onClick={handleOpen}
-            data-testid={`client-talent-${talent.id}`}
-            data-seen={seen ? "true" : "false"}
-            data-new={isNew ? "true" : "false"}
-            className="group relative text-left transition-all duration-300 ease-out hover:-translate-y-0.5"
-        >
+        <div className="relative group/card">
+            {/* Absolute Checkbox overlay positioned at top-right or top-left, let's put it at top-left to avoid seen badge overlapping */}
+            <div className="absolute top-3 right-3 z-30">
+                <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={(e) => {
+                        e.stopPropagation();
+                        onSelect(talent.id, e.target.checked);
+                    }}
+                    data-testid={`select-checkbox-${talent.id}`}
+                    className="w-4.5 h-4.5 rounded border-black/20 text-[var(--tg-navy-primary)] focus:ring-[var(--tg-navy-primary)] cursor-pointer accent-[var(--tg-navy-primary)] scale-110 shadow-sm"
+                />
+            </div>
+            <button
+                ref={ref}
+                onClick={handleOpen}
+                data-testid={`client-talent-${talent.id}`}
+                data-seen={seen ? "true" : "false"}
+                data-new={isNew ? "true" : "false"}
+                className="w-full text-left transition-all duration-300 ease-out hover:-translate-y-0.5"
+            >
             <div className="aspect-[3/4] bg-white overflow-hidden rounded-2xl group-hover:shadow-[0_8px_30px_rgb(0,0,0,0.04)] transition-all duration-300 relative shadow-sm">
                 {cover ? (
                     <img
@@ -2212,7 +2397,7 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                 <div className="absolute top-2 left-2 flex flex-col gap-1.5 items-start">
                     {isNew && (
                         <span
-                            className="inline-flex items-center gap-1 px-2 py-1 bg-[#B89B5E] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--tg-navy-primary)] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
                             data-testid={`badge-new-${talent.id}`}
                         >
                             <Sparkles className="w-3 h-3" />
@@ -2221,7 +2406,7 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                     )}
                     {isShortlisted && (
                         <span
-                            className="inline-flex items-center gap-1 px-2 py-1 bg-[#B89B5E] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--tg-navy-primary)] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
                             data-testid={`badge-shortlisted-${talent.id}`}
                         >
                             <Heart className="w-3 h-3 fill-current" />
@@ -2244,8 +2429,8 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                         Seen
                     </span>
                 )}
-            </div>
-        </button>
+            </button>
+        </div>
     );
 });
 

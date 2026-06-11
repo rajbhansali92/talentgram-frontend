@@ -1616,6 +1616,100 @@ async def admin_edit_submission(
     return fresh_sub
 
 
+@router.post("/projects/{pid}/submissions/{sid}/admin-media")
+async def admin_add_media(
+    pid: str,
+    sid: str,
+    file: UploadFile = File(...),
+    category: str = Form("image"),
+    label: Optional[str] = Form(None),
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Admin attaches extra project-specific media to a submission.
+
+    These assets are stored ONLY on the submission document (db.submissions).
+    The master talent profile (db.talents) is never modified.
+    """
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    data = await file.read()
+    size_bytes = len(data)
+    ct = (file.content_type or "").lower()
+    is_video = ct.startswith("video/") or category in ("intro_video", "take")
+    is_pdf = ct == "application/pdf" or category == "pdf"
+
+    if is_pdf:
+        rt = "raw"
+    elif is_video:
+        rt = "video"
+    else:
+        rt = "image"
+
+    media_id = f"adm_{str(uuid.uuid4())[:8]}"
+    folder = f"talentgram/admin_media/{pid}/{sid}"
+
+    result = cloudinary_upload(
+        data,
+        folder=folder,
+        public_id=media_id,
+        resource_type=rt,
+        content_type=file.content_type,
+        keep_original=False,
+    )
+
+    media_obj: Dict[str, Any] = {
+        "id": media_id,
+        "category": category,
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "content_type": file.content_type or "application/octet-stream",
+        "original_filename": file.filename,
+        "size": result.get("bytes") or size_bytes,
+        "created_at": _now(),
+        "scope": "admin_added",
+        "submission_id": sid,
+        "project_id": pid,
+        "admin_added": True,
+        "admin_added_by": admin.get("email"),
+        "label": (label or "").strip() or category,
+        "client_visible": True,
+        "duration": result.get("duration"),
+        "poster_url": video_poster_url(result["public_id"]) if is_video else None,
+        "thumbnail_url": (
+            media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"])
+            if rt == "image" else None
+        ),
+    }
+
+    await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return fresh_sub
+
+
+@router.delete("/projects/{pid}/submissions/{sid}/media/{media_id}")
+async def admin_remove_media_item(
+    pid: str,
+    sid: str,
+    media_id: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Admin removes a specific media item from a submission.
+
+    Works for both admin-added assets and original talent-uploaded media.
+    The master talent profile (db.talents) is never modified.
+    """
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"id": media_id}}})
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return fresh_sub
+
+
 @router.delete("/projects/{pid}/submissions/{sid}")
 async def delete_submission(
     pid: str, sid: str, admin: dict = Depends(current_admin)

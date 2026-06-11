@@ -26,7 +26,10 @@ import {
     RefreshCw,
     User,
     Phone,
-    Mail
+    Mail,
+    Upload,
+    Trash2,
+    Plus
 } from "lucide-react";
 import { AVAILABILITY_OPTIONS, BUDGET_OPTIONS } from "@/lib/talentSchema";
 import LocationSelector from "@/components/LocationSelector";
@@ -188,6 +191,11 @@ export default function SubmissionReviewCenter() {
     const [mediaList, setMediaList] = useState([]);
     const [isPreviewMode, setIsPreviewMode] = useState(false);
     const [saving, setSaving] = useState(false);
+
+    // Admin media upload state
+    const adminMediaInputRef = useRef(null);
+    const [adminMediaUploading, setAdminMediaUploading] = useState(false);
+    const [adminMediaCategory, setAdminMediaCategory] = useState("image");
 
     // Normalize utility
     const normalize = (fd) => ({
@@ -364,6 +372,45 @@ export default function SubmissionReviewCenter() {
         }
     };
 
+    const handleAdminMediaUpload = async (file) => {
+        if (!file || !selectedId) return;
+        setAdminMediaUploading(true);
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("category", adminMediaCategory);
+            const { data } = await adminApi.post(
+                `/projects/${id}/submissions/${selectedId}/admin-media`,
+                formData,
+                { headers: { "Content-Type": "multipart/form-data" } }
+            );
+            setDetail(data);
+            setMediaList(data?.media || []);
+            toast.success("Media uploaded successfully");
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to upload media");
+        } finally {
+            setAdminMediaUploading(false);
+        }
+    };
+
+    const handleRemoveMedia = async (mediaId) => {
+        if (!selectedId || !window.confirm("Remove this media item?")) return;
+        setSaving(true);
+        try {
+            const { data } = await adminApi.delete(
+                `/projects/${id}/submissions/${selectedId}/media/${mediaId}`
+            );
+            setDetail(data);
+            setMediaList(data?.media || []);
+            toast.success("Media removed");
+        } catch (e) {
+            toast.error("Failed to remove media");
+        } finally {
+            setSaving(false);
+        }
+    };
+
     // Reset visible count when filters or sorting change
     useEffect(() => {
         setVisibleCount(50);
@@ -506,7 +553,7 @@ export default function SubmissionReviewCenter() {
     const indianImages = getCuratedMedia("indian");
     const westernImages = getCuratedMedia("western");
 
-    const FIELDS = [
+    const PERSONAL_FIELDS = [
         { key: "first_name", label: "First Name" },
         { key: "last_name", label: "Last Name" },
         { key: "age", label: "Age", type: "number" },
@@ -514,13 +561,71 @@ export default function SubmissionReviewCenter() {
         { key: "location", label: "Location" },
         { key: "gender", label: "Gender" },
         { key: "ethnicity", label: "Ethnicity" },
-        { key: "languages", label: "Languages" },
         { key: "instagram_handle", label: "Instagram Handle" },
         { key: "instagram_followers", label: "Instagram Followers" },
+    ];
+
+    const PROFESSIONAL_FIELDS = [
+        { key: "languages", label: "Languages" },
         { key: "skills", label: "Skills" },
         { key: "special_abilities", label: "Special Abilities" },
         { key: "competitive_brand", label: "Competitive Brand" },
     ];
+
+    // Combined for preview-mode grid and any backward-compat references
+    const FIELDS = [...PERSONAL_FIELDS, ...PROFESSIONAL_FIELDS];
+
+    /** Renders a single editable field row with visibility toggle + override indicator. */
+    const renderFieldRow = (f) => {
+        const isArrayVal = Array.isArray(form[f.key]);
+        const displayVal = isArrayVal ? form[f.key].join(", ") : (form[f.key] ?? "");
+        // Show override indicator when original_form_data exists and value has been changed
+        const origVal = detail?.original_form_data?.[f.key];
+        const hasOverride = origVal !== undefined && JSON.stringify(origVal) !== JSON.stringify(form[f.key]);
+        return (
+            <div key={f.key} className={`flex items-start gap-3 p-3 rounded-lg border ${hasOverride ? "border-amber-200 bg-amber-50/40" : "bg-[#fafaf9] border-black/[0.03]"}`}>
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-0.5">
+                        <label className="text-[10px] text-black/45 tracking-widest uppercase">{f.label}</label>
+                        {hasOverride && (
+                            <span className="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">Override</span>
+                        )}
+                    </div>
+                    {f.key === "location" ? (
+                        <div className="mt-1">
+                            <LocationSelector
+                                value={Array.isArray(form.location) ? form.location : []}
+                                onChange={(arr) => setForm({ ...form, location: arr })}
+                                testid="form-location"
+                            />
+                        </div>
+                    ) : (
+                        <input
+                            type={f.type || "text"}
+                            value={displayVal}
+                            onChange={(e) => {
+                                const val = e.target.value;
+                                if (isArrayVal) {
+                                    setForm({ ...form, [f.key]: val.split(",").map(s => s.trim()).filter(Boolean) });
+                                } else {
+                                    setForm({ ...form, [f.key]: val });
+                                }
+                            }}
+                            className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium"
+                        />
+                    )}
+                </div>
+                <button
+                    type="button"
+                    onClick={() => setFv({ ...fv, [f.key]: fv[f.key] === false ? undefined : false })}
+                    title={fv[f.key] !== false ? "Visible to client" : "Hidden from client"}
+                    className={`mt-4 w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] !== false ? "bg-black" : "bg-black/15"}`}
+                >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
+                </button>
+            </div>
+        );
+    };
 
     // Status styling maps
     const borderColors = {
@@ -1027,13 +1132,17 @@ export default function SubmissionReviewCenter() {
                                     </div>
                                 )}
 
-                                {/* Profile detail blocks */}
-                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-6">
-                                    <p className="eyebrow mb-2">Talent Profile Details</p>
-                                    
+                                {/* ── SECTION A: Personal Information ── */}
+                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
+                                    <div className="flex items-start justify-between border-b border-black/[0.05] pb-3 gap-4">
+                                        <p className="eyebrow">Personal Information</p>
+                                        {!isPreviewMode && (
+                                            <span className="text-[9px] text-black/35 font-mono text-right shrink-0">Project-specific overrides · Master profile unchanged</span>
+                                        )}
+                                    </div>
                                     {isPreviewMode ? (
                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
-                                            {FIELDS.filter(f => fv[f.key] !== false).map(f => {
+                                            {PERSONAL_FIELDS.filter(f => fv[f.key] !== false).map(f => {
                                                 let val = form[f.key];
                                                 if (f.key === "location" && Array.isArray(val)) {
                                                     val = val.map(l => `${l.city}, ${l.country}`).join("; ");
@@ -1049,61 +1158,70 @@ export default function SubmissionReviewCenter() {
                                             })}
                                         </div>
                                     ) : (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                                            {FIELDS.map((f) => {
-                                                const isArrayVal = Array.isArray(form[f.key]);
-                                                const displayVal = isArrayVal ? form[f.key].join(", ") : (form[f.key] ?? "");
-                                                
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+                                            {PERSONAL_FIELDS.map((f) => renderFieldRow(f))}
+                                        </div>
+                                    )}
+                                </section>
+
+                                {/* ── SECTION B: Professional Information ── */}
+                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
+                                    <p className="eyebrow border-b border-black/[0.05] pb-3">Professional Information</p>
+                                    {isPreviewMode ? (
+                                        <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
+                                            {PROFESSIONAL_FIELDS.filter(f => fv[f.key] !== false).map(f => {
+                                                let val = form[f.key];
+                                                if (Array.isArray(val)) val = val.join(", ");
                                                 return (
-                                                    <div key={f.key} className="flex items-start gap-3 bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03]">
-                                                        <div className="flex-1 min-w-0">
-                                                            <label className="text-[10px] text-black/45 tracking-widest uppercase">
-                                                                {f.label}
-                                                            </label>
-                                                            {f.key === "location" ? (
-                                                                <div className="mt-1">
-                                                                    <LocationSelector
-                                                                        value={Array.isArray(form.location) ? form.location : []}
-                                                                        onChange={(arr) => setForm({ ...form, location: arr })}
-                                                                        testid="form-location"
-                                                                    />
-                                                                </div>
-                                                            ) : (
-                                                                <input
-                                                                    type={f.type || "text"}
-                                                                    value={displayVal}
-                                                                    onChange={(e) => {
-                                                                        const val = e.target.value;
-                                                                        if (isArrayVal) {
-                                                                            const arr = val.split(",").map(s => s.trim()).filter(Boolean);
-                                                                            setForm({ ...form, [f.key]: arr });
-                                                                        } else {
-                                                                            setForm({ ...form, [f.key]: val });
-                                                                        }
-                                                                    }}
-                                                                    className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium"
-                                                                />
-                                                            )}
-                                                        </div>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setFv({ ...fv, [f.key]: fv[f.key] === false ? true : false })}
-                                                            title={fv[f.key] !== false ? "Visible to client" : "Hidden from client"}
-                                                            className={`mt-4 w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] !== false ? "bg-black" : "bg-black/15"}`}
-                                                        >
-                                                            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
-                                                        </button>
+                                                    <div key={f.key} className="min-w-0">
+                                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">{f.label}</p>
+                                                        <p className="text-sm font-medium text-black/85">{val || "—"}</p>
                                                     </div>
                                                 );
                                             })}
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+                                            {PROFESSIONAL_FIELDS.map((f) => renderFieldRow(f))}
+                                        </div>
+                                    )}
+                                </section>
 
+                                {/* ── SECTION C: Project Information ── */}
+                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-6">
+                                    <p className="eyebrow border-b border-black/[0.05] pb-3">Project Information</p>
+
+                                    {/* Availability + Budget — preview vs edit */}
+                                    {isPreviewMode ? (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            {fv.availability !== false && form.availability?.status && (
+                                                <div>
+                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
+                                                    <p className="text-sm font-medium text-black/85">
+                                                        {form.availability?.status === "yes" ? "🟢 Available" : "🔴 Unavailable"}
+                                                        {form.availability?.note ? ` — ${form.availability.note}` : ""}
+                                                    </p>
+                                                </div>
+                                            )}
+                                            {fv.budget !== false && form.budget?.status && (
+                                                <div>
+                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Budget</p>
+                                                    <p className="text-sm font-medium text-black/85">
+                                                        {form.budget?.status === "accept" ? "🟢 Accepts Day Rate" : "🔴 Expected Day Rate"}
+                                                        {form.budget?.value ? ` — ${form.budget.value}` : ""}
+                                                    </p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
                                             {/* Structured Availability */}
-                                            <div className="md:col-span-2 border-t border-black/[0.08] pt-4 mt-2 space-y-2">
+                                            <div className="bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03] space-y-2">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-[10px] text-black/45 tracking-widest uppercase">Availability</label>
                                                     <button
                                                         type="button"
-                                                        onClick={() => setFv({ ...fv, availability: fv.availability === false })}
+                                                        onClick={() => setFv({ ...fv, availability: fv.availability === false ? undefined : false })}
                                                         className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
                                                     >
                                                         <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.availability !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
@@ -1112,10 +1230,7 @@ export default function SubmissionReviewCenter() {
                                                 <div className="flex items-center gap-3">
                                                     <select
                                                         value={form.availability?.status || ""}
-                                                        onChange={(e) => setForm({
-                                                            ...form,
-                                                            availability: { ...form.availability, status: e.target.value }
-                                                        })}
+                                                        onChange={(e) => setForm({ ...form, availability: { ...form.availability, status: e.target.value } })}
                                                         className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
                                                     >
                                                         <option value="">—</option>
@@ -1126,10 +1241,7 @@ export default function SubmissionReviewCenter() {
                                                     <input
                                                         type="text"
                                                         value={form.availability?.note || ""}
-                                                        onChange={(e) => setForm({
-                                                            ...form,
-                                                            availability: { ...form.availability, note: e.target.value }
-                                                        })}
+                                                        onChange={(e) => setForm({ ...form, availability: { ...form.availability, note: e.target.value } })}
                                                         placeholder="Note / reason"
                                                         className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 placeholder:text-black/30 font-medium"
                                                     />
@@ -1137,24 +1249,21 @@ export default function SubmissionReviewCenter() {
                                             </div>
 
                                             {/* Structured Budget */}
-                                            <div className="md:col-span-2 space-y-2">
+                                            <div className="bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03] space-y-2">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-[10px] text-black/45 tracking-widest uppercase">Budget</label>
                                                     <button
                                                         type="button"
-                                                        onClick={() => setFv({ ...fv, budget: !fv.budget })}
-                                                        className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv.budget ? "bg-black" : "bg-black/15"}`}
+                                                        onClick={() => setFv({ ...fv, budget: fv.budget === false ? undefined : false })}
+                                                        className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv.budget !== false ? "bg-black" : "bg-black/15"}`}
                                                     >
-                                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.budget ? "translate-x-4 bg-white" : "bg-black"}`} />
+                                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.budget !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
                                                     </button>
                                                 </div>
                                                 <div className="flex items-center gap-3">
                                                     <select
                                                         value={form.budget?.status || ""}
-                                                        onChange={(e) => setForm({
-                                                            ...form,
-                                                            budget: { ...form.budget, status: e.target.value }
-                                                        })}
+                                                        onChange={(e) => setForm({ ...form, budget: { ...form.budget, status: e.target.value } })}
                                                         className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
                                                     >
                                                         <option value="">—</option>
@@ -1165,10 +1274,7 @@ export default function SubmissionReviewCenter() {
                                                     <input
                                                         type="text"
                                                         value={form.budget?.value || ""}
-                                                        onChange={(e) => setForm({
-                                                            ...form,
-                                                            budget: { ...form.budget, value: e.target.value }
-                                                        })}
+                                                        onChange={(e) => setForm({ ...form, budget: { ...form.budget, value: e.target.value } })}
                                                         placeholder="Expected budget (if custom)"
                                                         className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 placeholder:text-black/30 font-medium"
                                                     />
@@ -1177,48 +1283,48 @@ export default function SubmissionReviewCenter() {
                                         </div>
                                     )}
 
-                                    {/* Client Mode Availability / Budget Display */}
-                                    {isPreviewMode && (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-black/[0.08] pt-4">
-                                            {fv.availability !== false && form.availability?.status && (
-                                                <div>
-                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
-                                                    <p className="text-sm font-medium text-black/85">
-                                                        {form.availability?.status === "yes" ? "🟢 Available" : "🔴 Unavailable"} 
-                                                        {form.availability?.note ? ` — ${form.availability.note}` : ""}
-                                                    </p>
-                                                </div>
-                                            )}
-                                            {fv.budget && form.budget?.status && (
-                                                <div>
-                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Budget</p>
-                                                    <p className="text-sm font-medium text-black/85">
-                                                        {form.budget?.status === "accept" ? "🟢 Accepts Day Rate" : "🔴 Expected Day Rate"} 
-                                                        {form.budget?.value ? ` — ${form.budget.value}` : ""}
-                                                    </p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    {/* Custom Question Answers */}
+                                    {/* Custom Question Answers — editable with override indicator */}
                                     {Array.isArray(project?.custom_questions) && project.custom_questions.length > 0 && (
-                                        <div className="border-t border-black/[0.08] pt-5 mt-4 space-y-4">
-                                            <p className="eyebrow text-black/75">Application answers</p>
+                                        <div className="border-t border-black/[0.08] pt-5 space-y-4">
+                                            <p className="eyebrow text-black/75">Application Answers</p>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                {project.custom_questions.map((q) => (
-                                                    <div key={q.id} className="text-sm">
-                                                        <div className="text-black/45 text-[10px] mb-1 uppercase tracking-wider font-semibold">{q.question}</div>
-                                                        <div className="text-black/85 font-medium">
-                                                            {(form.custom_answers || {})[q.id] || "—"}
+                                                {project.custom_questions.map((q) => {
+                                                    const origAns = detail?.original_form_data?.custom_answers?.[q.id];
+                                                    const curAns = (form.custom_answers || {})[q.id] || "";
+                                                    const ansOverridden = origAns !== undefined && origAns !== curAns;
+                                                    return (
+                                                        <div key={q.id} className={`text-sm p-3 rounded-lg border ${ansOverridden ? "border-amber-200 bg-amber-50/40" : "bg-[#fafaf9] border-black/[0.03]"}`}>
+                                                            <div className="flex items-center gap-2 mb-1.5">
+                                                                <div className="text-black/45 text-[10px] uppercase tracking-wider font-semibold">{q.question}</div>
+                                                                {ansOverridden && (
+                                                                    <span className="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider shrink-0">Override</span>
+                                                                )}
+                                                            </div>
+                                                            {isPreviewMode ? (
+                                                                <div className="text-black/85 font-medium">{curAns || "—"}</div>
+                                                            ) : (
+                                                                <textarea
+                                                                    value={curAns}
+                                                                    onChange={(e) => setForm({
+                                                                        ...form,
+                                                                        custom_answers: { ...(form.custom_answers || {}), [q.id]: e.target.value }
+                                                                    })}
+                                                                    rows={2}
+                                                                    placeholder="Enter answer..."
+                                                                    className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium resize-none placeholder:text-black/30"
+                                                                />
+                                                            )}
+                                                            {!isPreviewMode && origAns !== undefined && (
+                                                                <div className="mt-2 text-[10px] text-black/35 font-mono">Original: {origAns || "—"}</div>
+                                                            )}
                                                         </div>
-                                                    </div>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     )}
 
-                                    {/* Action save curations */}
+                                    {/* Save button */}
                                     {!isPreviewMode && (
                                         <div className="flex justify-end pt-2">
                                             <button
@@ -1228,13 +1334,100 @@ export default function SubmissionReviewCenter() {
                                                 className="inline-flex items-center gap-1.5 px-4 py-2 bg-black text-white rounded-md text-xs font-semibold hover:bg-black/90 transition-colors shadow-sm"
                                             >
                                                 {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                                                Save Curations
+                                                Save Project Overrides
                                             </button>
                                         </div>
                                     )}
                                 </section>
 
                                 {/* ── MEDIA WORKSPACE ── */}
+
+                                {/* Section 0: Admin-Added Media (Project-Specific) */}
+                                {!isPreviewMode && (
+                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+                                        <div className="flex items-start justify-between border-b border-black/[0.05] pb-3 mb-4 gap-4">
+                                            <p className="eyebrow">Admin-Added Media</p>
+                                            <span className="text-[9px] text-black/35 font-mono text-right shrink-0">Project-specific · Master profile unchanged</span>
+                                        </div>
+
+                                        {/* Admin-added media grid */}
+                                        {mediaList.filter(m => m.admin_added).length > 0 && (
+                                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-5">
+                                                {mediaList.filter(m => m.admin_added).map((m) => (
+                                                    <div key={m.id} className="relative group border border-black/[0.06] rounded-lg bg-[#fafaf9] overflow-hidden">
+                                                        {m.resource_type === "video" ? (
+                                                            <div className="aspect-video flex items-center justify-center bg-black/5">
+                                                                <Video className="w-8 h-8 text-black/25" />
+                                                            </div>
+                                                        ) : m.content_type === "application/pdf" ? (
+                                                            <div className="aspect-video flex items-center justify-center bg-black/5">
+                                                                <FileText className="w-8 h-8 text-black/25" />
+                                                            </div>
+                                                        ) : (
+                                                            <img src={m.thumbnail_url || m.url} alt="" loading="lazy" className="w-full aspect-video object-cover" />
+                                                        )}
+                                                        <div className="p-2">
+                                                            <p className="text-[9px] text-black/50 font-mono uppercase truncate">{m.label || m.category}</p>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleRemoveMedia(m.id)}
+                                                            disabled={saving}
+                                                            className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity p-1 bg-red-500 text-white rounded shadow"
+                                                            title="Remove"
+                                                        >
+                                                            <Trash2 className="w-3 h-3" />
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        {mediaList.filter(m => m.admin_added).length === 0 && (
+                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] rounded-lg p-5 text-center text-xs text-black/40 font-mono mb-4">
+                                                No admin-added media yet
+                                            </div>
+                                        )}
+
+                                        {/* Upload controls */}
+                                        <div className="flex flex-wrap items-center gap-3">
+                                            <select
+                                                value={adminMediaCategory}
+                                                onChange={(e) => setAdminMediaCategory(e.target.value)}
+                                                className="text-xs border border-black/[0.10] rounded-md px-2 py-1.5 bg-white outline-none text-black/70"
+                                            >
+                                                <option value="intro_video">Intro Video</option>
+                                                <option value="take">Audition Take</option>
+                                                <option value="image">Image</option>
+                                                <option value="indian">Indian Look</option>
+                                                <option value="western">Western Look</option>
+                                                <option value="pdf">PDF</option>
+                                            </select>
+                                            <input
+                                                ref={adminMediaInputRef}
+                                                type="file"
+                                                className="hidden"
+                                                accept="video/*,image/*,application/pdf"
+                                                onChange={(e) => {
+                                                    const file = e.target.files?.[0];
+                                                    if (file) {
+                                                        handleAdminMediaUpload(file);
+                                                        e.target.value = "";
+                                                    }
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => adminMediaInputRef.current?.click()}
+                                                disabled={adminMediaUploading}
+                                                className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-black/[0.12] hover:border-black/30 rounded-md text-xs font-semibold bg-white text-black/70 hover:text-black transition-all shadow-sm"
+                                            >
+                                                {adminMediaUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                                                {adminMediaUploading ? "Uploading..." : "Upload File"}
+                                            </button>
+                                        </div>
+                                    </section>
+                                )}
 
                                 {/* Section 1: Intro Video */}
                                 {(!isPreviewMode || introVideo) && (

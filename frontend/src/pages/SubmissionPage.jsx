@@ -1380,16 +1380,16 @@ function SubmissionPage() {
             missingList.push({ id: "bio", label: "Bio", section: "profile", selector: '[data-testid="form-bio-field"]' });
         }
         if (fieldsConfig.competitive_brand === "required" && !form.competitive_brand?.trim()) {
-            missingList.push({ id: "competitive_brand", label: "Competitive Brand details", section: "profile", selector: '[data-testid="form-competitive-brand"]' });
+            missingList.push({ id: "competitive_brand", label: "Competitive Brand details", section: "projectQuestions", selector: '[data-testid="form-competitive-brand"]' });
         }
 
         if (fieldsConfig.availability === "required") {
             const avail = form.availability || {};
             const status = (avail.status || "").trim();
             if (status !== "yes" && status !== "no") {
-                missingList.push({ id: "availability", label: "Availability (Yes / No)", section: "profile", selector: '[data-testid="availability-block"]' });
+                missingList.push({ id: "availability", label: "Availability (Yes / No)", section: "projectQuestions", selector: '[data-testid="availability-block"]' });
             } else if (status === "no" && !(avail.note || "").trim()) {
-                missingList.push({ id: "availability_note", label: "Availability note", section: "profile", selector: '[data-testid="availability-note-input"]' });
+                missingList.push({ id: "availability_note", label: "Availability note", section: "projectQuestions", selector: '[data-testid="availability-note-input"]' });
             }
         }
 
@@ -1397,9 +1397,9 @@ function SubmissionPage() {
             const budget = form.budget || {};
             const bstatus = (budget.status || "").trim();
             if (bstatus !== "accept" && bstatus !== "custom") {
-                missingList.push({ id: "budget", label: "Budget (Accept / Custom)", section: "profile", selector: '[data-testid="budget-block"]' });
+                missingList.push({ id: "budget", label: "Budget (Accept / Custom)", section: "projectQuestions", selector: '[data-testid="budget-block"]' });
             } else if (bstatus === "custom" && !(budget.value || "").trim()) {
-                missingList.push({ id: "budget_value", label: "Expected budget details", section: "profile", selector: '[data-testid="budget-value-input"]' });
+                missingList.push({ id: "budget_value", label: "Expected budget details", section: "projectQuestions", selector: '[data-testid="budget-value-input"]' });
             }
         }
 
@@ -1418,7 +1418,7 @@ function SubmissionPage() {
                     missingList.push({
                         id: `cq_${cq.id}`,
                         label: `"${cq.question}" answers`,
-                        section: "profile",
+                        section: "projectQuestions",
                         selector: `[data-testid="form-cq-${cq.id}"]`
                     });
                 }
@@ -2248,22 +2248,6 @@ function SubmissionPage() {
                                             error={validationErrors.location}
                                             inputRef={(el) => { fieldRefs.current.location = el; }}
                                         />
-                                        {project.competitive_brand_enabled && (
-                                            <PremiumFormField
-                                                label="Competitive Brand (declare conflicts)"
-                                                value={form.competitive_brand}
-                                                onChange={(v) =>
-                                                    setForm({
-                                                        ...form,
-                                                        competitive_brand: v,
-                                                    })
-                                                }
-                                                onBlur={saveForm}
-                                                placeholder="Any brand conflict? Type 'None' if not"
-                                                testid="form-competitive-brand"
-                                                wide
-                                            />
-                                        )}
                                     </div>
 
                                     {/* Phase 2 — unified identity fields */}
@@ -2665,6 +2649,29 @@ function SubmissionPage() {
                                                     className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                                 />
                                             )}
+                                        </div>
+                                    )}
+
+                                    {project.competitive_brand_enabled && (
+                                        <div
+                                            data-testid="competitive-brand-block"
+                                            data-step="2"
+                                            className="mb-6"
+                                        >
+                                            <PremiumFormField
+                                                label="Competitive Brand (declare conflicts)"
+                                                value={form.competitive_brand}
+                                                onChange={(v) => {
+                                                    setForm({ ...form, competitive_brand: v });
+                                                    if (validationErrors.competitive_brand) setValidationErrors((e) => ({ ...e, competitive_brand: undefined }));
+                                                }}
+                                                onBlur={saveForm}
+                                                placeholder="Any brand conflict? Type 'None' if not"
+                                                testid="form-competitive-brand"
+                                                wide
+                                                error={validationErrors.competitive_brand}
+                                                inputRef={(el) => { fieldRefs.current.competitive_brand = el; }}
+                                            />
                                         </div>
                                     )}
 

@@ -92,7 +92,7 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
                 ref={videoRef}
                 src={src}
                 poster={poster}
-                preload="metadata"
+                preload="none"
                 className="w-full h-full object-cover cursor-pointer"
                 onEnded={() => setIsPlaying(false)}
                 onClick={togglePlay}
@@ -120,6 +120,156 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
         </div>
     );
 }
+
+function EditableInput({ initialValue, onChange, type = "text", className, testid }) {
+    const [val, setVal] = useState(initialValue ?? "");
+    useEffect(() => {
+        setVal(initialValue ?? "");
+    }, [initialValue]);
+
+    return (
+        <input
+            type={type}
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+            onBlur={() => {
+                if (val !== (initialValue ?? "")) {
+                    onChange(val);
+                }
+            }}
+            onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                    e.target.blur();
+                }
+            }}
+            className={className}
+            data-testid={testid}
+        />
+    );
+}
+
+function EditableTextarea({ initialValue, onChange, placeholder, className, rows }) {
+    const [val, setVal] = useState(initialValue ?? "");
+    useEffect(() => {
+        setVal(initialValue ?? "");
+    }, [initialValue]);
+
+    return (
+        <textarea
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+            onBlur={() => {
+                if (val !== (initialValue ?? "")) {
+                    onChange(val);
+                }
+            }}
+            placeholder={placeholder}
+            className={className}
+            rows={rows}
+        />
+    );
+}
+
+function PremiumImage({ src, alt, className }) {
+    const [loaded, setLoaded] = useState(false);
+    return (
+        <div className="relative w-full h-full bg-neutral-100 overflow-hidden">
+            {!loaded && (
+                <div className="absolute inset-0 animate-pulse bg-neutral-200" />
+            )}
+            <img
+                src={src}
+                alt={alt}
+                loading="lazy"
+                decoding="async"
+                onLoad={() => setLoaded(true)}
+                className={`transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${className}`}
+            />
+        </div>
+    );
+}
+
+const SubmissionListItem = React.memo(({ s, isSelected, onClick, project, statusBadges, borderColors, formatRelativeTime }) => {
+    const comp = getCompleteness(s, project);
+    const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
+    const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
+    const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
+
+    const customAnswers = s.form_data?.custom_answers || {};
+    const totalQuestions = project?.custom_questions?.length || 0;
+    const answeredCount = Object.values(customAnswers).filter(val => val !== undefined && val !== null && val !== "").length;
+
+    const isRecent = (() => {
+        const ts = s.submitted_at || s.created_at;
+        if (!ts) return false;
+        const diffMs = new Date() - new Date(ts);
+        return diffMs < 24 * 60 * 60 * 1000;
+    })();
+
+    const isUpdated = s.status === "updated";
+    const statusKey = isUpdated ? "updated" : (s.decision || "pending");
+    const cardBorder = borderColors[statusKey] || "";
+
+    return (
+        <div
+            onClick={() => onClick(s.id)}
+            className={`px-4 py-3.5 cursor-pointer transition-colors flex flex-col gap-2 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
+        >
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-display font-semibold text-sm text-black/95 truncate">
+                    {s.talent_name}
+                </span>
+                <div className="flex gap-1 shrink-0">
+                    <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${statusBadges[s.decision || "pending"]}`}>
+                        {s.decision || "pending"}
+                    </span>
+                    <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${comp.color}`}>
+                        {comp.status}
+                    </span>
+                </div>
+            </div>
+            <div className="text-[10px] text-black/45 font-mono truncate">
+                {s.talent_email}
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                {hasIntro ? (
+                    <span className="inline-flex items-center text-[9px] bg-neutral-100 text-neutral-700 px-1.5 py-0.5 rounded font-mono">
+                        🎥 Intro Video
+                    </span>
+                ) : (
+                    <span className="inline-flex items-center text-[9px] bg-neutral-50 text-neutral-400 px-1.5 py-0.5 rounded font-mono border border-dashed border-neutral-200">
+                        🎥 No Video
+                    </span>
+                )}
+
+                <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${takesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
+                    🎬 Takes ({takesCount})
+                </span>
+
+                <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${imagesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
+                    📷 Images ({imagesCount})
+                </span>
+
+                {totalQuestions > 0 && (
+                    <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${answeredCount >= totalQuestions ? "bg-neutral-100 text-neutral-700" : "bg-amber-50 text-amber-600 border border-amber-200"}`}>
+                        📄 Qs ({answeredCount}/{totalQuestions})
+                    </span>
+                )}
+            </div>
+            <div className="text-[9px] text-black/55 flex items-center justify-between mt-1">
+                <span>Age: {s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—"}</span>
+                <div className="flex items-center gap-1">
+                    {isRecent && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" title="Recently updated" />
+                    )}
+                    <span className={isRecent ? "text-blue-600 font-semibold" : "text-black/45"}>
+                        🕒 {isRecent ? "Recently" : "Updated"}: {formatRelativeTime(s.submitted_at || s.created_at)}
+                    </span>
+                </div>
+            </div>
+        </div>
+    );
+});
 
 function getCompleteness(s, project) {
     const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
@@ -288,6 +438,30 @@ export default function SubmissionReviewCenter() {
             localStorage.setItem(`review_center_progress_${id}`, selectedId);
         }
     }, [selectedId, id]);
+
+    // Keyboard navigation shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+                return;
+            }
+
+            if (e.key === "ArrowLeft") {
+                handlePrev();
+            } else if (e.key === "ArrowRight") {
+                handleNext();
+            } else if (e.key.toLowerCase() === "a") {
+                handleDecision("approved");
+            } else if (e.key.toLowerCase() === "r") {
+                handleDecision("rejected");
+            } else if (e.key.toLowerCase() === "h") {
+                handleDecision("hold");
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [filteredSubmissions, currentIndex, selectedId, handlePrev, handleNext, handleDecision]);
 
     // Action handlers
     const handleDecision = async (decision) => {
@@ -600,11 +774,10 @@ export default function SubmissionReviewCenter() {
                             />
                         </div>
                     ) : (
-                        <input
+                        <EditableInput
                             type={f.type || "text"}
-                            value={displayVal}
-                            onChange={(e) => {
-                                const val = e.target.value;
+                            initialValue={displayVal}
+                            onChange={(val) => {
                                 if (isArrayVal) {
                                     setForm({ ...form, [f.key]: val.split(",").map(s => s.trim()).filter(Boolean) });
                                 } else {
@@ -685,7 +858,7 @@ export default function SubmissionReviewCenter() {
             <div className="flex flex-1 overflow-hidden relative">
                 
                 {/* ── LEFT PANEL (SUBMISSION LIST) ── */}
-                <aside className={`w-full md:w-[35%] border-r border-black/[0.08] bg-white flex flex-col shrink-0 overflow-hidden transition-all duration-300 ${isMobileDetailOpen ? "hidden md:flex" : "flex"}`}>
+                <aside className={`w-full lg:w-[30%] border-r border-black/[0.08] bg-white flex flex-col shrink-0 overflow-hidden transition-all duration-300 ${isMobileDetailOpen ? "hidden lg:flex" : "flex"}`}>
                     {/* Search & Filter Bar */}
                     <div className="p-4 border-b border-black/[0.06] space-y-3 bg-[#fafaf9]">
                         <div className="flex items-center gap-2">
@@ -825,110 +998,36 @@ export default function SubmissionReviewCenter() {
                             </div>
                         ) : (
                             <>
-                                 {filteredSubmissions.slice(0, visibleCount).map((s, idx) => {
-                                     const isSelected = s.id === selectedId;
-                                     const isUpdated = s.status === "updated";
-                                     const statusKey = isUpdated ? "updated" : (s.decision || "pending");
-                                     const cardBorder = borderColors[statusKey] || "";
-                                     
-                                     const comp = getCompleteness(s, project);
-
-                                     const hasIntro = s.media?.some(m => m.category === "intro_video" || m.category === "video");
-                                     const takesCount = s.media?.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length || 0;
-                                     const imagesCount = s.media?.filter(m => ["image", "indian", "western"].includes(m.category)).length || 0;
-
-                                     const customAnswers = s.form_data?.custom_answers || {};
-                                     const totalQuestions = project?.custom_questions?.length || 0;
-                                     const answeredCount = Object.values(customAnswers).filter(val => val !== undefined && val !== null && val !== "").length;
-
-                                     const isRecent = (() => {
-                                         const ts = s.submitted_at || s.created_at;
-                                         if (!ts) return false;
-                                         const diffMs = new Date() - new Date(ts);
-                                         return diffMs < 24 * 60 * 60 * 1000;
-                                     })();
-
-                                     return (
-                                         <div
-                                             key={s.id}
-                                             onClick={() => handleSelectRow(s.id)}
-                                             className={`px-4 py-3.5 cursor-pointer transition-colors flex flex-col gap-2 ${cardBorder} ${isSelected ? "bg-black/[0.02] border-r-2 border-r-black" : "bg-white hover:bg-black/[0.01]"}`}
-                                         >
-                                             <div className="flex items-center justify-between gap-2 flex-wrap">
-                                                 <span className="font-display font-semibold text-sm text-black/95 truncate">
-                                                     {s.talent_name}
-                                                 </span>
-                                                 <div className="flex gap-1 shrink-0">
-                                                     {/* Primary: Decision status */}
-                                                     <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${statusBadges[s.decision || "pending"]}`}>
-                                                         {s.decision || "pending"}
-                                                     </span>
-                                                     {/* Secondary: Completeness */}
-                                                     <span className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${comp.color}`}>
-                                                         {comp.status}
-                                                     </span>
-                                                 </div>
-                                             </div>
-                                             <div className="text-[10px] text-black/45 font-mono truncate">
-                                                 {s.talent_email}
-                                             </div>
-                                             <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                                                 {hasIntro ? (
-                                                     <span className="inline-flex items-center text-[9px] bg-neutral-100 text-neutral-700 px-1.5 py-0.5 rounded font-mono">
-                                                         🎥 Intro Video
-                                                     </span>
-                                                 ) : (
-                                                     <span className="inline-flex items-center text-[9px] bg-neutral-50 text-neutral-400 px-1.5 py-0.5 rounded font-mono border border-dashed border-neutral-200">
-                                                         🎥 No Video
-                                                     </span>
-                                                 )}
-
-                                                 <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${takesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
-                                                     🎬 Audition Takes ({takesCount})
-                                                 </span>
-
-                                                 <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${imagesCount > 0 ? "bg-neutral-100 text-neutral-700" : "bg-neutral-50 text-neutral-400 border border-dashed border-neutral-200"}`}>
-                                                     📷 Images ({imagesCount})
-                                                 </span>
-
-                                                 {totalQuestions > 0 && (
-                                                     <span className={`inline-flex items-center text-[9px] px-1.5 py-0.5 rounded font-mono ${answeredCount >= totalQuestions ? "bg-neutral-100 text-neutral-700" : "bg-amber-50 text-amber-600 border border-amber-200"}`}>
-                                                         📄 Qs ({answeredCount}/{totalQuestions})
-                                                     </span>
-                                                 )}
-                                             </div>
-                                             <div className="text-[9px] text-black/55 flex items-center justify-between mt-1">
-                                                 <span>Age: {s.effective_age !== undefined && s.effective_age !== null ? `${s.effective_age} yrs` : "—"}</span>
-                                                 <div className="flex items-center gap-1">
-                                                     {isRecent && (
-                                                         <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" title="Recently updated" />
-                                                     )}
-                                                     <span className={isRecent ? "text-blue-600 font-semibold" : "text-black/45"}>
-                                                         🕒 {isRecent ? "Recently Updated" : "Last Updated"}: {formatRelativeTime(s.submitted_at || s.created_at)}
-                                                     </span>
-                                                 </div>
-                                             </div>
-                                         </div>
-                                     );
-                                 })}
-                                 {filteredSubmissions.length > visibleCount && (
-                                     <div className="p-4 text-center">
-                                         <button
-                                             type="button"
-                                             onClick={() => setVisibleCount((prev) => prev + 50)}
-                                             className="px-4 py-2 border border-black/[0.08] hover:border-black/35 rounded-lg text-xs font-semibold shadow-sm transition-all bg-white select-none active:scale-[0.98]"
-                                         >
-                                             Load More (+50)
-                                         </button>
-                                     </div>
-                                 )}
+                                {filteredSubmissions.slice(0, visibleCount).map((s) => (
+                                    <SubmissionListItem
+                                        key={s.id}
+                                        s={s}
+                                        isSelected={s.id === selectedId}
+                                        onClick={handleSelectRow}
+                                        project={project}
+                                        statusBadges={statusBadges}
+                                        borderColors={borderColors}
+                                        formatRelativeTime={formatRelativeTime}
+                                    />
+                                ))}
+                                {filteredSubmissions.length > visibleCount && (
+                                    <div className="p-4 text-center">
+                                        <button
+                                            type="button"
+                                            onClick={() => setVisibleCount((prev) => prev + 50)}
+                                            className="px-4 py-2 border border-black/[0.08] hover:border-black/35 rounded-lg text-xs font-semibold shadow-sm transition-all bg-white select-none active:scale-[0.98]"
+                                        >
+                                            Load More (+50)
+                                        </button>
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>
                 </aside>
 
                 {/* ── RIGHT PANEL (CURATED REVIEW PANEL) ── */}
-                <main className={`flex-1 flex flex-col bg-white overflow-hidden transition-all duration-300 ${!isMobileDetailOpen ? "hidden md:flex" : "flex"} relative`}>
+                <main className={`flex-1 flex flex-col bg-white overflow-hidden transition-all duration-300 ${!isMobileDetailOpen ? "hidden lg:flex" : "flex"} relative`}>
                     {showResumePrompt && (
                         <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-6 z-50">
                             <div className="max-w-sm w-full bg-white border border-black/[0.08] rounded-xl p-6 shadow-xl space-y-6 text-center animate-in fade-in zoom-in-95 duration-200">
@@ -976,7 +1075,7 @@ export default function SubmissionReviewCenter() {
                         {/* Mobile Back control */}
                         <button
                             onClick={() => setIsMobileDetailOpen(false)}
-                            className="flex items-center gap-1.5 text-xs text-black/60 hover:text-black font-semibold md:hidden"
+                            className="flex items-center gap-1.5 text-xs text-black/60 hover:text-black font-semibold lg:hidden"
                         >
                             <ChevronLeft className="w-4 h-4" />
                             <span>List</span>
@@ -1003,21 +1102,58 @@ export default function SubmissionReviewCenter() {
                         </div>
 
                         {/* Mode selectors */}
-                        <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02]">
-                            <button
-                                type="button"
-                                onClick={() => setIsPreviewMode(false)}
-                                className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${!isPreviewMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
-                            >
-                                Recruiter view
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setIsPreviewMode(true)}
-                                className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${isPreviewMode ? "bg-amber-500 text-white shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
-                            >
-                                Client view
-                            </button>
+                        <div className="flex items-center gap-3">
+                            {!isPreviewMode && (
+                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[10px] font-mono uppercase tracking-wider select-none">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const nextFv = { ...fv };
+                                            PERSONAL_FIELDS.forEach(f => { nextFv[f.key] = undefined; });
+                                            PROFESSIONAL_FIELDS.forEach(f => { nextFv[f.key] = undefined; });
+                                            nextFv.availability = undefined;
+                                            nextFv.budget = undefined;
+                                            setFv(nextFv);
+                                            toast.success("All fields set to Visible");
+                                        }}
+                                        className="px-2.5 py-1 hover:text-black text-black/55 transition-colors"
+                                    >
+                                        Show All
+                                    </button>
+                                    <span className="text-black/10 self-center">|</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const nextFv = { ...fv };
+                                            PERSONAL_FIELDS.forEach(f => { nextFv[f.key] = false; });
+                                            PROFESSIONAL_FIELDS.forEach(f => { nextFv[f.key] = false; });
+                                            nextFv.availability = false;
+                                            nextFv.budget = false;
+                                            setFv(nextFv);
+                                            toast.success("All fields set to Hidden");
+                                        }}
+                                        className="px-2.5 py-1 hover:text-black text-black/55 transition-colors"
+                                    >
+                                        Hide All
+                                    </button>
+                                </div>
+                            )}
+                            <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02]">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsPreviewMode(false)}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${!isPreviewMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                >
+                                    Recruiter view
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsPreviewMode(true)}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${isPreviewMode ? "bg-amber-50 text-white shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                >
+                                    Client view
+                                </button>
+                            </div>
                         </div>
                     </div>
 
@@ -1134,10 +1270,43 @@ export default function SubmissionReviewCenter() {
 
                                 {/* ── SECTION A: Personal Information ── */}
                                 <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
-                                    <div className="flex items-start justify-between border-b border-black/[0.05] pb-3 gap-4">
-                                        <p className="eyebrow">Personal Information</p>
+                                    <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 gap-4">
+                                        <div className="flex items-center gap-3">
+                                            <p className="eyebrow">Personal Information</p>
+                                            {!isPreviewMode && (
+                                                <span className="text-[9px] text-black/30 font-mono hidden sm:inline">(Project-specific overrides)</span>
+                                            )}
+                                        </div>
                                         {!isPreviewMode && (
-                                            <span className="text-[9px] text-black/35 font-mono text-right shrink-0">Project-specific overrides · Master profile unchanged</span>
+                                            <div className="flex gap-2 text-[10px] font-mono uppercase tracking-wider shrink-0 select-none">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const nextFv = { ...fv };
+                                                        PERSONAL_FIELDS.forEach(f => {
+                                                            nextFv[f.key] = undefined;
+                                                        });
+                                                        setFv(nextFv);
+                                                    }}
+                                                    className="text-black/45 hover:text-black font-semibold transition-colors"
+                                                >
+                                                    Show All
+                                                </button>
+                                                <span className="text-black/10">|</span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const nextFv = { ...fv };
+                                                        PERSONAL_FIELDS.forEach(f => {
+                                                            nextFv[f.key] = false;
+                                                        });
+                                                        setFv(nextFv);
+                                                    }}
+                                                    className="text-black/45 hover:text-black font-semibold transition-colors"
+                                                >
+                                                    Hide All
+                                                </button>
+                                            </div>
                                         )}
                                     </div>
                                     {isPreviewMode ? (
@@ -1166,7 +1335,40 @@ export default function SubmissionReviewCenter() {
 
                                 {/* ── SECTION B: Professional Information ── */}
                                 <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
-                                    <p className="eyebrow border-b border-black/[0.05] pb-3">Professional Information</p>
+                                    <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 gap-4">
+                                        <p className="eyebrow">Professional Information</p>
+                                        {!isPreviewMode && (
+                                            <div className="flex gap-2 text-[10px] font-mono uppercase tracking-wider shrink-0 select-none">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const nextFv = { ...fv };
+                                                        PROFESSIONAL_FIELDS.forEach(f => {
+                                                            nextFv[f.key] = undefined;
+                                                        });
+                                                        setFv(nextFv);
+                                                    }}
+                                                    className="text-black/45 hover:text-black font-semibold transition-colors"
+                                                >
+                                                    Show All
+                                                </button>
+                                                <span className="text-black/10">|</span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const nextFv = { ...fv };
+                                                        PROFESSIONAL_FIELDS.forEach(f => {
+                                                            nextFv[f.key] = false;
+                                                        });
+                                                        setFv(nextFv);
+                                                    }}
+                                                    className="text-black/45 hover:text-black font-semibold transition-colors"
+                                                >
+                                                    Hide All
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
                                     {isPreviewMode ? (
                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
                                             {PROFESSIONAL_FIELDS.filter(f => fv[f.key] !== false).map(f => {
@@ -1189,7 +1391,32 @@ export default function SubmissionReviewCenter() {
 
                                 {/* ── SECTION C: Project Information ── */}
                                 <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-6">
-                                    <p className="eyebrow border-b border-black/[0.05] pb-3">Project Information</p>
+                                    <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 gap-4">
+                                        <p className="eyebrow">Project Information</p>
+                                        {!isPreviewMode && (
+                                            <div className="flex gap-2 text-[10px] font-mono uppercase tracking-wider shrink-0 select-none">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setFv({ ...fv, availability: undefined, budget: undefined });
+                                                    }}
+                                                    className="text-black/45 hover:text-black font-semibold transition-colors"
+                                                >
+                                                    Show All
+                                                </button>
+                                                <span className="text-black/10">|</span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setFv({ ...fv, availability: false, budget: false });
+                                                    }}
+                                                    className="text-black/45 hover:text-black font-semibold transition-colors"
+                                                >
+                                                    Hide All
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
 
                                     {/* Availability + Budget — preview vs edit */}
                                     {isPreviewMode ? (
@@ -1303,11 +1530,11 @@ export default function SubmissionReviewCenter() {
                                                             {isPreviewMode ? (
                                                                 <div className="text-black/85 font-medium">{curAns || "—"}</div>
                                                             ) : (
-                                                                <textarea
-                                                                    value={curAns}
-                                                                    onChange={(e) => setForm({
+                                                                <EditableTextarea
+                                                                    initialValue={curAns}
+                                                                    onChange={(val) => setForm({
                                                                         ...form,
-                                                                        custom_answers: { ...(form.custom_answers || {}), [q.id]: e.target.value }
+                                                                        custom_answers: { ...(form.custom_answers || {}), [q.id]: val }
                                                                     })}
                                                                     rows={2}
                                                                     placeholder="Enter answer..."
@@ -1364,7 +1591,7 @@ export default function SubmissionReviewCenter() {
                                                                 <FileText className="w-8 h-8 text-black/25" />
                                                             </div>
                                                         ) : (
-                                                            <img src={m.thumbnail_url || m.url} alt="" loading="lazy" className="w-full aspect-video object-cover" />
+                                                            <PremiumImage src={m.thumbnail_url || m.url} alt="" className="w-full aspect-video object-cover" />
                                                         )}
                                                         <div className="p-2">
                                                             <p className="text-[9px] text-black/50 font-mono uppercase truncate">{m.label || m.category}</p>
@@ -1502,7 +1729,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {indianImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <img src={m.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
                                                     </div>
                                                 ))}
                                             </div>
@@ -1522,7 +1749,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {westernImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <img src={m.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
                                                     </div>
                                                 ))}
                                             </div>
@@ -1570,6 +1797,10 @@ export default function SubmissionReviewCenter() {
                                         <Check className="w-4 h-4" /> Approve
                                     </button>
                                 </div>
+                            </div>
+                            <div className="flex items-center justify-between border-t border-black/[0.04] pt-3 text-[10px] text-black/35 font-mono select-none">
+                                <span>⚡ Shortcuts: <kbd className="bg-black/5 px-1 py-0.5 rounded border border-black/[0.08]">←</kbd> / <kbd className="bg-black/5 px-1 py-0.5 rounded border border-black/[0.08]">→</kbd> navigate · <kbd className="bg-black/5 px-1.5 py-0.5 rounded border border-black/[0.08]">A</kbd> Approve · <kbd className="bg-black/5 px-1.5 py-0.5 rounded border border-black/[0.08]">H</kbd> Hold · <kbd className="bg-black/5 px-1.5 py-0.5 rounded border border-black/[0.08]">R</kbd> Reject</span>
+                                <span className="hidden sm:inline">Press shortcut key when inputs are not focused</span>
                             </div>
                         </footer>
                     )}

@@ -2731,7 +2731,7 @@ function SubmissionReviewModal({ submission, onClose, onDecision, projectId, onC
                                     <div>
                                         <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
                                         <p className="text-sm font-medium text-black/85">
-                                            {form.availability?.status === "available" ? "🟢 Available" : "🔴 Unavailable"} 
+                                            {form.availability?.status === "yes" ? "🟢 Available" : "🔴 Unavailable"} 
                                             {form.availability?.note ? ` — ${form.availability.note}` : ""}
                                         </p>
                                     </div>

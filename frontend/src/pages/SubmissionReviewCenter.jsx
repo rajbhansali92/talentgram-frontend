@@ -512,6 +512,13 @@ export default function SubmissionReviewCenter() {
         { key: "age", label: "Age", type: "number" },
         { key: "height", label: "Height" },
         { key: "location", label: "Location" },
+        { key: "gender", label: "Gender" },
+        { key: "ethnicity", label: "Ethnicity" },
+        { key: "languages", label: "Languages" },
+        { key: "instagram_handle", label: "Instagram Handle" },
+        { key: "instagram_followers", label: "Instagram Followers" },
+        { key: "skills", label: "Skills" },
+        { key: "special_abilities", label: "Special Abilities" },
         { key: "competitive_brand", label: "Competitive Brand" },
     ];
 
@@ -1030,6 +1037,8 @@ export default function SubmissionReviewCenter() {
                                                 let val = form[f.key];
                                                 if (f.key === "location" && Array.isArray(val)) {
                                                     val = val.map(l => `${l.city}, ${l.country}`).join("; ");
+                                                } else if (Array.isArray(val)) {
+                                                    val = val.join(", ");
                                                 }
                                                 return (
                                                     <div key={f.key} className="min-w-0">
@@ -1041,39 +1050,52 @@ export default function SubmissionReviewCenter() {
                                         </div>
                                     ) : (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                                            {FIELDS.map((f) => (
-                                                <div key={f.key} className="flex items-start gap-3 bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03]">
-                                                    <div className="flex-1 min-w-0">
-                                                        <label className="text-[10px] text-black/45 tracking-widest uppercase">
-                                                            {f.label}
-                                                        </label>
-                                                        {f.key === "location" ? (
-                                                            <div className="mt-1">
-                                                                <LocationSelector
-                                                                    value={Array.isArray(form.location) ? form.location : []}
-                                                                    onChange={(arr) => setForm({ ...form, location: arr })}
-                                                                    testid="form-location"
+                                            {FIELDS.map((f) => {
+                                                const isArrayVal = Array.isArray(form[f.key]);
+                                                const displayVal = isArrayVal ? form[f.key].join(", ") : (form[f.key] ?? "");
+                                                
+                                                return (
+                                                    <div key={f.key} className="flex items-start gap-3 bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03]">
+                                                        <div className="flex-1 min-w-0">
+                                                            <label className="text-[10px] text-black/45 tracking-widest uppercase">
+                                                                {f.label}
+                                                            </label>
+                                                            {f.key === "location" ? (
+                                                                <div className="mt-1">
+                                                                    <LocationSelector
+                                                                        value={Array.isArray(form.location) ? form.location : []}
+                                                                        onChange={(arr) => setForm({ ...form, location: arr })}
+                                                                        testid="form-location"
+                                                                    />
+                                                                </div>
+                                                            ) : (
+                                                                <input
+                                                                    type={f.type || "text"}
+                                                                    value={displayVal}
+                                                                    onChange={(e) => {
+                                                                        const val = e.target.value;
+                                                                        if (isArrayVal) {
+                                                                            const arr = val.split(",").map(s => s.trim()).filter(Boolean);
+                                                                            setForm({ ...form, [f.key]: arr });
+                                                                        } else {
+                                                                            setForm({ ...form, [f.key]: val });
+                                                                        }
+                                                                    }}
+                                                                    className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium"
                                                                 />
-                                                            </div>
-                                                        ) : (
-                                                            <input
-                                                                type={f.type || "text"}
-                                                                value={form[f.key] ?? ""}
-                                                                onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
-                                                                className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium"
-                                                            />
-                                                        )}
+                                                            )}
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setFv({ ...fv, [f.key]: fv[f.key] === false ? true : false })}
+                                                            title={fv[f.key] !== false ? "Visible to client" : "Hidden from client"}
+                                                            className={`mt-4 w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] !== false ? "bg-black" : "bg-black/15"}`}
+                                                        >
+                                                            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
+                                                        </button>
                                                     </div>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setFv({ ...fv, [f.key]: !fv[f.key] })}
-                                                        title={fv[f.key] ? "Visible to client" : "Hidden from client"}
-                                                        className={`mt-4 w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] ? "bg-black" : "bg-black/15"}`}
-                                                    >
-                                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] ? "translate-x-4 bg-white" : "bg-black"}`} />
-                                                    </button>
-                                                </div>
-                                            ))}
+                                                );
+                                            })}
 
                                             {/* Structured Availability */}
                                             <div className="md:col-span-2 border-t border-black/[0.08] pt-4 mt-2 space-y-2">
@@ -1162,7 +1184,7 @@ export default function SubmissionReviewCenter() {
                                                 <div>
                                                     <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
                                                     <p className="text-sm font-medium text-black/85">
-                                                        {form.availability?.status === "available" ? "🟢 Available" : "🔴 Unavailable"} 
+                                                        {form.availability?.status === "yes" ? "🟢 Available" : "🔴 Unavailable"} 
                                                         {form.availability?.note ? ` — ${form.availability.note}` : ""}
                                                     </p>
                                                 </div>

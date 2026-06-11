@@ -195,9 +195,67 @@ def test_custom_answers_all_hidden_removes_key():
     assert "custom_answers" not in shape
 
 
-# --------------------------------------------------------------------------
-# Allowlist
-# --------------------------------------------------------------------------
 def test_allowlist_contains_new_fields():
     assert "competitive_brand" in CLIENT_ALLOWED_FIELDS
     assert "custom_answers" in CLIENT_ALLOWED_FIELDS
+    assert "gender" in CLIENT_ALLOWED_FIELDS
+    assert "ethnicity" in CLIENT_ALLOWED_FIELDS
+    assert "languages" in CLIENT_ALLOWED_FIELDS
+    assert "special_abilities" in CLIENT_ALLOWED_FIELDS
+
+
+def test_newly_surfaced_fields_gating():
+    # When enabled (True), the fields should be returned
+    sub = _base_submission(
+        form_data={
+            "first_name": "X",
+            "last_name": "Y",
+            "gender": "Female",
+            "ethnicity": "South Asian",
+            "languages": ["English", "Hindi"],
+            "skills": ["Dancing", "Singing"],
+            "special_abilities": "Gymnastics",
+        },
+        fv={
+            **DEFAULT_FIELD_VISIBILITY,
+            "gender": True,
+            "ethnicity": True,
+            "languages": True,
+            "skills": True,
+            "special_abilities": True,
+        }
+    )
+    shape = _submission_to_client_shape(sub)
+    assert shape["gender"] == "Female"
+    assert shape["ethnicity"] == "South Asian"
+    assert shape["languages"] == ["English", "Hindi"]
+    assert shape["skills"] == ["Dancing", "Singing"]
+    assert shape["special_abilities"] == "Gymnastics"
+
+    # When disabled (False), the fields should be filtered out / default value
+    sub_hidden = _base_submission(
+        form_data={
+            "first_name": "X",
+            "last_name": "Y",
+            "gender": "Female",
+            "ethnicity": "South Asian",
+            "languages": ["English", "Hindi"],
+            "skills": ["Dancing", "Singing"],
+            "special_abilities": "Gymnastics",
+        },
+        fv={
+            **DEFAULT_FIELD_VISIBILITY,
+            "gender": False,
+            "ethnicity": False,
+            "languages": False,
+            "skills": False,
+            "special_abilities": False,
+        }
+    )
+    shape_hidden = _submission_to_client_shape(sub_hidden)
+    assert shape_hidden.get("gender") is None
+    assert shape_hidden.get("ethnicity") is None
+    assert shape_hidden.get("languages") == []
+    assert shape_hidden.get("skills") == []
+    assert shape_hidden.get("special_abilities") is None
+

@@ -403,6 +403,10 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
 
     effective_age_val = compute_effective_age(fd, talent_age)
 
+    cb_val = str(fd.get("competitive_brand") or "").strip().lower()
+    cb_visible = bool(cb_val and cb_val not in ("none", "n/a", "na"))
+    fv_defaults = {**DEFAULT_FIELD_VISIBILITY, "competitive_brand": cb_visible}
+
     sid = str(uuid.uuid4())
     atk = make_access_token()
     doc = {
@@ -413,7 +417,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
         "talent_email": email,
         "talent_phone": payload.phone,
         "form_data": fd,
-        "field_visibility": {**DEFAULT_FIELD_VISIBILITY},
+        "field_visibility": fv_defaults,
         "submitted_age_override": submitted_age_override_val,
         "effective_age": effective_age_val,
         "media": deduplicate_media(prefill_media),

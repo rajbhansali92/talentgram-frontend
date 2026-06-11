@@ -1692,6 +1692,18 @@ function TalentDetail({
                                         {vis.instagram_followers && talent.instagram_followers && (
                                             <InfoRow label="Followers" value={talent.instagram_followers} />
                                         )}
+                                        {talent.gender && (
+                                            <InfoRow label="Gender" value={talent.gender} />
+                                        )}
+                                        {talent.languages && (Array.isArray(talent.languages) ? talent.languages.length > 0 : talent.languages) && (
+                                            <InfoRow label="Languages" value={Array.isArray(talent.languages) ? talent.languages.join(", ") : talent.languages} />
+                                        )}
+                                        {talent.skills && (Array.isArray(talent.skills) ? talent.skills.length > 0 : talent.skills) && (
+                                            <InfoRow label="Skills" value={Array.isArray(talent.skills) ? talent.skills.join(", ") : talent.skills} />
+                                        )}
+                                        {talent.special_abilities && (
+                                            <InfoRow label="Special Abilities" value={talent.special_abilities} />
+                                        )}
                                     </div>
                                     
                                     <AvailabilityBudgetSection 
@@ -1966,6 +1978,18 @@ function TalentDetail({
                                 )}
                                 {vis.instagram_followers && talent.instagram_followers && (
                                     <InfoRow label="Followers" value={talent.instagram_followers} />
+                                )}
+                                {talent.gender && (
+                                    <InfoRow label="Gender" value={talent.gender} />
+                                )}
+                                {talent.languages && (Array.isArray(talent.languages) ? talent.languages.length > 0 : talent.languages) && (
+                                    <InfoRow label="Languages" value={Array.isArray(talent.languages) ? talent.languages.join(", ") : talent.languages} />
+                                )}
+                                {talent.skills && (Array.isArray(talent.skills) ? talent.skills.length > 0 : talent.skills) && (
+                                    <InfoRow label="Skills" value={Array.isArray(talent.skills) ? talent.skills.join(", ") : talent.skills} />
+                                )}
+                                {talent.special_abilities && (
+                                    <InfoRow label="Special Abilities" value={talent.special_abilities} />
                                 )}
                             </div>
 

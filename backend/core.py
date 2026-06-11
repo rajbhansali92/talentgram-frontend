@@ -925,6 +925,13 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     # still see nothing reach the client.)
     "budget": True,
     "custom_answers": True,      # on by default — admin-configured questions are intentional
+    "gender": True,
+    "ethnicity": True,
+    "languages": True,
+    "instagram_handle": True,
+    "instagram_followers": True,
+    "skills": True,
+    "special_abilities": True,
 }
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
@@ -994,6 +1001,10 @@ CLIENT_ALLOWED_FIELDS = {
     "effective_age",
     "submitted_age_override",
     "skills",
+    "gender",
+    "ethnicity",
+    "languages",
+    "special_abilities",
 }
 
 
@@ -1469,14 +1480,22 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
         out["height"] = talent["height"]
     if v.get("location") and talent.get("location"):
         out["location"] = talent["location"]
+    if v.get("gender") and talent.get("gender"):
+        out["gender"] = talent["gender"]
     if v.get("ethnicity") and talent.get("ethnicity"):
         out["ethnicity"] = talent["ethnicity"]
-    if v.get("instagram") and talent.get("instagram_handle"):
+    if v.get("languages") and talent.get("languages"):
+        out["languages"] = talent["languages"]
+    if v.get("instagram_handle") and talent.get("instagram_handle"):
         out["instagram_handle"] = talent["instagram_handle"]
     if v.get("instagram_followers") and talent.get("instagram_followers"):
         out["instagram_followers"] = talent["instagram_followers"]
     if v.get("work_links") and talent.get("work_links"):
         out["work_links"] = talent["work_links"]
+    if v.get("skills") and talent.get("skills"):
+        out["skills"] = talent["skills"]
+    if v.get("special_abilities") and talent.get("special_abilities"):
+        out["special_abilities"] = talent["special_abilities"]
     # Availability & budget (structured objects)
     if v.get("availability") and talent.get("availability"):
         a = talent["availability"]
@@ -1731,6 +1750,11 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
         "work_links": (fd.get("work_links") or []) if fv.get("work_links", True) else [],
         "availability": (fd.get("availability") if fv.get("availability") else None),
         "budget": (fd.get("budget") if fv.get("budget") else None),
+        "gender": fd.get("gender") if fv.get("gender") else None,
+        "ethnicity": fd.get("ethnicity") if fv.get("ethnicity") else None,
+        "languages": fd.get("languages") if fv.get("languages") else [],
+        "skills": fd.get("skills") if fv.get("skills") else [],
+        "special_abilities": fd.get("special_abilities") if fv.get("special_abilities") else None,
         "cover_media_id": cover_mid,
         "media": [_public_media(m) for m in media],
     }

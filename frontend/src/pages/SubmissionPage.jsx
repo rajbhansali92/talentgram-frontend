@@ -211,7 +211,7 @@ function SubmissionPage() {
         (async () => {
             try {
                 const { data } = await axios.get(
-                    `${API}/public/projects/${slug}`,
+                    `/public/projects/${slug}`,
                 );
                 setProject(data);
                 // Snapshot commission on the form so it's preserved at submission time
@@ -297,7 +297,7 @@ function SubmissionPage() {
             (async () => {
                 try {
                     const { data } = await axios.get(
-                        `${API}/public/prefill?email=${encodeURIComponent(formatted)}`,
+                        `/public/prefill?email=${encodeURIComponent(formatted)}`,
                     );
                     if (data && Object.keys(data).length > 0 && data.first_name) {
                         populatePrefillData(data);
@@ -331,7 +331,7 @@ function SubmissionPage() {
         (async () => {
             try {
                 const { data } = await axios.get(
-                    `${API}/public/submissions/${saved.id}`,
+                    `/public/submissions/${saved.id}`,
                     { headers: { Authorization: `Bearer ${saved.token}` } },
                 );
                 setSubmission(data);
@@ -374,7 +374,7 @@ function SubmissionPage() {
         (async () => {
             try {
                 const { data } = await axios.get(
-                    `${API}/public/projects/${slug}/submission/me`,
+                    `/public/projects/${slug}/submission/me`,
                     { params: { atk } },
                 );
                 if (data?.id) {
@@ -503,7 +503,7 @@ function SubmissionPage() {
         setStarting(true);
         try {
             const { data } = await axios.post(
-                `${API}/public/projects/${slug}/submission`,
+                `/public/projects/${slug}/submission`,
                 {
                     name: `${form.first_name} ${form.last_name}`.trim(),
                     email: form.email.trim().toLowerCase(),
@@ -612,7 +612,7 @@ function SubmissionPage() {
         setPrefillTried(true);
         try {
             const { data } = await axios.get(
-                `${API}/public/prefill?email=${encodeURIComponent(email)}`,
+                `/public/prefill?email=${encodeURIComponent(email)}`,
             );
             if (!data || !data.first_name) {
                 // New talent — quietly unlock the rest of the form.
@@ -795,7 +795,7 @@ function SubmissionPage() {
         (async () => {
             try {
                 const { data } = await axios.get(
-                    `${API}/public/prefill?email=${encodeURIComponent(formatted)}`,
+                    `/public/prefill?email=${encodeURIComponent(formatted)}`,
                 );
                 if (data && Object.keys(data).length > 0 && data.first_name) {
                     populatePrefillData(data);
@@ -859,7 +859,7 @@ function SubmissionPage() {
                 },
             };
             const { data } = await axios.post(
-                `${API}/public/projects/${slug}/submission`,
+                `/public/projects/${slug}/submission`,
                 payload,
             );
             const ref = { id: data.id, token: data.token };
@@ -885,7 +885,7 @@ function SubmissionPage() {
         if (!saved) return;
         try {
             await axios.put(
-                `${API}/public/submissions/${saved.id}`,
+                `/public/submissions/${saved.id}`,
                 {
                     form_data: {
                         ...form,
@@ -972,7 +972,7 @@ function SubmissionPage() {
                 fd.append("category", category);
                 if (label && category === "take") fd.append("label", label);
                 const { data } = await axios.post(
-                    `${API}/public/submissions/${currentSaved.id}/upload`,
+                    `/public/submissions/${currentSaved.id}/upload`,
                     fd,
                     {
                         headers: {
@@ -1064,7 +1064,7 @@ function SubmissionPage() {
     const patchTakeLabel = async (mid, label) => {
         try {
             const { data } = await axios.patch(
-                `${API}/public/submissions/${saved.id}/media/${mid}`,
+                `/public/submissions/${saved.id}/media/${mid}`,
                 { label },
                 authCfg,
             );
@@ -1170,11 +1170,11 @@ function SubmissionPage() {
     const removeMedia = async (mid) => {
         try {
             await axios.delete(
-                `${API}/public/submissions/${saved.id}/media/${mid}`,
+                `/public/submissions/${saved.id}/media/${mid}`,
                 authCfg,
             );
             const { data } = await axios.get(
-                `${API}/public/submissions/${saved.id}`,
+                `/public/submissions/${saved.id}`,
                 authCfg,
             );
             setSubmission(data);
@@ -1265,7 +1265,7 @@ function SubmissionPage() {
         setFinalizing(true);
         try {
             await axios.post(
-                `${API}/public/submissions/${currentSaved.id}/finalize`,
+                `/public/submissions/${currentSaved.id}/finalize`,
                 {},
                 {
                     headers: {
@@ -1274,7 +1274,7 @@ function SubmissionPage() {
                 },
             );
             const { data } = await axios.get(
-                `${API}/public/submissions/${currentSaved.id}`,
+                `/public/submissions/${currentSaved.id}`,
                 {
                     headers: {
                         Authorization: `Bearer ${currentSaved.token}`,

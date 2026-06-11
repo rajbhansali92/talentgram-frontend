@@ -41,8 +41,8 @@ async def google_auth(payload: GoogleAuthIn):
     from pydantic import BaseModel
 
     token_url = "https://oauth2.googleapis.com/token"
-    client_id = os.environ.get("GOOGLE_CLIENT_ID", "mock-client-id")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "mock-client-secret")
+    client_id = os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "mock-client-id")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "mock-client-secret")
 
     token_data = {
         "code": payload.code,

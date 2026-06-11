@@ -30,6 +30,8 @@ import WorkflowPage from "@/pages/WorkflowPage";
 import PortalGateway from "@/pages/PortalGateway";
 import PortalHome from "@/pages/PortalHome";
 import PortalProfile from "@/pages/PortalProfile";
+import GoogleCallback from "@/pages/GoogleCallback";
+
 
 function App() {
     return (
@@ -89,6 +91,7 @@ function App() {
                     <Route path="/portal/:slug" element={<PortalGateway />} />
                     <Route path="/portal/home" element={<PortalHome />} />
                     <Route path="/portal/profile" element={<PortalProfile />} />
+                     <Route path="/google-callback" element={<GoogleCallback />} />
                     <Route path="/submit/:slug" element={<SubmissionPage />} />
                     <Route path="/apply" element={<ApplicationPage />} />
                     <Route path="/signup" element={<SignupPage />} />

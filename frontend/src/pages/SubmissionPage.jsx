@@ -238,13 +238,52 @@ function SubmissionPage() {
         };
     }, [activePortfolioThumbId]);
 
-    // Prefill from query params or localStorage talent portal session
+    // Prefill from query params, localStorage talent portal session, or Google Sign-In
     useEffect(() => {
         const urlParams = new URLSearchParams(window.location.search);
         const queryEmail = urlParams.get("email");
         const portalEmail = localStorage.getItem("talentgram_portal_email");
-        const emailToPrefill = queryEmail || portalEmail;
+        
+        // Google authentication checks
+        const googleEmail = localStorage.getItem("talentgram_google_email");
+        if (googleEmail) {
+            const profileDataStr = localStorage.getItem("talentgram_google_profile_data");
+            const avatar = localStorage.getItem("talentgram_google_avatar") || "";
+            
+            if (profileDataStr) {
+                // Existing Google-authenticated talent
+                const profileData = JSON.parse(profileDataStr);
+                setGatewayRecognition({
+                    name: `${profileData.first_name || ""} ${profileData.last_name || ""}`.trim(),
+                    email: googleEmail,
+                    location: profileData.location || "",
+                    image_url: avatar || profileData.image_url || profileData.cover_url || "",
+                    isGoogle: true
+                });
+                setEmailGateUnlocked(false);
+            } else {
+                // New Google-authenticated talent
+                const first = localStorage.getItem("talentgram_google_first_name") || "";
+                const last = localStorage.getItem("talentgram_google_last_name") || "";
+                setForm((f) => ({
+                    ...f,
+                    email: googleEmail,
+                    first_name: f.first_name || first,
+                    last_name: f.last_name || last,
+                }));
+                setEmailGateUnlocked(true);
+                
+                // Show welcome banner once
+                const onboardKey = `tg_onboard_shown_${slug}`;
+                if (!localStorage.getItem(onboardKey)) {
+                    toast.success("Welcome to Talentgram! Let's create your profile");
+                    localStorage.setItem(onboardKey, "true");
+                }
+            }
+            return;
+        }
 
+        const emailToPrefill = queryEmail || portalEmail;
         if (emailToPrefill && !form.email) {
             const formatted = emailToPrefill.trim().toLowerCase();
             setForm((f) => ({ ...f, email: formatted }));
@@ -267,7 +306,7 @@ function SubmissionPage() {
                 }
             })();
         }
-    }, [form.email]);
+    }, [form.email, slug]);
 
 
     // Branded page title — replaces the raw slug-based title users used to
@@ -592,6 +631,14 @@ function SubmissionPage() {
 
     const handleUseAnotherEmail = () => {
         localStorage.removeItem("talentgram_portal_email");
+        localStorage.removeItem("talentgram_google_email");
+        localStorage.removeItem("talentgram_google_first_name");
+        localStorage.removeItem("talentgram_google_last_name");
+        localStorage.removeItem("talentgram_google_avatar");
+        localStorage.removeItem("talentgram_google_profile_data");
+        const onboardKey = `tg_onboard_shown_${slug}`;
+        localStorage.removeItem(onboardKey);
+        
         setForm({
             first_name: "",
             last_name: "",
@@ -623,6 +670,14 @@ function SubmissionPage() {
         setGatewayRecognition(null);
         setGatewayEmail("");
         toast.info("Please enter your email to proceed.");
+    };
+
+    const handleGoogleLogin = () => {
+        const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "339414275037-rrm7uugj1t4gq2b02q9r51d9l6m39vbe.apps.googleusercontent.com";
+        const redirectUri = `${window.location.origin}/google-callback`;
+        const state = slug;
+        const scope = "openid profile email";
+        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
     };
 
     const handleInlineLookup = async (e) => {
@@ -664,6 +719,18 @@ function SubmissionPage() {
         setPrefillEmail(formatted);
         setEmailGateUnlocked(true);
         
+        if (gatewayRecognition.isGoogle) {
+            const profileDataStr = localStorage.getItem("talentgram_google_profile_data");
+            if (profileDataStr) {
+                const profileData = JSON.parse(profileDataStr);
+                populatePrefillData(profileData);
+                setPrefillSuggestion({ data: profileData });
+                setPrefillTried(true);
+            }
+            toast.success(`Welcome back, ${gatewayRecognition.name}!`);
+            return;
+        }
+        
         // Trigger pre-fill lookup immediately so the talent's profile details are auto-loaded
         (async () => {
             try {
@@ -684,6 +751,13 @@ function SubmissionPage() {
 
     const handleInlineCancel = () => {
         localStorage.removeItem("talentgram_portal_email");
+        localStorage.removeItem("talentgram_google_email");
+        localStorage.removeItem("talentgram_google_first_name");
+        localStorage.removeItem("talentgram_google_last_name");
+        localStorage.removeItem("talentgram_google_avatar");
+        localStorage.removeItem("talentgram_google_profile_data");
+        const onboardKey = `tg_onboard_shown_${slug}`;
+        localStorage.removeItem(onboardKey);
         setGatewayRecognition(null);
         setGatewayEmail("");
     };
@@ -1675,7 +1749,6 @@ function SubmissionPage() {
                     <p className="text-[13px] leading-relaxed text-[#333333] mb-10" data-step="1">
                         All fields are required unless marked optional.
                     </p>
-
                     <form onSubmit={startSubmission} className="space-y-8">
                         {/* Phase 1 — email-first identity. The email field
                             anchors the form so we can prefill known talents
@@ -1685,9 +1758,39 @@ function SubmissionPage() {
                                 !gatewayRecognition ? (
                                     /* Step A: Inline Email Lookup */
                                     <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
+                                        <button
+                                            type="button"
+                                            onClick={handleGoogleLogin}
+                                            className="w-full bg-white border border-[#eaeaea] hover:bg-slate-50 text-[#111111] py-3 px-4 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-2.5 transition duration-150 shadow-sm active:scale-[0.98] cursor-pointer"
+                                        >
+                                            <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                                <path
+                                                    fill="#EA4335"
+                                                    d="M12 5.04c1.78 0 3.38.61 4.64 1.8l3.46-3.46C17.99 1.19 15.21 0 12 0 7.31 0 3.28 2.69 1.34 6.61l4.08 3.16C6.4 7.02 9.01 5.04 12 5.04z"
+                                                />
+                                                <path
+                                                    fill="#4285F4"
+                                                    d="M23.49 12.27c0-.81-.07-1.59-.2-2.36H12v4.51h6.46c-.29 1.48-1.14 2.73-2.4 3.58l3.73 2.89c2.18-2.01 3.7-4.97 3.7-8.62z"
+                                                />
+                                                <path
+                                                    fill="#FBBC05"
+                                                    d="M5.42 14.78c-.24-.72-.38-1.49-.38-2.28s.14-1.56.38-2.28L1.34 7.06C.48 8.79 0 10.74 0 12.8s.48 4.01 1.34 5.74l4.08-3.76z"
+                                                />
+                                                <path
+                                                    fill="#34A853"
+                                                    d="M12 24c3.24 0 5.97-1.07 7.96-2.91l-3.73-2.89c-1.04.7-2.36 1.11-4.23 1.11-3.01 0-5.6-1.98-6.51-4.73L1.34 17.68C3.28 21.6 7.31 24 12 24z"
+                                                />
+                                            </svg>
+                                            Continue with Google
+                                        </button>
+                                        <div className="flex items-center my-1.5">
+                                            <div className="flex-grow border-t border-[#eaeaea]"></div>
+                                            <span className="mx-4 text-[10px] text-[#888888] font-mono uppercase tracking-wider">or</span>
+                                            <div className="flex-grow border-t border-[#eaeaea]"></div>
+                                        </div>
                                         <div className="flex flex-col gap-1.5">
                                             <label className="text-xs font-semibold text-[#111111] uppercase tracking-wider">
-                                                Continue your submission
+                                                Continue with Email
                                             </label>
                                             <p className="text-xs text-[#333333] leading-normal">
                                                 We use your email to recognise you and load any previously submitted details.

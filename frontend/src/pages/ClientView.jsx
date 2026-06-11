@@ -2429,6 +2429,7 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                         Seen
                     </span>
                 )}
+            </div>
             </button>
         </div>
     );

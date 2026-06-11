@@ -776,7 +776,9 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             raise HTTPException(400, "Age is required")
         if fields_config.get("height") == "required" and not (form.get("height") or "").strip():
             raise HTTPException(400, "Height is required")
-        if fields_config.get("location") == "required" and not (form.get("location") or "").strip():
+        loc_val = form.get("location")
+        is_loc_empty = not loc_val or (isinstance(loc_val, str) and not loc_val.strip())
+        if fields_config.get("location") == "required" and is_loc_empty:
             raise HTTPException(400, "Current Location is required")
         if fields_config.get("gender") == "required" and not (form.get("gender") or "").strip():
             raise HTTPException(400, "Gender is required")

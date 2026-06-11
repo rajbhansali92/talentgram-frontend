@@ -1,0 +1,30 @@
+import sys
+import os
+
+os.environ["MONGO_URL"] = "mongodb://localhost:27017"
+os.environ["DB_NAME"] = "test"
+os.environ["JWT_SECRET"] = "dummy"
+os.environ["RESEND_API_KEY"] = "dummy"
+os.environ["SENDGRID_API_KEY"] = "dummy"
+os.environ["ADMIN_EMAIL"] = "dummy"
+os.environ["ADMIN_PASSWORD"] = "dummy"
+os.environ["CLOUDINARY_URL"] = "cloudinary://foo:bar@baz"
+os.environ["CLOUDINARY_CLOUD_NAME"] = "dummy"
+os.environ["CLOUDINARY_API_KEY"] = "dummy"
+os.environ["CLOUDINARY_API_SECRET"] = "dummy"
+
+sys.path.insert(0, os.path.abspath('backend'))
+from routers.links import _generate_talent_details_pdf
+
+talent_doc = {
+    "name": "Priya Sharma",
+    "work_links": ["https://youtube.com/watch?v=dQw4w9WgXcQ"],
+    "custom_answers": [{"question": "Do you have a passport?", "answer": "Yes"}]
+}
+
+try:
+    _generate_talent_details_pdf(talent_doc, "1000", "interested")
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+

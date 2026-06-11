@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
+import LocationSelector from "@/components/LocationSelector";
 import ThemeToggle from "@/components/ThemeToggle";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import {
@@ -123,7 +124,7 @@ function SubmissionPage() {
             overrideAge: false,
             submitted_age_override: "",
             height: "",
-            location: "",
+            location: [],
             // Phase 2 — schema unification: every talent-facing form writes
             // the SAME shape directly into the talent record. No separate
             // mappings.
@@ -259,7 +260,7 @@ function SubmissionPage() {
                 setGatewayRecognition({
                     name: `${profileData.first_name || ""} ${profileData.last_name || ""}`.trim(),
                     email: googleEmail,
-                    location: profileData.location || "",
+                    location: profileData.location || [],
                     image_url: avatar || profileData.image_url || profileData.cover_url || "",
                     isGoogle: true
                 });
@@ -446,7 +447,7 @@ function SubmissionPage() {
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
         if (!form.height) return "Height is required";
-        if (!form.location.trim()) return "Current location is required";
+        if (!form.location || form.location.length === 0) return "Current location is required";
         if (!form.availability.status) return "Please confirm your availability";
         if (
             form.availability.status === "no" &&
@@ -470,7 +471,7 @@ function SubmissionPage() {
         if (!form.first_name.trim()) return "First name is required";
         if (!form.last_name.trim()) return "Last name is required";
         if (!form.height) return "Height is required";
-        if (!form.location.trim()) return "Current location is required";
+        if (!form.location || form.location.length === 0) return "Current location is required";
         return null;
     };
     const validateStep2 = () => {
@@ -571,7 +572,7 @@ function SubmissionPage() {
             age: f.age || (data.age != null ? String(data.age) : ""),
             dob: f.dob || data.dob || "",
             height: f.height || data.height || "",
-            location: f.location || data.location || "",
+            location: (f.location && f.location.length) ? f.location : (data.location || []),
             gender: f.gender || data.gender || "",
             ethnicity: f.ethnicity || data.ethnicity || "",
             bio: f.bio || data.bio || "",
@@ -652,7 +653,7 @@ function SubmissionPage() {
             overrideAge: false,
             submitted_age_override: "",
             height: "",
-            location: "",
+            location: [],
             gender: "",
             ethnicity: "",
             instagram_handle: "",
@@ -1309,7 +1310,7 @@ function SubmissionPage() {
             if (!form.height?.trim()) {
                 missingList.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]' });
             }
-            if (!form.location?.trim()) {
+            if (!form.location || form.location.length === 0) {
                 missingList.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]' });
             }
             
@@ -1361,7 +1362,7 @@ function SubmissionPage() {
         if (fieldsConfig.height === "required" && !form.height?.trim()) {
             missingList.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]' });
         }
-        if (fieldsConfig.location === "required" && !form.location?.trim()) {
+        if (fieldsConfig.location === "required" && (!form.location || form.location.length === 0)) {
             missingList.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]' });
         }
         if (fieldsConfig.gender === "required" && !form.gender?.trim()) {
@@ -1758,7 +1759,7 @@ function SubmissionPage() {
                             {[
                                 { 
                                     label: "Your Profile", 
-                                    completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.height && form.location?.trim()) 
+                                    completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.height && form.location && form.location.length > 0) 
                                 },
                                 { 
                                     label: "Project Questions", 
@@ -1964,7 +1965,7 @@ function SubmissionPage() {
                                             <div className="text-left">
                                                 <h4 className="font-semibold text-sm text-[#111111]">Is this you?</h4>
                                                 <p className="text-xs text-[#333333] font-medium">
-                                                    {gatewayRecognition.name} {gatewayRecognition.location ? `· ${gatewayRecognition.location}` : ""}
+                                                    {gatewayRecognition.name} {gatewayRecognition.location && gatewayRecognition.location.length > 0 ? `· ${gatewayRecognition.location.map(l => l.city).join(", ")}` : ""}
                                                 </p>
                                             </div>
                                         </div>
@@ -2235,19 +2236,21 @@ function SubmissionPage() {
                                                 Enter your actual height without footwear.
                                             </span>
                                         </div>
-                                        <PremiumFormField
-                                            label="Current Location *"
-                                            value={form.location}
-                                            onChange={(v) => {
-                                                setForm({ ...form, location: v });
-                                                if (validationErrors.location) setValidationErrors((e) => ({ ...e, location: undefined }));
-                                            }}
-                                            onBlur={saveForm}
-                                            testid="form-location"
-                                            required
-                                            error={validationErrors.location}
-                                            inputRef={(el) => { fieldRefs.current.location = el; }}
-                                        />
+                                        <div className="md:col-span-2">
+                                            <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono block mb-2">
+                                                Current Location(s) *
+                                            </span>
+                                            <LocationSelector
+                                                value={form.location || []}
+                                                onChange={(arr) => {
+                                                    setForm({ ...form, location: arr });
+                                                    if (validationErrors.location) setValidationErrors((e) => ({ ...e, location: undefined }));
+                                                    setTimeout(saveForm, 0);
+                                                }}
+                                                testid="form-location"
+                                                error={validationErrors.location}
+                                            />
+                                        </div>
                                     </div>
 
                                     {/* Phase 2 — unified identity fields */}

@@ -1193,7 +1193,12 @@ function TalentDetail({
             lines.push(`Name: ${privatizeName(talent.name)}`);
             if (talent.age) lines.push(`Age: ${talent.age}`);
             if (talent.height) lines.push(`Height: ${talent.height}`);
-            if (talent.location) lines.push(`Location: ${talent.location}`);
+            if (talent.location) {
+                const locStr = Array.isArray(talent.location)
+                    ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
+                    : talent.location;
+                lines.push(`Location: ${locStr}`);
+            }
             if (talent.ethnicity) lines.push(`Ethnicity: ${talent.ethnicity}`);
             
             // Availability status
@@ -1674,7 +1679,12 @@ function TalentDetail({
                                             <InfoRow label="Height" value={talent.height} />
                                         )}
                                         {vis.location && talent.location && (
-                                            <InfoRow label="Location" value={talent.location} />
+                                            <InfoRow 
+                                                label="Location" 
+                                                value={Array.isArray(talent.location)
+                                                    ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
+                                                    : talent.location} 
+                                            />
                                         )}
                                         {vis.ethnicity && talent.ethnicity && (
                                             <InfoRow label="Ethnicity" value={talent.ethnicity} />
@@ -2167,7 +2177,11 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                         {privatizeName(talent.name)}
                     </div>
                     <div className="text-[11px] text-[#8A8A8A] font-mono tracking-[0.08em] mt-1">
-                        {vis.location && talent.location ? talent.location : ""}
+                        {vis.location && talent.location 
+                            ? (Array.isArray(talent.location) 
+                                ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ") 
+                                : talent.location)
+                            : ""}
                     </div>
                 </div>
 

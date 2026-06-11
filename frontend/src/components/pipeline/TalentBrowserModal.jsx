@@ -219,7 +219,12 @@ const calculateMatchScore = (talent, filters) => {
     maxScore += 25;
     
     // Location match (15%)
-    if (filters.location !== "any" && talent.location === filters.location) score += 15;
+    if (filters.location !== "any") {
+        const hasLocMatch = Array.isArray(talent.location) && talent.location.some(
+            (loc) => `${loc.city}, ${loc.country}` === filters.location
+        );
+        if (hasLocMatch) score += 15;
+    }
     maxScore += 15;
     
     // Height (10%)
@@ -499,7 +504,17 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         for (const t of talents) {
             if (t.gender) genders.add(String(t.gender).trim());
             if (t.ethnicity) ethnicities.add(String(t.ethnicity).trim());
-            if (t.location) locations.add(String(t.location).trim());
+            if (t.location) {
+                if (Array.isArray(t.location)) {
+                    t.location.forEach(loc => {
+                        if (loc && loc.city && loc.country) {
+                            locations.add(`${loc.city}, ${loc.country}`);
+                        }
+                    });
+                } else {
+                    locations.add(String(t.location).trim());
+                }
+            }
         }
         
         const sort = (set) => Array.from(set).filter(Boolean).sort((a, b) => a.localeCompare(b));
@@ -555,11 +570,14 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             if (searchLower) {
                 const skillStr = (t.skills || []).join(" ");
                 const interestStr = (t.interested_in || []).join(" ");
+                const locStr = Array.isArray(t.location) 
+                    ? t.location.map(l => `${l.city} ${l.country}`).join(" ")
+                    : String(t.location || "");
                 const haystack = [
                     t.name, 
                     t.email, 
                     t.instagram_handle, 
-                    t.location, 
+                    locStr, 
                     t.gender, 
                     t.category, 
                     skillStr, 
@@ -579,7 +597,12 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             // 2. Demographics
             if (gender !== "any" && t.gender !== gender) return false;
             if (ethnicity !== "any" && t.ethnicity !== ethnicity) return false;
-            if (location !== "any" && t.location !== location) return false;
+            if (location !== "any") {
+                const hasLoc = Array.isArray(t.location) && t.location.some(
+                    (loc) => `${loc.city}, ${loc.country}` === location
+                );
+                if (!hasLoc) return false;
+            }
             
             // 3. Age Range
             if (ageMinNum !== null && !Number.isNaN(ageMinNum)) {
@@ -1311,7 +1334,13 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#333333] mt-0.5">
                         {talent.age && <span>{talent.age} yrs</span>}
                         {talent.height && <span>· {talent.height}</span>}
-                        {talent.location && <span className="truncate">· {talent.location.split(",")[0]}</span>}
+                        {talent.location && (
+                            <span className="truncate">
+                                · {Array.isArray(talent.location)
+                                    ? (talent.location[0]?.city || "")
+                                    : String(talent.location).split(",")[0]}
+                            </span>
+                        )}
                         {talent.instagram_handle && (
                             <a
                                 href={instagramProfileUrl(talent.instagram_handle)}
@@ -1414,7 +1443,11 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                     </div>
                     <div>
                         <span className="text-[10px] text-[#333333] uppercase font-medium">Location</span>
-                        <div className="text-sm font-semibold text-[#111111]">{talent.location || "—"}</div>
+                        <div className="text-sm font-semibold text-[#111111]">
+                            {Array.isArray(talent.location)
+                                ? (talent.location.map(l => `${l.city}, ${l.country}`).join("; ") || "—")
+                                : (talent.location || "—")}
+                        </div>
                     </div>
                     <div>
                         <span className="text-[10px] text-[#333333] uppercase font-medium">Instagram</span>
@@ -2386,7 +2419,13 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
                     <div className="flex items-center gap-1.5 text-[10px] text-[#333333] mb-1">
                         {talent.age && <span>{talent.age} yrs</span>}
                         {talent.height && <span>{talent.height}</span>}
-                        {talent.location && !isMobile && <span className="truncate">· {talent.location.split(",")[0]}</span>}
+                        {talent.location && !isMobile && (
+                            <span className="truncate">
+                                · {Array.isArray(talent.location)
+                                    ? (talent.location[0]?.city || "")
+                                    : String(talent.location).split(",")[0]}
+                            </span>
+                        )}
                     </div>
                 )}
                 {(talent.instagram_handle) && (

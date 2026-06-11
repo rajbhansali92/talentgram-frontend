@@ -34,6 +34,7 @@ import {
 import WorkLinksDisplay from "@/components/WorkLinksDisplay";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
+import LocationSelector from "@/components/LocationSelector";
 
 
 
@@ -44,7 +45,7 @@ const emptyTalent = {
     age: "",
     dob: "",
     height: "",
-    location: "",
+    location: [],
     ethnicity: "",
     gender: "",
     instagram_handle: "",
@@ -799,12 +800,17 @@ export default function TalentEdit() {
                         </div>
                     </div>
 
-                    <Field
-                        label="Location"
-                        value={talent.location}
-                        onChange={(v) => updateTalent({ location: v })}
-                        disabled={!isEditing}
-                    />
+                    <div className="md:col-span-1">
+                        <span className="text-[11px] text-black/45 tracking-widest uppercase block mb-2">
+                            Location(s)
+                        </span>
+                        <LocationSelector
+                            value={Array.isArray(talent.location) ? talent.location : []}
+                            onChange={(arr) => updateTalent({ location: arr })}
+                            disabled={!isEditing}
+                            testid="form-location"
+                        />
+                    </div>
                     <div data-testid="field-ethnicity">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Ethnicity

@@ -1022,6 +1022,11 @@ class MediaItem(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+class LocationItem(BaseModel):
+    city: str
+    country: str
+
+
 class TalentIn(BaseModel):
     name: str
     email: Optional[EmailStr] = None
@@ -1029,7 +1034,8 @@ class TalentIn(BaseModel):
     age: Optional[int] = None
     dob: Optional[str] = None
     height: Optional[str] = None
-    location: Optional[str] = None
+    location: List[LocationItem] = Field(default_factory=list)
+    needs_location_review: Optional[bool] = None
     ethnicity: Optional[str] = None
     gender: Optional[str] = None
     instagram_handle: Optional[str] = None
@@ -1049,6 +1055,42 @@ class TalentIn(BaseModel):
     def _normalize_ig(cls, v):
         """Auto-normalize any pasted Instagram URL/handle to a raw username."""
         return normalize_instagram_handle(v)
+
+    @field_validator('location', mode='before')
+    @classmethod
+    def _normalize_location(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            # Split by common separators if any
+            if ";" in v:
+                v = [x.strip() for x in v.split(";")]
+            elif "/" in v:
+                v = [x.strip() for x in v.split("/")]
+            else:
+                v = [v]
+        if isinstance(v, list):
+            res = []
+            for item in v:
+                if isinstance(item, dict):
+                    city = item.get("city", "").strip()
+                    country = item.get("country", "").strip()
+                    if city and country:
+                        res.append({"city": city, "country": country})
+                elif isinstance(item, str):
+                    item = item.strip()
+                    if not item:
+                        continue
+                    if "," in item:
+                        parts = [p.strip() for p in item.split(",")]
+                        city = parts[0]
+                        country = parts[-1]
+                        res.append({"city": city, "country": country})
+                    else:
+                        res.append({"city": item, "country": "India"})
+            return res
+        return v
+
 
 
 class TalentOut(TalentIn):

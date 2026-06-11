@@ -5,6 +5,7 @@ import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
+import LocationSelector from "@/components/LocationSelector";
 import {
     Select,
     SelectContent,
@@ -62,7 +63,7 @@ export default function ApplicationPage() {
         height: "",
         gender: "",
         ethnicity: "",
-        location: "",
+        location: [],
         instagram_handle: "",
         instagram_followers: "",
         bio: "",
@@ -184,7 +185,7 @@ export default function ApplicationPage() {
             dob: f.dob || d.dob || "",
             age: f.age || (d.age != null ? String(d.age) : ""),
             height: f.height || d.height || "",
-            location: f.location || d.location || "",
+            location: (f.location && f.location.length) ? f.location : (d.location || []),
             gender: f.gender || d.gender || "",
             ethnicity: f.ethnicity || d.ethnicity || "",
             bio: f.bio || d.bio || "",
@@ -451,7 +452,7 @@ export default function ApplicationPage() {
                                         <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
                                             {applyPrefill.data.first_name}{" "}
                                             {applyPrefill.data.last_name || ""}
-                                            {applyPrefill.data.location ? ` · ${applyPrefill.data.location}` : ""}
+                                            {applyPrefill.data.location && applyPrefill.data.location.length > 0 ? ` · ${applyPrefill.data.location.map(l => l.city).join(", ")}` : ""}
                                             {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
                                         </p>
                                     </div>
@@ -617,16 +618,17 @@ export default function ApplicationPage() {
                         </div>
 
                         <div>
-                            <Label>Current Location *</Label>
-                            <input
-                                value={form.location}
-                                onChange={(e) =>
-                                    setForm({ ...form, location: e.target.value })
-                                }
-                                placeholder="City, Country"
-                                data-testid="form-location"
-                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
-                            />
+                            <Label>Current Location(s) *</Label>
+                            <div className="mt-2">
+                                <LocationSelector
+                                    value={form.location || []}
+                                    onChange={(arr) =>
+                                        setForm({ ...form, location: arr })
+                                    }
+                                    testid="form-location"
+                                    placeholder="Search for a city..."
+                                />
+                            </div>
                         </div>
 
                         <div className="md:col-span-2">

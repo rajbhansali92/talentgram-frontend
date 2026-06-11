@@ -29,6 +29,7 @@ import {
     Mail
 } from "lucide-react";
 import { AVAILABILITY_OPTIONS, BUDGET_OPTIONS } from "@/lib/talentSchema";
+import LocationSelector from "@/components/LocationSelector";
 
 function formatRelativeTime(ts) {
     if (!ts) return "—";
@@ -444,8 +445,15 @@ export default function SubmissionReviewCenter() {
                     return ageA - ageB;
                 }
                 if (sortBy === "location") {
-                    const locA = (a.form_data?.location || "").toLowerCase();
-                    const locB = (b.form_data?.location || "").toLowerCase();
+                    const getLocStr = (s) => {
+                        const loc = s.form_data?.location;
+                        if (Array.isArray(loc)) {
+                            return loc[0]?.city || "";
+                        }
+                        return loc || "";
+                    };
+                    const locA = getLocStr(a).toLowerCase();
+                    const locB = getLocStr(b).toLowerCase();
                     return locA.localeCompare(locB);
                 }
                 return 0;
@@ -1018,12 +1026,18 @@ export default function SubmissionReviewCenter() {
                                     
                                     {isPreviewMode ? (
                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
-                                            {FIELDS.filter(f => fv[f.key] !== false).map(f => (
-                                                <div key={f.key} className="min-w-0">
-                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">{f.label}</p>
-                                                    <p className="text-sm font-medium text-black/85">{form[f.key] || "—"}</p>
-                                                </div>
-                                            ))}
+                                            {FIELDS.filter(f => fv[f.key] !== false).map(f => {
+                                                let val = form[f.key];
+                                                if (f.key === "location" && Array.isArray(val)) {
+                                                    val = val.map(l => `${l.city}, ${l.country}`).join("; ");
+                                                }
+                                                return (
+                                                    <div key={f.key} className="min-w-0">
+                                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">{f.label}</p>
+                                                        <p className="text-sm font-medium text-black/85">{val || "—"}</p>
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
                                     ) : (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
@@ -1033,12 +1047,22 @@ export default function SubmissionReviewCenter() {
                                                         <label className="text-[10px] text-black/45 tracking-widest uppercase">
                                                             {f.label}
                                                         </label>
-                                                        <input
-                                                            type={f.type || "text"}
-                                                            value={form[f.key] ?? ""}
-                                                            onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
-                                                            className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium"
-                                                        />
+                                                        {f.key === "location" ? (
+                                                            <div className="mt-1">
+                                                                <LocationSelector
+                                                                    value={Array.isArray(form.location) ? form.location : []}
+                                                                    onChange={(arr) => setForm({ ...form, location: arr })}
+                                                                    testid="form-location"
+                                                                />
+                                                            </div>
+                                                        ) : (
+                                                            <input
+                                                                type={f.type || "text"}
+                                                                value={form[f.key] ?? ""}
+                                                                onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+                                                                className="mt-1 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 font-medium"
+                                                            />
+                                                        )}
                                                     </div>
                                                     <button
                                                         type="button"

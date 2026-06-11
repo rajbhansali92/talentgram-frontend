@@ -4,8 +4,6 @@ import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-
 export default function GoogleCallback() {
     const [searchParams] = useSearchParams();
     const navigate = useNavigate();
@@ -29,7 +27,7 @@ export default function GoogleCallback() {
                 // Determine origin dynamically for redirect_uri
                 const redirect_uri = `${window.location.origin}/google-callback`;
                 
-                const { data } = await axios.post(`${API}/auth/google`, {
+                const { data } = await axios.post("/auth/google", {
                     code,
                     redirect_uri,
                     slug: state

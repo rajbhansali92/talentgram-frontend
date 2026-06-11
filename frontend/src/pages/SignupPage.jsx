@@ -1,12 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import axios from "axios";
+import { api as axios, saveAdminSession } from "@/lib/api";
 import { toast } from "sonner";
-import { saveAdminSession } from "@/lib/api";
 import Logo from "@/components/Logo";
 import { Loader2, Check, Sparkles, Eye, EyeOff, RefreshCw } from "lucide-react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
 
 export default function SignupPage() {
     const [params] = useSearchParams();
@@ -32,7 +31,7 @@ export default function SignupPage() {
 
         try {
             const { data } = await axios.post(
-                `${API}/public/signup/validate`,
+                "/public/signup/validate",
                 { token },
             );
             setInvite(data);
@@ -70,12 +69,12 @@ export default function SignupPage() {
         }
         setSaving(true);
         try {
-            await axios.post(`${API}/public/signup/complete`, {
+            await axios.post("/public/signup/complete", {
                 token,
                 password,
             });
             // Auto-login
-            const { data } = await axios.post(`${API}/auth/login`, {
+            const { data } = await axios.post("/auth/login", {
                 email: invite.email,
                 password,
             });

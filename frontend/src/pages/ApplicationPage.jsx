@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import axios from "axios";
+import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
@@ -36,7 +36,7 @@ import {
     calcAge,
 } from "@/lib/talentSchema";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
 // Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
 // `western` is independently capped at this value, NOT combined.
 const MAX_IMAGES_PER_CATEGORY = 10;
@@ -103,7 +103,7 @@ export default function ApplicationPage() {
                 (async () => {
                     try {
                         const { data } = await axios.get(
-                            `${API}/public/apply/${saved.aid}`,
+                            `/public/apply/${saved.aid}`,
                             { headers: { Authorization: `Bearer ${saved.token}` } },
                         );
                         setForm((f) => ({ ...f, ...(data.form_data || {}) }));
@@ -153,7 +153,7 @@ export default function ApplicationPage() {
         setApplyPrefillTried(email);
         try {
             const { data } = await axios.get(
-                `${API}/public/prefill?email=${encodeURIComponent(email)}`,
+                `/public/prefill?email=${encodeURIComponent(email)}`,
             );
             if (data && data.first_name) {
                 setApplyPrefill({ data });
@@ -243,7 +243,7 @@ export default function ApplicationPage() {
         }
         setSaving(true);
         try {
-            const { data } = await axios.post(`${API}/public/apply`, basics);
+            const { data } = await axios.post(`/public/apply`, basics);
             setAid(data.id);
             setToken(data.token);
             setStarted(true);
@@ -271,7 +271,7 @@ export default function ApplicationPage() {
         const id = setTimeout(async () => {
             try {
                 await axios.put(
-                    `${API}/public/apply/${aid}`,
+                    `/public/apply/${aid}`,
                     { form_data: form },
                     { headers: { Authorization: `Bearer ${token}` } },
                 );
@@ -338,7 +338,7 @@ export default function ApplicationPage() {
                 fd.append("file", file);
                 fd.append("category", category);
                 const { data } = await axios.post(
-                    `${API}/public/apply/${aid}/upload`,
+                    `/public/apply/${aid}/upload`,
                     fd,
                     {
                         headers: {
@@ -358,7 +358,7 @@ export default function ApplicationPage() {
 
     const removeMedia = async (mid) => {
         try {
-            await axios.delete(`${API}/public/apply/${aid}/media/${mid}`, {
+            await axios.delete(`/public/apply/${aid}/media/${mid}`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             setMedia((m) => m.filter((x) => x.id !== mid));
@@ -372,12 +372,12 @@ export default function ApplicationPage() {
         try {
             // Final sync of form_data
             await axios.put(
-                `${API}/public/apply/${aid}`,
+                `/public/apply/${aid}`,
                 { form_data: form },
                 { headers: { Authorization: `Bearer ${token}` } },
             );
             await axios.post(
-                `${API}/public/apply/${aid}/finalize`,
+                `/public/apply/${aid}/finalize`,
                 {},
                 { headers: { Authorization: `Bearer ${token}` } },
             );

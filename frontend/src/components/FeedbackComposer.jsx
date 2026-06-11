@@ -1,10 +1,9 @@
 import React, { useState } from "react";
-import axios from "axios";
+import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import { Mic, MessageCircle, Loader2, Send, ShieldCheck } from "lucide-react";
 import VoiceRecorder from "@/components/VoiceRecorder";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 /**
  * Client-side feedback composer used inside the talent detail overlay.
@@ -54,7 +53,7 @@ export default function FeedbackComposer({
         setSending(true);
         try {
             await axios.post(
-                `${API}/public/links/${slug}/feedback`,
+                `/public/links/${slug}/feedback`,
                 {
                     talent_id: talentId,
                     submission_id: submissionId,
@@ -86,7 +85,7 @@ export default function FeedbackComposer({
             form.append("project_id", projectId);
             form.append("file", blob, "feedback.webm");
             await axios.post(
-                `${API}/public/links/${slug}/feedback/voice`,
+                `/public/links/${slug}/feedback/voice`,
                 form,
                 {
                     headers: {

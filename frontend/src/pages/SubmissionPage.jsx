@@ -46,7 +46,6 @@ import {
     calcAge,
 } from "@/lib/talentSchema";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const MAX_IMAGES = 8;
 // Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
 // `western` is independently capped at this value, NOT combined.
@@ -695,7 +694,7 @@ function SubmissionPage() {
 
         setGatewayLoading(true);
         try {
-            await axios.post(`${API}/auth/otp/send`, { email: trimmedEmail });
+            await axios.post("/auth/otp/send", { email: trimmedEmail });
             setOtpSent(true);
             toast.success("Verification code sent!");
         } catch (error) {
@@ -718,7 +717,7 @@ function SubmissionPage() {
         setOtpLoading(true);
         try {
             const trimmedEmail = gatewayEmail.trim().toLowerCase();
-            const { data } = await axios.post(`${API}/auth/otp/verify`, {
+            const { data } = await axios.post("/auth/otp/verify", {
                 email: trimmedEmail,
                 otp: code,
                 slug: slug
@@ -761,7 +760,7 @@ function SubmissionPage() {
         const trimmedEmail = gatewayEmail.trim().toLowerCase();
         setOtpResending(true);
         try {
-            await axios.post(`${API}/auth/otp/send`, { email: trimmedEmail });
+            await axios.post("/auth/otp/send", { email: trimmedEmail });
             toast.success("Verification code resent.");
         } catch (error) {
             console.error("OTP resend error:", error);

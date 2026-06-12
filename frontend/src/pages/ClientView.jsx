@@ -2230,8 +2230,6 @@ function TalentDetail({
                                             />
                                             {renderVoiceHistory()}
                                         </div>
-                                    )}                                            />
-                                        </div>
                                     )}
 
                                     {nextUnreviewed && (

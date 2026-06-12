@@ -33,15 +33,35 @@ export default function GoogleCallback() {
                     slug: state
                 });
 
+                const getRedirectPath = (s) => {
+                    if (!s) return "/";
+                    if (s === "apply") return "/apply";
+                    return `/submit/${s}`;
+                };
+
                 if (data.existing) {
-                    if (data.token && data.submission_id) {
+                    if (state === "apply" && data.token && data.application_id) {
+                        const ref = {
+                            aid: data.application_id,
+                            token: data.token,
+                            basics: {
+                                first_name: data.talent?.first_name || "",
+                                last_name: data.talent?.last_name || "",
+                                email: data.email,
+                                phone: data.talent?.phone || ""
+                            },
+                            savedAt: Date.now()
+                        };
+                        localStorage.setItem("tg_application", JSON.stringify(ref));
+                        toast.success("Welcome back! Resuming your application.");
+                    } else if (data.token && data.submission_id) {
                         // Existing talent with submission -> resume and unlock
                         const ref = { id: data.submission_id, token: data.token };
                         localStorage.setItem(`tg_submission_${state}`, JSON.stringify(ref));
                         localStorage.setItem(`tg_atk_${state}`, data.token);
                         toast.success("Welcome back! Resuming your audition submission.");
                     } else {
-                        // Existing talent, no submission yet -> prefill details
+                        // Existing talent, no submission/application yet -> prefill details
                         localStorage.setItem("talentgram_google_email", data.email);
                         localStorage.setItem("talentgram_google_first_name", data.first_name || "");
                         localStorage.setItem("talentgram_google_last_name", data.last_name || "");
@@ -57,11 +77,12 @@ export default function GoogleCallback() {
                     toast.success("Successfully authenticated with Google. Welcome to Talentgram!");
                 }
 
-                navigate(`/submit/${state}`);
+                navigate(getRedirectPath(state));
             } catch (err) {
                 console.error("Google authentication error:", err);
                 toast.error(err?.response?.data?.detail || "Google authentication failed. Please try again.");
-                navigate(state ? `/submit/${state}` : "/");
+                const redirectPath = state === "apply" ? "/apply" : (state ? `/submit/${state}` : "/");
+                navigate(redirectPath);
             }
         };
 

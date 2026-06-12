@@ -28,6 +28,8 @@ import {
     ArrowRight,
     Mail,
     Plus,
+    User,
+    ChevronRight,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -84,8 +86,107 @@ export default function ApplicationPage() {
     const indianRef = useRef();
     const westernRef = useRef();
 
+    // Inline Portal Gateway states
+    const [gatewayEmail, setGatewayEmail] = useState("");
+    const [gatewayLoading, setGatewayLoading] = useState(false);
+    const [gatewayRecognition, setGatewayRecognition] = useState(null);
+    const [otpSent, setOtpSent] = useState(false);
+    const [otpValue, setOtpValue] = useState("");
+    const [otpLoading, setOtpLoading] = useState(false);
+    const [otpResending, setOtpResending] = useState(false);
+
     // Restore local draft
     useEffect(() => {
+        // Google authentication checks
+        const googleEmail = localStorage.getItem("talentgram_google_email");
+        if (googleEmail) {
+            const profileDataStr = localStorage.getItem("talentgram_google_profile_data");
+            const avatar = localStorage.getItem("talentgram_google_avatar") || "";
+            
+            if (profileDataStr) {
+                // Existing Google-authenticated talent
+                const profileData = JSON.parse(profileDataStr);
+                setGatewayRecognition({
+                    name: `${profileData.first_name || ""} ${profileData.last_name || ""}`.trim(),
+                    email: googleEmail,
+                    location: profileData.location || [],
+                    image_url: avatar || profileData.image_url || profileData.cover_url || "",
+                    isGoogle: true
+                });
+                setEmailGateUnlocked(false);
+            } else {
+                // New Google-authenticated talent
+                const first = localStorage.getItem("talentgram_google_first_name") || "";
+                const last = localStorage.getItem("talentgram_google_last_name") || "";
+                setBasics((b) => ({
+                    ...b,
+                    email: googleEmail,
+                    first_name: b.first_name || first,
+                    last_name: b.last_name || last,
+                }));
+                setEmailGateUnlocked(true);
+                
+                // Show welcome banner once
+                const onboardKey = "tg_onboard_shown_apply";
+                if (!localStorage.getItem(onboardKey)) {
+                    toast.success("Welcome to Talentgram! Let's create your profile");
+                    localStorage.setItem(onboardKey, "true");
+                }
+            }
+            return;
+        }
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const queryEmail = urlParams.get("email");
+        const portalEmail = localStorage.getItem("talentgram_portal_email");
+        const emailToPrefill = queryEmail || portalEmail;
+        if (emailToPrefill && !basics.email) {
+            const formatted = emailToPrefill.trim().toLowerCase();
+            setBasics((b) => ({ ...b, email: formatted }));
+            setApplyPrefillTried(formatted);
+            setEmailGateUnlocked(true);
+            
+            // Trigger pre-fill lookup immediately
+            (async () => {
+                try {
+                    const { data } = await axios.get(
+                        `/public/prefill?email=${encodeURIComponent(formatted)}`,
+                    );
+                    if (data && Object.keys(data).length > 0 && data.first_name) {
+                        setBasics((b) => ({
+                            ...b,
+                            first_name: b.first_name || data.first_name || "",
+                            last_name: b.last_name || data.last_name || "",
+                            phone: b.phone || data.phone || "",
+                        }));
+                        setForm((f) => ({
+                            ...f,
+                            dob: f.dob || data.dob || "",
+                            age: f.age || (data.age != null ? String(data.age) : ""),
+                            height: f.height || data.height || "",
+                            location: (f.location && f.location.length) ? f.location : (data.location || []),
+                            gender: f.gender || data.gender || "",
+                            ethnicity: f.ethnicity || data.ethnicity || "",
+                            bio: f.bio || data.bio || "",
+                            instagram_handle: f.instagram_handle || data.instagram_handle || "",
+                            instagram_followers:
+                                f.instagram_followers || data.instagram_followers || "",
+                            work_links:
+                                f.work_links && f.work_links.length
+                                    ? f.work_links
+                                    : (data.work_links || []),
+                            skills:
+                                f.skills && f.skills.length
+                                    ? f.skills
+                                    : (data.skills || []),
+                        }));
+                    }
+                } catch (e) {
+                    console.error("Auto prefill lookup failed:", e);
+                }
+            })();
+        }
+
         const raw = localStorage.getItem(LS_KEY);
         if (!raw) return;
         try {
@@ -167,6 +268,242 @@ export default function ApplicationPage() {
             setApplyPrefill(null);
             setEmailGateUnlocked(true);
         }
+    };
+
+    const handleGoogleLogin = () => {
+        const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "339414275037-rrm7uugj1t4gq2b02q9r51d9l6m39vbe.apps.googleusercontent.com";
+        const redirectUri = `${window.location.origin}/google-callback`;
+        const state = "apply";
+        const scope = "openid profile email";
+        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
+    };
+
+    const handleInlineLookup = async (e) => {
+        if (e) e.preventDefault();
+        if (gatewayLoading) return;
+        const trimmedEmail = gatewayEmail.trim().toLowerCase();
+        if (!trimmedEmail || !trimmedEmail.includes("@")) {
+            toast.error("Please enter a valid email address.");
+            return;
+        }
+
+        setGatewayLoading(true);
+        try {
+            await axios.post("/auth/otp/send", { email: trimmedEmail });
+            setOtpSent(true);
+            toast.success("Verification code sent!");
+        } catch (error) {
+            console.error("OTP send error:", error);
+            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
+        } finally {
+            setGatewayLoading(false);
+        }
+    };
+
+    const handleVerifyOtp = async (e) => {
+        if (e) e.preventDefault();
+        if (otpLoading) return;
+        const code = otpValue.trim();
+        if (code.length !== 6 || !/^\d+$/.test(code)) {
+            toast.error("Please enter a valid 6-digit verification code.");
+            return;
+        }
+
+        setOtpLoading(true);
+        try {
+            const trimmedEmail = gatewayEmail.trim().toLowerCase();
+            const { data } = await axios.post("/auth/otp/verify", {
+                email: trimmedEmail,
+                otp: code,
+                slug: "apply"
+            });
+
+            if (data.existing) {
+                if (data.token && data.application_id) {
+                    const ref = {
+                        aid: data.application_id,
+                        token: data.token,
+                        basics: {
+                            first_name: data.talent?.first_name || "",
+                            last_name: data.talent?.last_name || "",
+                            email: data.email,
+                            phone: data.talent?.phone || ""
+                        },
+                        savedAt: Date.now()
+                    };
+                    localStorage.setItem(LS_KEY, JSON.stringify(ref));
+                    setAid(data.application_id);
+                    setToken(data.token);
+                    setBasics(ref.basics);
+                    if (data.talent) {
+                        setForm((f) => ({ ...f, ...(data.talent.form_data || {}) }));
+                    }
+                    setStarted(true);
+                    toast.success("Welcome back!");
+                } else {
+                    toast.success("Welcome back!");
+                    if (data.talent) {
+                        setBasics((b) => ({
+                            ...b,
+                            first_name: b.first_name || data.talent.first_name || "",
+                            last_name: b.last_name || data.talent.last_name || "",
+                            phone: b.phone || data.talent.phone || "",
+                            email: trimmedEmail
+                        }));
+                        setForm((f) => ({
+                            ...f,
+                            dob: f.dob || data.talent.dob || "",
+                            age: f.age || (data.talent.age != null ? String(data.talent.age) : ""),
+                            height: f.height || data.talent.height || "",
+                            location: (f.location && f.location.length) ? f.location : (data.talent.location || []),
+                            gender: f.gender || data.talent.gender || "",
+                            ethnicity: f.ethnicity || data.talent.ethnicity || "",
+                            bio: f.bio || data.talent.bio || "",
+                            instagram_handle: f.instagram_handle || data.talent.instagram_handle || "",
+                            instagram_followers:
+                                f.instagram_followers || data.talent.instagram_followers || "",
+                            work_links:
+                                f.work_links && f.work_links.length
+                                    ? f.work_links
+                                    : (data.talent.work_links || []),
+                            skills:
+                                f.skills && f.skills.length
+                                    ? f.skills
+                                    : (data.talent.skills || []),
+                        }));
+                    }
+                    setBasics((b) => ({ ...b, email: trimmedEmail }));
+                    setEmailGateUnlocked(true);
+                }
+            } else {
+                toast.success("Successfully authenticated. Welcome to Talentgram!");
+                setBasics((b) => ({ ...b, email: trimmedEmail }));
+                setEmailGateUnlocked(true);
+            }
+
+            localStorage.setItem("talentgram_portal_email", trimmedEmail);
+            setOtpSent(false);
+        } catch (error) {
+            console.error("OTP verify error:", error);
+            toast.error(error?.response?.data?.detail || "Invalid or expired verification code.");
+        } finally {
+            setOtpLoading(false);
+        }
+    };
+
+    const handleResendOtp = async () => {
+        if (otpResending) return;
+        const trimmedEmail = gatewayEmail.trim().toLowerCase();
+        setOtpResending(true);
+        try {
+            await axios.post("/auth/otp/send", { email: trimmedEmail });
+            toast.success("Verification code resent.");
+        } catch (error) {
+            console.error("OTP resend error:", error);
+            toast.error(error?.response?.data?.detail || "Failed to resend code. Please try again.");
+        } finally {
+            setOtpResending(false);
+        }
+    };
+
+    const handleInlineContinue = () => {
+        if (!gatewayRecognition || !gatewayRecognition.email) return;
+        
+        const formatted = gatewayRecognition.email.trim().toLowerCase();
+        localStorage.setItem("talentgram_portal_email", formatted);
+        setBasics((b) => ({ ...b, email: formatted }));
+        setEmailGateUnlocked(true);
+        
+        if (gatewayRecognition.isGoogle) {
+            const profileDataStr = localStorage.getItem("talentgram_google_profile_data");
+            if (profileDataStr) {
+                const profileData = JSON.parse(profileDataStr);
+                setBasics((b) => ({
+                    ...b,
+                    first_name: b.first_name || profileData.first_name || "",
+                    last_name: b.last_name || profileData.last_name || "",
+                    phone: b.phone || profileData.phone || "",
+                }));
+                setForm((f) => ({
+                    ...f,
+                    dob: f.dob || profileData.dob || "",
+                    age: f.age || (profileData.age != null ? String(profileData.age) : ""),
+                    height: f.height || profileData.height || "",
+                    location: (f.location && f.location.length) ? f.location : (profileData.location || []),
+                    gender: f.gender || profileData.gender || "",
+                    ethnicity: f.ethnicity || profileData.ethnicity || "",
+                    bio: f.bio || profileData.bio || "",
+                    instagram_handle: f.instagram_handle || profileData.instagram_handle || "",
+                    instagram_followers:
+                        f.instagram_followers || profileData.instagram_followers || "",
+                    work_links:
+                        f.work_links && f.work_links.length
+                            ? f.work_links
+                            : (profileData.work_links || []),
+                    skills:
+                        f.skills && f.skills.length
+                            ? f.skills
+                            : (profileData.skills || []),
+                }));
+            }
+            toast.success(`Welcome back, ${gatewayRecognition.name}!`);
+            return;
+        }
+        
+        // Trigger pre-fill lookup immediately so the talent's profile details are auto-loaded
+        (async () => {
+            try {
+                const { data } = await axios.get(
+                    `/public/prefill?email=${encodeURIComponent(formatted)}`,
+                );
+                if (data && Object.keys(data).length > 0 && data.first_name) {
+                    setBasics((b) => ({
+                        ...b,
+                        first_name: b.first_name || data.first_name || "",
+                        last_name: b.last_name || data.last_name || "",
+                        phone: b.phone || data.phone || "",
+                    }));
+                    setForm((f) => ({
+                        ...f,
+                        dob: f.dob || data.dob || "",
+                        age: f.age || (data.age != null ? String(data.age) : ""),
+                        height: f.height || data.height || "",
+                        location: (f.location && f.location.length) ? f.location : (data.location || []),
+                        gender: f.gender || data.gender || "",
+                        ethnicity: f.ethnicity || data.ethnicity || "",
+                        bio: f.bio || data.bio || "",
+                        instagram_handle: f.instagram_handle || data.instagram_handle || "",
+                        instagram_followers:
+                            f.instagram_followers || data.instagram_followers || "",
+                        work_links:
+                            f.work_links && f.work_links.length
+                                ? f.work_links
+                                : (data.work_links || []),
+                        skills:
+                            f.skills && f.skills.length
+                                ? f.skills
+                                : (data.skills || []),
+                    }));
+                }
+            } catch (e) {
+                console.error("Auto prefill lookup failed:", e);
+            }
+        })();
+        
+        toast.success(`Welcome back, ${gatewayRecognition.name}!`);
+    };
+
+    const handleInlineCancel = () => {
+        localStorage.removeItem("talentgram_portal_email");
+        localStorage.removeItem("talentgram_google_email");
+        localStorage.removeItem("talentgram_google_first_name");
+        localStorage.removeItem("talentgram_google_last_name");
+        localStorage.removeItem("talentgram_google_avatar");
+        localStorage.removeItem("talentgram_google_profile_data");
+        const onboardKey = "tg_onboard_shown_apply";
+        localStorage.removeItem(onboardKey);
+        setGatewayRecognition(null);
+        setGatewayEmail("");
     };
 
     // "Use this" — fill EMPTY fields only on basics + form; never overwrite.
@@ -408,6 +745,30 @@ export default function ApplicationPage() {
                     {/* Centered standardized prominent logo with breathing room */}
                     <div className="mb-12 text-center">
                         <Logo size={120} className="mx-auto" forceVariant="black" />
+                        {/* Clickable Instagram icon */}
+                        <div className="mt-4">
+                            <a
+                                href="https://www.instagram.com/talentgram.agency/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center justify-center p-2 rounded-full text-[#1a1a1a] hover:bg-slate-100 transition-all duration-200 cursor-pointer group"
+                                title="Follow us on Instagram"
+                            >
+                                <svg
+                                    className="w-5 h-5 transition-colors duration-200 hover:text-[#E1306C] md:group-hover:text-[#E1306C]"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                >
+                                    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                                    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                                    <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                                </svg>
+                            </a>
+                        </div>
                     </div>
 
                     <div className="w-full">
@@ -417,87 +778,263 @@ export default function ApplicationPage() {
                         </h1>
                         <p className="text-[#6b6b6b] text-sm mb-10 leading-relaxed">
                             Submit your portfolio once — get considered for every
-                            brand, film, and campaign we cast. Takes about 5 minutes.
+                            brand, film, and campaign we scout. Takes about 5 minutes.
                         </p>
                         <div className="space-y-5">
-                            <Row
-                                label="Email *"
-                                type="email"
-                                value={basics.email}
-                                onChange={(v) => {
-                                    setBasics({ ...basics, email: v });
-                                    // Re-arm the prefill if the email changed.
-                                    if (v.trim().toLowerCase() !== applyPrefillTried) {
-                                        setEmailGateUnlocked(false);
-                                        setApplyPrefill(null);
-                                    }
-                                }}
-                                onBlur={tryEmailPrefill}
-                                testid="apply-email"
-                                hint="Used as your unique identifier — we'll resume from where you stop"
-                            />
-
-                            {applyPrefill && !emailGateUnlocked && (
-                                <div
-                                    className="bg-white rounded-xl border border-[#eaeaea] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
-                                    data-testid="apply-prefill-card"
-                                >
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-sm text-[#1a1a1a]">
-                                            We found your profile.{" "}
-                                            <span className="text-[#6b6b6b]">
-                                                Use saved details?
-                                            </span>
-                                        </p>
-                                        <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
-                                            {applyPrefill.data.first_name}{" "}
-                                            {applyPrefill.data.last_name || ""}
-                                            {applyPrefill.data.location && applyPrefill.data.location.length > 0 ? ` · ${applyPrefill.data.location.map(l => l.city).join(", ")}` : ""}
-                                            {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
-                                        </p>
-                                    </div>
-                                    <div className="flex items-center gap-2">
+                            {!emailGateUnlocked ? (
+                                otpSent ? (
+                                    /* Step A.5: OTP Verification Input */
+                                    <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
+                                        <div className="flex flex-col gap-1.5">
+                                            <label className="text-xs font-semibold text-[#111111] uppercase tracking-wider">
+                                                Enter Verification Code
+                                            </label>
+                                            <p className="text-xs text-[#6b6b6b] leading-normal">
+                                                We've sent a verification code to <span className="font-semibold text-[#1a1a1a]">{gatewayEmail}</span>
+                                            </p>
+                                        </div>
+                                        <div className="flex flex-col sm:flex-row gap-3">
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                pattern="[0-9]*"
+                                                maxLength={6}
+                                                value={otpValue}
+                                                onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ''))}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter") {
+                                                        e.preventDefault();
+                                                        handleVerifyOtp();
+                                                    }
+                                                }}
+                                                placeholder="6-digit code"
+                                                style={{ fontSize: "16px" }}
+                                                className="flex-1 px-4 py-2.5 bg-white border border-[#eaeaea] rounded-xl text-[#1a1a1a] placeholder:text-[#6b6b6b] focus:border-[#1a1a1a] focus:outline-none transition duration-150 h-[44px]"
+                                                disabled={otpLoading}
+                                            />
+                                            <div className="flex gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={handleVerifyOtp}
+                                                    disabled={otpLoading}
+                                                    className="bg-[#1a1a1a] text-white px-5 py-2.5 rounded-xl text-xs font-medium hover:bg-[#333] active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 min-w-[100px] h-[44px] cursor-pointer"
+                                                >
+                                                    {otpLoading ? "Verifying..." : "Verify"}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleResendOtp}
+                                                    disabled={otpResending || otpLoading}
+                                                    className="bg-white border border-[#eaeaea] hover:bg-slate-50 text-[#1a1a1a] text-xs font-medium px-4 py-2.5 rounded-xl transition duration-150 h-[44px] cursor-pointer"
+                                                >
+                                                    {otpResending ? "Resending..." : "Resend OTP"}
+                                                </button>
+                                            </div>
+                                        </div>
                                         <button
                                             type="button"
-                                            onClick={useApplyPrefill}
-                                            data-testid="apply-prefill-use-btn"
-                                            className="bg-[#1a1a1a] text-white px-4 py-2.5 text-xs rounded-lg hover:bg-[#333] transition-colors duration-150 inline-flex items-center gap-1.5 min-h-[44px]"
+                                            onClick={() => {
+                                                setOtpSent(false);
+                                                setOtpValue("");
+                                            }}
+                                            className="text-left text-xs text-[#6b6b6b] hover:text-[#1a1a1a] transition underline cursor-pointer"
                                         >
-                                            <Check className="w-3.5 h-3.5" />
-                                            Use this
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={dismissApplyPrefill}
-                                            data-testid="apply-prefill-dismiss-btn"
-                                            className="border border-[#eaeaea] bg-white text-[#4a4a4a] hover:border-[#d4d4d4] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
-                                        >
-                                            Edit manually
+                                            Change email address
                                         </button>
                                     </div>
-                                </div>
-                            )}
+                                ) : !gatewayRecognition ? (
+                                    /* Step A: Inline Email Lookup */
+                                    <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
+                                        <button
+                                            type="button"
+                                            onClick={handleGoogleLogin}
+                                            className="w-full bg-white border border-[#eaeaea] hover:bg-slate-50 text-[#1a1a1a] py-3 px-4 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-2.5 transition duration-150 shadow-sm active:scale-[0.98] cursor-pointer"
+                                        >
+                                            <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                                <path
+                                                    fill="#EA4335"
+                                                    d="M12 5.04c1.78 0 3.38.61 4.64 1.8l3.46-3.46C17.99 1.19 15.21 0 12 0 7.31 0 3.28 2.69 1.34 6.61l4.08 3.16C6.4 7.02 9.01 5.04 12 5.04z"
+                                                />
+                                                <path
+                                                    fill="#4285F4"
+                                                    d="M23.49 12.27c0-.81-.07-1.59-.2-2.36H12v4.51h6.46c-.29 1.48-1.14 2.73-2.4 3.58l3.73 2.89c2.18-2.01 3.7-4.97 3.7-8.62z"
+                                                />
+                                                <path
+                                                    fill="#FBBC05"
+                                                    d="M5.42 14.78c-.24-.72-.38-1.49-.38-2.28s.14-1.56.38-2.28L1.34 7.06C.48 8.79 0 10.74 0 12.8s.48 4.01 1.34 5.74l4.08-3.76z"
+                                                />
+                                                <path
+                                                    fill="#34A853"
+                                                    d="M12 24c3.24 0 5.97-1.07 7.96-2.91l-3.73-2.89c-1.04.7-2.36 1.11-4.23 1.11-3.01 0-5.6-1.98-6.51-4.73L1.34 17.68C3.28 21.6 7.31 24 12 24z"
+                                                />
+                                            </svg>
+                                            Continue with Google
+                                        </button>
+                                        <div className="flex items-center my-1.5">
+                                            <div className="flex-grow border-t border-[#eaeaea]"></div>
+                                            <span className="mx-4 text-[10px] text-[#888888] font-mono uppercase tracking-wider">or</span>
+                                            <div className="flex-grow border-t border-[#eaeaea]"></div>
+                                        </div>
+                                        <div className="flex flex-col gap-1.5">
+                                            <label className="text-xs font-semibold text-[#111111] uppercase tracking-wider">
+                                                Continue with Email
+                                            </label>
+                                            <p className="text-xs text-[#6b6b6b] leading-normal">
+                                                We use your email to recognise you and load any previously submitted details.
+                                            </p>
+                                        </div>
+                                        <div className="flex flex-col sm:flex-row gap-3">
+                                            <input
+                                                type="email"
+                                                value={gatewayEmail}
+                                                onChange={(e) => setGatewayEmail(e.target.value)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter") {
+                                                        e.preventDefault();
+                                                        handleInlineLookup();
+                                                    }
+                                                }}
+                                                placeholder="Enter your email address"
+                                                style={{ fontSize: "16px" }}
+                                                className="flex-1 px-4 py-2.5 bg-white border border-[#eaeaea] rounded-xl text-[#1a1a1a] placeholder:text-[#6b6b6b] focus:border-[#1a1a1a] focus:outline-none transition duration-150 h-[44px]"
+                                                disabled={gatewayLoading}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={handleInlineLookup}
+                                                disabled={gatewayLoading}
+                                                className="bg-[#1a1a1a] text-white px-5 py-2.5 rounded-xl text-xs font-medium hover:bg-[#333] active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 min-w-[120px] h-[44px]"
+                                            >
+                                                {gatewayLoading ? "Verifying..." : "Continue"}
+                                                <ArrowRight className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    /* Step B: Inline Cinematic Recognition */
+                                    <div className="flex flex-col gap-5 border border-slate-100 rounded-2xl p-5 bg-slate-50/50 animate-in fade-in zoom-in-95 duration-200 text-left">
+                                        <div className="flex items-center gap-4">
+                                            {gatewayRecognition.image_url ? (
+                                                <img
+                                                    src={gatewayRecognition.image_url}
+                                                    alt={gatewayRecognition.name}
+                                                    className="w-12 h-12 rounded-full object-cover border border-[#eaeaea]"
+                                                />
+                                            ) : (
+                                                <div className="w-12 h-12 rounded-full bg-slate-200 flex items-center justify-center border border-[#d4d4d4]">
+                                                    <User className="w-5 h-5 text-[#333333]" />
+                                                </div>
+                                            )}
+                                            <div className="text-left">
+                                                <h4 className="font-semibold text-sm text-[#111111]">Is this you?</h4>
+                                                <p className="text-xs text-[#6b6b6b] font-medium">
+                                                    {gatewayRecognition.name} {gatewayRecognition.location && gatewayRecognition.location.length > 0 ? `· ${gatewayRecognition.location.map(l => l.city).join(", ")}` : ""}
+                                                </p>
+                                            </div>
+                                        </div>
 
-                            {emailGateUnlocked && (
-                                <div className="space-y-5" data-testid="apply-identity-rest">
+                                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-[#eaeaea]/40">
+                                            <button
+                                                type="button"
+                                                onClick={handleInlineContinue}
+                                                className="flex-1 bg-[#1a1a1a] text-white px-4 py-2.5 rounded-xl text-xs font-semibold hover:bg-[#333] active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 h-[40px]"
+                                            >
+                                                Continue to Application
+                                                <ChevronRight className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={handleInlineCancel}
+                                                className="border border-[#eaeaea] text-[#333333] hover:border-[#d4d4d4] px-4 py-2.5 rounded-xl text-xs inline-flex items-center justify-center h-[40px] bg-white"
+                                            >
+                                                Use another email
+                                            </button>
+                                        </div>
+                                    </div>
+                                )
+                            ) : (
+                                /* Locked Email State (if unlocked) */
+                                <div className="space-y-5">
                                     <Row
-                                        label="First Name *"
-                                        value={basics.first_name}
-                                        onChange={(v) => setBasics({ ...basics, first_name: v })}
-                                        testid="apply-first-name"
+                                        label="Email *"
+                                        type="email"
+                                        value={basics.email}
+                                        onChange={(v) => {
+                                            setBasics({ ...basics, email: v });
+                                            // Re-arm the prefill if the email changed.
+                                            if (v.trim().toLowerCase() !== applyPrefillTried) {
+                                                setEmailGateUnlocked(false);
+                                                setApplyPrefill(null);
+                                            }
+                                        }}
+                                        onBlur={tryEmailPrefill}
+                                        testid="apply-email"
+                                        hint="Used as your unique identifier — we'll resume from where you stop"
                                     />
-                                    <Row
-                                        label="Last Name *"
-                                        value={basics.last_name}
-                                        onChange={(v) => setBasics({ ...basics, last_name: v })}
-                                        testid="apply-last-name"
-                                    />
-                                    <Row
-                                        label="Phone"
-                                        value={basics.phone}
-                                        onChange={(v) => setBasics({ ...basics, phone: v })}
-                                        testid="apply-phone"
-                                    />
+
+                                    {applyPrefill && !emailGateUnlocked && (
+                                        <div
+                                            className="bg-white rounded-xl border border-[#eaeaea] p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between shadow-sm"
+                                            data-testid="apply-prefill-card"
+                                        >
+                                            <div className="min-w-0 flex-1">
+                                                <p className="text-sm text-[#1a1a1a]">
+                                                    We found your profile.{" "}
+                                                    <span className="text-[#6b6b6b]">
+                                                        Use saved details?
+                                                    </span>
+                                                </p>
+                                                <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
+                                                    {applyPrefill.data.first_name}{" "}
+                                                    {applyPrefill.data.last_name || ""}
+                                                    {applyPrefill.data.location && applyPrefill.data.location.length > 0 ? ` · ${applyPrefill.data.location.map(l => l.city).join(", ")}` : ""}
+                                                    {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={useApplyPrefill}
+                                                    data-testid="apply-prefill-use-btn"
+                                                    className="bg-[#1a1a1a] text-white px-4 py-2.5 text-xs rounded-lg hover:bg-[#333] transition-colors duration-150 inline-flex items-center gap-1.5 min-h-[44px]"
+                                                >
+                                                    <Check className="w-3.5 h-3.5" />
+                                                    Use this
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={dismissApplyPrefill}
+                                                    data-testid="apply-prefill-dismiss-btn"
+                                                    className="border border-[#eaeaea] bg-white text-[#4a4a4a] hover:border-[#d4d4d4] px-4 py-2.5 text-xs rounded-lg inline-flex items-center gap-1.5 min-h-[44px] transition-colors duration-150"
+                                                >
+                                                    Edit manually
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {emailGateUnlocked && (
+                                        <div className="space-y-5" data-testid="apply-identity-rest">
+                                            <Row
+                                                label="First Name *"
+                                                value={basics.first_name}
+                                                onChange={(v) => setBasics({ ...basics, first_name: v })}
+                                                testid="apply-first-name"
+                                            />
+                                            <Row
+                                                label="Last Name *"
+                                                value={basics.last_name}
+                                                onChange={(v) => setBasics({ ...basics, last_name: v })}
+                                                testid="apply-last-name"
+                                            />
+                                            <Row
+                                                label="Phone"
+                                                value={basics.phone}
+                                                onChange={(v) => setBasics({ ...basics, phone: v })}
+                                                testid="apply-phone"
+                                            />
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>

@@ -81,6 +81,20 @@ async def google_auth(payload: GoogleAuthIn):
     name = id_info.get("name") or ""
     picture = id_info.get("picture") or ""
 
+    if payload.slug == "apply":
+        application = await db.applications.find_one({"talent_email": email})
+        if application:
+            talent = await db.talents.find_one({"email": email})
+            token = make_token({"role": "submitter", "sid": application["id"], "kind": "application"}, days=7)
+            return {
+                "existing": True,
+                "email": email,
+                "token": token,
+                "application_id": application["id"],
+                "status": application.get("status", "draft"),
+                "talent": _get_talent_profile_response(talent) if talent else None
+            }
+
     talent = await db.talents.find_one({"email": email})
     if not talent:
         return {
@@ -657,23 +671,43 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         "ip_address": ip
     })
 
-    project = await db.projects.find_one({"slug": slug})
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    submission = await db.submissions.find_one({"project_id": project["id"], "talent_email": email})
-    
-    if submission:
-        token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
+    if slug == "apply":
+        application = await db.applications.find_one({"talent_email": email})
         talent = await db.talents.find_one({"email": email})
-        return {
-            "existing": True,
-            "email": email,
-            "token": token,
-            "submission_id": submission["id"],
-            "status": submission.get("status", "draft"),
-            "talent": _get_talent_profile_response(talent) if talent else None
-        }
+        if application:
+            token = make_token({"role": "submitter", "sid": application["id"], "kind": "application"}, days=7)
+            return {
+                "existing": True,
+                "email": email,
+                "token": token,
+                "application_id": application["id"],
+                "status": application.get("status", "draft"),
+                "talent": _get_talent_profile_response(talent) if talent else None
+            }
+        elif talent:
+            return {
+                "existing": True,
+                "email": email,
+                "talent": _get_talent_profile_response(talent)
+            }
+    else:
+        project = await db.projects.find_one({"slug": slug})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        submission = await db.submissions.find_one({"project_id": project["id"], "talent_email": email})
+        
+        if submission:
+            token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
+            talent = await db.talents.find_one({"email": email})
+            return {
+                "existing": True,
+                "email": email,
+                "token": token,
+                "submission_id": submission["id"],
+                "status": submission.get("status", "draft"),
+                "talent": _get_talent_profile_response(talent) if talent else None
+            }
 
     talent = await db.talents.find_one({"email": email})
     if talent:

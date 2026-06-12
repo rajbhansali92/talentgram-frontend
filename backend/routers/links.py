@@ -12,6 +12,7 @@ class LinkTrackIn(BaseModel):
     talent_id: Optional[str] = None
     media_id: Optional[str] = None
     watch_time: Optional[float] = None
+    video_action: Optional[str] = None
 
 
 class LinkShareIn(BaseModel):
@@ -350,6 +351,8 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
                 "interested":   {"$sum": {"$cond": [{"$eq": ["$action", "interested"]}, 1, 0]}},
                 "not_for_this": {"$sum": {"$cond": [{"$eq": ["$action", "not_for_this"]}, 1, 0]}},
                 "not_sure":     {"$sum": {"$cond": [{"$eq": ["$action", "not_sure"]}, 1, 0]}},
+                "ask_for_test": {"$sum": {"$cond": [{"$eq": ["$action", "ask_for_test"]}, 1, 0]}},
+                "lock":         {"$sum": {"$cond": [{"$eq": ["$action", "lock"]}, 1, 0]}},
             }},
         ]
         rows = await db.link_actions.aggregate(pipeline).to_list(10000)
@@ -410,6 +413,8 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
             "interested":   agg_by_tid.get(tid, {}).get("interested", 0),
             "not_for_this": agg_by_tid.get(tid, {}).get("not_for_this", 0),
             "not_sure":     agg_by_tid.get(tid, {}).get("not_sure", 0),
+            "ask_for_test": agg_by_tid.get(tid, {}).get("ask_for_test", 0),
+            "lock":         agg_by_tid.get(tid, {}).get("lock", 0),
             "comments": [],
         }
         for tid in ordered_ids
@@ -422,7 +427,9 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
                 summary[tid] = {
                     "talent_id": tid,
                     "shortlist": 0, "interested": 0,
-                    "not_for_this": 0, "not_sure": 0, "comments": [],
+                    "not_for_this": 0, "not_sure": 0,
+                    "ask_for_test": 0, "lock": 0,
+                    "comments": [],
                 }
             summary[tid]["comments"].append({
                 "viewer_email": a.get("viewer_email"),
@@ -462,6 +469,8 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
         "slug": slug,
         "viewer_email": email,
         "viewer_name": payload.name,
+        "device": payload.device or "Unknown",
+        "browser": payload.browser or "Unknown",
         "created_at": now,
     })
     # Rotate visit timestamps so "what's new since last time" can be computed.
@@ -1070,6 +1079,7 @@ async def track_link_event(
         "talent_id": payload.talent_id,
         "media_id": payload.media_id,
         "watch_time": payload.watch_time,
+        "video_action": payload.video_action,
         "viewer_email": viewer.get("email") if viewer else None,
         "viewer_name": viewer.get("name") if viewer else None,
         "created_at": now,
@@ -1745,6 +1755,21 @@ async def download_talent_zip(
             yield chunk
         logger.info("ZIP RESPONSE RETURNED")
 
+    # Log the folder ZIP download
+    try:
+        await db.link_downloads.insert_one({
+            "id": str(uuid.uuid4()),
+            "link_id": link["id"],
+            "slug": slug,
+            "viewer_email": viewer["email"],
+            "viewer_name": viewer.get("name"),
+            "talent_id": talent_id,
+            "media_id": "zip:talent_folder",
+            "created_at": _now(),
+        })
+    except Exception as ex:
+        logger.exception(f"Failed to log talent ZIP download: {ex}")
+
     safe_name = privatize_name(filtered_talent.get("name")).replace(".", "").replace(" ", "_").strip()
     zip_filename = f"{safe_name}_Package.zip"
     return StreamingResponse(
@@ -1898,6 +1923,21 @@ async def download_campaign_bundle_zip(
                 break
             yield chunk
         logger.info("ZIP RESPONSE RETURNED")
+
+    # Log the campaign bundle ZIP download
+    try:
+        await db.link_downloads.insert_one({
+            "id": str(uuid.uuid4()),
+            "link_id": link["id"],
+            "slug": slug,
+            "viewer_email": viewer["email"],
+            "viewer_name": viewer.get("name"),
+            "talent_id": "all",
+            "media_id": "zip:campaign_bundle",
+            "created_at": _now(),
+        })
+    except Exception as ex:
+        logger.exception(f"Failed to log campaign bundle ZIP download: {ex}")
 
     campaign_name = "".join(c for c in link.get("title", "Campaign") if c.isalnum() or c in (" ", "-", "_")).strip()
     zip_filename = f"{campaign_name}_Campaign_Bundle.zip"

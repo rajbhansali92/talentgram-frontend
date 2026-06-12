@@ -1149,6 +1149,8 @@ class LinkOut(LinkIn):
 class IdentifyIn(BaseModel):
     name: str
     email: EmailStr
+    browser: Optional[str] = None
+    device: Optional[str] = None
 
 
 class SeenIn(BaseModel):

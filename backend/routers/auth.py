@@ -255,6 +255,9 @@ def get_client_ip(request: Request) -> str:
         or (request.client.host if request.client else "127.0.0.1")
     )
 
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Talentgram <verification@talentgramagency.com>")
+print(f"Using Resend sender: {RESEND_FROM_EMAIL}")
+
 async def send_otp_email(email: str, otp: str) -> bool:
     subject = "Your Talentgram Verification Code"
     body = (
@@ -277,7 +280,7 @@ async def send_otp_email(email: str, otp: str) -> bool:
                         "Content-Type": "application/json"
                     },
                     json={
-                        "from": "Talentgram <verification@talentgram.app>",
+                        "from": RESEND_FROM_EMAIL,
                         "to": email,
                         "subject": subject,
                         "text": body
@@ -288,25 +291,7 @@ async def send_otp_email(email: str, otp: str) -> bool:
                     logger.info(f"OTP sent to {email} via Resend")
                     return True
                 else:
-                    logger.warning(f"Resend custom domain failed ({res.status_code}): {res.text}, retrying with onboarding@resend.dev...")
-                    res = await client.post(
-                        "https://api.resend.com/emails",
-                        headers={
-                            "Authorization": f"Bearer {resend_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "from": "Talentgram <onboarding@resend.dev>",
-                            "to": email,
-                            "subject": subject,
-                            "text": body
-                        },
-                        timeout=10.0
-                    )
-                    if res.status_code in (200, 201):
-                        logger.info(f"OTP sent to {email} via Resend (onboarding sender)")
-                        return True
-                    logger.error(f"Resend failed: {res.text}")
+                    logger.error(f"Resend failed ({res.status_code}): {res.text}")
         except Exception as e:
             logger.error(f"Resend error: {e}")
 
@@ -323,7 +308,7 @@ async def send_otp_email(email: str, otp: str) -> bool:
                     },
                     json={
                         "personalizations": [{"to": [{"email": email}]}],
-                        "from": {"email": "noreply@talentgram.app", "name": "Talentgram"},
+                        "from": {"email": "noreply@talentgramagency.com", "name": "Talentgram"},
                         "subject": subject,
                         "content": [{"type": "text/plain", "value": body}]
                     },
@@ -341,7 +326,7 @@ async def send_otp_email(email: str, otp: str) -> bool:
         if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_DEFAULT_REGION"):
             ses = boto3.client('ses', region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
             res = ses.send_email(
-                Source="Talentgram <noreply@talentgram.app>",
+                Source="Talentgram <noreply@talentgramagency.com>",
                 Destination={"ToAddresses": [email]},
                 Message={
                     "Subject": {"Data": subject},

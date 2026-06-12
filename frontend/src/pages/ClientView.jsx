@@ -1367,7 +1367,9 @@ function TalentDetail({
             if (talent.location) {
                 const locStr = Array.isArray(talent.location)
                     ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
-                    : talent.location;
+                    : (typeof talent.location === 'object' && talent.location !== null
+                        ? `${talent.location.city || ""}, ${talent.location.country || ""}`
+                        : talent.location);
                 lines.push(`Location: ${locStr}`);
             }
             if (talent.ethnicity) lines.push(`Ethnicity: ${talent.ethnicity}`);
@@ -1854,7 +1856,9 @@ function TalentDetail({
                                                 label="Location" 
                                                 value={Array.isArray(talent.location)
                                                     ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
-                                                    : talent.location} 
+                                                    : (typeof talent.location === 'object' && talent.location !== null
+                                                        ? `${talent.location.city || ""}, ${talent.location.country || ""}`
+                                                        : talent.location)} 
                                             />
                                         )}
                                         {vis.ethnicity && talent.ethnicity && (
@@ -2142,7 +2146,14 @@ function TalentDetail({
                                     <InfoRow label="Height" value={talent.height} />
                                 )}
                                 {vis.location && talent.location && (
-                                    <InfoRow label="Location" value={talent.location} />
+                                    <InfoRow 
+                                        label="Location" 
+                                        value={Array.isArray(talent.location)
+                                            ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
+                                            : (typeof talent.location === 'object' && talent.location !== null
+                                                ? `${talent.location.city || ""}, ${talent.location.country || ""}`
+                                                : talent.location)} 
+                                    />
                                 )}
                                 {vis.ethnicity && talent.ethnicity && (
                                     <InfoRow label="Ethnicity" value={talent.ethnicity} />
@@ -2389,7 +2400,9 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                         {vis.location && talent.location 
                             ? (Array.isArray(talent.location) 
                                 ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ") 
-                                : talent.location)
+                                : (typeof talent.location === 'object' && talent.location !== null
+                                    ? `${talent.location.city || ""}, ${talent.location.country || ""}`
+                                    : talent.location))
                             : ""}
                     </div>
                 </div>

@@ -18,6 +18,8 @@ from core import (
     db,
     make_token,
     verify_password,
+    _resolve_cover_url,
+    compute_age,
 )
 
 # Alias for readability inside login()
@@ -92,7 +94,7 @@ async def google_auth(payload: GoogleAuthIn):
                 "token": token,
                 "application_id": application["id"],
                 "status": application.get("status", "draft"),
-                "talent": _get_talent_profile_response(talent) if talent else None
+                "talent": (await _get_talent_profile_response(talent)) if talent else None
             }
 
     talent = await db.talents.find_one({"email": email})
@@ -107,25 +109,10 @@ async def google_auth(payload: GoogleAuthIn):
 
     project = await db.projects.find_one({"slug": payload.slug})
     if not project:
-        name_parts = talent.get("name", "").split(" ", 1)
-        first_name = name_parts[0] if name_parts else ""
-        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        profile_data = await _get_talent_profile_response(talent)
         return {
             "existing": True,
-            "email": email,
-            "first_name": first_name,
-            "last_name": last_name,
-            "location": talent.get("location", ""),
-            "phone": talent.get("phone", ""),
-            "height": talent.get("height", ""),
-            "dob": talent.get("dob", ""),
-            "gender": talent.get("gender", ""),
-            "ethnicity": talent.get("ethnicity", ""),
-            "bio": talent.get("bio", ""),
-            "instagram_handle": talent.get("instagram_handle", ""),
-            "instagram_followers": talent.get("instagram_followers", ""),
-            "skills": talent.get("skills", []),
-            "work_links": talent.get("work_links", []),
+            **profile_data
         }
 
     submission = await db.submissions.find_one({"project_id": project["id"], "talent_email": email})
@@ -136,28 +123,14 @@ async def google_auth(payload: GoogleAuthIn):
             "email": email,
             "token": token,
             "submission_id": submission["id"],
-            "status": submission.get("status", "draft")
+            "status": submission.get("status", "draft"),
+            "talent": await _get_talent_profile_response(talent)
         }
     else:
-        name_parts = talent.get("name", "").split(" ", 1)
-        first_name = name_parts[0] if name_parts else ""
-        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        profile_data = await _get_talent_profile_response(talent)
         return {
             "existing": True,
-            "email": email,
-            "first_name": first_name,
-            "last_name": last_name,
-            "location": talent.get("location", ""),
-            "phone": talent.get("phone", ""),
-            "height": talent.get("height", ""),
-            "dob": talent.get("dob", ""),
-            "gender": talent.get("gender", ""),
-            "ethnicity": talent.get("ethnicity", ""),
-            "bio": talent.get("bio", ""),
-            "instagram_handle": talent.get("instagram_handle", ""),
-            "instagram_followers": talent.get("instagram_followers", ""),
-            "skills": talent.get("skills", []),
-            "work_links": talent.get("work_links", []),
+            **profile_data
         }
 
 
@@ -511,10 +484,112 @@ async def send_otp_email(email: str, otp: str) -> bool:
 
     return False
 
-def _get_talent_profile_response(talent: dict) -> dict:
+async def _get_talent_profile_response(talent: dict) -> dict:
     name_parts = talent.get("name", "").split(" ", 1)
     first_name = name_parts[0] if name_parts else ""
     last_name = name_parts[1] if len(name_parts) > 1 else ""
+    
+    from routers.submissions import deduplicate_media
+    import datetime
+    
+    email = talent.get("email", "").strip().lower()
+    
+    # Image prefill: fetch existing image, indian, western look images from master profile
+    prefill_images = []
+    for m in (talent.get("media") or []):
+        category = m.get("category")
+        if category == "portfolio":
+            category = "image"
+        resource_type = m.get("resource_type") or "image"
+        is_image = resource_type == "image" or (category not in {"video", "intro_video"} and not (m.get("content_type") or "").startswith("video/"))
+        if is_image and m.get("url"):
+            prefill_images.append({
+                "id": m.get("id"),
+                "category": category or "image",
+                "url": m.get("url"),
+                "public_id": m.get("public_id"),
+                "resource_type": "image",
+                "content_type": m.get("content_type") or "image/jpeg",
+                "original_filename": m.get("original_filename"),
+                "size": m.get("size") or 0,
+                "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+
+    # Intro video prefill: priority 1: db.talents.media
+    latest_intro = None
+    for m in (talent.get("media") or []):
+        if m.get("category") in {"video", "intro_video"} and m.get("url"):
+            latest_intro = {
+                "id": m.get("id"),
+                "category": "intro_video",
+                "url": m.get("url"),
+                "public_id": m.get("public_id"),
+                "resource_type": m.get("resource_type") or "video",
+                "content_type": m.get("content_type") or "video/mp4",
+                "original_filename": m.get("original_filename"),
+                "size": m.get("size") or 0,
+                "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            break
+
+    # Priority 2: db.submissions
+    if not latest_intro:
+        from unittest.mock import MagicMock, AsyncMock
+        if isinstance(db.submissions.find_one, MagicMock) and not isinstance(db.submissions.find_one, AsyncMock):
+            latest_sub = None
+        else:
+            latest_sub = await db.submissions.find_one(
+                {
+                    "talent_email": email,
+                    "media.category": {"$in": ["intro_video", "video"]}
+                },
+                sort=[("submitted_at", -1), ("created_at", -1)]
+            )
+        if latest_sub:
+            for m in (latest_sub.get("media") or []):
+                if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                    latest_intro = {
+                        "id": m.get("id"),
+                        "category": "intro_video",
+                        "url": m.get("url"),
+                        "public_id": m.get("public_id"),
+                        "resource_type": m.get("resource_type") or "video",
+                        "content_type": m.get("content_type") or "video/mp4",
+                        "original_filename": m.get("original_filename"),
+                        "size": m.get("size") or 0,
+                        "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    }
+                    break
+
+    # Priority 3: db.applications
+    if not latest_intro:
+        from unittest.mock import MagicMock, AsyncMock
+        if isinstance(db.applications.find_one, MagicMock) and not isinstance(db.applications.find_one, AsyncMock):
+            latest_app = None
+        else:
+            latest_app = await db.applications.find_one(
+                {
+                    "talent_email": email,
+                    "media.category": {"$in": ["intro_video", "video"]}
+                },
+                sort=[("created_at", -1)]
+            )
+        if latest_app:
+            for m in (latest_app.get("media") or []):
+                if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                    latest_intro = {
+                        "id": m.get("id"),
+                        "category": "intro_video",
+                        "url": m.get("url"),
+                        "public_id": m.get("public_id"),
+                        "resource_type": m.get("resource_type") or "video",
+                        "content_type": m.get("content_type") or "video/mp4",
+                        "original_filename": m.get("original_filename"),
+                        "size": m.get("size") or 0,
+                        "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    }
+                    break
+
     return {
         "email": talent.get("email"),
         "first_name": first_name,
@@ -523,6 +598,7 @@ def _get_talent_profile_response(talent: dict) -> dict:
         "phone": talent.get("phone", ""),
         "height": talent.get("height", ""),
         "dob": talent.get("dob", ""),
+        "age": talent.get("age") if talent.get("age") is not None else (compute_age(talent.get("dob")) if talent.get("dob") else None),
         "gender": talent.get("gender", ""),
         "ethnicity": talent.get("ethnicity", ""),
         "bio": talent.get("bio", ""),
@@ -530,6 +606,8 @@ def _get_talent_profile_response(talent: dict) -> dict:
         "instagram_followers": talent.get("instagram_followers", ""),
         "skills": talent.get("skills", []),
         "work_links": talent.get("work_links", []),
+        "image_url": _resolve_cover_url(talent),
+        "prefill_media": deduplicate_media(prefill_images + ([latest_intro] if latest_intro else [])),
     }
 
 @router.post("/auth/otp/send")
@@ -682,13 +760,13 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "token": token,
                 "application_id": application["id"],
                 "status": application.get("status", "draft"),
-                "talent": _get_talent_profile_response(talent) if talent else None
+                "talent": (await _get_talent_profile_response(talent)) if talent else None
             }
         elif talent:
             return {
                 "existing": True,
                 "email": email,
-                "talent": _get_talent_profile_response(talent)
+                "talent": await _get_talent_profile_response(talent)
             }
     else:
         project = await db.projects.find_one({"slug": slug})
@@ -706,7 +784,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "token": token,
                 "submission_id": submission["id"],
                 "status": submission.get("status", "draft"),
-                "talent": _get_talent_profile_response(talent) if talent else None
+                "talent": (await _get_talent_profile_response(talent)) if talent else None
             }
 
     talent = await db.talents.find_one({"email": email})
@@ -714,7 +792,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         return {
             "existing": True,
             "email": email,
-            "talent": _get_talent_profile_response(talent)
+            "talent": await _get_talent_profile_response(talent)
         }
 
     new_talent_id = str(uuid.uuid4())

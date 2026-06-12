@@ -89,10 +89,6 @@ app.include_router(workflow.router)
 app.include_router(portal.router)
 
 
-# Middleware — order matters: last registered = outermost (first to run).
-# SecurityHeadersMiddleware is registered first so it wraps the full response.
-app.add_middleware(SecurityHeadersMiddleware)
-
 # CORS — env-var driven with Vercel preview regex fallback.
 # CORS_ORIGINS: comma-separated explicit origins (e.g. your production domain).
 # CORS_ORIGINS_REGEX: regex covering dynamic preview URLs. Defaults to all
@@ -102,6 +98,10 @@ cors_origins = [
     for origin in os.environ.get("CORS_ORIGINS", "").split(",")
     if origin.strip()
 ]
+
+# Ensure the main production frontend origin is explicitly allowed by default
+if "https://talentgram-frontend.vercel.app" not in cors_origins:
+    cors_origins.append("https://talentgram-frontend.vercel.app")
 
 cors_origins_regex = os.environ.get(
     "CORS_ORIGINS_REGEX",
@@ -115,6 +115,7 @@ logger.info("Active CORS origins: %s", cors_origins)
 if cors_origins_regex:
     logger.info("Active CORS origin regex: %s", cors_origins_regex)
 
+# Add CORS Middleware FIRST so it becomes the outer-most middleware (last added = first to run on request)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -123,6 +124,9 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Register security headers next (will execute after CORS check passes)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # Startup

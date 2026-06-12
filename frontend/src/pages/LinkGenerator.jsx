@@ -788,7 +788,11 @@ const TalentCard = React.memo(function TalentCard({
                         {talent.name}
                     </div>
                     <div className="text-[10px] text-black/45 truncate">
-                        {talent.location || "—"}
+                        {Array.isArray(talent.location)
+                            ? talent.location.map(l => `${l.city || l}, ${l.country || ""}`).join("; ")
+                            : (typeof talent.location === 'object' && talent.location !== null
+                                ? `${talent.location.city || ""}, ${talent.location.country || ""}`
+                                : (talent.location || "—"))}
                     </div>
                 </div>
                 {active && (

@@ -106,7 +106,11 @@ export default function PortalHome() {
                                     {talent?.location && (
                                         <span className="flex items-center gap-1">
                                             <MapPin className="w-3.5 h-3.5 text-black/40" />
-                                            {talent.location}
+                                            {Array.isArray(talent.location)
+                                                ? talent.location.map(l => `${l.city || l}, ${l.country || ""}`).join("; ")
+                                                : (typeof talent.location === 'object' && talent.location !== null
+                                                    ? `${talent.location.city || ""}, ${talent.location.country || ""}`
+                                                    : (talent.location || ""))}
                                         </span>
                                     )}
                                     {talent?.height && <span>{talent.height}</span>}

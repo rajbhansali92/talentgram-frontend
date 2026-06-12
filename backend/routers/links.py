@@ -626,57 +626,102 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     for t in enriched_talents:
         per_t = talent_field_visibility.get(t["id"])
         eff_vis = {**visibility, **per_t} if per_t else visibility
-        talents.append(_filter_talent_for_client(t, eff_vis))
+        # INDIVIDUAL TALENT SHARE: visibility_source = individual_link_settings
+        # Must add missing controls: skills, special_abilities, etc.
+        # Remove project-specific dependency on availability and budget.
+        indiv_vis = {
+            "portfolio": eff_vis.get("portfolio", True),
+            "intro_video": eff_vis.get("intro_video", True),
+            "takes": eff_vis.get("takes", True),
+            "instagram": eff_vis.get("instagram", True),
+            "instagram_followers": eff_vis.get("instagram_followers", True),
+            "age": eff_vis.get("age", True),
+            "height": eff_vis.get("height", True),
+            "location": eff_vis.get("location", True),
+            "ethnicity": eff_vis.get("ethnicity", True),
+            "work_links": eff_vis.get("work_links", True),
+            "download": eff_vis.get("download", False),
+            "skills": True,  # Added missing control for Individual Talent Share
+            "special_abilities": True,  # Added missing control for Individual Talent Share
+            "availability": False,  # Remove project-specific availability
+            "budget": False,  # Remove project-specific budget
+        }
+        talents.append(_filter_talent_for_client(t, indiv_vis))
+
     for s in raw_subs:
-        # Submission objects already carry their own field_visibility; the
-        # link-level visibility is applied as the outer envelope (kept the
-        # existing behaviour to avoid breaking M2 semantics).
-        # Pass the project so custom question IDs are resolved to text.
+        # PROJECT SHOWCASE & SUBMISSION/AUDITION LINK: visibility_source = submission_review_settings
+        # Structurally reads ONLY from the submission's own field_visibility (plus default fields if absent).
+        # We do NOT read any settings from Link Visibility Controls (visibility).
         s_project = project_meta_by_id.get(s.get("project_id") or "")
         shape = _submission_to_client_shape(s, project=s_project)
-        talents.append(_filter_talent_for_client(shape, visibility))
+        
+        # Build the strict submission_review_settings from submission's own field_visibility
+        s_fv = s.get("field_visibility") or {}
+        sub_review_vis = {
+            "portfolio": True,  # Always show media attached to submission if client-visible
+            "intro_video": True,
+            "takes": True,
+            "age": s_fv.get("age", True),
+            "height": s_fv.get("height", True),
+            "gender": s_fv.get("gender", True),
+            "location": s_fv.get("location", True),
+            "ethnicity": s_fv.get("ethnicity", True),
+            "instagram": s_fv.get("instagram_handle", True),
+            "instagram_followers": s_fv.get("instagram_followers", True),
+            "languages": s_fv.get("languages", True),
+            "skills": s_fv.get("skills", True),
+            "special_abilities": s_fv.get("special_abilities", True),
+            "availability": s_fv.get("availability", True),
+            "budget": s_fv.get("budget", True),
+            "work_links": s_fv.get("work_links", True),
+            "download": True, # Allow download if enabled generally
+        }
+        talents.append(_filter_talent_for_client(shape, sub_review_vis))
 
-    # Client-facing project budget (gated by visibility.budget)
+    # Client-facing project budget (gated strictly by project/submission settings)
     project_budget: List[Dict[str, Any]] = []
-    # Client-facing project shoot dates (gated by visibility.availability) —
-    # surfaces existing `projects.shoot_dates` so the talent's availability
-    # response can render alongside the project's actual shoot window.
-    # Sibling array so it stays available even when the budget toggle is off.
+    # Client-facing project shoot dates (gated strictly by project/submission settings)
     project_shoot_dates: List[Dict[str, Any]] = []
-    if visibility.get("budget"):
-        override = link.get("client_budget_override")
-        if override:
-            project_budget = [{
-                "project_id": None,
-                "brand_name": link.get("brand_name") or link.get("title"),
-                "lines": override,
-            }]
-        else:
+    if raw_subs:
+        # Budget and availability are always loaded for project submissions since they are gated per-submission.
+        # However, we can check if any submission has budget visibility enabled in field_visibility.
+        any_budget_visible = any((s.get("field_visibility") or {}).get("budget", True) for s in raw_subs)
+        any_avail_visible = any((s.get("field_visibility") or {}).get("availability", True) for s in raw_subs)
+        
+        if any_budget_visible:
+            override = link.get("client_budget_override")
+            if override:
+                project_budget = [{
+                    "project_id": None,
+                    "brand_name": link.get("brand_name") or link.get("title"),
+                    "lines": override,
+                }]
+            else:
+                for pid in seen_pids:
+                    proj = project_meta_by_id.get(pid)
+                    if not proj:
+                        continue
+                    lines = proj.get("client_budget") or []
+                    if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
+                        project_budget.append({
+                            "project_id": pid,
+                            "brand_name": proj.get("brand_name"),
+                            "lines": lines,
+                            "talent_budget": proj.get("talent_budget") or [],
+                            "budget_per_day": proj.get("budget_per_day"),
+                        })
+        if any_avail_visible:
             for pid in seen_pids:
                 proj = project_meta_by_id.get(pid)
                 if not proj:
                     continue
-                lines = proj.get("client_budget") or []
-                if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
-                    project_budget.append({
+                sd = (proj.get("shoot_dates") or "").strip()
+                if sd:
+                    project_shoot_dates.append({
                         "project_id": pid,
                         "brand_name": proj.get("brand_name"),
-                        "lines": lines,
-                        "talent_budget": proj.get("talent_budget") or [],
-                        "budget_per_day": proj.get("budget_per_day"),
+                        "shoot_dates": sd,
                     })
-    if visibility.get("availability", True):
-        for pid in seen_pids:
-            proj = project_meta_by_id.get(pid)
-            if not proj:
-                continue
-            sd = (proj.get("shoot_dates") or "").strip()
-            if sd:
-                project_shoot_dates.append({
-                    "project_id": pid,
-                    "brand_name": proj.get("brand_name"),
-                    "shoot_dates": sd,
-                })
 
     actions = await db.link_actions.find({
         "link_id": link["id"],

@@ -25,7 +25,7 @@ from core import (  # noqa: E402
 FORBIDDEN_KEYS = {
     "custom_answers", "competitive_brand",
     "form_data", "field_visibility",
-    "dob", "gender", "bio", "source",
+    "dob", "bio", "source",
     "notes", "password", "created_by",
     "email", "phone", "talent_email", "talent_phone",
     "scope",

@@ -1134,6 +1134,7 @@ async def get_share_preview(share_id: str):
 
     is_sub = False
     talent_doc = None
+    target_sub = None
     if talent_id in submission_ids:
         sub = await db.submissions.find_one({"id": talent_id}, {"_id": 0})
         if not sub:
@@ -1141,6 +1142,7 @@ async def get_share_preview(share_id: str):
         sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
         talent_doc = _submission_to_client_shape(sub, project=sub_project)
         is_sub = True
+        target_sub = sub
     elif talent_id in talent_ids:
         direct_talent = await db.talents.find_one({"id": talent_id}, {"_id": 0})
         if not direct_talent:
@@ -1157,6 +1159,7 @@ async def get_share_preview(share_id: str):
         ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
         talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
         is_sub = True
+        target_sub = matching_sub
 
     visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
     if not is_sub:
@@ -1165,7 +1168,27 @@ async def get_share_preview(share_id: str):
         eff_vis = {**visibility, **per_t} if per_t else visibility
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        filtered_talent = _filter_talent_for_client(talent_doc, visibility)
+        s_fv = (target_sub or {}).get("field_visibility") or {}
+        sub_review_vis = {
+            "portfolio": True,
+            "intro_video": True,
+            "takes": True,
+            "age": s_fv.get("age", True),
+            "height": s_fv.get("height", True),
+            "gender": s_fv.get("gender", True),
+            "location": s_fv.get("location", True),
+            "ethnicity": s_fv.get("ethnicity", True),
+            "instagram": s_fv.get("instagram_handle", True),
+            "instagram_followers": s_fv.get("instagram_followers", True),
+            "languages": s_fv.get("languages", True),
+            "skills": s_fv.get("skills", True),
+            "special_abilities": s_fv.get("special_abilities", True),
+            "availability": s_fv.get("availability", True),
+            "budget": s_fv.get("budget", True),
+            "work_links": s_fv.get("work_links", True),
+            "download": True,
+        }
+        filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
 
     if media_id:
         filtered_media = [m for m in filtered_talent.get("media", []) if m.get("id") == media_id]
@@ -1375,6 +1398,7 @@ async def download_talent_zip(
         
     is_sub = False
     talent_doc = None
+    target_sub = None
     if talent_id in talent_ids:
         direct_talent = await db.talents.find_one({"id": talent_id}, {"_id": 0})
         if not direct_talent:
@@ -1387,6 +1411,7 @@ async def download_talent_zip(
         sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
         talent_doc = _submission_to_client_shape(sub, project=sub_project)
         is_sub = True
+        target_sub = sub
     else:
         sub_docs = await db.submissions.find(
             {"id": {"$in": submission_ids}},
@@ -1398,6 +1423,7 @@ async def download_talent_zip(
         ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
         talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
         is_sub = True
+        target_sub = matching_sub
 
     if not is_sub:
         talent_doc = enrich_talent(talent_doc)
@@ -1405,7 +1431,27 @@ async def download_talent_zip(
         eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        filtered_talent = _filter_talent_for_client(talent_doc, link.get("visibility", {}))
+        s_fv = (target_sub or {}).get("field_visibility") or {}
+        sub_review_vis = {
+            "portfolio": True,
+            "intro_video": True,
+            "takes": True,
+            "age": s_fv.get("age", True),
+            "height": s_fv.get("height", True),
+            "gender": s_fv.get("gender", True),
+            "location": s_fv.get("location", True),
+            "ethnicity": s_fv.get("ethnicity", True),
+            "instagram": s_fv.get("instagram_handle", True),
+            "instagram_followers": s_fv.get("instagram_followers", True),
+            "languages": s_fv.get("languages", True),
+            "skills": s_fv.get("skills", True),
+            "special_abilities": s_fv.get("special_abilities", True),
+            "availability": s_fv.get("availability", True),
+            "budget": s_fv.get("budget", True),
+            "work_links": s_fv.get("work_links", True),
+            "download": True,
+        }
+        filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
 
     media_list = filtered_talent.get("media", [])
     

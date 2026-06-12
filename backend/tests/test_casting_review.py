@@ -115,18 +115,21 @@ def test_order_takes_then_intro_then_images():
 # --------------------------------------------------------------------------
 # competitive_brand
 # --------------------------------------------------------------------------
-def test_competitive_brand_gated_off_by_default():
+def test_competitive_brand_gated_on_by_default():
     sub = _base_submission(form_data={
         "first_name": "X", "last_name": "Y", "height": "5'10\"",
         "location": "Delhi", "availability": {"status": "yes"},
         "budget": {"status": "accept"}, "competitive_brand": "ACME",
     })
     shape = _submission_to_client_shape(sub)
-    assert "competitive_brand" not in shape
+    assert shape["competitive_brand"] == "ACME"
+    # Must survive link-level filter
+    filt = _filter_talent_for_client(shape, DEFAULT_VISIBILITY)
+    assert filt["competitive_brand"] == "ACME"
 
 
-def test_competitive_brand_gated_on_passes_through():
-    fv = {**DEFAULT_FIELD_VISIBILITY, "competitive_brand": True}
+def test_competitive_brand_gated_off_when_false():
+    fv = {**DEFAULT_FIELD_VISIBILITY, "competitive_brand": False}
     sub = _base_submission(
         form_data={
             "first_name": "X", "last_name": "Y", "height": "5'10\"",
@@ -136,10 +139,9 @@ def test_competitive_brand_gated_on_passes_through():
         fv=fv,
     )
     shape = _submission_to_client_shape(sub)
-    assert shape["competitive_brand"] == "ACME"
-    # Must survive link-level filter
+    assert "competitive_brand" not in shape
     filt = _filter_talent_for_client(shape, DEFAULT_VISIBILITY)
-    assert filt["competitive_brand"] == "ACME"
+    assert "competitive_brand" not in filt
 
 
 # --------------------------------------------------------------------------

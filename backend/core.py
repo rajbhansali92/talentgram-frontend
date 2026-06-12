@@ -916,7 +916,7 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     "age": True,
     "height": True,
     "location": True,
-    "competitive_brand": False,  # opt-in — brand conflicts are sensitive
+    "competitive_brand": True,  # ON by default per visibility separation audit
     "availability": True,
     # Budget defaults to visible at submission level. Link-level `visibility.budget`
     # is still the final gate for what each client sees — this just stops the
@@ -932,6 +932,7 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     "instagram_followers": True,
     "skills": True,
     "special_abilities": True,
+    "work_links": True,
 }
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
@@ -1486,7 +1487,7 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
         out["ethnicity"] = talent["ethnicity"]
     if v.get("languages") and talent.get("languages"):
         out["languages"] = talent["languages"]
-    if v.get("instagram_handle") and talent.get("instagram_handle"):
+    if (v.get("instagram_handle") or v.get("instagram")) and talent.get("instagram_handle"):
         out["instagram_handle"] = talent["instagram_handle"]
     if v.get("instagram_followers") and talent.get("instagram_followers"):
         out["instagram_followers"] = talent["instagram_followers"]

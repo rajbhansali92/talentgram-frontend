@@ -403,8 +403,7 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
 
     effective_age_val = compute_effective_age(fd, talent_age)
 
-    cb_val = str(fd.get("competitive_brand") or "").strip().lower()
-    cb_visible = bool(cb_val and cb_val not in ("none", "n/a", "na"))
+    cb_visible = True
     fv_defaults = {**DEFAULT_FIELD_VISIBILITY, "competitive_brand": cb_visible}
 
     sid = str(uuid.uuid4())

@@ -1488,16 +1488,12 @@ function TalentDetail({
     const indianOn = portfolioOn && (vis.indian_images ?? true);
     const westernOn = portfolioOn && (vis.western_images ?? true);
     const portfolioGenericOn = portfolioOn;
-    const portfolioImages = portfolioGenericOn
-        ? mediaAll.filter((m) => m.category === "portfolio")
-        : [];
-    const indianImages = indianOn
-        ? mediaAll.filter((m) => m.category === "indian")
-        : [];
-    const westernImages = westernOn
-        ? mediaAll.filter((m) => m.category === "western")
-        : [];
-    const images = [...portfolioImages, ...indianImages, ...westernImages];
+    const images = useMemo(() => {
+        const pImgs = portfolioGenericOn ? mediaAll.filter((m) => m.category === "portfolio") : [];
+        const iImgs = indianOn ? mediaAll.filter((m) => m.category === "indian") : [];
+        const wImgs = westernOn ? mediaAll.filter((m) => m.category === "western") : [];
+        return [...pImgs, ...iImgs, ...wImgs];
+    }, [mediaAll, portfolioGenericOn, indianOn, westernOn]);
     const intro = mediaAll.find((m) => m.category === "video") || null;
     const takes = mediaAll.filter((m) => m.category === "take");
     const [idx, setIdx] = useState(0);

@@ -255,18 +255,159 @@ def get_client_ip(request: Request) -> str:
         or (request.client.host if request.client else "127.0.0.1")
     )
 
-RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Talentgram <verification@talentgramagency.com>")
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Talentgram Agency <team@talentgramagency.com>")
 print(f"Using Resend sender: {RESEND_FROM_EMAIL}")
 
 async def send_otp_email(email: str, otp: str) -> bool:
     subject = "Your Talentgram Verification Code"
-    body = (
-        f"Your verification code is:\n\n"
+    
+    # Branded plain text version
+    text_content = (
+        f"Hello,\n\n"
+        f"Your Talentgram verification code is:\n\n"
         f"{otp}\n\n"
         f"This code expires in 10 minutes.\n\n"
-        f"If you did not request this code, please ignore this email.\n\n"
-        f"– Talentgram"
+        f"If you did not request this verification code, please ignore this email.\n\n"
+        f"Instagram:\n"
+        f"https://www.instagram.com/talentgram.agency/\n\n"
+        f"Regards,\n"
+        f"Talentgram Agency\n\n"
+        f"https://www.talentgramagency.com"
     )
+
+    # Modern, center-aligned, mobile-responsive HTML version
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your Talentgram Verification Code</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 0;
+      background-color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }}
+    .wrapper {{
+      width: 100%;
+      table-layout: fixed;
+      background-color: #f8fafc;
+      padding: 40px 0;
+    }}
+    .container {{
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+      border-radius: 12px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+      border: 1px solid #e2e8f0;
+      overflow: hidden;
+    }}
+    .header {{
+      background-color: #0b192c;
+      padding: 24px;
+      text-align: center;
+    }}
+    .header-text {{
+      color: #ffffff;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin: 0;
+    }}
+    .content {{
+      padding: 40px;
+      color: #334155;
+      line-height: 1.6;
+    }}
+    .greeting {{
+      font-size: 16px;
+      margin-bottom: 16px;
+    }}
+    .body-text {{
+      font-size: 16px;
+      margin-bottom: 32px;
+    }}
+    .otp-box {{
+      background-color: #f1f5f9;
+      border-radius: 8px;
+      padding: 24px;
+      text-align: center;
+      margin-bottom: 32px;
+      border: 1px dashed #cbd5e1;
+    }}
+    .otp-code {{
+      font-size: 42px;
+      font-weight: 800;
+      letter-spacing: 6px;
+      color: #0b192c;
+      margin: 0;
+      font-family: monospace, Courier, monospace;
+    }}
+    .disclaimer {{
+      font-size: 14px;
+      color: #64748b;
+      margin-bottom: 24px;
+    }}
+    .instagram-link {{
+      font-size: 15px;
+      color: #0b192c;
+      text-decoration: none;
+      font-weight: 600;
+      display: inline-block;
+      margin-bottom: 8px;
+    }}
+    .footer {{
+      border-top: 1px solid #e2e8f0;
+      padding: 32px 40px;
+      background-color: #fafafa;
+      text-align: center;
+      color: #64748b;
+      font-size: 14px;
+    }}
+    .footer-title {{
+      font-weight: 700;
+      color: #334155;
+      margin: 0 0 4px 0;
+    }}
+    .footer-sub {{
+      margin: 0 0 16px 0;
+    }}
+    .footer-link {{
+      color: #64748b;
+      text-decoration: underline;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1 class="header-text">Talentgram Agency</h1>
+      </div>
+      <div class="content">
+        <p class="greeting">Hello,</p>
+        <p class="body-text">Your Talentgram verification code is:</p>
+        <div class="otp-box">
+          <h2 class="otp-code">{otp}</h2>
+        </div>
+        <p class="body-text" style="margin-top: 32px;">This code expires in 10 minutes.</p>
+        <p class="disclaimer">If you did not request this verification code, please ignore this email.</p>
+        <p style="margin: 0;">
+          <a href="https://www.instagram.com/talentgram.agency/" class="instagram-link">Follow us on Instagram</a>
+        </p>
+      </div>
+      <div class="footer">
+        <p class="footer-title">Talentgram Agency</p>
+        <p class="footer-sub">Global Talent Management & Casting</p>
+        <a href="https://www.talentgramagency.com" class="footer-link">www.talentgramagency.com</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
 
     # 1. Resend
     resend_key = os.environ.get("RESEND_API_KEY")
@@ -282,8 +423,10 @@ async def send_otp_email(email: str, otp: str) -> bool:
                     json={
                         "from": RESEND_FROM_EMAIL,
                         "to": email,
+                        "reply_to": "team@talentgramagency.com",
                         "subject": subject,
-                        "text": body
+                        "html": html_content,
+                        "text": text_content
                     },
                     timeout=10.0
                 )
@@ -308,9 +451,13 @@ async def send_otp_email(email: str, otp: str) -> bool:
                     },
                     json={
                         "personalizations": [{"to": [{"email": email}]}],
-                        "from": {"email": "noreply@talentgramagency.com", "name": "Talentgram"},
+                        "from": {"email": "team@talentgramagency.com", "name": "Talentgram Agency"},
+                        "reply_to": {"email": "team@talentgramagency.com", "name": "Talentgram Agency"},
                         "subject": subject,
-                        "content": [{"type": "text/plain", "value": body}]
+                        "content": [
+                            {"type": "text/plain", "value": text_content},
+                            {"type": "text/html", "value": html_content}
+                        ]
                     },
                     timeout=10.0
                 )
@@ -326,12 +473,16 @@ async def send_otp_email(email: str, otp: str) -> bool:
         if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_DEFAULT_REGION"):
             ses = boto3.client('ses', region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
             res = ses.send_email(
-                Source="Talentgram <noreply@talentgramagency.com>",
+                Source="Talentgram Agency <team@talentgramagency.com>",
                 Destination={"ToAddresses": [email]},
                 Message={
                     "Subject": {"Data": subject},
-                    "Body": {"Text": {"Data": body}}
-                }
+                    "Body": {
+                        "Text": {"Data": text_content},
+                        "Html": {"Data": html_content}
+                    }
+                },
+                ReplyToAddresses=["team@talentgramagency.com"]
             )
             if res.get("MessageId"):
                 logger.info(f"OTP sent to {email} via AWS SES")

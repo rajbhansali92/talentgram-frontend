@@ -1483,7 +1483,7 @@ function TalentDetail({
     const vis = link.visibility || {};
     const project = link || {};
     const visibleActions = ACTIONS.filter(a => a.key !== "ask_for_test" || project.requires_test === true);
-    const mediaAll = talent.media || [];
+    const mediaAll = useMemo(() => talent.media || [], [talent.media]);
     const portfolioOn = vis.portfolio !== false;
     const indianOn = portfolioOn && (vis.indian_images ?? true);
     const westernOn = portfolioOn && (vis.western_images ?? true);

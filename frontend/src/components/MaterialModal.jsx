@@ -19,8 +19,8 @@ import {
  *  - onRemove?: (mid) => void   // admin-only; if omitted, trash buttons are hidden
  */
 export default function MaterialModal({ project, onClose, onRemove }) {
-    const materials = project?.materials || [];
-    const videos = project?.video_links || [];
+    const materials = Array.isArray(project?.materials) ? project.materials : [];
+    const videos = Array.isArray(project?.video_links) ? project.video_links : [];
     const byCat = (c) => materials.filter((m) => m.category === c);
 
     // Lock background scrolling on mount and listen for Escape key

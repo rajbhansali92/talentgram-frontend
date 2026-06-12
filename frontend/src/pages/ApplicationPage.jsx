@@ -928,7 +928,12 @@ export default function ApplicationPage() {
                                             <div className="text-left">
                                                 <h4 className="font-semibold text-sm text-[#111111]">Is this you?</h4>
                                                 <p className="text-xs text-[#6b6b6b] font-medium">
-                                                    {gatewayRecognition.name} {gatewayRecognition.location && gatewayRecognition.location.length > 0 ? `· ${gatewayRecognition.location.map(l => l.city).join(", ")}` : ""}
+                                                    {gatewayRecognition.name} {(() => {
+                                                        const locs = Array.isArray(gatewayRecognition.location) 
+                                                            ? gatewayRecognition.location 
+                                                            : (gatewayRecognition.location ? [{ city: gatewayRecognition.location }] : []);
+                                                        return locs.length > 0 ? `· ${locs.map(l => l?.city || l).join(", ")}` : "";
+                                                    })()}
                                                 </p>
                                             </div>
                                         </div>
@@ -987,7 +992,12 @@ export default function ApplicationPage() {
                                                 <p className="text-[11px] font-mono text-[#8b8b8b] mt-1 truncate">
                                                     {applyPrefill.data.first_name}{" "}
                                                     {applyPrefill.data.last_name || ""}
-                                                    {applyPrefill.data.location && applyPrefill.data.location.length > 0 ? ` · ${applyPrefill.data.location.map(l => l.city).join(", ")}` : ""}
+                                                    {(() => {
+                                                        const locs = Array.isArray(applyPrefill.data.location) 
+                                                            ? applyPrefill.data.location 
+                                                            : (applyPrefill.data.location ? [{ city: applyPrefill.data.location }] : []);
+                                                        return locs.length > 0 ? ` · ${locs.map(l => l?.city || l).join(", ")}` : "";
+                                                    })()}
                                                     {applyPrefill.data.height ? ` · ${applyPrefill.data.height}` : ""}
                                                 </p>
                                             </div>

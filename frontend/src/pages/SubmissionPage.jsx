@@ -1105,7 +1105,7 @@ function SubmissionPage() {
         });
 
     const activeConditionalVideoRules = useMemo(() => {
-        if (!project || !project.conditional_video_rules) return [];
+        if (!project || !Array.isArray(project.conditional_video_rules)) return [];
         return project.conditional_video_rules.filter((rule) => {
             const ans = (form.custom_answers || {})[rule.question_id];
             return (
@@ -1739,8 +1739,8 @@ function SubmissionPage() {
                             </p>
                         </div>
                     )}
-                    {((project.materials || []).length > 0 ||
-                        (project.video_links || []).length > 0) && (
+                    {((Array.isArray(project.materials) && project.materials.length > 0) ||
+                        (Array.isArray(project.video_links) && project.video_links.length > 0)) && (
                         <button
                             onClick={() => setShowMaterial(true)}
                             data-testid="view-audition-material-btn"
@@ -1965,7 +1965,12 @@ function SubmissionPage() {
                                             <div className="text-left">
                                                 <h4 className="font-semibold text-sm text-[#111111]">Is this you?</h4>
                                                 <p className="text-xs text-[#333333] font-medium">
-                                                    {gatewayRecognition.name} {gatewayRecognition.location && gatewayRecognition.location.length > 0 ? `· ${gatewayRecognition.location.map(l => l.city).join(", ")}` : ""}
+                                                    {gatewayRecognition.name} {(() => {
+                                                        const locs = Array.isArray(gatewayRecognition.location) 
+                                                            ? gatewayRecognition.location 
+                                                            : (gatewayRecognition.location ? [{ city: gatewayRecognition.location }] : []);
+                                                        return locs.length > 0 ? `· ${locs.map(l => l?.city || l).join(", ")}` : "";
+                                                    })()}
                                                 </p>
                                             </div>
                                         </div>
@@ -2573,7 +2578,7 @@ function SubmissionPage() {
                                                         {project.budget_per_day}
                                                     </p>
                                                 )}
-                                                {(project.talent_budget || []).length > 0 && (
+                                                {Array.isArray(project.talent_budget) && project.talent_budget.length > 0 && (
                                                     <div className={`space-y-3 ${project.budget_per_day ? "border-t border-slate-100 pt-4 mt-4" : ""}`}>
                                                         {project.talent_budget.map((row, i) => (
                                                             <div
@@ -2687,7 +2692,7 @@ function SubmissionPage() {
                                         </div>
                                     )}
 
-                                    {(project.custom_questions || []).length > 0 && (
+                                    {Array.isArray(project.custom_questions) && project.custom_questions.length > 0 && (
                                         <div className="border-t border-slate-100 pt-8 space-y-6" data-step="2">
                                             <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70">Additional Questions</p>
                                             {project.custom_questions.map((q) => (

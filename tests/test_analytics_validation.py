@@ -327,6 +327,25 @@ def run():
     print("\n-- PHASE 5: Download Intelligence ------------------------------------\n")
 
     if test_slug and test_talent_id and viewer_token:
+        # Enable downloads temporarily
+        orig_vis = test_link.get("visibility", {}).copy()
+        temp_vis = orig_vis.copy()
+        temp_vis["download"] = True
+        requests.put(f"{BASE}/links/{test_link_id}", json={
+            "title": test_link.get("title", "Test Link"),
+            "brand_name": test_link.get("brand_name"),
+            "talent_ids": test_link.get("talent_ids", []),
+            "submission_ids": test_link.get("submission_ids", []),
+            "visibility": temp_vis,
+            "talent_field_visibility": test_link.get("talent_field_visibility", {}),
+            "auto_pull": test_link.get("auto_pull", False),
+            "auto_project_id": test_link.get("auto_project_id"),
+            "is_public": test_link.get("is_public", True),
+            "password": test_link.get("password"),
+            "notes": test_link.get("notes"),
+            "client_budget_override": test_link.get("client_budget_override"),
+        }, headers=hdr(token), timeout=TIMEOUT)
+
         download_scenarios = [
             (test_talent_id, "media-img-001",        "Individual image",    "Individual Download"),
             (test_talent_id, "media-vid-001",        "Individual video",    "Individual Download"),
@@ -370,6 +389,22 @@ def run():
                 else:
                     record(5, f"{label} — record found in results",
                            "fail", f"media_id={mid} not found in downloads list")
+
+        # Restore original visibility
+        requests.put(f"{BASE}/links/{test_link_id}", json={
+            "title": test_link.get("title", "Test Link"),
+            "brand_name": test_link.get("brand_name"),
+            "talent_ids": test_link.get("talent_ids", []),
+            "submission_ids": test_link.get("submission_ids", []),
+            "visibility": orig_vis,
+            "talent_field_visibility": test_link.get("talent_field_visibility", {}),
+            "auto_pull": test_link.get("auto_pull", False),
+            "auto_project_id": test_link.get("auto_project_id"),
+            "is_public": test_link.get("is_public", True),
+            "password": test_link.get("password"),
+            "notes": test_link.get("notes"),
+            "client_budget_override": test_link.get("client_budget_override"),
+        }, headers=hdr(token), timeout=TIMEOUT)
     else:
         record(5, "No viewer token or test link available", "info", "Skipped")
 

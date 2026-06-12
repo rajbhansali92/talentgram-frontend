@@ -978,6 +978,7 @@ async def record_bulk_action(
 
 
 @router.post("/public/links/{slug}/download-log")
+@router.post("/public/links/{slug}/download")
 async def log_download(
     slug: str,
     payload: DownloadIn,

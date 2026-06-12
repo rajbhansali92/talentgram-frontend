@@ -7,15 +7,32 @@ import { API } from "@/lib/api";
  * Replaces the poster with an interactive video player only upon user interaction (click),
  * preventing unnecessary heavy video preloads or bandwidth waste.
  */
-export default function LazyVideoPlayer({ src, poster, label, className = "", mediaId, slug }) {
+export default function LazyVideoPlayer({ src, poster, label, className = "", mediaId, slug, talentId }) {
     const [isPlaying, setIsPlaying] = useState(false);
     const videoRef = useRef(null);
     const lastTrackedTimeRef = useRef(0);
+    const hasPlayedRef = useRef(false);
+    const hasCompletedRef = useRef(false);
 
     useEffect(() => {
         if (!isPlaying || !videoRef.current || !slug || !mediaId) return;
 
         let intervalId = null;
+
+        const trackVideoEvent = (action) => {
+            const sid = sessionStorage.getItem("client_session_id") || "guest-session";
+            fetch(`${API}/public/links/${slug}/track`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    event_type: "watch_video",
+                    session_id: sid,
+                    media_id: mediaId,
+                    talent_id: talentId,
+                    video_action: action
+                })
+            }).catch(() => {});
+        };
 
         const startTracking = () => {
             if (intervalId) return;
@@ -33,6 +50,7 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
                             event_type: "watch_video",
                             session_id: sid,
                             media_id: mediaId,
+                            talent_id: talentId,
                             watch_time: delta
                         })
                     }).catch(() => {});
@@ -48,22 +66,39 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
             }
         };
 
+        const handlePlayEvent = () => {
+            if (!hasPlayedRef.current) {
+                trackVideoEvent("play");
+                hasPlayedRef.current = true;
+            } else if (hasCompletedRef.current) {
+                trackVideoEvent("replay");
+                hasCompletedRef.current = false;
+            }
+            startTracking();
+        };
+
+        const handleEndedEvent = () => {
+            trackVideoEvent("completion");
+            hasCompletedRef.current = true;
+            stopTracking();
+        };
+
         const video = videoRef.current;
-        video.addEventListener("play", startTracking);
+        video.addEventListener("play", handlePlayEvent);
         video.addEventListener("pause", stopTracking);
-        video.addEventListener("ended", stopTracking);
+        video.addEventListener("ended", handleEndedEvent);
 
         if (!video.paused) {
-            startTracking();
+            handlePlayEvent();
         }
 
         return () => {
-            video.removeEventListener("play", startTracking);
+            video.removeEventListener("play", handlePlayEvent);
             video.removeEventListener("pause", stopTracking);
-            video.removeEventListener("ended", stopTracking);
+            video.removeEventListener("ended", handleEndedEvent);
             stopTracking();
         };
-    }, [isPlaying, slug, mediaId]);
+    }, [isPlaying, slug, mediaId, talentId]);
 
     if (!src) return null;
 

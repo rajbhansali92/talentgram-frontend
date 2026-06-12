@@ -15,7 +15,29 @@ import {
     Settings,
     Lock,
     ClipboardCheck,
+    Flame,
+    Thermometer,
+    Activity,
 } from "lucide-react";
+
+// ── Engagement scoring weights ──────────────────────────────────────────────
+const SCORE_WEIGHTS = {
+    open: 1,
+    view_talent: 1,
+    view_media: 2,
+    watch_video: 2,
+    watch_video_completion: 4,
+    log_download: 6,
+    zip_folder: 10,
+    zip_bundle: 10,
+};
+
+function computeHeat(score) {
+    if (score >= 12) return { label: "Very Interested", icon: Flame, cls: "text-rose-600", bg: "bg-rose-50 border-rose-200" };
+    if (score >= 6)  return { label: "Hot",             icon: Flame, cls: "text-orange-500", bg: "bg-orange-50 border-orange-200" };
+    if (score >= 2)  return { label: "Warm",            icon: Thermometer, cls: "text-amber-500", bg: "bg-amber-50 border-amber-200" };
+    return null;
+}
 
 const ACTION_META = {
     ask_for_test: {
@@ -141,33 +163,67 @@ export default function LinkResults() {
 
     const subjects = data?.subjects || {};
     const url = data ? `${PUBLIC_FRONTEND_URL}/l/${data.link.slug}` : "";
-    const totalDownloads = data?.downloads?.length || 0;
     const viewers = data?.viewers || [];
     const downloads = data?.downloads || [];
     const actions = data?.actions || [];
 
-    const actionCountsByTalent = {};
-    if (data && data.actions) {
-        data.actions.forEach((a) => {
-            const tid = a.talent_id;
-            const act = a.action;
-            if (tid && act) {
-                if (!actionCountsByTalent[tid]) {
-                    actionCountsByTalent[tid] = {
-                        ask_for_test: 0,
-                        interested: 0,
-                        not_for_this: 0,
-                        shortlist: 0,
-                        lock: 0,
-                        not_sure: 0
-                    };
-                }
-                if (actionCountsByTalent[tid][act] !== undefined) {
-                    actionCountsByTalent[tid][act]++;
-                }
+    // ── Use server-aggregated counts from summary (not the capped raw actions array).
+    // This ensures ask_for_test + lock are accurate at scale.
+    const summaryByTalent = {};
+    if (data?.summary) {
+        data.summary.forEach((s) => {
+            summaryByTalent[s.talent_id] = s;
+        });
+    }
+
+    // ── Compute per-talent engagement scores from events + downloads ──────────
+    const engagementByTalent = {};
+    if (data?.events) {
+        data.events.forEach((ev) => {
+            const tid = ev.talent_id;
+            if (!tid) return;
+            if (!engagementByTalent[tid]) engagementByTalent[tid] = 0;
+            if (ev.event_type === "watch_video" && ev.video_action === "completion") {
+                engagementByTalent[tid] += SCORE_WEIGHTS.watch_video_completion;
+            } else {
+                engagementByTalent[tid] += SCORE_WEIGHTS[ev.event_type] || 0;
             }
         });
     }
+    if (data?.downloads) {
+        data.downloads.forEach((d) => {
+            const tid = d.talent_id;
+            if (!tid) return;
+            if (!engagementByTalent[tid]) engagementByTalent[tid] = 0;
+            if (d.media_id === "zip:campaign_bundle") {
+                engagementByTalent[tid] = (engagementByTalent[tid] || 0) + SCORE_WEIGHTS.zip_bundle;
+            } else if (d.media_id === "zip:talent_folder") {
+                engagementByTalent[tid] = (engagementByTalent[tid] || 0) + SCORE_WEIGHTS.zip_folder;
+            } else {
+                engagementByTalent[tid] = (engagementByTalent[tid] || 0) + SCORE_WEIGHTS.log_download;
+            }
+        });
+    }
+
+    // ── Build talent-centric timeline: group events by talent, then by viewer ─
+    const talentTimeline = {};
+    if (data?.events) {
+        data.events.forEach((ev) => {
+            const tid = ev.talent_id || "__global__";
+            if (!talentTimeline[tid]) talentTimeline[tid] = {};
+            const viewer = ev.viewer_email || ev.session_id || "Anonymous";
+            if (!talentTimeline[tid][viewer]) {
+                talentTimeline[tid][viewer] = {
+                    name: ev.viewer_name || "Client",
+                    email: ev.viewer_email || "Anonymous Session",
+                    items: [],
+                };
+            }
+            talentTimeline[tid][viewer].items.push(ev);
+        });
+    }
+
+    const totalDownloads = data?.downloads?.length || 0;
 
     const analytics = data?.link?.analytics || {};
     const trackingViews = analytics.total_views !== undefined ? analytics.total_views : (data?.view_count || data?.link?.view_count || 0);
@@ -328,6 +384,8 @@ export default function LinkResults() {
                             <div className="divide-y divide-black/[0.06]">
                                 {data.summary.map((s) => {
                                     const t = subjects[s.talent_id];
+                                    const score = engagementByTalent[s.talent_id] || 0;
+                                    const heat = computeHeat(score);
                                     return (
                                         <div
                                             key={s.talent_id}
@@ -336,33 +394,33 @@ export default function LinkResults() {
                                         >
                                             <div className="flex items-start justify-between flex-wrap gap-4">
                                                 <div>
-                                                    <h3 className="font-display text-lg text-black/85 font-medium">
-                                                        {t?.name || "Unnamed Talent"}
-                                                    </h3>
-                                                    <div className="text-[10px] text-black/35 font-mono">
-                                                        {s.talent_id}
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <h3 className="font-display text-lg text-black/85 font-medium">
+                                                            {t?.name || "Unnamed Talent"}
+                                                        </h3>
+                                                        {heat && (
+                                                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full border ${heat.bg}`}>
+                                                                <heat.icon className={`w-3 h-3 ${heat.cls}`} />
+                                                                <span className={heat.cls}>{heat.label}</span>
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <div className="text-[11px] text-black/45 mt-1">
                                                         {t?.source === "submission" ? "Audition submission" : "Talent"}
+                                                        {score > 0 && (
+                                                            <span className="ml-2 font-mono text-black/30">engagement: {score}pts</span>
+                                                        )}
                                                     </div>
                                                 </div>
+                                                {/* Use server-aggregated counts — accurate at scale, not capped at 500 */}
                                                 <div className="flex gap-4 flex-wrap text-xs">
-                                                    {Object.entries(
-                                                        ACTION_META,
-                                                    ).map(([k, m]) => (
-                                                        <div
-                                                            key={k}
-                                                            className="flex items-center gap-1.5"
-                                                        >
-                                                            <m.icon
-                                                                className={`w-3.5 h-3.5 ${m.color}`}
-                                                            />
+                                                    {Object.entries(ACTION_META).map(([k, m]) => (
+                                                        <div key={k} className="flex items-center gap-1.5">
+                                                            <m.icon className={`w-3.5 h-3.5 ${m.color}`} />
                                                             <span className="font-mono text-black/70">
-                                                                {actionCountsByTalent[s.talent_id]?.[k] || 0}
+                                                                {summaryByTalent[s.talent_id]?.[k] ?? s[k] ?? 0}
                                                             </span>
-                                                            <span className="text-black/45">
-                                                                {m.label}
-                                                            </span>
+                                                            <span className="text-black/45">{m.label}</span>
                                                         </div>
                                                     ))}
                                                 </div>
@@ -374,12 +432,9 @@ export default function LinkResults() {
                                                             key={`${c.viewer_email}-${c.updated_at || i}`}
                                                             className="border-l-2 border-black/[0.08] pl-3 text-sm"
                                                         >
-                                                            <div className="text-black/80">
-                                                                "{c.comment}"
-                                                            </div>
+                                                            <div className="text-black/80">"{c.comment}"</div>
                                                             <div className="text-[10px] text-black/45 mt-1">
-                                                                — {c.viewer_name}{" "}
-                                                                ({c.viewer_email})
+                                                                — {c.viewer_name} ({c.viewer_email})
                                                             </div>
                                                         </div>
                                                     ))}
@@ -394,89 +449,101 @@ export default function LinkResults() {
 
                     <section className="bg-white border border-black/[0.08] rounded-xl mb-10 overflow-hidden">
                         <div className="px-6 py-4 border-b border-black/[0.06] flex items-center justify-between">
-                            <p className="eyebrow">Client Activity Timeline</p>
-                            <p className="text-xs text-black/45">
-                                Real-time professional engagement
-                            </p>
+                            <p className="eyebrow">Talent Engagement Timeline</p>
+                            <p className="text-xs text-black/45">Grouped by talent · real-time</p>
                         </div>
                         {!data?.events || data.events.length === 0 ? (
                             <div className="p-8 text-center text-black/45 text-sm">
                                 No client engagement tracked yet.
                             </div>
                         ) : (
-                            <div className="p-6 max-h-[500px] overflow-y-auto space-y-6">
+                            <div className="p-6 max-h-[600px] overflow-y-auto space-y-8">
                                 {(() => {
-                                    const grouped = {};
-                                    data.events.forEach((ev) => {
-                                        const key = ev.viewer_email || ev.session_id || "Anonymous";
-                                        if (!grouped[key]) {
-                                            grouped[key] = {
-                                                name: ev.viewer_name || "Client",
-                                                email: ev.viewer_email || "Anonymous Session",
-                                                items: [],
-                                            };
-                                        }
-                                        grouped[key].items.push(ev);
+                                    // Sort talent groups: those with a name first, then global
+                                    const talentOrder = Object.keys(talentTimeline).sort((a, b) => {
+                                        if (a === "__global__") return 1;
+                                        if (b === "__global__") return -1;
+                                        const nameA = subjects[a]?.name || "";
+                                        const nameB = subjects[b]?.name || "";
+                                        return nameA.localeCompare(nameB);
                                     });
 
-                                    return Object.values(grouped).map((viewerGroup) => (
-                                        <div key={viewerGroup.email} className="space-y-3">
-                                            <div className="flex items-center justify-between border-b border-black/[0.03] pb-1.5">
-                                                <h4 className="font-semibold text-sm text-black/80">
-                                                    {viewerGroup.name}
-                                                </h4>
-                                                <span className="text-[10px] font-mono text-black/45">
-                                                    {viewerGroup.email}
-                                                </span>
-                                            </div>
-                                            <div className="space-y-2.5 pl-3 border-l border-black/[0.05]">
-                                                {viewerGroup.items.slice(0, 15).map((item, idx) => {
-                                                    const date = new Date(item.created_at);
-                                                    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                                                    
-                                                    let actionText = "";
-                                                    let details = "";
-                                                    const tName = subjects[item.talent_id]?.name || "Talent";
-                                                    
-                                                    if (item.event_type === "open") {
-                                                        actionText = "Opened Link";
-                                                        details = "Started review session";
-                                                    } else if (item.event_type === "view_talent") {
-                                                        actionText = "Viewed Profile";
-                                                        details = `Opened ${tName}'s profile`;
-                                                    } else if (item.event_type === "view_media") {
-                                                        actionText = "Engaged";
-                                                        details = `Checked portfolio assets of ${tName}`;
-                                                    } else if (item.event_type === "watch_video") {
-                                                        actionText = "Watched Video";
-                                                        details = `Viewed audition takes of ${tName}`;
-                                                    } else if (item.event_type === "review_talent") {
-                                                        actionText = "Reviewed";
-                                                        details = `Completed initial review of ${tName}`;
-                                                    } else {
-                                                        actionText = item.event_type;
-                                                        details = tName;
-                                                    }
-                                                    
-                                                    return (
-                                                        <div key={item.id || idx} className="flex items-start gap-3 text-xs">
-                                                            <span className="font-mono text-black/35 shrink-0 w-10">
-                                                                {timeStr}
-                                                            </span>
-                                                            <div className="flex-1">
-                                                                <span className="font-medium text-black/75 mr-1.5">
-                                                                    {actionText}
-                                                                </span>
-                                                                <span className="text-black/45">
-                                                                    {details}
-                                                                </span>
+                                    return talentOrder.map((tid) => {
+                                        const tName = tid === "__global__" ? "General" : (subjects[tid]?.name || "Talent");
+                                        const viewerGroups = talentTimeline[tid];
+                                        const score = tid !== "__global__" ? (engagementByTalent[tid] || 0) : 0;
+                                        const heat = computeHeat(score);
+
+                                        return (
+                                            <div key={tid} className="space-y-3">
+                                                {/* Talent header */}
+                                                <div className="flex items-center gap-2 border-b border-black/[0.05] pb-2">
+                                                    <Activity className="w-3.5 h-3.5 text-black/30" />
+                                                    <h4 className="font-semibold text-sm text-black/80">{tName}</h4>
+                                                    {heat && (
+                                                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-semibold rounded-full border ${heat.bg}`}>
+                                                            <heat.icon className={`w-2.5 h-2.5 ${heat.cls}`} />
+                                                            <span className={heat.cls}>{heat.label}</span>
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                {/* Viewer sub-groups */}
+                                                <div className="space-y-4 pl-4">
+                                                    {Object.values(viewerGroups).map((viewerGroup) => (
+                                                        <div key={viewerGroup.email} className="space-y-2">
+                                                            <div className="flex items-center justify-between">
+                                                                <span className="text-[11px] font-medium text-black/60">{viewerGroup.name}</span>
+                                                                <span className="text-[10px] font-mono text-black/35">{viewerGroup.email}</span>
+                                                            </div>
+                                                            <div className="space-y-1.5 pl-3 border-l border-black/[0.05]">
+                                                                {viewerGroup.items.slice(0, 12).map((item, idx) => {
+                                                                    const timeStr = new Date(item.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                                                                    let actionText = "";
+                                                                    let details = "";
+
+                                                                    if (item.event_type === "open") {
+                                                                        actionText = "Opened Link";
+                                                                        details = "Started review session";
+                                                                    } else if (item.event_type === "view_talent") {
+                                                                        actionText = "Viewed Profile";
+                                                                        details = tName !== "General" ? tName : "";
+                                                                    } else if (item.event_type === "view_media") {
+                                                                        actionText = "Portfolio View";
+                                                                        details = "Opened portfolio image";
+                                                                    } else if (item.event_type === "watch_video") {
+                                                                        const va = item.video_action;
+                                                                        if (va === "play") { actionText = "Played Video"; details = "Started watching"; }
+                                                                        else if (va === "replay") { actionText = "Replayed Video"; details = "Watched again"; }
+                                                                        else if (va === "completion") { actionText = "Completed Video"; details = "Watched to end ✓"; }
+                                                                        else {
+                                                                            actionText = "Watched Video";
+                                                                            details = item.watch_time ? `${Math.round(item.watch_time)}s watched` : "";
+                                                                        }
+                                                                    } else if (item.event_type === "review_talent") {
+                                                                        actionText = "Reviewed";
+                                                                        details = "Completed review";
+                                                                    } else {
+                                                                        actionText = item.event_type;
+                                                                        details = "";
+                                                                    }
+
+                                                                    return (
+                                                                        <div key={item.id || idx} className="flex items-start gap-2 text-xs">
+                                                                            <span className="font-mono text-black/30 shrink-0 w-10">{timeStr}</span>
+                                                                            <div className="flex-1">
+                                                                                <span className="font-medium text-black/70 mr-1">{actionText}</span>
+                                                                                {details && <span className="text-black/40">{details}</span>}
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
                                                             </div>
                                                         </div>
-                                                    );
-                                                })}
+                                                    ))}
+                                                </div>
                                             </div>
-                                        </div>
-                                    ));
+                                        );
+                                    });
                                 })()}
                             </div>
                         )}
@@ -523,23 +590,32 @@ export default function LinkResults() {
                                 </div>
                             ) : (
                                 <div className="divide-y divide-black/[0.06] max-h-96 overflow-y-auto">
-                                    {downloads.map((d) => (
-                                        <div
-                                            key={d.id}
-                                            className="px-6 py-4 text-sm transition-colors duration-150 hover:bg-black/[0.02]"
-                                        >
-                                            <div className="font-medium text-black/85">
-                                                {d.viewer_name}
+                                    {downloads.map((d) => {
+                                        const isBundle = d.media_id === "zip:campaign_bundle";
+                                        const isFolder = d.media_id === "zip:talent_folder";
+                                        const talentName = d.talent_id === "all"
+                                            ? "All Talents"
+                                            : subjects[d.talent_id]?.name || d.talent_id;
+                                        return (
+                                            <div
+                                                key={d.id}
+                                                className="px-6 py-4 text-sm transition-colors duration-150 hover:bg-black/[0.02]"
+                                            >
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-medium text-black/85">{d.viewer_name}</span>
+                                                    {(isBundle || isFolder) && (
+                                                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${
+                                                            isBundle ? "bg-indigo-50 text-indigo-600 border-indigo-200" : "bg-blue-50 text-blue-600 border-blue-200"
+                                                        }`}>
+                                                            {isBundle ? "Campaign Bundle" : "Folder ZIP"}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="text-xs text-black/45 mt-0.5">{talentName}</div>
+                                                <div className="text-[10px] text-black/35 mt-1">{formatDate(d.created_at)}</div>
                                             </div>
-                                            <div className="text-xs text-black/45 mt-0.5">
-                                                {subjects[d.talent_id]?.name ||
-                                                    d.talent_id}
-                                            </div>
-                                            <div className="text-[10px] text-black/35 mt-1">
-                                                {formatDate(d.created_at)}
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>

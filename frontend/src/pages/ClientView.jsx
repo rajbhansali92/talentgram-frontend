@@ -503,10 +503,36 @@ export default function ClientView() {
         };
     }, [data?.link?.brand_name, data?.link?.title]);
 
+    const getBrowserAndDevice = () => {
+        const ua = navigator.userAgent;
+        let browser = "Unknown";
+        let device = "Desktop";
+
+        if (ua.includes("Firefox")) browser = "Firefox";
+        else if (ua.includes("SamsungBrowser")) browser = "Samsung Browser";
+        else if (ua.includes("Opera") || ua.includes("OPR")) browser = "Opera";
+        else if (ua.includes("Trident")) browser = "Internet Explorer";
+        else if (ua.includes("Edge") || ua.includes("Edg")) browser = "Edge";
+        else if (ua.includes("Chrome")) browser = "Chrome";
+        else if (ua.includes("Safari")) browser = "Safari";
+
+        if (/Android/i.test(ua)) {
+            device = "Android";
+        } else if (/iPhone/i.test(ua)) {
+            device = "iPhone";
+        } else if (/iPad/i.test(ua)) {
+            device = "iPad";
+        } else if (/Mobile/i.test(ua)) {
+            device = "Mobile";
+        }
+        return { browser, device };
+    };
+
     const identify = async (e, optName, optEmail) => {
         if (e) e.preventDefault();
         const activeName = optName || name;
         const activeEmail = optEmail || email;
+        const { browser, device } = getBrowserAndDevice();
         // Synchronous in-flight guard: prevents double-submission on rapid taps
         // (state-based `loading` flag is async and doesn't block a second call immediately).
         if (identifyInFlightRef.current) return;
@@ -518,6 +544,8 @@ export default function ClientView() {
                 {
                     name: activeName,
                     email: activeEmail,
+                    browser,
+                    device
                 },
             );
             if (response.data.token) {
@@ -1661,11 +1689,28 @@ function TalentDetail({
         viewerActionRef.current = viewerAction;
     }, [viewerAction]);
 
-    // Reset gallery image index and details accordion on talent navigation — prevents broken images when
-    // navigating from a talent with many images to one with fewer (AUDIT: MED-01).
+    const trackedMediaRefs = useRef(new Set());
+
+    const trackMediaView = useCallback((mediaId) => {
+        if (!mediaId || trackedMediaRefs.current.has(mediaId)) return;
+        trackedMediaRefs.current.add(mediaId);
+        
+        let sid = sessionStorage.getItem("client_session_id") || "guest-session";
+        axios.post(
+            `${API}/public/links/${slug}/track`,
+            {
+                event_type: "view_media",
+                session_id: sid,
+                media_id: mediaId,
+                talent_id: talent.id
+            }
+        ).catch(() => {});
+    }, [slug, talent.id]);
+
     useEffect(() => {
         setIdx(0);
         setIsDetailsExpanded(false);
+        trackedMediaRefs.current.clear();
     }, [talent.id]);
 
     useEffect(() => {
@@ -1676,8 +1721,21 @@ function TalentDetail({
         return () => clearTimeout(timer);
     }, [talent?.id, isReviewed, onMarkReviewed]);
 
-    const prev = useCallback(() => setIdx((i) => (i - 1 + images.length) % images.length), [images.length]);
-    const next = useCallback(() => setIdx((i) => (i + 1) % images.length), [images.length]);
+    const prev = useCallback(() => {
+        setIdx((i) => {
+            const nextIdx = (i - 1 + images.length) % images.length;
+            if (images[nextIdx]) trackMediaView(images[nextIdx].id);
+            return nextIdx;
+        });
+    }, [images, trackMediaView]);
+
+    const next = useCallback(() => {
+        setIdx((i) => {
+            const nextIdx = (i + 1) % images.length;
+            if (images[nextIdx]) trackMediaView(images[nextIdx].id);
+            return nextIdx;
+        });
+    }, [images, trackMediaView]);
 
     // Effect 1: Body scroll lock — empty deps so it only runs on mount/unmount.
     // Previously combined with the keyboard effect whose deps included viewerAction?.action,
@@ -2071,6 +2129,7 @@ function TalentDetail({
                                                         className="w-full"
                                                         mediaId={t.id}
                                                         slug={slug}
+                                                        talentId={talent.id}
                                                     />
                                                     {vis.download && (
                                                         <button
@@ -2099,6 +2158,7 @@ function TalentDetail({
                                              className="w-full"
                                              mediaId={intro.id}
                                              slug={slug}
+                                             talentId={talent.id}
                                          />
                                          {vis.download && (
                                              <button
@@ -2122,7 +2182,8 @@ function TalentDetail({
                                         <img
                                             src={IMAGE_URL(images[idx])}
                                             alt={privatizeName(talent.name)}
-                                            className="w-full h-full object-contain"
+                                            className="w-full h-full object-contain cursor-pointer"
+                                            onClick={() => trackMediaView(images[idx].id)}
                                         />
                                     </div>
                                     {images.length > 1 && (
@@ -2165,7 +2226,10 @@ function TalentDetail({
                                     {images.map((m, i) => (
                                         <button
                                             key={m.id}
-                                            onClick={() => setIdx(i)}
+                                            onClick={() => {
+                                                setIdx(i);
+                                                trackMediaView(m.id);
+                                            }}
                                             className={`shrink-0 w-20 h-28 border-2 ${i === idx ? "border-[var(--tg-navy-primary)]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
                                         >
                                             <img

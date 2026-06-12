@@ -232,6 +232,37 @@ async def create_voice_feedback(
         content_url=result["url"],
         content_type=ct,
     )
+    # Also push to voice_notes array in db.link_actions
+    filt = {
+        "link_id": link["id"],
+        "viewer_email": viewer["email"],
+        "talent_id": talent_id,
+    }
+    new_voice_note = {
+        "author": viewer.get("name") or viewer["email"],
+        "role": "Admin" if viewer.get("role") in ("admin", "team") else "Viewer",
+        "timestamp": _now(),
+        "content": result["url"]
+    }
+    await db.link_actions.update_one(
+        filt,
+        {
+            "$push": {"voice_notes": new_voice_note},
+            "$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "created_at": _now(),
+                "viewer_name": viewer.get("name") or viewer["email"],
+                "action": None,
+                "comment": None,
+                "comments": []
+            },
+            "$set": {
+                "role": viewer.get("role") or "viewer",
+                "updated_at": _now()
+            }
+        },
+        upsert=True
+    )
     return doc
 
 

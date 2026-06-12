@@ -489,8 +489,13 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
             "updated_at": now,
             "created_at": now,
         })
+    user = await db.users.find_one({"email": email, "status": {"$ne": "disabled"}}, {"_id": 0, "role": 1})
+    role = "viewer"
+    if user and user.get("role") in ("admin", "team"):
+        role = user.get("role")
+
     token = make_token({
-        "role": "viewer",
+        "role": role,
         "slug": slug,
         "email": email,
         "name": payload.name,
@@ -727,6 +732,76 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         "link_id": link["id"],
         "viewer_email": viewer["email"],
     }, {"_id": 0}).to_list(5000)
+
+    # Fetch all link actions and legacy voices to construct review history
+    all_actions = await db.link_actions.find({"link_id": link["id"]}, {"_id": 0}).to_list(10000)
+    legacy_voices = await db.feedback.find({"link_id": link["id"], "type": "voice"}, {"_id": 0}).to_list(10000)
+
+    comments_by_talent = {}
+    voice_notes_by_talent = {}
+
+    for a in all_actions:
+        tid = a.get("talent_id")
+        if not tid:
+            continue
+            
+        # Migrate/load comments
+        comments_list = a.get("comments")
+        if comments_list is None:
+            comments_list = []
+            legacy_comment = a.get("comment")
+            if legacy_comment:
+                comments_list.append({
+                    "author": a.get("viewer_name") or "Viewer",
+                    "role": "Admin" if a.get("role") in ("admin", "team") else "Viewer",
+                    "timestamp": a.get("updated_at") or a.get("created_at") or _now(),
+                    "decision_status": a.get("action"),
+                    "content": legacy_comment
+                })
+        
+        for c in comments_list:
+            if tid not in comments_by_talent:
+                comments_by_talent[tid] = []
+            comments_by_talent[tid].append(c)
+
+        # Load voice notes
+        vn_list = a.get("voice_notes") or []
+        for vn in vn_list:
+            if tid not in voice_notes_by_talent:
+                voice_notes_by_talent[tid] = []
+            voice_notes_by_talent[tid].append(vn)
+
+    for lv in legacy_voices:
+        tid = lv.get("talent_id")
+        if not tid:
+            continue
+        if tid not in voice_notes_by_talent:
+            voice_notes_by_talent[tid] = []
+        content_url = lv.get("content_url")
+        if not any(v.get("content") == content_url for v in voice_notes_by_talent[tid]):
+            voice_notes_by_talent[tid].append({
+                "author": lv.get("client_viewer_name") or lv.get("client_viewer_email") or "Viewer",
+                "role": "Admin" if lv.get("role") in ("admin", "team") else "Viewer",
+                "timestamp": lv.get("created_at") or _now(),
+                "content": content_url
+            })
+
+    def _get_timestamp_str(x):
+        ts = x.get("timestamp")
+        if not ts:
+            return ""
+        if hasattr(ts, "isoformat"):
+            return ts.isoformat()
+        return str(ts)
+
+    for t in talents:
+        tid = t["id"]
+        t_comments = comments_by_talent.get(tid, [])
+        t_voice = voice_notes_by_talent.get(tid, [])
+        t_comments.sort(key=_get_timestamp_str, reverse=True)
+        t_voice.sort(key=_get_timestamp_str, reverse=True)
+        t["comments"] = t_comments
+        t["voice_notes"] = t_voice
     # Client viewing-intelligence state — seen list + visit timestamps so the
     # frontend can render Pending / Seen / New / Shortlisted tabs.
     state = await db.client_states.find_one(
@@ -780,16 +855,44 @@ async def record_action(
         "talent_id": payload.talent_id,
     }
     existing = await db.link_actions.find_one(filt, {"_id": 0})
+    comments = []
+    if existing:
+        comments = existing.get("comments")
+        if comments is None:
+            comments = []
+            legacy_comment = existing.get("comment")
+            if legacy_comment:
+                comments.append({
+                    "author": existing.get("viewer_name") or "Viewer",
+                    "role": "Admin" if existing.get("role") in ("admin", "team") else "Viewer",
+                    "timestamp": existing.get("updated_at") or existing.get("created_at") or _now(),
+                    "decision_status": existing.get("action"),
+                    "content": legacy_comment
+                })
+    
+    if payload.comment is not None and payload.comment.strip():
+        new_comment = {
+            "author": viewer.get("name") or viewer["email"],
+            "role": "Admin" if viewer.get("role") in ("admin", "team") else "Viewer",
+            "timestamp": _now(),
+            "decision_status": payload.action,
+            "content": payload.comment.strip()
+        }
+        comments.append(new_comment)
+
     doc = {
         **filt,
         "viewer_name": viewer["name"],
         "action": payload.action,
         "comment": payload.comment if payload.comment is not None else (existing.get("comment") if existing else None),
+        "comments": comments,
+        "role": viewer.get("role") or "viewer",
         "updated_at": _now(),
     }
     if not existing:
         doc["id"] = str(uuid.uuid4())
         doc["created_at"] = _now()
+        doc["voice_notes"] = []
     await db.link_actions.update_one(filt, {"$set": doc}, upsert=True)
     return {"ok": True}
 

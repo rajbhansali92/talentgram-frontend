@@ -624,10 +624,40 @@ export default function ClientView() {
 
     const saveComment = useCallback(async (talentId) => {
         const text = commentDrafts[talentId];
-        if (text === undefined) return;
+        if (text === undefined || !text.trim()) return;
         const existing = viewerActions[talentId];
         updateLocalAction(talentId, existing?.action || null, text);
         markReviewed(talentId);
+        
+        // Optimistic UI update
+        const now = new Date().toISOString();
+        const newComment = {
+            author: data?.viewer?.name || data?.viewer?.email || "Viewer",
+            role: (data?.viewer?.role === "admin" || data?.viewer?.role === "team") ? "Admin" : "Viewer",
+            timestamp: now,
+            decision_status: existing?.action || null,
+            content: text.trim()
+        };
+        setData(prev => {
+            if (!prev) return prev;
+            const newTalents = prev.talents.map(t => {
+                if (t.id === talentId) {
+                    return {
+                        ...t,
+                        comments: [newComment, ...(t.comments || [])]
+                    };
+                }
+                return t;
+            });
+            return { ...prev, talents: newTalents };
+        });
+
+        // Clear input immediately
+        setCommentDrafts(prev => ({
+            ...prev,
+            [talentId]: ""
+        }));
+
         try {
             await axios.post(
                 `${API}/public/links/${slug}/action`,
@@ -643,11 +673,13 @@ export default function ClientView() {
                 },
             );
             toast.success("Comment saved");
+            loadData();
         } catch {
             updateLocalAction(talentId, existing?.action, existing?.comment);
             toast.error("Failed to save");
+            loadData();
         }
-    }, [commentDrafts, viewerActions, slug, updateLocalAction, markReviewed]);
+    }, [commentDrafts, viewerActions, slug, updateLocalAction, markReviewed, data, loadData]);
 
     const logDownload = useCallback(async (talentId, mediaId) => {
         try {
@@ -720,7 +752,7 @@ export default function ClientView() {
         formData.append("file", blob, "voice_feedback.webm");
 
         try {
-            await axios.post(
+            const response = await axios.post(
                 `${API}/public/links/${slug}/feedback/voice`,
                 formData,
                 {
@@ -730,15 +762,38 @@ export default function ClientView() {
                     },
                 },
             );
-            toast.success("Voice feedback sent for moderation");
+            const returnedDoc = response.data;
+            const now = new Date().toISOString();
+            const newVoice = {
+                author: data?.viewer?.name || data?.viewer?.email || "Viewer",
+                role: (data?.viewer?.role === "admin" || data?.viewer?.role === "team") ? "Admin" : "Viewer",
+                timestamp: now,
+                content: returnedDoc.content_url
+            };
+            setData(prev => {
+                if (!prev) return prev;
+                const newTalents = prev.talents.map(t => {
+                    if (t.id === talentId) {
+                        return {
+                            ...t,
+                            voice_notes: [newVoice, ...(t.voice_notes || [])]
+                        };
+                    }
+                    return t;
+                });
+                return { ...prev, talents: newTalents };
+            });
+            toast.success("Voice feedback uploaded successfully");
             markReviewed(talentId);
+            loadData();
         } catch (e) {
             toast.error("Failed to upload voice feedback");
             console.error(e);
+            loadData();
         } finally {
             setSendingVoice(false);
         }
-    }, [data, slug, markReviewed]);
+    }, [data, slug, markReviewed, loadData]);
 
     const markSeen = useCallback(
         async (talentId) => {
@@ -1216,7 +1271,6 @@ export default function ClientView() {
                     setAction={setAction}
                     commentDraft={
                         commentDrafts[activeTalent.id] ??
-                        viewerActions[activeTalent.id]?.comment ??
                         ""
                     }
                     setCommentDraft={(text) =>
@@ -1332,6 +1386,72 @@ function TalentDetail({
     isSharePreview = false,
 }) {
     console.log("CLIENT VIEW DATA (TalentDetail)", talent);
+    const renderCommentsHistory = () => {
+        if (!talent.comments || talent.comments.length === 0) return null;
+        return (
+            <div className="mt-4 space-y-3" data-testid="threaded-comments-container">
+                <p className="text-[10px] font-mono tracking-wider uppercase text-black/40">Review History ({talent.comments.length})</p>
+                <div className="space-y-3 max-h-[250px] overflow-y-auto pr-1 custom-scrollbar">
+                    {talent.comments.map((c, idx) => (
+                        <div key={idx} className="p-3 bg-black/[0.02] border border-black/[0.04] rounded-xl hover:bg-black/[0.03] transition-all duration-150" data-testid={`comment-item-${idx}`}>
+                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs font-semibold text-black/80">{c.author}</span>
+                                    <span className={`px-1.5 py-0.5 text-[9px] font-medium rounded-full uppercase tracking-wider ${
+                                        c.role?.toLowerCase() === 'admin' 
+                                            ? 'bg-amber-100 text-amber-800 border border-amber-200' 
+                                            : 'bg-gray-100 text-gray-600 border border-gray-200'
+                                    }`}>
+                                        {c.role}
+                                    </span>
+                                    {c.decision_status && (
+                                        <span className="text-[10px] text-black/50 bg-black/[0.04] px-1.5 py-0.5 rounded-md font-medium capitalize">
+                                            {c.decision_status.replace(/_/g, ' ')}
+                                        </span>
+                                    )}
+                                </div>
+                                <span className="text-[10px] text-black/40 font-mono">
+                                    {new Date(c.timestamp).toLocaleDateString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})}
+                                </span>
+                            </div>
+                            <p className="text-xs text-black/70 leading-relaxed break-words whitespace-pre-wrap">{c.content || c.comment}</p>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    };
+
+    const renderVoiceHistory = () => {
+        if (!talent.voice_notes || talent.voice_notes.length === 0) return null;
+        return (
+            <div className="mt-4 space-y-3" data-testid="voice-notes-container">
+                <p className="text-[10px] font-mono tracking-wider uppercase text-black/40">Voice Reviews ({talent.voice_notes.length})</p>
+                <div className="space-y-3 max-h-[250px] overflow-y-auto pr-1 custom-scrollbar">
+                    {talent.voice_notes.map((vn, idx) => (
+                        <div key={idx} className="p-3 bg-black/[0.02] border border-black/[0.04] rounded-xl hover:bg-black/[0.03] transition-all duration-150" data-testid={`voice-note-item-${idx}`}>
+                            <div className="flex items-start justify-between gap-2 mb-2">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs font-semibold text-black/80">{vn.author}</span>
+                                    <span className={`px-1.5 py-0.5 text-[9px] font-medium rounded-full uppercase tracking-wider ${
+                                        vn.role?.toLowerCase() === 'admin' 
+                                            ? 'bg-amber-100 text-amber-800 border border-amber-200' 
+                                            : 'bg-gray-100 text-gray-600 border border-gray-200'
+                                    }`}>
+                                        {vn.role}
+                                    </span>
+                                </div>
+                                <span className="text-[10px] text-black/40 font-mono">
+                                    {new Date(vn.timestamp).toLocaleDateString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'})}
+                                </span>
+                            </div>
+                            <audio src={vn.content} controls className="w-full h-8 mt-1 accent-black" />
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    };
     const vis = link.visibility || {};
     const project = link || {};
     const visibleActions = ACTIONS.filter(a => a.key !== "ask_for_test" || project.requires_test === true);
@@ -2098,6 +2218,7 @@ function TalentDetail({
                                         </div>
                                         <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
                                         <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                        {renderCommentsHistory()}
                                     </div>
 
                                     {talent.submission_id && talent.project_id && (
@@ -2107,6 +2228,9 @@ function TalentDetail({
                                                 onSend={(blob) => saveVoiceNote(talent.id, blob)}
                                                 sending={sendingVoice}
                                             />
+                                            {renderVoiceHistory()}
+                                        </div>
+                                    )}                                            />
                                         </div>
                                     )}
 
@@ -2246,6 +2370,7 @@ function TalentDetail({
                                         </div>
                                         <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
                                         <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                        {renderCommentsHistory()}
                                     </div>
 
                                     {talent.submission_id && talent.project_id && (
@@ -2255,6 +2380,7 @@ function TalentDetail({
                                                 onSend={(blob) => saveVoiceNote(talent.id, blob)}
                                                 sending={sendingVoice}
                                             />
+                                            {renderVoiceHistory()}
                                         </div>
                                     )}
                                 </div>

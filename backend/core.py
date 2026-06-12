@@ -212,7 +212,7 @@ def decode_viewer(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
     token = authorization.split(" ", 1)[1]
     data = decode_token(token)
-    if not data or data.get("role") != "viewer":
+    if not data or data.get("role") not in ("viewer", "admin", "team"):
         return None
     return data
 

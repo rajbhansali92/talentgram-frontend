@@ -1161,7 +1161,9 @@ async def create_share_link(
     authorization: Optional[str] = Header(None),
 ):
     viewer = decode_viewer(authorization)
-    if not viewer or viewer.get("slug") != slug:
+    if not viewer:
+        raise HTTPException(401, "Identity required")
+    if viewer.get("role") not in ("admin", "team") and viewer.get("slug") != slug:
         raise HTTPException(401, "Identity required")
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:

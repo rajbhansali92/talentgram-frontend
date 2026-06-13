@@ -355,6 +355,41 @@ export default function ClientView() {
         return m;
     }, [data?.actions]);
 
+    const buckets = useMemo(() => {
+        const talents = data?.talents || [];
+        return {
+            all: talents,
+            pending_action: talents.filter((t) => !reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
+            viewed: talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action),
+            ask_for_test: talents.filter((t) => viewerActions[t.id]?.action === "ask_for_test"),
+            interested: talents.filter((t) => viewerActions[t.id]?.action === "interested"),
+            not_for_this: talents.filter((t) => viewerActions[t.id]?.action === "not_for_this"),
+            shortlist: talents.filter((t) => viewerActions[t.id]?.action === "shortlist"),
+            lock: talents.filter((t) => viewerActions[t.id]?.action === "lock"),
+            not_sure: talents.filter((t) => viewerActions[t.id]?.action === "not_sure"),
+        };
+    }, [data?.talents, reviewedIds, viewerActions]);
+
+    const filteredTalents = useMemo(() => {
+        const base = buckets[activeTab] || buckets.all || [];
+        if (!searchQuery.trim()) return base;
+        const query = searchQuery.toLowerCase().trim();
+        return base.filter((t) => {
+            const name = (t.name || "").toLowerCase();
+            const insta = (t.instagram_handle || "").toLowerCase();
+            const id = (t.id || "").toLowerCase();
+            const locText = Array.isArray(t.location)
+                ? t.location.map(l => `${l.city || ""} ${l.country || ""}`).join(" ")
+                : (t.location ? `${t.location.city || ""} ${t.location.country || ""}` : "");
+            const location = locText.toLowerCase();
+
+            return name.includes(query) ||
+                   insta.includes(query) ||
+                   id.includes(query) ||
+                   location.includes(query);
+        });
+    }, [buckets, activeTab, searchQuery]);
+
     useEffect(() => {
         if (!shareId) return;
         const fetchShare = async () => {
@@ -1053,37 +1088,7 @@ export default function ClientView() {
         if (!t) return false;
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
     };
-    const buckets = useMemo(() => ({
-        all: talents,
-        pending_action: talents.filter((t) => !reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
-        viewed: talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action),
-        ask_for_test: talents.filter((t) => viewerActions[t.id]?.action === "ask_for_test"),
-        interested: talents.filter((t) => viewerActions[t.id]?.action === "interested"),
-        not_for_this: talents.filter((t) => viewerActions[t.id]?.action === "not_for_this"),
-        shortlist: talents.filter((t) => viewerActions[t.id]?.action === "shortlist"),
-        lock: talents.filter((t) => viewerActions[t.id]?.action === "lock"),
-        not_sure: talents.filter((t) => viewerActions[t.id]?.action === "not_sure"),
-    }), [talents, reviewedIds, viewerActions]);
 
-    const filteredTalents = useMemo(() => {
-        const base = buckets[activeTab] || buckets.all;
-        if (!searchQuery.trim()) return base;
-        const query = searchQuery.toLowerCase().trim();
-        return base.filter((t) => {
-            const name = (t.name || "").toLowerCase();
-            const insta = (t.instagram_handle || "").toLowerCase();
-            const id = (t.id || "").toLowerCase();
-            const locText = Array.isArray(t.location)
-                ? t.location.map(l => `${l.city || ""} ${l.country || ""}`).join(" ")
-                : (t.location ? `${t.location.city || ""} ${t.location.country || ""}` : "");
-            const location = locText.toLowerCase();
-
-            return name.includes(query) ||
-                   insta.includes(query) ||
-                   id.includes(query) ||
-                   location.includes(query);
-        });
-    }, [buckets, activeTab, searchQuery]);
     const reviewedCount = talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action).length;
     const seenCount = reviewedCount;
     const totalCount = talents.length;

@@ -67,12 +67,12 @@ function availabilityLabel(av) {
 }
 
 const ACTIONS = [
-    { key: "ask_for_test", label: "Ask for Test", icon: ClipboardCheck },
     { key: "interested", label: "Audition Approved", icon: ThumbsUp },
     { key: "not_for_this", label: "Does Not Work For This Project", icon: XCircle },
     { key: "shortlist", label: "Shortlist", icon: Star },
     { key: "lock", label: "Lock", icon: Lock },
     { key: "not_sure", label: "Unsure", icon: HelpCircle },
+    { key: "ask_for_test", label: "Ask for Test", icon: ClipboardCheck },
 ];
 
 const TABS = [
@@ -1149,7 +1149,7 @@ export default function ClientView() {
                 </div>
 
                 {(() => {
-                    const visibleTabs = TABS.filter(t => t.key !== "ask_for_test" || link.requires_test === true);
+                    const visibleTabs = TABS;
                     return (
                         <div
                             className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 flex flex-wrap items-center justify-between gap-4 border-b border-black/[0.04] pb-4"
@@ -1372,6 +1372,14 @@ export default function ClientView() {
                             <HelpCircle className="w-3.5 h-3.5" />
                             Unsure
                         </button>
+                        <button
+                            onClick={() => setBulkAction(Array.from(selectedIds), "ask_for_test")}
+                            data-testid="bulk-action-ask_for_test"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                        >
+                            <ClipboardCheck className="w-3.5 h-3.5" />
+                            Ask for Test
+                        </button>
                     </div>
 
                     <div className="h-6 w-px bg-white/10" />
@@ -1482,7 +1490,7 @@ function TalentDetail({
     };
     const vis = link.visibility || {};
     const project = link || {};
-    const visibleActions = ACTIONS.filter(a => a.key !== "ask_for_test" || project.requires_test === true);
+    const visibleActions = ACTIONS;
     const mediaAll = useMemo(() => talent.media || [], [talent.media]);
     const portfolioOn = vis.portfolio !== false;
     const indianOn = portfolioOn && (vis.indian_images ?? true);

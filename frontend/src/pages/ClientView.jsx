@@ -76,6 +76,7 @@ const ACTIONS = [
 ];
 
 const TABS = [
+    { key: "all", label: "All Submissions", icon: Layers },
     { key: "pending_action", label: "Pending Action", icon: Clock },
     { key: "viewed", label: "Viewed", icon: Eye },
     { key: "ask_for_test", label: "Ask for Test", icon: ClipboardCheck },
@@ -332,7 +333,8 @@ export default function ClientView() {
     const [seenIds, setSeenIds] = useState(new Set());
     const [reviewedIds, setReviewedIds] = useState(new Set());
     const [selectedIds, setSelectedIds] = useState(new Set());
-    const [activeTab, setActiveTab] = useState("pending_action");
+    const [activeTab, setActiveTab] = useState("all");
+    const [searchQuery, setSearchQuery] = useState("");
     const [showResumeBanner, setShowResumeBanner] = useState(false);
 
     // ── Stabilization refs ───────────────────────────────────────────────────
@@ -1051,7 +1053,8 @@ export default function ClientView() {
         if (!t) return false;
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
     };
-    const buckets = {
+    const buckets = useMemo(() => ({
+        all: talents,
         pending_action: talents.filter((t) => !reviewedIds.has(t.id) && !viewerActions[t.id]?.action),
         viewed: talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action),
         ask_for_test: talents.filter((t) => viewerActions[t.id]?.action === "ask_for_test"),
@@ -1060,8 +1063,27 @@ export default function ClientView() {
         shortlist: talents.filter((t) => viewerActions[t.id]?.action === "shortlist"),
         lock: talents.filter((t) => viewerActions[t.id]?.action === "lock"),
         not_sure: talents.filter((t) => viewerActions[t.id]?.action === "not_sure"),
-    };
-    const filteredTalents = buckets[activeTab] || buckets.pending_action || talents;
+    }), [talents, reviewedIds, viewerActions]);
+
+    const filteredTalents = useMemo(() => {
+        const base = buckets[activeTab] || buckets.all;
+        if (!searchQuery.trim()) return base;
+        const query = searchQuery.toLowerCase().trim();
+        return base.filter((t) => {
+            const name = (t.name || "").toLowerCase();
+            const insta = (t.instagram_handle || "").toLowerCase();
+            const id = (t.id || "").toLowerCase();
+            const locText = Array.isArray(t.location)
+                ? t.location.map(l => `${l.city || ""} ${l.country || ""}`).join(" ")
+                : (t.location ? `${t.location.city || ""} ${t.location.country || ""}` : "");
+            const location = locText.toLowerCase();
+
+            return name.includes(query) ||
+                   insta.includes(query) ||
+                   id.includes(query) ||
+                   location.includes(query);
+        });
+    }, [buckets, activeTab, searchQuery]);
     const reviewedCount = talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action).length;
     const seenCount = reviewedCount;
     const totalCount = talents.length;
@@ -1152,77 +1174,130 @@ export default function ClientView() {
                     const visibleTabs = TABS;
                     return (
                         <div
-                            className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 flex flex-wrap items-center justify-between gap-4 border-b border-black/[0.04] pb-4"
-                            data-testid="client-view-tabs"
+                            className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 border-b border-black/[0.04] pb-6"
+                            data-testid="client-view-tabs-container"
                         >
-                            <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap" style={{ scrollbarWidth: "none" }}>
-                                {visibleTabs.map((tab) => {
-                                    const count = buckets[tab.key]?.length || 0;
-                                    const active = activeTab === tab.key;
-                                    return (
-                                        <button
-                                            key={tab.key}
-                                            type="button"
-                                            onClick={() => setActiveTab(tab.key)}
-                                            data-testid={`client-tab-${tab.key}`}
-                                            className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
-                                                active
-                                                    ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
-                                                    : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
-                                            }`}
-                                        >
-                                            <tab.icon className="w-3.5 h-3.5" />
-                                            {tab.label}
-                                            <span
-                                                className={`font-mono text-[10px] ${active ? "text-white/60" : "text-[#8A8A8A]"}`}
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                {/* Desktop tab row */}
+                                <div className="hidden md:flex items-center gap-3 overflow-x-auto whitespace-nowrap" style={{ scrollbarWidth: "none" }} data-testid="client-view-tabs">
+                                    {visibleTabs.map((tab) => {
+                                        const count = buckets[tab.key]?.length || 0;
+                                        const active = activeTab === tab.key;
+                                        return (
+                                            <button
+                                                key={tab.key}
+                                                type="button"
+                                                onClick={() => setActiveTab(tab.key)}
+                                                data-testid={`client-tab-${tab.key}`}
+                                                className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] ${
+                                                    active
+                                                        ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
+                                                        : "border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
+                                                }`}
                                             >
-                                                {count}
-                                            </span>
-                                        </button>
-                                    );
-                                })}
-                            </div>
+                                                <tab.icon className="w-3.5 h-3.5" />
+                                                {tab.label}
+                                                <span
+                                                    className={`font-mono text-[10px] ${active ? "text-white/60" : "text-[#8A8A8A]"}`}
+                                                >
+                                                    {count}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
 
-                            <div className="flex items-center gap-2 flex-wrap text-xs">
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        // Select All Visible - currently filtered talents
-                                        const visibleIds = filteredTalents.map(t => t.id);
-                                        setSelectedIds(new Set(visibleIds));
-                                        toast.success(`Selected all ${visibleIds.length} visible talent(s)`);
-                                    }}
-                                    data-testid="select-all-visible"
-                                    className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
-                                >
-                                    Select All Visible
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        // Select All Filtered - all talents loaded in the link
-                                        const allIds = talents.map(t => t.id);
-                                        setSelectedIds(new Set(allIds));
-                                        toast.success(`Selected all ${allIds.length} filtered talent(s)`);
-                                    }}
-                                    data-testid="select-all-filtered"
-                                    className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
-                                >
-                                    Select All Filtered
-                                </button>
-                                {selectedIds.size > 0 && (
+                                {/* Mobile dropdown selector */}
+                                <div className="flex md:hidden flex-col gap-1.5 w-full" data-testid="client-view-tabs-mobile">
+                                    <label htmlFor="mobile-filter-select" className="text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] font-semibold">
+                                        Filter Submissions
+                                    </label>
+                                    <div className="relative">
+                                        <select
+                                            id="mobile-filter-select"
+                                            data-testid="mobile-filter-select"
+                                            value={activeTab}
+                                            onChange={(e) => setActiveTab(e.target.value)}
+                                            className="w-full appearance-none bg-white border border-black/10 rounded-xl px-4 py-3 pr-10 text-xs font-semibold tracking-wider uppercase text-[#111111] focus:outline-none focus:border-black transition-colors"
+                                        >
+                                            {visibleTabs.map((tab) => {
+                                                const count = buckets[tab.key]?.length || 0;
+                                                return (
+                                                    <option key={tab.key} value={tab.key}>
+                                                        {tab.label} ({count})
+                                                    </option>
+                                                );
+                                            })}
+                                        </select>
+                                        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-4 text-[#8A8A8A]">
+                                            <ChevronDown className="w-4 h-4" />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 flex-wrap text-xs">
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            setSelectedIds(new Set());
-                                            toast.success("Selection cleared");
+                                            const visibleIds = filteredTalents.map(t => t.id);
+                                            setSelectedIds(new Set(visibleIds));
+                                            toast.success(`Selected all ${visibleIds.length} visible talent(s)`);
                                         }}
-                                        data-testid="clear-selection"
-                                        className="px-3 py-1.5 text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors font-semibold"
+                                        data-testid="select-all-visible"
+                                        className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
                                     >
-                                        Clear Selection
+                                        Select All Visible
                                     </button>
-                                )}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const allIds = talents.map(t => t.id);
+                                            setSelectedIds(new Set(allIds));
+                                            toast.success(`Selected all ${allIds.length} filtered talent(s)`);
+                                        }}
+                                        data-testid="select-all-filtered"
+                                        className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
+                                    >
+                                        Select All Filtered
+                                    </button>
+                                    {selectedIds.size > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setSelectedIds(new Set());
+                                                toast.success("Selection cleared");
+                                            }}
+                                            data-testid="clear-selection"
+                                            className="px-3 py-1.5 text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors font-semibold"
+                                        >
+                                            Clear Selection
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Search bar row */}
+                            <div className="mt-4 max-w-md" data-testid="search-container">
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        placeholder="Search by name, instagram, location..."
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        data-testid="search-input"
+                                        className="w-full bg-[#fdfdfd] border border-black/[0.06] hover:border-black/15 focus:border-black/30 rounded-full py-2.5 pl-5 pr-10 text-xs text-[#111111] placeholder-[#8A8A8A] focus:outline-none transition-all duration-150 shadow-sm"
+                                    />
+                                    {searchQuery && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchQuery("")}
+                                            className="absolute inset-y-0 right-0 flex items-center pr-4 text-[#8A8A8A] hover:text-[#111111] transition-colors"
+                                            aria-label="Clear search"
+                                        >
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     );

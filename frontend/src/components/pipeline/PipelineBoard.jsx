@@ -223,9 +223,19 @@ function PipelineBoard({ projectId, projectName }) {
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-[#f5f5f3] flex items-center justify-center" data-testid="pipeline-loading">
-                <div className="text-black/45 text-sm tracking-wide">
-                    Loading casting pipeline…
+            <div className="min-h-screen bg-[#f5f5f3] p-8 space-y-6" data-testid="pipeline-loading">
+                <div className="flex justify-between items-center max-w-7xl mx-auto">
+                    <div className="h-8 w-48 rounded animate-tg-shimmer" />
+                    <div className="h-10 w-32 rounded animate-tg-shimmer" />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 max-w-7xl mx-auto">
+                    {[1, 2, 3, 4].map((i) => (
+                        <div key={i} className="bg-white p-4 rounded-lg border border-gray-100 space-y-4">
+                            <div className="h-6 w-3/4 rounded animate-tg-shimmer" />
+                            <div className="h-24 w-full rounded animate-tg-shimmer" />
+                            <div className="h-24 w-full rounded animate-tg-shimmer" />
+                        </div>
+                    ))}
                 </div>
             </div>
         );

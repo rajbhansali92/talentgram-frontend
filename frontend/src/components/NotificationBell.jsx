@@ -158,9 +158,16 @@ export default function NotificationBell() {
                             data-testid="notification-scroll-region"
                         >
                             {loading ? (
-                                <div className="p-6 text-center text-black/40 text-xs inline-flex items-center gap-2 justify-center w-full">
-                                    <Loader2 className="w-3 h-3 animate-spin" />
-                                    Loading…
+                                <div className="p-4 space-y-3">
+                                    {[1, 2, 3].map((i) => (
+                                        <div key={i} className="flex gap-3">
+                                            <div className="w-8 h-8 rounded-full animate-tg-shimmer shrink-0" />
+                                            <div className="space-y-1.5 flex-1 py-1">
+                                                <div className="h-3 w-3/4 rounded animate-tg-shimmer" />
+                                                <div className="h-2.5 w-1/2 rounded animate-tg-shimmer" />
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
                             ) : items.length === 0 ? (
                                 <div className="p-8 text-center text-black/40 text-xs">

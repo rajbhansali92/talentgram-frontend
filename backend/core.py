@@ -28,7 +28,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
-JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret")
+JWT_SECRET = os.environ["JWT_SECRET"]
 APP_NAME = os.environ.get("APP_NAME", "talentgram")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
@@ -277,16 +277,46 @@ def cloudinary_upload(
     content_type: Optional[str] = None,
     keep_original: bool = True,
 ) -> dict:
-    """Upload raw bytes to Cloudinary and return the upload result.
-
-    Result includes `secure_url`, `public_id`, `resource_type`, `bytes`, and
-    `format`. Raises HTTPException on validation failure or Cloudinary error.
-
-    `resource_type="auto"` lets Cloudinary detect image vs video vs raw
-    automatically — appropriate for our mixed audition uploads.
-    """
+    """Upload raw bytes to Cloudinary with MIME type binary validation checks."""
     _validate_folder(folder)
     ct = (content_type or "").lower()
+
+    # Priority 4: Implement binary signature validation check
+    allowed_signatures = {
+        b"\xff\xd8\xff": "image/jpeg",
+        b"\x89PNG\r\n\x1a\n": "image/png",
+        b"RIFF": "image/webp",  # WebP signatures typically contain RIFF....WEBP
+        b"ftypmp42": "video/mp4",
+        b"ftypisom": "video/mp4",
+        b"ftypMSNV": "video/mp4",
+        b"ftypavc1": "video/mp4",
+        b"%PDF": "application/pdf"
+    }
+
+    detected_mime = None
+    for sig, mime in allowed_signatures.items():
+        if data.startswith(sig):
+            detected_mime = mime
+            break
+
+    # WebP check extension: WebP files contain RIFF header and WEBP signature bytes at offset 8
+    if data.startswith(b"RIFF") and b"WEBP" in data[8:15]:
+        detected_mime = "image/webp"
+
+    # MP4 check extension: MP4 files typically carry ftyp signature starting at index 4
+    if not detected_mime and b"ftyp" in data[4:12]:
+        detected_mime = "video/mp4"
+
+    # Allow PDF files for admin attachments
+    if not detected_mime and data.startswith(b"%PDF"):
+        detected_mime = "application/pdf"
+
+    if not detected_mime:
+        raise HTTPException(status_code=400, detail="Invalid file signature: file type not allowed.")
+
+    # Validate that MIME header matches the detected signature
+    if ct and not ct.startswith(detected_mime.split('/')[0]):
+        raise HTTPException(status_code=400, detail="MIME type header does not match detected file signature.")
     
     is_pdf = ct == "application/pdf" or ct.startswith("application/pdf")
     if is_pdf and resource_type == "auto":

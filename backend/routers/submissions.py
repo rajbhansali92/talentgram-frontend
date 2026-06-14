@@ -91,27 +91,27 @@ async def public_project(slug: str):
 
 
 @router.get("/public/prefill")
-async def prefill_for_email(email: str, request: Request):
-    """Public lookup: if the email matches an approved talent, return safe fields
-    so the audition form can pre-fill. Returns 204-style empty dict if not found.
-
-    Phase 2 unified schema: returns the full set of non-sensitive identity
-    fields. Media / source / notes / created_by are NEVER included.
-
-    Phase 0: rate-limited to **20 lookups per minute per IP** to mitigate
-    email-probing. The limiter is a sliding-window in-memory counter — fine
-    for our scale; replace with Redis once we run multi-replica.
-    """
+async def prefill_for_email(
+    email: str,
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    """Prefill lookup endpoint: requires valid submitter session token in the headers."""
     if not _prefill_rate_limit_ok(request):
         raise HTTPException(429, "Too many lookups — please slow down")
+
     email = (email or "").strip().lower()
     if "@" not in email:
         return {}
+
+    # Remedy IDOR: Require valid OTP verified session token matching the query email
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("email") != email:
+        # Prevent email enumeration: return generic empty prefill schema on invalid auth
+        return {}
+
     talent = await db.talents.find_one(
         {"$or": [{"email": email}, {"source.talent_email": email}]},
-        # Strict allowlist projection. Storage paths / source / notes never
-        # leave this endpoint. `media` IS included so the prefill confirmation
-        # card can show a "Is this you?" thumbnail derived via _resolve_cover_url.
         {
             "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
             "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
@@ -133,7 +133,6 @@ async def prefill_for_email(email: str, request: Request):
         if category == "portfolio":
             category = "image"
         resource_type = m.get("resource_type") or "image"
-        # Match all portfolio image categories (image, indian, western, ethnic, lifestyle, commercial, fashion, character, etc.)
         is_image = resource_type == "image" or (category not in {"video", "intro_video"} and not (m.get("content_type") or "").startswith("video/"))
         if is_image and m.get("url"):
             prefill_images.append({
@@ -229,10 +228,6 @@ async def prefill_for_email(email: str, request: Request):
         "instagram_followers": talent.get("instagram_followers"),
         "work_links": talent.get("work_links") or [],
         "skills": talent.get("skills") or [],
-        # Cloudinary cover thumbnail for the confirmation prompt. Resolved
-        # via _resolve_cover_url so it picks the cover_media_id, falling
-        # back to the first portfolio/indian/western image. None when the
-        # talent has no usable image — the card hides the thumb gracefully.
         "image_url": _resolve_cover_url(talent),
         "prefill_media": deduplicate_media(prefill_images + ([latest_intro] if latest_intro else [])),
     }

@@ -28,6 +28,9 @@ _now_iso = _now
 router = APIRouter(prefix="/api", tags=["auth"])
 logger = logging.getLogger(__name__)
 
+# Prefill/Auth IP sliding window storage bucket
+_PREFILL_BUCKET = {}
+
 
 class GoogleAuthIn(BaseModel):
     code: str
@@ -36,11 +39,22 @@ class GoogleAuthIn(BaseModel):
 
 
 @router.post("/auth/google")
-async def google_auth(payload: GoogleAuthIn):
+async def google_auth(payload: GoogleAuthIn, request: Request):
     import os
     import requests
     import jwt
+    import time
     from pydantic import BaseModel
+
+    # Priority 5: Implement conservative rate limiting to prevent auth endpoint abuse (max 15 requests per minute per IP)
+    ip = get_client_ip(request)
+    now_ts = time.time()
+    ip_bucket = _PREFILL_BUCKET.setdefault(ip, [])
+    # Filter timestamps within last 60 seconds
+    ip_bucket[:] = [ts for ts in ip_bucket if now_ts - ts < 60.0]
+    if len(ip_bucket) >= 15:
+        raise HTTPException(status_code=429, detail="Too many authentication attempts. Please try again in a minute.")
+    ip_bucket.append(now_ts)
 
     token_url = "https://oauth2.googleapis.com/token"
     client_id = os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "mock-client-id")
@@ -64,15 +78,22 @@ async def google_auth(payload: GoogleAuthIn):
         logger.error(f"Failed to post to Google token url: {e}")
         raise HTTPException(status_code=400, detail="Failed to exchange Google OAuth code")
 
-    id_token = res_data.get("id_token")
-    if not id_token:
+    from google.oauth2 import id_token
+    from google.auth.transport import requests as google_requests
+
+    id_token_val = res_data.get("id_token")
+    if not id_token_val:
         raise HTTPException(status_code=400, detail="No id_token in Google response")
 
     try:
-        id_info = jwt.decode(id_token, options={"verify_signature": False})
+        id_info = id_token.verify_oauth2_token(
+            id_token_val,
+            google_requests.Request(),
+            client_id
+        )
     except Exception as e:
-        logger.error(f"Failed to decode id_token: {e}")
-        raise HTTPException(status_code=400, detail="Failed to parse user profile from Google")
+        logger.error(f"Google Token Verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid Google token signature")
 
     email = id_info.get("email")
     if not email:

@@ -1,4 +1,5 @@
 import { ImageResponse } from 'next/og';
+import { logoBase64 } from '@/lib/logoBase64';
 
 export const runtime = 'edge';
 
@@ -24,7 +25,7 @@ export default async function Image({ params }) {
     const brandName = project?.brand_name || "Premium Brand";
     const campaignType = project?.campaign_type || "Campaign";
     const statusText = project?.status === "active" ? "APPLICATIONS OPEN" : "IN REVIEW";
-    const locationText = project?.location || "India ↔ UAE";
+    const locationText = (project?.location || "India — UAE").replace('↔', '—');
 
     return new ImageResponse(
         (
@@ -55,9 +56,16 @@ export default async function Image({ params }) {
                     }}
                 />
 
-                {/* Top Bar */}
+                {/* Top Bar with Logo Asset */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
-                    <div style={{ fontSize: '24px', fontWeight: 'bold', letterSpacing: '0.1em' }}>TALENTGRAM</div>
+                    <img
+                        src={logoBase64}
+                        alt="Talentgram Logo"
+                        style={{
+                            width: '150px',
+                            height: 'auto',
+                        }}
+                    />
                     <div style={{
                         fontSize: '12px',
                         letterSpacing: '0.2em',
@@ -88,7 +96,7 @@ export default async function Image({ params }) {
                 {/* Footer bar */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.2em', zIndex: 10 }}>
                     <span>TALENTGRAM AGENCY</span>
-                    <span>INDIA ↔ UAE ➜ GLOBAL</span>
+                    <span>INDIA — UAE</span>
                 </div>
             </div>
         ),

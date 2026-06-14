@@ -9,25 +9,25 @@ export async function generateMetadata() {
   const host = headersList.get("host") || "talentgramagency.com";
   const domain = host.replace(/^www\./, "");
 
-  let title = "Talentgram | Premium Casting & Talent Platform";
-  let description = "Scout, manage, submit, and review professional talent portfolios across India & UAE.";
+  let title = "Talentgram Agency";
+  let description = "WE SCOUT | WE MANAGE. Premium fashion-agency casting & talent platform across India and UAE.";
   const baseSiteUrl = `https://${domain}`;
   const versionString = `v=${Date.now()}`;
   let ogImageUrl = `https://talentgramagency.com/og-image?${versionString}`;
 
   if (domain.startsWith("apply.")) {
-    title = "Apply to Join Talentgram | Premium Talent Network";
-    description = "Apply to join our exclusive casting database. Scout. Manage. Place. Audition for premium projects in India and UAE.";
+    title = "Talentgram Agency — Apply Portal";
+    description = "Apply to join our exclusive casting database. WE SCOUT | WE MANAGE.";
     ogImageUrl = `https://talentgramagency.com/og-image?portal=apply&${versionString}`;
   } else if (domain.startsWith("review.")) {
-    title = "Talentgram Review Centre";
+    title = "Talentgram Agency — Review Centre";
     description = "Secure access portal for casting directors and clients to review, shortlist, and approve talent portfolios.";
     ogImageUrl = `https://talentgramagency.com/og-image?portal=review&${versionString}`;
   } else if (domain.startsWith("submit.")) {
-    title = "Talentgram Audition Submission Portal";
+    title = "Talentgram Agency — Submission Portal";
     description = "Submit your video auditions, polaroids, and details for active casting projects.";
   } else if (domain.startsWith("links.")) {
-    title = "Talentgram Portfolios";
+    title = "Talentgram Agency — Portfolios";
     description = "Explore premium artist headshots, intro videos, and work reels.";
   }
 

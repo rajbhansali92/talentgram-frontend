@@ -1,4 +1,5 @@
 import { ImageResponse } from 'next/og';
+import { logoBase64 } from '@/lib/logoBase64';
 
 export const runtime = 'edge';
 
@@ -16,99 +17,63 @@ export async function GET() {
                     backgroundColor: '#0B1F3A',
                     color: '#FFFFFF',
                     fontFamily: 'serif',
-                    padding: '60px',
+                    padding: '80px',
                     boxSizing: 'border-box',
                 }}
             >
-                {/* Minimalist Premium Border */}
-                <div
+                {/* Logo Image */}
+                <img
+                    src={logoBase64}
+                    alt="Talentgram Logo"
                     style={{
-                        position: 'absolute',
-                        top: '40px',
-                        left: '40px',
-                        right: '40px',
-                        bottom: '40px',
-                        border: '1px solid rgba(255, 255, 255, 0.15)',
-                        display: 'flex',
+                        width: '280px',
+                        height: 'auto',
+                        marginBottom: '40px',
                     }}
                 />
 
-                {/* Content Container */}
+                {/* Brand Title */}
                 <div
                     style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        zIndex: 10,
+                        fontSize: '36px',
+                        fontWeight: 'bold',
+                        letterSpacing: '0.15em',
+                        textTransform: 'uppercase',
+                        marginBottom: '24px',
+                        fontFamily: 'serif',
                     }}
                 >
-                    {/* Logo/Brand Title */}
-                    <div
-                        style={{
-                            fontSize: '64px',
-                            fontWeight: 'bold',
-                            letterSpacing: '0.15em',
-                            textTransform: 'uppercase',
-                            marginBottom: '16px',
-                            fontFamily: 'serif',
-                        }}
-                    >
-                        TALENTGRAM
-                    </div>
+                    TALENTGRAM AGENCY
+                </div>
 
-                    {/* Subtitle */}
-                    <div
-                        style={{
-                            fontSize: '20px',
-                            letterSpacing: '0.25em',
-                            textTransform: 'uppercase',
-                            color: 'rgba(255, 255, 255, 0.7)',
-                            marginBottom: '64px',
-                            fontWeight: '300',
-                        }}
-                    >
-                        PREMIUM TALENT NETWORK
-                    </div>
+                {/* Subtitle / Pillars */}
+                <div
+                    style={{
+                        fontSize: '18px',
+                        letterSpacing: '0.3em',
+                        textTransform: 'uppercase',
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        marginBottom: '40px',
+                        fontWeight: '300',
+                    }}
+                >
+                    WE SCOUT | WE MANAGE
+                </div>
 
-                    {/* Pillars */}
-                    <div
-                        style={{
-                            display: 'flex',
-                            fontSize: '14px',
-                            letterSpacing: '0.3em',
-                            textTransform: 'uppercase',
-                            color: 'rgba(255, 255, 255, 0.5)',
-                            marginBottom: '40px',
-                            gap: '12px',
-                        }}
-                    >
-                        <span>SCOUT</span>
-                        <span>•</span>
-                        <span>MANAGE</span>
-                        <span>•</span>
-                        <span>SUBMIT</span>
-                        <span>•</span>
-                        <span>REVIEW</span>
-                        <span>•</span>
-                        <span>PLACE</span>
-                    </div>
-
-                    {/* Region */}
-                    <div
-                        style={{
-                            fontSize: '12px',
-                            letterSpacing: '0.4em',
-                            textTransform: 'uppercase',
-                            color: 'rgba(255, 255, 255, 0.4)',
-                            borderTop: '1px solid rgba(255, 255, 255, 0.2)',
-                            paddingTop: '16px',
-                            width: '200px',
-                            textAlign: 'center',
-                        }}
-                    >
-                        INDIA ↔ UAE
-                    </div>
+                {/* Region */}
+                <div
+                    style={{
+                        fontSize: '14px',
+                        letterSpacing: '0.4em',
+                        textTransform: 'uppercase',
+                        color: 'rgba(255, 255, 255, 0.5)',
+                        borderTop: '1px solid rgba(255, 255, 255, 0.15)',
+                        paddingTop: '20px',
+                        width: '240px',
+                        textAlign: 'center',
+                    }}
+                >
+                    INDIA — UAE
                 </div>
             </div>
         ),

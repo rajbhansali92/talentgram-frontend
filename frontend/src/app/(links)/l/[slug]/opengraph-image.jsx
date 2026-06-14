@@ -1,4 +1,5 @@
 import { ImageResponse } from 'next/og';
+import { logoBase64 } from '@/lib/logoBase64';
 
 export const runtime = 'edge';
 
@@ -21,9 +22,20 @@ export default async function Image({ params }) {
     
     // Extrapolate primary talent profile details
     const talent = portfolio?.talents?.[0] || {};
-    const name = talent.name || "Artist Portfolio";
+    const rawName = talent.name || "Artist Portfolio";
+
+    // Format Name to: AARAV M. (First name + space + first letter of last name, uppercase)
+    const nameParts = rawName.trim().split(/\s+/);
+    let displayName = rawName.toUpperCase();
+    if (nameParts.length > 1) {
+        const first = nameParts[0].toUpperCase();
+        const lastInitial = nameParts[nameParts.length - 1].charAt(0).toUpperCase();
+        displayName = `${first} ${lastInitial}.`;
+    } else if (nameParts.length === 1) {
+        displayName = nameParts[0].toUpperCase();
+    }
+
     const category = talent.skills?.join(' | ') || "Featured Talent";
-    const location = talent.location || "India ↔ UAE";
     
     // Defensive profile headshot retrieval
     let headshotUrl = talent.image_url || "";
@@ -32,7 +44,6 @@ export default async function Image({ params }) {
 
     if (headshotUrl) {
         try {
-            // Add a timeout helper to prevent slow images from halting Edge function
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 2500);
 
@@ -54,12 +65,7 @@ export default async function Image({ params }) {
     }
 
     // Dynamic Initials generation for typographic layout fallback
-    const initials = name
-        .split(' ')
-        .map(n => n.charAt(0))
-        .join('')
-        .toUpperCase()
-        .slice(0, 2) || "TG";
+    const initials = displayName.slice(0, 2);
 
     return new ImageResponse(
         (
@@ -87,28 +93,32 @@ export default async function Image({ params }) {
                         boxSizing: 'border-box',
                     }}
                 >
-                    {/* Top bar header */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <div style={{ fontSize: '24px', fontWeight: 'bold', letterSpacing: '0.15em' }}>TALENTGRAM</div>
-                        <div style={{ fontSize: '10px', letterSpacing: '0.3em', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase' }}>PREMIUM TALENT NETWORK</div>
+                    {/* Top Bar with Logo Asset */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <img
+                            src={logoBase64}
+                            alt="Talentgram Logo"
+                            style={{
+                                width: '150px',
+                                height: 'auto',
+                            }}
+                        />
+                        <div style={{ fontSize: '20px', fontWeight: 'bold', letterSpacing: '0.15em' }}>TALENTGRAM AGENCY</div>
                     </div>
 
                     {/* Content Area */}
                     <div style={{ display: 'flex', flexDirection: 'column', marginTop: '40px', marginBottom: '40px' }}>
                         <div style={{ fontSize: '48px', fontWeight: 'bold', letterSpacing: '0.02em', marginBottom: '16px', lineHeight: 1.1 }}>
-                            {name}
+                            {displayName}
                         </div>
-                        <div style={{ fontSize: '16px', color: 'rgba(255,255,255,0.7)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '8px' }}>
+                        <div style={{ fontSize: '18px', color: 'rgba(255,255,255,0.7)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                             {category}
-                        </div>
-                        <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)', letterSpacing: '0.05em' }}>
-                            {location}
                         </div>
                     </div>
 
-                    {/* Footer region indicator */}
-                    <div style={{ display: 'flex', fontSize: '11px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.2em' }}>
-                        <span>EXCLUSIVE PORTFOLIO</span>
+                    {/* Region */}
+                    <div style={{ display: 'flex', fontSize: '12px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.2em' }}>
+                        <span>INDIA — UAE</span>
                     </div>
                 </div>
 

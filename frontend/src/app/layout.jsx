@@ -31,16 +31,20 @@ export async function generateMetadata() {
     description = "Explore premium artist headshots, intro videos, and work reels.";
   }
 
+  const { sanitizeMetadata } = require("@/lib/sanitize");
+  const cleanTitle = sanitizeMetadata(title);
+  const cleanDescription = sanitizeMetadata(description);
+
   return {
-    title,
-    description,
+    title: cleanTitle,
+    description: cleanDescription,
     metadataBase: new URL(baseSiteUrl),
     alternates: {
       canonical: "/",
     },
     openGraph: {
-      title,
-      description,
+      title: cleanTitle,
+      description: cleanDescription,
       url: baseSiteUrl,
       siteName: "Talentgram",
       type: "website",
@@ -49,14 +53,14 @@ export async function generateMetadata() {
           url: ogImageUrl,
           width: 1200,
           height: 630,
-          alt: title,
+          alt: cleanTitle,
         }
       ],
     },
     twitter: {
       card: "summary_large_image",
-      title,
-      description,
+      title: cleanTitle,
+      description: cleanDescription,
       images: [ogImageUrl],
     }
   };

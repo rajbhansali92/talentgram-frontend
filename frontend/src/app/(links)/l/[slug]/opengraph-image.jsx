@@ -22,7 +22,8 @@ export default async function Image({ params }) {
     
     // Extrapolate primary talent profile details
     const talent = portfolio?.talents?.[0] || {};
-    const rawName = talent.name || "Artist Portfolio";
+    const { sanitizeMetadata } = require('@/lib/sanitize');
+    const rawName = sanitizeMetadata(talent.name || "Artist Portfolio");
 
     // Format Name to: AARAV M. (First name + space + first letter of last name, uppercase)
     const nameParts = rawName.trim().split(/\s+/);

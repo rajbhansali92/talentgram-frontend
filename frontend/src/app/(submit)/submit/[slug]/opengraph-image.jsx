@@ -21,8 +21,9 @@ export default async function Image({ params }) {
     const { slug } = await params;
     const project = await getProject(slug);
 
-    const projectName = project?.title || "Casting Call";
-    const brandName = project?.brand_name || "Premium Brand";
+    const { sanitizeMetadata } = require('@/lib/sanitize');
+    const projectName = sanitizeMetadata(project?.title || "Casting Call");
+    const brandName = sanitizeMetadata(project?.brand_name || "Premium Brand");
     const titleText = `${brandName.toUpperCase()} — ${projectName.toUpperCase()}`;
 
     return new ImageResponse(

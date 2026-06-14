@@ -101,7 +101,6 @@ cors_origins = [
 
 # Ensure the main production frontend origins are explicitly allowed by default
 default_origins = [
-    "https://talentgram-frontend.vercel.app",
     "https://talentgramagency.com",
     "https://www.talentgramagency.com",
     "https://apply.talentgramagency.com",

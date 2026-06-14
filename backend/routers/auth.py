@@ -68,12 +68,17 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
         "grant_type": "authorization_code"
     }
 
+    import httpx
+
     try:
-        r = requests.post(token_url, data=token_data)
+        async with httpx.AsyncClient() as client:
+            r = await client.post(token_url, data=token_data, timeout=10.0)
         if r.status_code != 200:
             logger.error(f"Google Token Exchange error: {r.text}")
             raise HTTPException(status_code=400, detail="Failed to exchange Google OAuth code")
         res_data = r.json()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to post to Google token url: {e}")
         raise HTTPException(status_code=400, detail="Failed to exchange Google OAuth code")

@@ -1,12 +1,12 @@
 import React, { useEffect, useRef } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useRouter, useSearchParams } from "next/navigation";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
 export default function GoogleCallback() {
-    const [searchParams] = useSearchParams();
-    const navigate = useNavigate();
+    const searchParams = useSearchParams();
+    const router = useRouter();
     const ranRef = useRef(false);
 
     useEffect(() => {
@@ -18,7 +18,7 @@ export default function GoogleCallback() {
 
         if (!code) {
             toast.error("Google authentication failed. No authorization code received.");
-            navigate(state ? `/submit/${state}` : "/");
+            router.push(state ? `/submit/${state}` : "/");
             return;
         }
 
@@ -77,17 +77,17 @@ export default function GoogleCallback() {
                     toast.success("Successfully authenticated with Google. Welcome to Talentgram!");
                 }
 
-                navigate(getRedirectPath(state));
+                router.push(getRedirectPath(state));
             } catch (err) {
                 console.error("Google authentication error:", err);
                 toast.error(err?.response?.data?.detail || "Google authentication failed. Please try again.");
                 const redirectPath = state === "apply" ? "/apply" : (state ? `/submit/${state}` : "/");
-                navigate(redirectPath);
+                router.push(redirectPath);
             }
         };
 
         exchangeCode();
-    }, [searchParams, navigate]);
+    }, [searchParams, router]);
 
     return (
         <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center justify-center px-4">

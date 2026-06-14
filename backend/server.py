@@ -99,13 +99,23 @@ cors_origins = [
     if origin.strip()
 ]
 
-# Ensure the main production frontend origin is explicitly allowed by default
-if "https://talentgram-frontend.vercel.app" not in cors_origins:
-    cors_origins.append("https://talentgram-frontend.vercel.app")
+# Ensure the main production frontend origins are explicitly allowed by default
+default_origins = [
+    "https://talentgram-frontend.vercel.app",
+    "https://talentgramagency.com",
+    "https://www.talentgramagency.com",
+    "https://apply.talentgramagency.com",
+    "https://submit.talentgramagency.com",
+    "https://review.talentgramagency.com",
+    "https://links.talentgramagency.com"
+]
+for origin in default_origins:
+    if origin not in cors_origins:
+        cors_origins.append(origin)
 
 cors_origins_regex = os.environ.get(
     "CORS_ORIGINS_REGEX",
-    r"https://talentgram-frontend-.*\.vercel\.app",
+    r"https://talentgram-frontend-.*\.vercel\.app|https://.*\.talentgramagency\.com",
 ).strip()
 
 if cors_origins_regex in ("", "disabled", "None", "none"):

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "next/navigation";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";

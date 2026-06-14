@@ -26,12 +26,18 @@ export function middleware(req: NextRequest) {
         return NextResponse.next();
     }
 
+    // Strip optional www. prefix for subdomain matching
+    let cleanHostname = hostname;
+    if (cleanHostname.startsWith('www.')) {
+        cleanHostname = cleanHostname.substring(4);
+    }
+
     // Determine subdomain prefix
     const subdomains = ['apply', 'submit', 'review', 'links'];
     let subdomain = '';
 
     for (const sub of subdomains) {
-        if (hostname.startsWith(`${sub}.`)) {
+        if (cleanHostname.startsWith(`${sub}.`)) {
             subdomain = sub;
             break;
         }

@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 const applyTheme = () => {
+    if (typeof window === "undefined") return;
     const html = document.documentElement;
     html.classList.add("light");
     html.classList.remove("dark");

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "next/navigation";
 import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL, API } from "@/lib/api";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover, displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";

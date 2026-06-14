@@ -1,9 +1,7 @@
 'use client';
 
 import React from 'react';
-import dynamic from 'next/dynamic';
-
-const ApplicationPage = dynamic(() => import('@/pages/ApplicationPage'), { ssr: false });
+import ApplicationPage from '@/pages-components/ApplicationPage';
 
 export default function ApplyPage() {
     return <ApplicationPage />;

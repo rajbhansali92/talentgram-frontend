@@ -49,13 +49,13 @@ export function middleware(req: NextRequest) {
         if (cleanPath === '/apply') {
             cleanPath = '/';
         }
-        url.pathname = `/apply-portal${cleanPath}`;
+        url.pathname = `/apply${cleanPath}`;
     } else if (subdomain === 'submit') {
         let cleanPath = url.pathname;
         if (cleanPath.startsWith('/submit/')) {
             cleanPath = cleanPath.substring('/submit'.length);
         }
-        url.pathname = `/submit-portal${cleanPath}`;
+        url.pathname = `/submit${cleanPath}`;
     } else if (subdomain === 'review') {
         let cleanPath = url.pathname;
         if (cleanPath === '/') {
@@ -67,7 +67,7 @@ export function middleware(req: NextRequest) {
         if (cleanPath.startsWith('/l/')) {
             cleanPath = cleanPath.substring('/l'.length);
         }
-        url.pathname = `/links-portal${cleanPath}`;
+        url.pathname = `/l${cleanPath}`;
     } else {
         // Root / Landing domain
         url.pathname = `${url.pathname}`;

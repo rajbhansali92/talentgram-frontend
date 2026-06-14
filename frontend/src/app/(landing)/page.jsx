@@ -1,17 +1,19 @@
 'use client';
 
-import React, { useEffect } from 'react';
-import Landing from '@/pages-components/Landing';
+import React from 'react';
 
-export default function LandingPage() {
-    useEffect(() => {
-        console.log("Hydrated:", window.location.hostname);
-    }, []);
-
+export default function Page() {
     return (
-        <>
-            <div data-route-debug="landing" style={{ display: 'none' }}>Landing Loaded</div>
-            <Landing />
-        </>
+        <div
+            style={{
+                padding: "100px",
+                fontSize: "40px",
+                background: "red",
+                color: "white",
+                minHeight: "100vh"
+            }}
+        >
+            LANDING PAGE RENDERED
+        </div>
     );
 }

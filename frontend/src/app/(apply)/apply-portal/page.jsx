@@ -8,10 +8,5 @@ export default function ApplyPage() {
         console.log("Hydrated:", window.location.hostname);
     }, []);
 
-    return (
-        <>
-            <div data-route-debug="apply" style={{ display: 'none' }}>Apply Loaded</div>
-            <ApplicationPage />
-        </>
-    );
+    return <ApplicationPage />;
 }

@@ -1,19 +1,12 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
+import Landing from '@/pages-components/Landing';
 
-export default function Page() {
-    return (
-        <div
-            style={{
-                padding: "100px",
-                fontSize: "40px",
-                background: "red",
-                color: "white",
-                minHeight: "100vh"
-            }}
-        >
-            LANDING PAGE RENDERED
-        </div>
-    );
+export default function LandingPage() {
+    useEffect(() => {
+        console.log("Hydrated:", window.location.hostname);
+    }, []);
+
+    return <Landing />;
 }

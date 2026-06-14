@@ -8,10 +8,5 @@ export default function LinksPage() {
         console.log("Hydrated:", window.location.hostname);
     }, []);
 
-    return (
-        <>
-            <div data-route-debug="links" style={{ display: 'none' }}>Links Loaded</div>
-            <ClientView />
-        </>
-    );
+    return <ClientView />;
 }

@@ -8,10 +8,5 @@ export default function SubmitPage() {
         console.log("Hydrated:", window.location.hostname);
     }, []);
 
-    return (
-        <>
-            <div data-route-debug="submit" style={{ display: 'none' }}>Submit Loaded</div>
-            <SubmissionPage />
-        </>
-    );
+    return <SubmissionPage />;
 }

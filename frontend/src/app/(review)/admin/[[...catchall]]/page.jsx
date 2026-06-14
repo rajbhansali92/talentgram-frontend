@@ -15,10 +15,5 @@ export default function AdminPage() {
 
     if (!mounted) return null;
 
-    return (
-        <>
-            <div data-route-debug="review" style={{ display: 'none' }}>Review Loaded</div>
-            <AdminApp />
-        </>
-    );
+    return <AdminApp />;
 }

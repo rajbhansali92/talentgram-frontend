@@ -1,5 +1,5 @@
 import { ImageResponse } from 'next/og';
-import { logoBase64 } from '@/lib/logoBase64';
+import { logoBlackBase64 } from '@/lib/logoBlackBase64';
 
 export const runtime = 'edge';
 
@@ -35,38 +35,6 @@ export default async function Image({ params }) {
         displayName = nameParts[0].toUpperCase();
     }
 
-    const category = talent.skills?.join(' | ') || "Featured Talent";
-    
-    // Defensive profile headshot retrieval
-    let headshotUrl = talent.image_url || "";
-    let headshotLoaded = false;
-    let headshotBase64 = null;
-
-    if (headshotUrl) {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 2500);
-
-            const imageRes = await fetch(headshotUrl, {
-                signal: controller.signal,
-                headers: { 'Accept': 'image/*' }
-            });
-            clearTimeout(timeoutId);
-
-            if (imageRes.ok) {
-                const arrayBuffer = await imageRes.arrayBuffer();
-                const buffer = Buffer.from(arrayBuffer);
-                headshotBase64 = `data:${imageRes.headers.get('content-type') || 'image/jpeg'};base64,${buffer.toString('base64')}`;
-                headshotLoaded = true;
-            }
-        } catch (e) {
-            console.error("Remote talent headshot failed to load. Falling back to high-end typography layout.", e);
-        }
-    }
-
-    // Dynamic Initials generation for typographic layout fallback
-    const initials = displayName.slice(0, 2);
-
     return new ImageResponse(
         (
             <div
@@ -74,83 +42,71 @@ export default async function Image({ params }) {
                     width: '100%',
                     height: '100%',
                     display: 'flex',
-                    flexDirection: 'row',
-                    backgroundColor: '#0B1F3A',
-                    color: '#FFFFFF',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: '#FFFFFF',
+                    color: '#000000',
                     fontFamily: 'serif',
+                    padding: '80px',
                     boxSizing: 'border-box',
                 }}
             >
-                {/* Left side text details */}
-                <div
+                {/* Original Black Logo */}
+                <img
+                    src={logoBlackBase64}
+                    alt="Talentgram Logo"
                     style={{
-                        width: headshotLoaded ? '55%' : '100%',
-                        height: '100%',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'space-between',
-                        padding: '80px',
-                        boxSizing: 'border-box',
-                    }}
-                >
-                    {/* Top Bar with Logo Asset */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                        <img
-                            src={logoBase64}
-                            alt="Talentgram Logo"
-                            style={{
-                                width: '150px',
-                                height: 'auto',
-                            }}
-                        />
-                        <div style={{ fontSize: '20px', fontWeight: 'bold', letterSpacing: '0.15em' }}>TALENTGRAM AGENCY</div>
-                    </div>
-
-                    {/* Content Area */}
-                    <div style={{ display: 'flex', flexDirection: 'column', marginTop: '40px', marginBottom: '40px' }}>
-                        <div style={{ fontSize: '48px', fontWeight: 'bold', letterSpacing: '0.02em', marginBottom: '16px', lineHeight: 1.1 }}>
-                            {displayName}
-                        </div>
-                        <div style={{ fontSize: '18px', color: 'rgba(255,255,255,0.7)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                            {category}
-                        </div>
-                    </div>
-
-                    {/* Region */}
-                    <div style={{ display: 'flex', fontSize: '12px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.2em' }}>
-                        <span>INDIA — UAE</span>
-                    </div>
-                </div>
-
-                {/* Right side headshot layout or typography fallback */}
-                <div
-                    style={{
-                        width: headshotLoaded ? '45%' : '0%',
-                        height: '100%',
-                        display: headshotLoaded ? 'flex' : 'none',
-                        backgroundImage: headshotLoaded ? `url(${headshotBase64})` : 'none',
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
+                        width: '280px',
+                        height: 'auto',
+                        marginBottom: '32px',
                     }}
                 />
 
-                {!headshotLoaded && (
-                    <div
-                        style={{
-                            width: '40%',
-                            height: '100%',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            backgroundColor: 'rgba(255, 255, 255, 0.03)',
-                            borderLeft: '1px solid rgba(255, 255, 255, 0.05)',
-                        }}
-                    >
-                        <div style={{ fontSize: '120px', fontWeight: 'light', letterSpacing: '0.1em', color: 'rgba(255, 255, 255, 0.1)', fontFamily: 'serif' }}>
-                            {initials}
-                        </div>
-                    </div>
-                )}
+                {/* Brand Title */}
+                <div
+                    style={{
+                        fontSize: '36px',
+                        fontWeight: 'bold',
+                        letterSpacing: '0.15em',
+                        textTransform: 'uppercase',
+                        marginBottom: '20px',
+                        fontFamily: 'serif',
+                    }}
+                >
+                    TALENTGRAM AGENCY
+                </div>
+
+                {/* Talent Specific Name */}
+                <div
+                    style={{
+                        fontSize: '24px',
+                        letterSpacing: '0.1em',
+                        textTransform: 'uppercase',
+                        color: 'rgba(0, 0, 0, 0.8)',
+                        marginBottom: '40px',
+                        fontWeight: '500',
+                        textAlign: 'center',
+                    }}
+                >
+                    {displayName}
+                </div>
+
+                {/* Region */}
+                <div
+                    style={{
+                        fontSize: '14px',
+                        letterSpacing: '0.4em',
+                        textTransform: 'uppercase',
+                        color: 'rgba(0, 0, 0, 0.4)',
+                        borderTop: '1px solid rgba(0, 0, 0, 0.15)',
+                        paddingTop: '20px',
+                        width: '240px',
+                        textAlign: 'center',
+                    }}
+                >
+                    INDIA — UAE
+                </div>
             </div>
         ),
         {

@@ -1,5 +1,5 @@
 import { ImageResponse } from 'next/og';
-import { logoBase64 } from '@/lib/logoBase64';
+import { logoBlackBase64 } from '@/lib/logoBlackBase64';
 
 export const runtime = 'edge';
 
@@ -23,9 +23,7 @@ export default async function Image({ params }) {
 
     const projectName = project?.title || "Casting Call";
     const brandName = project?.brand_name || "Premium Brand";
-    const campaignType = project?.campaign_type || "Campaign";
-    const statusText = project?.status === "active" ? "APPLICATIONS OPEN" : "IN REVIEW";
-    const locationText = (project?.location || "India — UAE").replace('↔', '—');
+    const titleText = `${brandName.toUpperCase()} — ${projectName.toUpperCase()}`;
 
     return new ImageResponse(
         (
@@ -35,68 +33,69 @@ export default async function Image({ params }) {
                     height: '100%',
                     display: 'flex',
                     flexDirection: 'column',
-                    justifyContent: 'space-between',
-                    backgroundColor: '#0B1F3A',
-                    color: '#FFFFFF',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: '#FFFFFF',
+                    color: '#000000',
                     fontFamily: 'serif',
                     padding: '80px',
                     boxSizing: 'border-box',
                 }}
             >
-                {/* Elegant luxury framing */}
-                <div
+                {/* Original Black Logo */}
+                <img
+                    src={logoBlackBase64}
+                    alt="Talentgram Logo"
                     style={{
-                        position: 'absolute',
-                        top: '40px',
-                        left: '40px',
-                        right: '40px',
-                        bottom: '40px',
-                        border: '1px solid rgba(255, 255, 255, 0.1)',
-                        display: 'flex',
+                        width: '280px',
+                        height: 'auto',
+                        marginBottom: '32px',
                     }}
                 />
 
-                {/* Top Bar with Logo Asset */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
-                    <img
-                        src={logoBase64}
-                        alt="Talentgram Logo"
-                        style={{
-                            width: '150px',
-                            height: 'auto',
-                        }}
-                    />
-                    <div style={{
-                        fontSize: '12px',
-                        letterSpacing: '0.2em',
-                        border: '1px solid rgba(255,255,255,0.3)',
-                        padding: '6px 16px',
-                        borderRadius: '2px',
-                        fontWeight: '600'
-                    }}>
-                        {statusText}
-                    </div>
+                {/* Brand Title */}
+                <div
+                    style={{
+                        fontSize: '36px',
+                        fontWeight: 'bold',
+                        letterSpacing: '0.15em',
+                        textTransform: 'uppercase',
+                        marginBottom: '20px',
+                        fontFamily: 'serif',
+                    }}
+                >
+                    TALENTGRAM AGENCY
                 </div>
 
-                {/* Main Content */}
-                <div style={{ display: 'flex', flexDirection: 'column', zIndex: 10 }}>
-                    <div style={{ fontSize: '20px', letterSpacing: '0.15em', color: 'rgba(255,255,255,0.6)', textTransform: 'uppercase', marginBottom: '16px' }}>
-                        {brandName}
-                    </div>
-                    <div style={{ fontSize: '56px', fontWeight: 'bold', letterSpacing: '0.02em', marginBottom: '24px', lineHeight: 1.1 }}>
-                        {projectName}
-                    </div>
-                    <div style={{ display: 'flex', gap: '24px', fontSize: '16px', color: 'rgba(255,255,255,0.7)', letterSpacing: '0.05em' }}>
-                        <span>{campaignType}</span>
-                        <span>•</span>
-                        <span>{locationText}</span>
-                    </div>
+                {/* Project Specific Name */}
+                <div
+                    style={{
+                        fontSize: '20px',
+                        letterSpacing: '0.1em',
+                        textTransform: 'uppercase',
+                        color: 'rgba(0, 0, 0, 0.7)',
+                        marginBottom: '40px',
+                        fontWeight: '400',
+                        textAlign: 'center',
+                    }}
+                >
+                    {titleText}
                 </div>
 
-                {/* Footer bar */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.2em', zIndex: 10 }}>
-                    <span>TALENTGRAM AGENCY</span>
-                    <span>INDIA — UAE</span>
+                {/* Region */}
+                <div
+                    style={{
+                        fontSize: '14px',
+                        letterSpacing: '0.4em',
+                        textTransform: 'uppercase',
+                        color: 'rgba(0, 0, 0, 0.4)',
+                        borderTop: '1px solid rgba(0, 0, 0, 0.15)',
+                        paddingTop: '20px',
+                        width: '240px',
+                        textAlign: 'center',
+                    }}
+                >
+                    INDIA — UAE
                 </div>
             </div>
         ),

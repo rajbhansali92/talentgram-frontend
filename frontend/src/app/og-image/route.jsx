@@ -1,5 +1,5 @@
 import { ImageResponse } from 'next/og';
-import { logoBase64 } from '@/lib/logoBase64';
+import { logoBlackBase64 } from '@/lib/logoBlackBase64';
 
 export const runtime = 'edge';
 
@@ -14,16 +14,16 @@ export async function GET() {
                     flexDirection: 'column',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    backgroundColor: '#0B1F3A',
-                    color: '#FFFFFF',
+                    backgroundColor: '#FFFFFF',
+                    color: '#000000',
                     fontFamily: 'serif',
                     padding: '80px',
                     boxSizing: 'border-box',
                 }}
             >
-                {/* Logo Image */}
+                {/* Original Black Logo */}
                 <img
-                    src={logoBase64}
+                    src={logoBlackBase64}
                     alt="Talentgram Logo"
                     style={{
                         width: '280px',
@@ -39,25 +39,11 @@ export async function GET() {
                         fontWeight: 'bold',
                         letterSpacing: '0.15em',
                         textTransform: 'uppercase',
-                        marginBottom: '24px',
+                        marginBottom: '40px',
                         fontFamily: 'serif',
                     }}
                 >
                     TALENTGRAM AGENCY
-                </div>
-
-                {/* Subtitle / Pillars */}
-                <div
-                    style={{
-                        fontSize: '18px',
-                        letterSpacing: '0.3em',
-                        textTransform: 'uppercase',
-                        color: 'rgba(255, 255, 255, 0.7)',
-                        marginBottom: '40px',
-                        fontWeight: '300',
-                    }}
-                >
-                    WE SCOUT | WE MANAGE
                 </div>
 
                 {/* Region */}
@@ -66,8 +52,8 @@ export async function GET() {
                         fontSize: '14px',
                         letterSpacing: '0.4em',
                         textTransform: 'uppercase',
-                        color: 'rgba(255, 255, 255, 0.5)',
-                        borderTop: '1px solid rgba(255, 255, 255, 0.15)',
+                        color: 'rgba(0, 0, 0, 0.4)',
+                        borderTop: '1px solid rgba(0, 0, 0, 0.15)',
                         paddingTop: '20px',
                         width: '240px',
                         textAlign: 'center',

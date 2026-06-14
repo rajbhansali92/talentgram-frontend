@@ -10,6 +10,7 @@ export default function PortalPage() {
     
     useEffect(() => {
         setMounted(true);
+        console.log("Hydrated:", window.location.hostname);
     }, []);
 
     if (!mounted) return null;

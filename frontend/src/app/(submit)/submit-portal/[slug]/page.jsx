@@ -1,8 +1,17 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import SubmissionPage from '@/pages-components/SubmissionPage';
 
 export default function SubmitPage() {
-    return <SubmissionPage />;
+    useEffect(() => {
+        console.log("Hydrated:", window.location.hostname);
+    }, []);
+
+    return (
+        <>
+            <div data-route-debug="submit" style={{ display: 'none' }}>Submit Loaded</div>
+            <SubmissionPage />
+        </>
+    );
 }

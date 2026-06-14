@@ -10,9 +10,15 @@ export default function AdminPage() {
     
     useEffect(() => {
         setMounted(true);
+        console.log("Hydrated:", window.location.hostname);
     }, []);
 
     if (!mounted) return null;
 
-    return <AdminApp />;
+    return (
+        <>
+            <div data-route-debug="review" style={{ display: 'none' }}>Review Loaded</div>
+            <AdminApp />
+        </>
+    );
 }

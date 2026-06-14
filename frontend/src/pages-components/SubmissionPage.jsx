@@ -3617,7 +3617,7 @@ function parseWorkLinksText(text) {
             if (!match) return null;
             // Strip trailing punctuation that may have been captured by the greedy [^\s]+ match
             const url = match[0].replace(/[.,;:!?)\]>]+$/, "");
-            const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
+            const before = line.slice(0, match.index).replace(new RegExp("[-:" + "\\s" + "|]+$"), "").trim();
             return before ? `${before} || ${url}` : url;
         })
         .filter(Boolean);

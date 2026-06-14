@@ -5,7 +5,7 @@ import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
 import MaterialModal from "@/components/MaterialModal";
 import BudgetLines from "@/components/BudgetLines";
-import ProjectPipeline from "@/pages/ProjectPipeline";
+import ProjectPipeline from "@/pages-components/ProjectPipeline";
 import {
     AVAILABILITY_OPTIONS,
     BUDGET_OPTIONS,

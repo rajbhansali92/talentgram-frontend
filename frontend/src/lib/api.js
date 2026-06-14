@@ -11,6 +11,21 @@ export const API = `${BACKEND_URL}/api`;
 // ✅ Centralized Public Frontend URL to prevent Vercel preview auth wall on public links
 export const PUBLIC_FRONTEND_URL = "https://talentgram-frontend.vercel.app";
 
+/**
+ * Resolves subdomain URLs dynamically, supporting local development.
+ */
+export function getSubdomainUrl(subdomain) {
+    if (typeof window === "undefined") return `https://${subdomain}.talentgramagency.com`;
+    const hostname = window.location.hostname;
+    const port = window.location.port;
+    if (hostname.includes("localhost") || hostname.includes("127.0.0.1") || hostname.includes("local")) {
+        // e.g. review.localhost:3000
+        const hostBase = hostname.includes("localhost") ? "localhost" : "talentgramagency.local";
+        return `http://${subdomain}.${hostBase}${port ? ":" + port : ""}`;
+    }
+    return `https://${subdomain}.talentgramagency.com`;
+}
+
 // 🔍 Debug (remove later if needed)
 console.log("🚀 Backend URL:", BACKEND_URL);
 console.log("🚀 API URL:", API);

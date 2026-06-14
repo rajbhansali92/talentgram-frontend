@@ -1658,7 +1658,7 @@ function parseWorkLinksText(text) {
             const match = URL_RE.exec(line);
             if (!match) return null;
             const url = match[0];
-            const before = line.slice(0, match.index).replace(/[-:\s|]+$/, "").trim();
+            const before = line.slice(0, match.index).replace(new RegExp("[-:" + "\\s" + "|]+$"), "").trim();
             return before ? `${before} || ${url}` : url;
         })
         .filter(Boolean);

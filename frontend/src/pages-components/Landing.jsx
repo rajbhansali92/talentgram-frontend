@@ -1,7 +1,7 @@
 import React from "react";
-import { Link } from "react-router-dom";
 import { ArrowRight, Sparkles } from "lucide-react";
 import Logo from "@/components/Logo";
+import { getSubdomainUrl } from "@/lib/api";
 
 /**
  * Landing surface — pure brand statement.
@@ -17,21 +17,21 @@ export default function Landing() {
         >
             <div className="relative z-10 min-h-screen flex flex-col">
                 <header className="px-6 md:px-12 py-6 flex items-center justify-end gap-3">
-                    <Link
-                        to="/apply"
+                    <a
+                        href={getSubdomainUrl("apply")}
                         data-testid="landing-apply-link"
                         className="hidden sm:inline-flex items-center gap-1.5 text-sm text-black/70 hover:text-black transition-colors duration-150 px-4 py-2 border border-black/15 rounded-lg hover:border-black/40"
                     >
                         <Sparkles className="w-3.5 h-3.5" />
                         Apply as Talent
-                    </Link>
-                    <Link
-                        to="/admin/login"
+                    </a>
+                    <a
+                        href={getSubdomainUrl("review") + "/admin/login"}
                         data-testid="landing-login-btn"
                         className="text-sm text-black/70 hover:text-black transition-colors duration-150 px-4 py-2 border border-black/15 rounded-lg hover:border-black/40"
                     >
                         Admin Sign in
-                    </Link>
+                    </a>
                 </header>
 
                 <main className="flex-1 flex flex-col items-center justify-center px-6 md:px-12">
@@ -39,8 +39,8 @@ export default function Landing() {
                         <Logo size={120} className="mx-auto mb-12" forceVariant="black" />
 
                         <div className="flex items-center gap-4 flex-wrap justify-center">
-                            <Link
-                                to="/admin/login"
+                            <a
+                                href={getSubdomainUrl("review") + "/admin/login"}
                                 data-testid="landing-cta-btn"
                                 className="inline-flex items-center gap-2 bg-black text-white px-6 py-3 rounded-lg text-sm font-medium hover:opacity-90 transition-all duration-150"
                             >
@@ -49,15 +49,15 @@ export default function Landing() {
                                     className="w-4 h-4"
                                     strokeWidth={1.5}
                                 />
-                            </Link>
-                            <Link
-                                to="/apply"
+                            </a>
+                            <a
+                                href={getSubdomainUrl("apply")}
                                 data-testid="landing-apply-card"
                                 className="inline-flex items-center gap-2 px-6 py-3 border border-black/15 hover:border-black/40 text-black/85 hover:text-black text-sm rounded-lg transition-colors duration-150"
                             >
                                 <Sparkles className="w-3.5 h-3.5" />
                                 Apply as Talent
-                            </Link>
+                            </a>
                         </div>
                     </div>
                 </main>

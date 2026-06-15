@@ -144,7 +144,10 @@ logger.info("Active CORS origins: %s", cors_origins)
 if cors_origins_regex:
     logger.info("Active CORS origin regex: %s", cors_origins_regex)
 
-# Add CORS Middleware FIRST so it becomes the outer-most middleware (last added = first to run on request)
+# Register security headers first
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Add CORS Middleware next so it becomes the outer-most middleware (last added = first to run on request)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -153,9 +156,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
-
-# Register security headers next (will execute after CORS check passes)
-app.add_middleware(SecurityHeadersMiddleware)
 
 
 # Startup

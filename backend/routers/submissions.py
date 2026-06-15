@@ -54,6 +54,48 @@ from notifications import fanout as notify_fanout
 router = APIRouter(prefix="/api", tags=["submissions"])
 
 
+async def update_talent_submission_metrics(email: str):
+    if not email:
+        return
+    cursor = db.submissions.find({
+        "talent_email": email.lower().strip(),
+        "status": {"$ne": "draft"}
+    }).sort("submitted_at", 1)
+    subs = await cursor.to_list(length=1000)
+    if not subs:
+        await db.talents.update_one(
+            {"$or": [{"email": email}, {"source.talent_email": email}]},
+            {"$set": {
+                "first_submission_at": None,
+                "last_submission_at": None,
+                "total_submissions": 0
+            }}
+        )
+        return
+    
+    submitted_dates = []
+    for s in subs:
+        dt = s.get("submitted_at") or s.get("created_at")
+        if dt:
+            submitted_dates.append(dt)
+            
+    if submitted_dates:
+        first_sub = min(submitted_dates)
+        last_sub = max(submitted_dates)
+    else:
+        first_sub = None
+        last_sub = None
+        
+    await db.talents.update_one(
+        {"$or": [{"email": email}, {"source.talent_email": email}]},
+        {"$set": {
+            "first_submission_at": first_sub,
+            "last_submission_at": last_sub,
+            "total_submissions": len(subs)
+        }}
+    )
+
+
 def deduplicate_media(media_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen_public_ids = set()
     seen_urls = set()
@@ -938,6 +980,14 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # size limits). This block is intentionally empty — no media
     # minimums are enforced at finalize.
 
+    # Verify that all Cloudinary uploads associated with this submission have completed.
+    pending_assets = await db.asset_metadata.find_one({
+        "submission_id": sid,
+        "upload_status": "pending"
+    })
+    if pending_assets:
+        raise HTTPException(400, "Cloudinary uploads are still in progress. Please wait until uploads are complete.")
+
     # First-time finalize vs retest finalize
     is_retest = sub.get("status") in ("submitted", "updated")
     new_status = "updated" if is_retest else "submitted"
@@ -1129,6 +1179,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             body=f"{brand} — awaiting your review.",
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
+    await update_talent_submission_metrics(email)
     return {
         "ok": True,
         "status": new_status,
@@ -1432,6 +1483,10 @@ async def set_decision(
                 project_id=pid,
                 talent_id=resolved_talent_id,
             )
+
+    email = (sub.get("talent_email") or "").lower().strip()
+    if email:
+        await update_talent_submission_metrics(email)
 
     prev = sub.get("decision")
     

@@ -480,12 +480,41 @@ async def set_application_decision(
             )
             return {"ok": True, "talent_id": existing["id"], "merged": True}
         else:
-            await db.talents.insert_one(talent)
-            await update_talent_cover_cache(talent["id"])
-            await db.applications.update_one(
-                {"id": aid}, {"$set": {"talent_id": talent["id"], "merged": False}}
-            )
-            return {"ok": True, "talent_id": talent["id"], "merged": False}
+            try:
+                await db.talents.insert_one(talent)
+                await update_talent_cover_cache(talent["id"])
+                await db.applications.update_one(
+                    {"id": aid}, {"$set": {"talent_id": talent["id"], "merged": False}}
+                )
+                return {"ok": True, "talent_id": talent["id"], "merged": False}
+            except DuplicateKeyError:
+                existing = await db.talents.find_one(
+                    {"$or": [{"email": email}, {"source.talent_email": email}]}
+                )
+                if existing:
+                    new_media = existing.get("media", []) + [
+                        m for m in talent["media"] if m["id"] not in {x["id"] for x in existing.get("media", [])}
+                    ]
+                    update = {"media": new_media}
+                    for key in ("email", "phone", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio", "skills"):
+                        if not existing.get(key) and talent.get(key):
+                            update[key] = talent[key]
+                    if not (existing.get("work_links") or []) and talent.get("work_links"):
+                        update["work_links"] = talent["work_links"]
+                    if not existing.get("cover_media_id") and talent.get("cover_media_id"):
+                        update["cover_media_id"] = talent["cover_media_id"]
+                    existing_interests = set(existing.get("interested_in") or [])
+                    incoming_interests = set(talent.get("interested_in") or [])
+                    merged_interests = sorted(existing_interests | incoming_interests)
+                    if merged_interests:
+                        update["interested_in"] = merged_interests
+                    await db.talents.update_one({"id": existing["id"]}, {"$set": update})
+                    await update_talent_cover_cache(existing["id"])
+                    await db.applications.update_one(
+                        {"id": aid}, {"$set": {"talent_id": existing["id"], "merged": True}}
+                    )
+                    return {"ok": True, "talent_id": existing["id"], "merged": True}
+                raise
     return {"ok": True}
 
 

@@ -205,12 +205,16 @@ def _enrich_list(doc: dict) -> dict:
 @router.get("/talents")
 async def list_talents(
     q: Optional[str] = None,
+    status: Optional[str] = None,
     page: Optional[int] = None,
     size: Optional[int] = None,
     limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
-    query: Dict[str, Any] = {"status": {"$ne": "DRAFT"}}
+    if status:
+        query: Dict[str, Any] = {"status": status}
+    else:
+        query: Dict[str, Any] = {"status": {"$nin": ["DRAFT", "ARCHIVED"]}}
     if q:
         needle = q.strip()
         terms = [t for t in re.split(r"[\s+\-,;]+", needle) if t]

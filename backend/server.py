@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 
 from fastapi import APIRouter, FastAPI
@@ -309,6 +309,94 @@ async def run_draft_talent_migration():
     logger.info("== DRAFT TALENT CLEANUP & MIGRATION COMPLETED (migrated %d) ==", migrated_count)
 
 
+async def run_draft_expiration_and_backfill():
+    logger.info("== STARTING DRAFT EXPIRATION & SUBMISSION METRICS BACKFILL ===")
+    
+    limit_date = datetime.now(timezone.utc) - timedelta(days=30)
+    limit_date_iso = limit_date.isoformat()
+    
+    drafts_query = {
+        "$or": [
+            {"updated_at": {"$lt": limit_date_iso}},
+            {"updated_at": {"$lt": limit_date}},
+            {"created_at": {"$lt": limit_date_iso}},
+            {"created_at": {"$lt": limit_date}}
+        ]
+    }
+    res_drafts = await db.submission_drafts.delete_many(drafts_query)
+    logger.info("Expired/Deleted %d submission drafts older than 30 days", res_drafts.deleted_count)
+    
+    submissions_query = {
+        "status": "draft",
+        "$or": [
+            {"updated_at": {"$lt": limit_date_iso}},
+            {"updated_at": {"$lt": limit_date}},
+            {"created_at": {"$lt": limit_date_iso}},
+            {"created_at": {"$lt": limit_date}}
+        ]
+    }
+    res_subs = await db.submissions.delete_many(submissions_query)
+    logger.info("Expired/Deleted %d draft submissions older than 30 days", res_subs.deleted_count)
+    
+    cursor = db.talents.find({})
+    talents = await cursor.to_list(length=10000)
+    backfilled_count = 0
+    
+    for t in talents:
+        email = t.get("email")
+        if not email:
+            email = (t.get("source") or {}).get("talent_email")
+            
+        if not email:
+            continue
+            
+        sub_cursor = db.submissions.find({
+            "talent_email": email.lower().strip(),
+            "status": {"$ne": "draft"}
+        }).sort("submitted_at", 1)
+        subs = await sub_cursor.to_list(length=1000)
+        
+        if not subs:
+            if t.get("total_submissions") == 0:
+                continue
+            await db.talents.update_one(
+                {"id": t["id"]},
+                {"$set": {
+                    "first_submission_at": None,
+                    "last_submission_at": None,
+                    "total_submissions": 0
+                }}
+            )
+            backfilled_count += 1
+            continue
+            
+        submitted_dates = []
+        for s in subs:
+            dt = s.get("submitted_at") or s.get("created_at")
+            if dt:
+                submitted_dates.append(dt)
+                
+        if submitted_dates:
+            first_sub = min(submitted_dates)
+            last_sub = max(submitted_dates)
+        else:
+            first_sub = None
+            last_sub = None
+            
+        await db.talents.update_one(
+            {"id": t["id"]},
+            {"$set": {
+                "first_submission_at": first_sub,
+                "last_submission_at": last_sub,
+                "total_submissions": len(subs)
+            }}
+        )
+        backfilled_count += 1
+        
+    logger.info("Recalculated/Backfilled submission metrics for %d talents", backfilled_count)
+    logger.info("== DRAFT EXPIRATION & SUBMISSION METRICS BACKFILL COMPLETED ==")
+
+
 @app.on_event("startup")
 async def on_startup():
     try:
@@ -316,6 +404,7 @@ async def on_startup():
 
         await run_media_duplicate_cleanup_migration()
         await run_draft_talent_migration()
+        await run_draft_expiration_and_backfill()
 
         await seed_admin()
         logger.info("Admin seed complete")

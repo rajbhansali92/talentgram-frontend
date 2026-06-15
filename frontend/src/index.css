@@ -266,6 +266,21 @@ body {
   [data-testid="submission-page"] * {
     min-width: 0;
   }
+
+  /* Hide sticky submit footers when virtual keyboard is open.
+     On mobile, sticky bottom-0 elements float above the keyboard,
+     blocking content and causing layout jumps. We collapse them
+     when any input/textarea is focused. */
+  [data-testid="application-form-page"]:focus-within [data-sticky-footer],
+  [data-testid="submission-page"]:focus-within [data-sticky-footer] {
+    position: relative;
+    opacity: 0;
+    pointer-events: none;
+    height: 0;
+    overflow: hidden;
+    padding: 0;
+    margin: 0;
+  }
 }
 
 

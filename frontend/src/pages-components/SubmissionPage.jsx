@@ -3229,7 +3229,7 @@ function SubmissionPage() {
                             </div>
                         )}
 
-                        <div className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
+                        <div data-sticky-footer className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
                             <p className="text-[12px] text-[#333333] text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
                                 Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
                             </p>
@@ -4377,7 +4377,7 @@ class SubmissionErrorBoundary extends React.Component {
     render() {
         if (this.state.hasError) {
             return (
-                <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4 py-12 sm:px-6 lg:px-8">
+                <div className="min-h-dvh flex items-center justify-center bg-slate-50 px-4 py-12 sm:px-6 lg:px-8">
                     <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-3xl border border-[#eaeaea] shadow-sm text-center">
                         <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8">

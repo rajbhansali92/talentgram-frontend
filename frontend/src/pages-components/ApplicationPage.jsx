@@ -740,7 +740,7 @@ export default function ApplicationPage() {
     if (!started) {
         return (
             <div
-                className="min-h-screen bg-[#ffffff] text-[#1a1a1a]"
+                className="min-h-dvh bg-[#ffffff] text-[#1a1a1a]"
                 data-testid="application-identity-page"
             >
                 <div className="max-w-xl mx-auto px-6 py-16 md:py-24 flex flex-col items-center">
@@ -1073,7 +1073,7 @@ export default function ApplicationPage() {
     if (finalized) {
         return (
             <div
-                className="min-h-screen bg-[#faf9f6] text-[#1a1a1a] flex flex-col"
+                className="min-h-dvh bg-[#faf9f6] text-[#1a1a1a] flex flex-col"
                 data-testid="application-success-page"
             >
                 <Header />
@@ -1106,7 +1106,7 @@ export default function ApplicationPage() {
     // --- Main form ---------------------------------------------------------
     return (
         <div
-            className="min-h-screen bg-[#faf9f6] text-[#1a1a1a]"
+            className="min-h-dvh bg-[#faf9f6] text-[#1a1a1a]"
             data-testid="application-form-page"
         >
             <Header />
@@ -1228,7 +1228,7 @@ export default function ApplicationPage() {
                                 }}
                                 placeholder="@yourhandle"
                                 data-testid="form-instagram"
-                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
+                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
                             />
                         </div>
                         <div>
@@ -1309,7 +1309,7 @@ export default function ApplicationPage() {
                                 rows={4}
                                 placeholder="A few lines about yourself — experience, strengths, what you're looking for."
                                 data-testid="form-bio"
-                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg p-4 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 resize-vertical"
+                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg p-4 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 resize-vertical"
                             />
                         </div>
                         <div className="md:col-span-2">
@@ -1484,7 +1484,7 @@ export default function ApplicationPage() {
                 </Section>
 
                 {/* Safe-area-aware sticky submit footer */}
-                <div className="sticky bottom-0 z-20 bg-gradient-to-t from-[#faf9f6] via-[#faf9f6]/95 to-transparent pt-4 pb-safe-offset-6 -mx-4 sm:-mx-6 px-4 sm:px-6">
+                <div data-sticky-footer className="sticky bottom-0 z-20 bg-gradient-to-t from-[#faf9f6] via-[#faf9f6]/95 to-transparent pt-4 pb-safe-offset-6 -mx-4 sm:-mx-6 px-4 sm:px-6">
                 <button
                     onClick={finalize}
                     disabled={saving}

@@ -122,8 +122,8 @@ async def start_application(payload: ApplicationStartIn):
     return {"id": aid, "token": token, "resumed": False}
 
 
-def _check_app_token(authorization: Optional[str], aid: str) -> Dict[str, Any]:
-    data = decode_submitter(authorization)
+async def _check_app_token(authorization: Optional[str], aid: str) -> Dict[str, Any]:
+    data = await decode_submitter(authorization)
     if not data or data.get("sid") != aid or data.get("kind") != "application":
         raise HTTPException(401, "Invalid application token")
     return data
@@ -131,7 +131,7 @@ def _check_app_token(authorization: Optional[str], aid: str) -> Dict[str, Any]:
 
 @router.get("/public/apply/{aid}")
 async def get_application(aid: str, authorization: Optional[str] = Header(None)):
-    _check_app_token(authorization, aid)
+    await _check_app_token(authorization, aid)
     app_doc = await db.applications.find_one({"id": aid}, {"_id": 0})
     if not app_doc:
         raise HTTPException(404, "Application not found")
@@ -144,7 +144,7 @@ async def update_application(
     payload: SubmissionUpdateIn,
     authorization: Optional[str] = Header(None),
 ):
-    _check_app_token(authorization, aid)
+    await _check_app_token(authorization, aid)
     app_doc = await db.applications.find_one({"id": aid})
     if not app_doc:
         raise HTTPException(404, "Application not found")
@@ -189,7 +189,7 @@ async def upload_application_media(
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(None),
 ):
-    _check_app_token(authorization, aid)
+    await _check_app_token(authorization, aid)
     if category not in APPLICATION_UPLOAD_CATEGORIES:
         raise HTTPException(400, "Invalid category (image|indian|western|intro_video)")
     app_doc = await db.applications.find_one({"id": aid})
@@ -311,7 +311,7 @@ async def upload_application_media(
 async def delete_application_media(
     aid: str, mid: str, authorization: Optional[str] = Header(None)
 ):
-    _check_app_token(authorization, aid)
+    await _check_app_token(authorization, aid)
     app_doc = await db.applications.find_one({"id": aid})
     if not app_doc:
         raise HTTPException(404, "Application not found")
@@ -323,7 +323,7 @@ async def delete_application_media(
 
 @router.post("/public/apply/{aid}/finalize")
 async def finalize_application(aid: str, authorization: Optional[str] = Header(None)):
-    _check_app_token(authorization, aid)
+    await _check_app_token(authorization, aid)
     app_doc = await db.applications.find_one({"id": aid})
     if not app_doc:
         raise HTTPException(404, "Application not found")

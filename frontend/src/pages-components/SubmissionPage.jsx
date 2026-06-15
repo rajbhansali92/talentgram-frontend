@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { api as axios } from "@/lib/api";
@@ -59,6 +61,7 @@ const LS_ATK_KEY = (slug) => `tg_atk_${slug}`;
 
 
 function readSaved(slug) {
+    if (typeof window === "undefined") return null;
     try {
         return JSON.parse(localStorage.getItem(LS_KEY(slug)) || "null");
     } catch {
@@ -70,6 +73,7 @@ function readSaved(slug) {
 // users never lose what they've typed even before the talent record is
 // created on the backend.
 function readDraft(slug) {
+    if (typeof window === "undefined") return null;
     try {
         return JSON.parse(localStorage.getItem(LS_DRAFT_KEY(slug)) || "null");
     } catch {
@@ -180,6 +184,7 @@ function SubmissionPage() {
     // Initialised here (rather than later in the component body) so
     // validateForm / validateStep1 can read it without TDZ surprises.
     const [emailGateUnlocked, setEmailGateUnlocked] = useState(() => {
+        if (typeof window === "undefined") return false;
         const hasDraft = !!readSaved(slug);
         const hasPortalSession = !!localStorage.getItem("talentgram_portal_email");
         return hasDraft || hasPortalSession;

@@ -102,16 +102,19 @@ viewerApi.interceptors.request.use((cfg) => {
 // ================= SESSION HELPERS =================
 
 export function saveAdminSession(token, admin) {
+    if (typeof window === "undefined") return;
     localStorage.setItem("tg_admin_token", token);
     localStorage.setItem("tg_admin", JSON.stringify(admin));
 }
 
 export function clearAdminSession() {
+    if (typeof window === "undefined") return;
     localStorage.removeItem("tg_admin_token");
     localStorage.removeItem("tg_admin");
 }
 
 export function getAdmin() {
+    if (typeof window === "undefined") return null;
     try {
         return JSON.parse(localStorage.getItem("tg_admin") || "null");
     } catch {
@@ -133,9 +136,11 @@ export function getRole() {
 // ================= VIEWER TOKEN =================
 
 export function saveViewerToken(slug, token) {
+    if (typeof window === "undefined") return;
     localStorage.setItem(`tg_viewer_${slug}`, token);
 }
 
 export function getViewerToken(slug) {
+    if (typeof window === "undefined") return null;
     return localStorage.getItem(`tg_viewer_${slug}`);
 }

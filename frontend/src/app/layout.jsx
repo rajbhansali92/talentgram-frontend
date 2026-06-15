@@ -57,6 +57,11 @@ export async function generateMetadata() {
         }
       ],
     },
+    manifest: '/site.webmanifest',
+    icons: {
+      icon: '/favicon.ico',
+      apple: '/apple-touch-icon.png',
+    },
     twitter: {
       card: "summary_large_image",
       title: cleanTitle,

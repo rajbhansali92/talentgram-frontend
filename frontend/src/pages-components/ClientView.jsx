@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "next/navigation";
 import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL, API } from "@/lib/api";
@@ -304,20 +306,35 @@ function getVideoDownloadUrl(url) {
 
 export default function ClientView() {
     const { slug } = useParams();
-    const queryParams = new URLSearchParams(window.location.search);
-    const shareId = queryParams.get("share");
+    const [shareId, setShareId] = useState(null);
+    const [loadingShare, setLoadingShare] = useState(false);
+
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            const queryParams = new URLSearchParams(window.location.search);
+            const sId = queryParams.get("share");
+            setShareId(sId);
+            setLoadingShare(!!sId);
+        }
+    }, []);
 
     const [shareData, setShareData] = useState(null);
-    const [loadingShare, setLoadingShare] = useState(!!shareId);
     const [shareError, setShareError] = useState(null);
     const [sendingVoice, setSendingVoice] = useState(false);
 
-    const [identified, setIdentified] = useState(!!getViewerToken(slug) || !!shareId);
+    const [identified, setIdentified] = useState(false);
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            setIdentified(!!getViewerToken(slug) || !!shareId);
+        }
+    }, [slug, shareId]);
+
     const [name, setName] = useState("");
     const [email, setEmail] = useState("");
     const [loading, setLoading] = useState(false);
 
     const [savedReviewer, setSavedReviewer] = useState(() => {
+        if (typeof window === "undefined") return null;
         try {
             const saved = localStorage.getItem(`client_view_${slug}`);
             return saved ? JSON.parse(saved) : null;

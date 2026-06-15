@@ -5,11 +5,12 @@ export function middleware(req: NextRequest) {
     const url = req.nextUrl.clone();
     const hostname = req.headers.get('host') || '';
 
-    // Ignore static assets, APIs, and Next.js internal calls
+    // Ignore static assets, APIs, and Next.js internal calls or opengraph-image endpoints
     if (
         url.pathname.startsWith('/_next') ||
         url.pathname.startsWith('/api') ||
-        url.pathname.includes('.')
+        url.pathname.includes('.') ||
+        url.pathname.endsWith('/opengraph-image')
     ) {
         return NextResponse.next();
     }

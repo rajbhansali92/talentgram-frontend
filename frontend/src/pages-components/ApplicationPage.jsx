@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";

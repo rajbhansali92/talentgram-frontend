@@ -1471,7 +1471,7 @@ export default function ApplicationPage() {
                                             />
                                             <button
                                                 onClick={() => removeMedia(m.id)}
-                                                className="absolute top-2 right-2 w-7 h-7 bg-white/90 rounded-lg opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[#d03a2a] hover:text-white transition-all duration-150 shadow-sm"
+                                                className="absolute top-2 right-2 w-7 h-7 bg-white/90 rounded-lg opacity-100 md:opacity-0 md:group-hover:opacity-100 flex items-center justify-center hover:bg-[#d03a2a] hover:text-white transition-all duration-150 shadow-sm"
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                             </button>

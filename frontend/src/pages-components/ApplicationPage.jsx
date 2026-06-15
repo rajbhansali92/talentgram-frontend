@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
+import { useUploadManager } from "@/context/UploadManagerContext";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
@@ -76,7 +77,7 @@ export default function ApplicationPage() {
         skills: [],
     });
     const [media, setMedia] = useState([]);
-    const [uploading, setUploading] = useState(null);
+    const { activeUploads, uploadFile } = useUploadManager();
     const [saving, setSaving] = useState(false);
     // Email-first gate (does NOT touch /api/public/apply, validation, or schema —
     // pure conditional rendering inside the existing identity screen).
@@ -628,40 +629,7 @@ export default function ApplicationPage() {
     const upload = async (files, category) => {
         if (!files || !files.length) return;
 
-        // Size & type validation (P5)
-        const isVideoSlot = category === "intro_video";
-        for (const file of files) {
-            const sizeMB = file.size / (1024 * 1024);
-            const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-
-            if (isVideoSlot) {
-                if (sizeMB > 200) {
-                    toast.error(`Video is too large (${sizeMB.toFixed(1)} MB). Max limit is 200 MB.`);
-                    return;
-                }
-                const allowedVideoExts = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.3gp'];
-                if (!allowedVideoExts.includes(ext) && !file.type.startsWith('video/')) {
-                    toast.error(`Unsupported video format. Please upload MP4, MOV, or WEBM.`);
-                    return;
-                }
-            } else {
-                if (sizeMB > 20) {
-                    toast.error(`Image is too large (${sizeMB.toFixed(1)} MB). Max limit is 20 MB.`);
-                    return;
-                }
-                if (['.bmp', '.tiff', '.heic', '.heif'].includes(ext) || ['image/bmp', 'image/tiff', 'image/heic', 'image/heif'].includes(file.type)) {
-                    toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
-                    return;
-                }
-                if (!file.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
-                    toast.error(`Unsupported image format. Please upload JPG, PNG, or WEBP.`);
-                    return;
-                }
-            }
-        }
-
         if (category === "image" || category === "indian" || category === "western") {
-            // Phase 3 — per-category cap (10 each), not combined.
             const existing = media.filter((m) => m.category === category).length;
             const remaining = MAX_IMAGES_PER_CATEGORY - existing;
             if (remaining <= 0) {
@@ -671,28 +639,16 @@ export default function ApplicationPage() {
             }
             files = Array.from(files).slice(0, remaining);
         }
-        setUploading(category);
-        try {
-            for (const file of files) {
-                const fd = new FormData();
-                fd.append("file", file);
-                fd.append("category", category);
-                const { data } = await axios.post(
-                    `/public/apply/${aid}/upload`,
-                    fd,
-                    {
-                        headers: {
-                            Authorization: `Bearer ${token}`,
-                            "Content-Type": "multipart/form-data",
-                        },
-                    },
-                );
-                setMedia(data.media || []);
-            }
-        } catch (e) {
-            toast.error(e?.response?.data?.detail || "Upload failed");
-        } finally {
-            setUploading(null);
+
+        for (const file of files) {
+            const label = (category === "image" || category === "indian" || category === "western") ? file.name : null;
+            await uploadFile(file, category, label, {
+                endpoint: `/public/apply/${aid}/upload`,
+                token: token,
+                onSuccess: (data) => {
+                    setMedia(data.media || []);
+                }
+            });
         }
     };
 
@@ -1366,10 +1322,10 @@ export default function ApplicationPage() {
                                 <button
                                     onClick={() => videoRef.current?.click()}
                                     data-testid="apply-intro-upload-btn"
-                                    disabled={uploading === "intro_video"}
+                                    disabled={activeUploads["intro_video"]?.status === "uploading" || activeUploads["intro_video"]?.status === "processing"}
                                     className="w-full max-w-lg bg-[#f5f4f0] border border-dashed border-[#eaeaea] rounded-xl py-10 flex flex-col items-center gap-2 text-sm text-[#6b6b6b] hover:bg-[#efede8] transition-colors duration-150"
                                 >
-                                    {uploading === "intro_video" ? (
+                                    {(activeUploads["intro_video"]?.status === "uploading" || activeUploads["intro_video"]?.status === "processing") ? (
                                         <Loader2 className="w-5 h-5 animate-spin" />
                                     ) : (
                                         <Video className="w-5 h-5" />
@@ -1399,7 +1355,7 @@ export default function ApplicationPage() {
                             inputRef={indianRef}
                             upload={upload}
                             removeMedia={removeMedia}
-                            uploading={uploading}
+                            activeUploads={activeUploads}
                             testidPrefix="indian"
                         />
                         <ApplyLookGroup
@@ -1412,7 +1368,7 @@ export default function ApplicationPage() {
                             inputRef={westernRef}
                             upload={upload}
                             removeMedia={removeMedia}
-                            uploading={uploading}
+                            activeUploads={activeUploads}
                             testidPrefix="western"
                         />
 
@@ -1425,10 +1381,10 @@ export default function ApplicationPage() {
                                     <button
                                         onClick={() => imgRef.current?.click()}
                                         data-testid="apply-image-upload-btn"
-                                        disabled={uploading === "image"}
+                                        disabled={Object.values(activeUploads).some(u => u.category === "image" && (u.status === "uploading" || u.status === "processing"))}
                                         className="inline-flex items-center gap-1.5 text-xs border border-[#eaeaea] bg-white hover:border-[#d4d4d4] px-3 py-1.5 rounded-lg transition-colors duration-150"
                                     >
-                                        {uploading === "image" ? (
+                                        {Object.values(activeUploads).some(u => u.category === "image" && (u.status === "uploading" || u.status === "processing")) ? (
                                             <Loader2 className="w-3 h-3 animate-spin" />
                                         ) : (
                                             <Upload className="w-3 h-3" />
@@ -1570,10 +1526,10 @@ function ApplyLookGroup({
     inputRef,
     upload,
     removeMedia,
-    uploading,
+    activeUploads = {},
     testidPrefix,
 }) {
-    const isUploading = uploading === category;
+    const isUploading = Object.values(activeUploads).some(u => u.category === category && (u.status === "uploading" || u.status === "processing"));
     const reachedCap = allCount >= maxImages;
     return (
         <div className="mb-2" data-testid={`apply-look-group-${testidPrefix}`}>

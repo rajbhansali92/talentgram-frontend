@@ -84,6 +84,8 @@ export async function generateMetadata() {
   };
 }
 
+import { UploadManagerProvider } from "@/context/UploadManagerContext";
+
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
@@ -107,7 +109,9 @@ export default function RootLayout({ children }) {
             },
           }}
         />
-        {children}
+        <UploadManagerProvider>
+          {children}
+        </UploadManagerProvider>
       </body>
     </html>
   );

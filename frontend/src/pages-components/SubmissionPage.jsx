@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams } from "next/navigation";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
+import { useUploadManager } from "@/context/UploadManagerContext";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -153,7 +154,7 @@ function SubmissionPage() {
     const fieldRefs = useRef({}); // { fieldId: HTMLElement }
 
     const [submission, setSubmission] = useState(null);
-    const [activeUploads, setActiveUploads] = useState({});
+    const { activeUploads, retryQueue, uploadFile, retryUpload } = useUploadManager();
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
 
@@ -166,9 +167,7 @@ function SubmissionPage() {
     const [isGenericPortfolioCollapsed, setIsGenericPortfolioCollapsed] = useState(() => {
         return typeof window !== "undefined" && window.innerWidth < 768;
     });
-    // Upload retry queue: per-slot pending file with attempt counter so a
-    // transient network drop doesn't lose the file selection.
-    const [retryQueue, setRetryQueue] = useState({}); // { slotKey: { file, category, label, attempt } }
+
 
     // Portfolio (General) — tracks which thumbnail has its action overlay
     // visible on touch devices (tap-to-reveal). null = all overlays hidden.
@@ -906,165 +905,32 @@ function SubmissionPage() {
         } catch (e) { console.error(e); }
     }
 
-    const uploadFile = async (file, category, label = null) => {
-        // Client-side guard mirrors backend cap (200 MB videos / 20 MB images) (P5)
-        const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
-        const CAP_MB = isVideoSlot ? 200 : 20;
-        if (file) {
-            const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-            if (isVideoSlot) {
-                if (file.size > CAP_MB * 1024 * 1024) {
-                    toast.error(`Video is too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
-                    return;
-                }
-                const allowedVideoExts = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.3gp'];
-                if (!allowedVideoExts.includes(ext) && !file.type.startsWith('video/')) {
-                    toast.error(`Unsupported video format. Please upload MP4, MOV, or WEBM.`);
-                    return;
-                }
-            } else {
-                if (file.size > CAP_MB * 1024 * 1024) {
-                    toast.error(`Image too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
-                    return;
-                }
-                if (['.bmp', '.tiff', '.heic', '.heif'].includes(ext) || ['image/bmp', 'image/tiff', 'image/heic', 'image/heif'].includes(file.type)) {
-                    toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
-                    return;
-                }
-                if (!file.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
-                    toast.error(`Unsupported image format. Please upload JPG, PNG, or WEBP.`);
-                    return;
-                }
-            }
-        }
-
-        let currentSaved = saved;
-        if (!currentSaved) {
-            const err = validateStep1();
-            if (err) {
-                toast.error("Please complete the required Profile fields first before uploading files.");
-                setCollapsedSections((prev) => ({ ...prev, profile: false }));
-                return;
-            }
-            const next = await startSubmissionDirect();
-            if (!next) return;
-            currentSaved = next;
-        }
-
-        const slotKey = label ? `${category}:${label}` : category;
-        setActiveUploads((prev) => ({
-            ...prev,
-            [slotKey]: {
-                status: "uploading",
-                pct: 0,
-                fileName: file.name,
-                category,
-                label,
-                file
-            }
-        }));
-        // Persist the pending file in retryQueue so reload + retry button work.
-        setRetryQueue((q) => ({ ...q, [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size } }));
-
-        // Auto-retry loop with exponential backoff (3 attempts, 1s/2s/4s).
-        // Solves transient mobile-network disconnects without backend changes.
-        // True resumable-from-offset upload is a P1 follow-up.
-        const MAX_ATTEMPTS = 3;
-        let lastErr = null;
-        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            try {
-                const fd = new FormData();
-                fd.append("file", file);
-                fd.append("category", category);
-                if (label && category === "take") fd.append("label", label);
-                const { data } = await axios.post(
-                    `/public/submissions/${currentSaved.id}/upload`,
-                    fd,
-                    {
-                        headers: {
-                            Authorization: `Bearer ${currentSaved.token}`,
-                            "Content-Type": "multipart/form-data",
-                        },
-                        timeout: 0, // no per-request timeout — let mobile networks breathe
-                        onUploadProgress: (e) => {
-                            if (e.total) {
-                                const pct = Math.round((e.loaded / e.total) * 100);
-                                setActiveUploads((prev) => {
-                                    if (!prev[slotKey]) return prev;
-                                    return {
-                                        ...prev,
-                                        [slotKey]: {
-                                            ...prev[slotKey],
-                                            status: pct >= 100 ? "processing" : "uploading",
-                                            pct
-                                        }
-                                    };
-                                });
-                            }
-                        },
-                    },
-                );
+    const triggerUpload = async (file, category, label = null) => {
+        await uploadFile(file, category, label, {
+            token: saved?.token,
+            endpoint: saved ? `/public/submissions/${saved.id}/upload` : null,
+            onSuccess: (data) => {
                 setSubmission(data);
-                setRetryQueue((q) => {
-                    const n = { ...q }; delete n[slotKey]; return n;
-                });
-                setActiveUploads((prev) => ({
-                    ...prev,
-                    [slotKey]: {
-                        ...prev[slotKey],
-                        status: "completed",
-                        pct: 100
+            },
+            onBeforeUpload: async () => {
+                let currentSaved = saved;
+                if (!currentSaved) {
+                    const err = validateStep1();
+                    if (err) {
+                        toast.error("Please complete the required Profile fields first before uploading files.");
+                        setCollapsedSections((prev) => ({ ...prev, profile: false }));
+                        return null;
                     }
-                }));
-                setTimeout(() => {
-                    setActiveUploads((prev) => {
-                        const next = { ...prev };
-                        if (next[slotKey]?.status === "completed") {
-                            delete next[slotKey];
-                        }
-                        return next;
-                    });
-                }, 3000);
-                if (attempt > 1) toast.success(`Recovered after ${attempt} attempts`);
-                return;
-            } catch (err) {
-                lastErr = err;
-                const isNetwork = !err?.response; // axios sets `response` on HTTP errors only
-                if (!isNetwork || attempt === MAX_ATTEMPTS) break;
-                // Exponential backoff: 1s, 2s, 4s
-                const wait = 1000 * Math.pow(2, attempt - 1);
-                toast.message(`Network blip — retrying in ${wait / 1000}s (attempt ${attempt}/${MAX_ATTEMPTS})`);
-                setRetryQueue((q) => ({
-                    ...q,
-                    [slotKey]: { ...(q[slotKey] || {}), attempt },
-                }));
-                await new Promise((r) => setTimeout(r, wait));
+                    const next = await startSubmissionDirect();
+                    if (!next) return null;
+                    currentSaved = next;
+                }
+                return {
+                    token: currentSaved.token,
+                    endpoint: `/public/submissions/${currentSaved.id}/upload`
+                };
             }
-        }
-        // Failed after retries — keep entry in retryQueue so user can tap "Retry".
-        setRetryQueue((q) => ({
-            ...q,
-            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed", file },
-        }));
-        setActiveUploads((prev) => ({
-            ...prev,
-            [slotKey]: {
-                ...prev[slotKey],
-                status: "failed",
-                error: lastErr?.response?.data?.detail || "Upload failed"
-            }
-        }));
-        toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
-    };
-
-    // Manual retry for a slot whose auto-retries exhausted.
-    const retryUpload = async (slotKey) => {
-        const entry = retryQueue[slotKey];
-        if (!entry?.file) {
-            toast.error("Re-select the file to retry");
-            return;
-        }
-        await uploadFile(entry.file, entry.category, entry.label);
+        });
     };
 
     const patchTakeLabel = async (mid, label) => {
@@ -1169,7 +1035,7 @@ function SubmissionPage() {
         }
 
         await Promise.all(
-            accepted.map((f) => uploadFile(f, imageCategory, f.name))
+            accepted.map((f) => triggerUpload(f, imageCategory, f.name))
         );
     };
 
@@ -1192,7 +1058,7 @@ function SubmissionPage() {
     const replaceMediaFile = async (oldMedia, file) => {
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(oldMedia.category);
         const label = oldMedia.category === "take" ? oldMedia.label : (!isVideoSlot ? file.name : null);
-        await uploadFile(file, oldMedia.category, label);
+        await triggerUpload(file, oldMedia.category, label);
         await removeMedia(oldMedia.id);
     };
 
@@ -2868,7 +2734,7 @@ function SubmissionPage() {
                                     icon={Video}
                                     accept="video/*"
                                     inputRef={introRef}
-                                    onPick={(f) => uploadFile(f[0], "intro_video")}
+                                    onPick={(f) => triggerUpload(f[0], "intro_video")}
                                     uploadState={activeUploads["intro_video"]}
                                     media={intro}
                                     onRemove={(m) => removeMedia(m.id)}
@@ -2954,7 +2820,7 @@ function SubmissionPage() {
                                             number={takes.length + 1}
                                             activeUploads={activeUploads}
                                             onPick={(file, label) =>
-                                                uploadFile(file, "take", label)
+                                                triggerUpload(file, "take", label)
                                             }
                                             inputRef={newTakeRef}
                                         />
@@ -3284,110 +3150,6 @@ function SubmissionPage() {
                         alt=""
                         className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200"
                     />
-                </div>
-            )}
-
-            <FloatingUploadManager
-                activeUploads={activeUploads}
-                onRetry={retryUpload}
-                onDismiss={(key) => setActiveUploads((prev) => {
-                    const n = { ...prev };
-                    delete n[key];
-                    return n;
-                })}
-            />
-        </div>
-    );
-}
-
-function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
-    const items = Object.entries(activeUploads);
-    const [collapsed, setCollapsed] = useState(false);
-
-    if (items.length === 0) return null;
-
-    const activeCount = items.filter(([_, u]) => u.status === "uploading" || u.status === "processing").length;
-    const failedCount = items.filter(([_, u]) => u.status === "failed").length;
-
-    return (
-        <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-50 w-[calc(100vw-2rem)] max-w-xs sm:w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3 cursor-pointer" onClick={() => setCollapsed(!collapsed)}>
-                <div className="flex items-center gap-2">
-                    <div className="relative">
-                        <Upload className="w-4 h-4 text-[#0c2340] animate-pulse" />
-                        {activeCount > 0 && (
-                            <span className="absolute -top-1 -right-1 flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#0c2340]/40 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#0c2340]"></span>
-                            </span>
-                        )}
-                    </div>
-                    <span className="font-semibold text-xs text-[#111111] font-mono tracking-wider uppercase">
-                        Uploads ({items.length})
-                    </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                    {failedCount > 0 && (
-                        <span className="text-[10px] font-mono font-bold text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded-md border border-rose-100 animate-pulse">
-                            {failedCount} Failed
-                        </span>
-                    )}
-                    <button
-                        type="button"
-                        className="text-[#333333] hover:text-[#222222] p-1"
-                    >
-                        <ChevronDown className={`w-4 h-4 transform transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`} />
-                    </button>
-                </div>
-            </div>
-
-            {!collapsed && (
-                <div className="space-y-3 max-h-60 overflow-y-auto pr-1">
-                    {items.map(([key, u]) => {
-                        const cleanLabel = u.category === "intro_video" ? "Intro Video" : (u.category === "take" ? u.label : `${u.category === "image" ? "Portfolio" : u.category === "indian" ? "Indian" : "Western"}: ${u.fileName}`);
-                        
-                        return (
-                            <div key={key} className="text-xs bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/80">
-                                <div className="flex items-center justify-between mb-1.5">
-                                    <span className="font-medium text-[#111111] truncate max-w-[160px]" title={cleanLabel}>
-                                        {cleanLabel}
-                                    </span>
-                                    <div className="flex items-center gap-1">
-                                        <span className={`font-mono text-[10px] font-semibold ${u.status === "failed" ? "text-rose-500" : u.status === "completed" ? "text-emerald-600" : "text-[#0c2340]"}`}>
-                                            {u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed"}
-                                        </span>
-                                        <button
-                                            type="button"
-                                            onClick={() => onDismiss(key)}
-                                            className="text-[#333333] hover:text-[#222222] p-0.5"
-                                        >
-                                            <X className="w-3 h-3" />
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {u.status === "failed" ? (
-                                    <div className="flex items-center justify-between mt-1 gap-2">
-                                        <span className="text-[10px] text-rose-500 truncate max-w-[150px] font-mono">{u.error || "Upload failed"}</span>
-                                        <button
-                                            type="button"
-                                            onClick={() => onRetry(key)}
-                                            className="text-[10px] font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full bg-white active:scale-95 transition-all"
-                                        >
-                                            Retry
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
-                                        <div
-                                            className={`h-full bg-[#0c2340] transition-all duration-300 ${u.status === "completed" ? "bg-emerald-500" : u.status === "processing" ? "bg-emerald-400 animate-pulse" : ""}`}
-                                            style={{ width: `${u.pct}%` }}
-                                        />
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
                 </div>
             )}
         </div>

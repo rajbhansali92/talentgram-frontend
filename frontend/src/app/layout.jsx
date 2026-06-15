@@ -10,14 +10,14 @@ export async function generateMetadata() {
   const domain = host.replace(/^www\./, "");
 
   let title = "Talentgram Agency";
-  let description = "WE SCOUT | WE MANAGE. Premium fashion-agency casting & talent platform across India and UAE.";
+  let description = "India - UAE";
   const baseSiteUrl = `https://${domain}`;
   const versionString = `v=${Date.now()}`;
   let ogImageUrl = `https://talentgramagency.com/og-image?${versionString}`;
 
   if (domain.startsWith("apply.")) {
     title = "Talentgram Agency — Apply Portal";
-    description = "Apply to join our exclusive casting database. WE SCOUT | WE MANAGE.";
+    description = "India - UAE";
     ogImageUrl = `https://talentgramagency.com/og-image?portal=apply&${versionString}`;
   } else if (domain.startsWith("review.")) {
     title = "Talentgram Agency — Review Centre";

@@ -1110,7 +1110,7 @@ export default function ApplicationPage() {
             data-testid="application-form-page"
         >
             <Header />
-            <div className="max-w-3xl mx-auto px-6 py-10 md:py-16">
+            <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 md:py-16">
                 <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Application · {basics.email}</p>
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-[#eaeaea] pb-4">
                     <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a]">
@@ -1483,11 +1483,14 @@ export default function ApplicationPage() {
                     </div>
                 </Section>
 
+                {/* Safe-area-aware sticky submit footer */}
+                <div className="sticky bottom-0 z-20 bg-gradient-to-t from-[#faf9f6] via-[#faf9f6]/95 to-transparent pt-4 pb-safe-offset-6 -mx-4 sm:-mx-6 px-4 sm:px-6">
                 <button
                     onClick={finalize}
                     disabled={saving}
                     data-testid="apply-submit-btn"
-                    className="mt-6 w-full bg-[#1a1a1a] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40 inline-flex items-center justify-center gap-2"
+                    className="mt-2 w-full bg-[#1a1a1a] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40 inline-flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.98]"
+                    style={{ WebkitTapHighlightColor: "transparent" }}
                 >
                     {saving ? (
                         <Loader2 className="w-4 h-4 animate-spin" />
@@ -1500,6 +1503,7 @@ export default function ApplicationPage() {
                     We'll auto-save as you go — feel free to come back and
                     finish later.
                 </p>
+                </div>
             </div>
         </div>
     );
@@ -1507,7 +1511,7 @@ export default function ApplicationPage() {
 
 function Header() {
     return (
-        <header className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-white/90 backdrop-blur-md border-b border-[#eaeaea]">
+        <header className="sticky top-0 z-10 flex items-center justify-between px-4 sm:px-6 py-4 bg-white/90 backdrop-blur-md border-b border-[#eaeaea]">
             <Logo className="h-8" />
         </header>
     );
@@ -1515,7 +1519,7 @@ function Header() {
 
 function Section({ title, index, children }) {
     return (
-        <section className="mb-10 bg-white rounded-xl border border-[#eaeaea] shadow-[0_8px_30px_-12px_rgba(0,0,0,0.04)] p-6 md:p-8">
+        <section className="mb-10 bg-white rounded-xl border border-[#eaeaea] shadow-[0_8px_30px_-12px_rgba(0,0,0,0.04)] p-4 sm:p-6 md:p-8">
             <div className="flex items-center gap-3 mb-6">
                 <span className="text-[10px] font-mono text-[#b0aea6]">
                     {index}
@@ -1545,7 +1549,7 @@ function Row({ label, value, onChange, onBlur, type = "text", testid, hint }) {
                 onChange={(e) => onChange(e.target.value)}
                 onBlur={onBlur}
                 data-testid={testid}
-                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
+                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
             />
             {hint && (
                 <p className="text-[10px] text-[#8b8b8b] font-mono mt-1.5">
@@ -1711,7 +1715,7 @@ function ApplyWorkLinksEditor({ links, onChange }) {
                     "Pepsi - https://youtu.be/xyz\n" +
                     "https://vimeo.com/showreel"
                 }
-                className="w-full bg-white border border-[#eaeaea] rounded-lg p-4 text-[14px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 resize-y font-mono leading-relaxed"
+                className="w-full bg-white border border-[#eaeaea] rounded-lg p-4 text-[16px] md:text-[14px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 resize-y font-mono leading-relaxed"
             />
             <div className="flex items-center gap-2">
                 <span

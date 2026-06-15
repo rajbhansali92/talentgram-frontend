@@ -1622,7 +1622,7 @@ function SubmissionPage() {
                 <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
                 </div>
-                <div className="max-w-xl mx-auto px-6 py-16 md:py-24 tg-fade-up">
+                <div className="max-w-xl mx-auto px-4 sm:px-6 py-16 md:py-24 tg-fade-up">
                     
                     {submission?.status === "retest" && (
                         <div className="mb-8 bg-rose-50/60 border border-rose-200 rounded-3xl p-6 text-left animate-in fade-in slide-in-from-top-4 duration-250">
@@ -3310,7 +3310,7 @@ function FloatingUploadManager({ activeUploads, onRetry, onDismiss }) {
     const failedCount = items.filter(([_, u]) => u.status === "failed").length;
 
     return (
-        <div className="fixed bottom-6 right-6 z-50 max-w-xs w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
+        <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-50 w-[calc(100vw-2rem)] max-w-xs sm:w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
             <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3 cursor-pointer" onClick={() => setCollapsed(!collapsed)}>
                 <div className="flex items-center gap-2">
                     <div className="relative">
@@ -3673,7 +3673,7 @@ function WorkLinksEditor({ links, onChange }) {
                     "Pepsi - https://youtu.be/xyz\n" +
                     "https://vimeo.com/showreel"
                 }
-                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[14px] text-[#111111] placeholder:text-[#333333] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                className="w-full bg-white/60 border border-[#eaeaea] rounded-2xl p-4 text-[16px] md:text-[14px] text-[#111111] placeholder:text-[#333333] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none transition-all duration-200 resize-y font-mono leading-relaxed shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
             />
             <div className="flex items-center gap-2">
                 <span

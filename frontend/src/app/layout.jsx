@@ -4,6 +4,19 @@ import { Toaster } from "sonner";
 
 import { headers } from "next/headers";
 
+/**
+ * viewport-fit=cover is REQUIRED for env(safe-area-inset-*) to work on
+ * iOS Safari (notch, Dynamic Island, home-indicator bar). Without it the
+ * browser clips content to the safe area rectangle and ignores the env().
+ */
+export function generateViewport() {
+  return {
+    width: "device-width",
+    initialScale: 1,
+    viewportFit: "cover",
+  };
+}
+
 export async function generateMetadata() {
   const headersList = await headers();
   const host = headersList.get("host") || "talentgramagency.com";

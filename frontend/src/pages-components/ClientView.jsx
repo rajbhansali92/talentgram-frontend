@@ -8,6 +8,7 @@ import { thumbnailUrl, posterUrl, resolveTalentCover, displayInstagramHandle, in
 import Logo from "@/components/Logo";
 import WorkLinksDisplay, { parseStoredWorkLink } from "@/components/WorkLinksDisplay";
 import { api as axios } from "@/lib/api";
+import { formatTalentLocation } from "@/lib/sanitize";
 import { toast } from "sonner";
 import VoiceRecorder from "@/components/VoiceRecorder";
 import {
@@ -395,9 +396,7 @@ export default function ClientView() {
             const name = (t.name || "").toLowerCase();
             const insta = (t.instagram_handle || "").toLowerCase();
             const id = (t.id || "").toLowerCase();
-            const locText = Array.isArray(t.location)
-                ? t.location.map(l => `${l.city || ""} ${l.country || ""}`).join(" ")
-                : (t.location ? `${t.location.city || ""} ${t.location.country || ""}` : "");
+            const locText = formatTalentLocation(t.location);
             const location = locText.toLowerCase();
 
             return name.includes(query) ||
@@ -1614,12 +1613,8 @@ function TalentDetail({
             if (talent.age) lines.push(`Age: ${talent.age}`);
             if (talent.height) lines.push(`Height: ${talent.height}`);
             if (talent.location) {
-                const locStr = Array.isArray(talent.location)
-                    ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
-                    : (typeof talent.location === 'object' && talent.location !== null
-                        ? `${talent.location.city || ""}, ${talent.location.country || ""}`
-                        : talent.location);
-                lines.push(`Location: ${locStr}`);
+                const locStr = formatTalentLocation(talent.location);
+                if (locStr) lines.push(`Location: ${locStr}`);
             }
             if (talent.ethnicity) lines.push(`Ethnicity: ${talent.ethnicity}`);
             
@@ -2133,11 +2128,7 @@ function TalentDetail({
                                         {vis.location && talent.location && (
                                             <InfoRow 
                                                 label="Location" 
-                                                value={Array.isArray(talent.location)
-                                                    ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
-                                                    : (typeof talent.location === 'object' && talent.location !== null
-                                                        ? `${talent.location.city || ""}, ${talent.location.country || ""}`
-                                                        : talent.location)} 
+                                                value={formatTalentLocation(talent.location)} 
                                             />
                                         )}
                                         {vis.ethnicity && talent.ethnicity && (
@@ -2435,11 +2426,7 @@ function TalentDetail({
                                 {vis.location && talent.location && (
                                     <InfoRow 
                                         label="Location" 
-                                        value={Array.isArray(talent.location)
-                                            ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ")
-                                            : (typeof talent.location === 'object' && talent.location !== null
-                                                ? `${talent.location.city || ""}, ${talent.location.country || ""}`
-                                                : talent.location)} 
+                                        value={formatTalentLocation(talent.location)} 
                                     />
                                 )}
                                 {vis.ethnicity && talent.ethnicity && (
@@ -2686,13 +2673,7 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                         {privatizeName(talent.name)}
                     </div>
                     <div className="text-[11px] text-[#8A8A8A] font-mono tracking-[0.08em] mt-1">
-                        {vis.location && talent.location 
-                            ? (Array.isArray(talent.location) 
-                                ? talent.location.map(l => `${l.city}, ${l.country}`).join("; ") 
-                                : (typeof talent.location === 'object' && talent.location !== null
-                                    ? `${talent.location.city || ""}, ${talent.location.country || ""}`
-                                    : talent.location))
-                            : ""}
+                        {vis.location && talent.location ? formatTalentLocation(talent.location) : ""}
                     </div>
                 </div>
 

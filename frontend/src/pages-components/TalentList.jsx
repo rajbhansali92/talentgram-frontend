@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
+import { formatTalentLocation } from "@/lib/sanitize";
 import { Search, Plus, Check, User, LayoutGrid, List, Tag } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
@@ -132,7 +133,7 @@ const TalentCard = React.memo(function TalentCard({
                     {t.name || "—"}
                 </div>
                 <div className="text-[11px] text-neutral-400 mt-0.5 truncate">
-                    {[t.location, t.category].filter(Boolean).join(" · ") || "\u00a0"}
+                    {[formatTalentLocation(t.location), t.category].filter(Boolean).join(" · ") || "\u00a0"}
                 </div>
                 {/* Compact tag pills — max 2 visible + overflow badge */}
                 {(t.tags || []).length > 0 && (
@@ -371,7 +372,7 @@ const TalentListRow = React.memo(function TalentListRow({
                             {t.gender && <span className="capitalize">{t.gender}</span>}
                             {t.age && <span>· {t.age} yrs</span>}
                             {t.height && <span>· {t.height}</span>}
-                            {t.location && <span className="truncate">· {t.location}</span>}
+                            {formatTalentLocation(t.location) && <span className="truncate">· {formatTalentLocation(t.location)}</span>}
                         </div>
                     </div>
 
@@ -384,8 +385,8 @@ const TalentListRow = React.memo(function TalentListRow({
                     </div>
 
                     {/* Location */}
-                    <div className="hidden md:block md:col-span-2 text-[12px] text-neutral-500 truncate" title={t.location}>
-                        {t.location || "—"}
+                    <div className="hidden md:block md:col-span-2 text-[12px] text-neutral-500 truncate" title={formatTalentLocation(t.location)}>
+                        {formatTalentLocation(t.location) || "—"}
                     </div>
 
                     {/* Media Counts */}
@@ -627,7 +628,7 @@ export default function TalentList() {
             t.name || "",
             t.email || "",
             t.phone || "",
-            t.location || "",
+            formatTalentLocation(t.location) || "",
             t.gender || "",
             t.age || "",
             t.height || "",

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award, List, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
+import { formatTalentLocation } from "@/lib/sanitize";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
 
@@ -1334,11 +1335,9 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#333333] mt-0.5">
                         {talent.age && <span>{talent.age} yrs</span>}
                         {talent.height && <span>· {talent.height}</span>}
-                        {talent.location && (
+                        {formatTalentLocation(talent.location) && (
                             <span className="truncate">
-                                · {Array.isArray(talent.location)
-                                    ? (talent.location[0]?.city || "")
-                                    : String(talent.location).split(",")[0]}
+                                · {formatTalentLocation(talent.location)}
                             </span>
                         )}
                         {talent.instagram_handle && (
@@ -1444,9 +1443,7 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                     <div>
                         <span className="text-[10px] text-[#333333] uppercase font-medium">Location</span>
                         <div className="text-sm font-semibold text-[#111111]">
-                            {Array.isArray(talent.location)
-                                ? (talent.location.map(l => `${l.city}, ${l.country}`).join("; ") || "—")
-                                : (talent.location || "—")}
+                            {formatTalentLocation(talent.location) || "—"}
                         </div>
                     </div>
                     <div>
@@ -2419,11 +2416,9 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
                     <div className="flex items-center gap-1.5 text-[10px] text-[#333333] mb-1">
                         {talent.age && <span>{talent.age} yrs</span>}
                         {talent.height && <span>{talent.height}</span>}
-                        {talent.location && !isMobile && (
+                        {formatTalentLocation(talent.location) && !isMobile && (
                             <span className="truncate">
-                                · {Array.isArray(talent.location)
-                                    ? (talent.location[0]?.city || "")
-                                    : String(talent.location).split(",")[0]}
+                                · {formatTalentLocation(talent.location)}
                             </span>
                         )}
                     </div>

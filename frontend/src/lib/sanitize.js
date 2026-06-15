@@ -7,3 +7,26 @@ export function sanitizeMetadata(str) {
         .replace(/[\x00-\x1F\x7F-\x9F]/g, '')                // Remove ASCII/unicode control characters
         .trim();
 }
+
+export function formatTalentLocation(location) {
+    if (!location) return "";
+    
+    if (typeof location === "string") {
+        return location.trim();
+    }
+    
+    if (Array.isArray(location)) {
+        return location
+            .map(loc => formatTalentLocation(loc))
+            .filter(Boolean)
+            .join("; ");
+    }
+    
+    if (typeof location === "object" && location !== null) {
+        const { city, country } = location;
+        const parts = [city, country].map(s => (s || "").trim()).filter(Boolean);
+        return parts.join(", ");
+    }
+    
+    return "";
+}

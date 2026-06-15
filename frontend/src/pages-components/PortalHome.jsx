@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { User, MapPin, ArrowUpRight, LogOut, Edit3, Briefcase, Award, CheckCircle } from "lucide-react";
 import Logo from "@/components/Logo";
+import { formatTalentLocation } from "@/lib/sanitize";
 import { toast } from "sonner";
 import { api as axios } from "@/lib/api";
 
@@ -103,14 +104,10 @@ export default function PortalHome() {
                             <div className="flex flex-col gap-1.5">
                                 <h1 className="text-2xl md:text-3xl font-semibold text-black tracking-tight">{talent?.name}</h1>
                                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-black/55">
-                                    {talent?.location && (
+                                    {formatTalentLocation(talent?.location) && (
                                         <span className="flex items-center gap-1">
                                             <MapPin className="w-3.5 h-3.5 text-black/40" />
-                                            {Array.isArray(talent.location)
-                                                ? talent.location.map(l => `${l.city || l}, ${l.country || ""}`).join("; ")
-                                                : (typeof talent.location === 'object' && talent.location !== null
-                                                    ? `${talent.location.city || ""}, ${talent.location.country || ""}`
-                                                    : (talent.location || ""))}
+                                            {formatTalentLocation(talent.location)}
                                         </span>
                                     )}
                                     {talent?.height && <span>{talent.height}</span>}

@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { adminApi, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import { toast } from "sonner";
+import WhatsAppShareButton from "@/components/WhatsAppShareButton";
+import { generateClientViewMessage } from "@/lib/whatsappShare";
 import {
     ArrowLeft,
     ExternalLink,
@@ -242,10 +244,7 @@ export default function LinkResults() {
     };
 
     const whatsApp = () => {
-        const msg = encodeURIComponent(
-            `${data.link.title}\n\nCurated portfolio review — ${url}`,
-        );
-        window.open(`https://wa.me/?text=${msg}`, "_blank");
+        window.open(generateClientViewMessage(data.link.title, url), "_blank");
     };
 
     if (error) {
@@ -313,14 +312,10 @@ export default function LinkResults() {
                             >
                                 <Copy className="w-3.5 h-3.5" /> Copy
                             </button>
-                            <button
+                            <WhatsAppShareButton
                                 onClick={whatsApp}
                                 data-testid="results-whatsapp-btn"
-                                className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#25D366] text-white rounded-lg text-xs font-medium hover:opacity-90 transition-colors duration-150"
-                            >
-                                <MessageCircle className="w-3.5 h-3.5" />{" "}
-                                WhatsApp
-                            </button>
+                            />
                             <Link
                                 to={`/admin/links/${id}/edit`}
                                 className="inline-flex items-center gap-2 px-4 py-2.5 border border-black/[0.08] hover:border-black/[0.16] rounded-lg text-xs text-black/70 hover:text-black transition-colors duration-150"

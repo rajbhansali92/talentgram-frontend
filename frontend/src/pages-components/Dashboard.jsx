@@ -13,6 +13,8 @@ import {
     Activity,
 } from "lucide-react";
 import { toast } from "sonner";
+import WhatsAppShareButton from "@/components/WhatsAppShareButton";
+import { generateApplicationMessage } from "@/lib/whatsappShare";
 
 export default function Dashboard() {
     const [stats, setStats] = useState({
@@ -251,10 +253,8 @@ function OnboardingLinkCard() {
     };
 
     const share = () => {
-        const msg = encodeURIComponent(
-            `Hi! Apply to join Talentgram — share your portfolio with us:\n${url}`,
-        );
-        window.open(`https://wa.me/?text=${msg}`, "_blank");
+        const urlWithProtocol = url.startsWith("http") ? url : `https://${url}`;
+        window.open(generateApplicationMessage(urlWithProtocol), "_blank");
     };
 
     return (
@@ -301,14 +301,10 @@ function OnboardingLinkCard() {
                 >
                     <Copy className="w-3.5 h-3.5" /> Copy
                 </button>
-                <button
-                    type="button"
+                <WhatsAppShareButton
                     onClick={share}
                     data-testid="onboarding-whatsapp-btn"
-                    className="inline-flex items-center justify-center gap-2 border border-black/[0.06] hover:border-black/[0.16] px-4 py-2.5 rounded-md text-xs font-medium text-black/70 hover:text-black transition-colors duration-150 active:scale-[0.98] min-h-[40px] flex-1 md:flex-none"
-                >
-                    <Send className="w-3.5 h-3.5" /> WhatsApp
-                </button>
+                />
             </div>
         </div>
     );

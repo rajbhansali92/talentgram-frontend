@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import { toast } from "sonner";
+import WhatsAppShareButton from "@/components/WhatsAppShareButton";
+import { generateClientViewMessage } from "@/lib/whatsappShare";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import {
@@ -103,10 +105,7 @@ export default function LinkHistory() {
 
     const shareWhatsApp = (l) => {
         const url = `${PUBLIC_FRONTEND_URL}/l/${l.slug}`;
-        const msg = encodeURIComponent(
-            `${l.title}\n\nCurated portfolio review — ${url}`,
-        );
-        window.open(`https://wa.me/?text=${msg}`, "_blank");
+        window.open(generateClientViewMessage(l.title, url), "_blank");
     };
 
     const duplicate = async (id) => {
@@ -289,14 +288,13 @@ export default function LinkHistory() {
                                         >
                                             <Copy className="w-3.5 h-3.5" />
                                         </button>
-                                        <button
+                                        <WhatsAppShareButton
                                             onClick={() => shareWhatsApp(l)}
                                             title="WhatsApp"
                                             data-testid={`whatsapp-share-${l.id}`}
-                                            className="p-2 text-black/50 hover:text-black/80 hover:bg-black/[0.04] rounded-md transition-colors duration-150"
-                                        >
-                                            <MessageCircle className="w-3.5 h-3.5" />
-                                        </button>
+                                            label=""
+                                            className="p-2 border-none hover:border-none text-black/55 hover:text-black hover:bg-black/[0.04] rounded-md transition-colors duration-150 min-h-0 h-auto flex-none focus-visible:ring-0 active:scale-100 px-2 py-2 w-auto"
+                                        />
                                         <button
                                             onClick={() => duplicate(l.id)}
                                             title="Duplicate"
@@ -422,13 +420,10 @@ export default function LinkHistory() {
                                         </div>
                                         {/* Secondary Actions (WhatsApp, Duplicate, Delete) */}
                                         <div className="flex gap-2 justify-between">
-                                            <button
+                                            <WhatsAppShareButton
                                                 onClick={() => shareWhatsApp(l)}
-                                                className="flex-1 h-11 inline-flex items-center justify-center gap-2 border border-black/[0.08] hover:bg-black/[0.02] rounded-xl transition-colors duration-150 text-[11px] font-semibold text-black/75 shadow-sm"
-                                            >
-                                                <MessageCircle className="w-4 h-4 text-black/45" />
-                                                <span>WhatsApp</span>
-                                            </button>
+                                                className="flex-1"
+                                            />
                                             {canCreate && (
                                                 <button
                                                     onClick={() => duplicate(l.id)}

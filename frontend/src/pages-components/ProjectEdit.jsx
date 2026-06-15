@@ -3,6 +3,8 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, isAdmin, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
+import WhatsAppShareButton from "@/components/WhatsAppShareButton";
+import { generateSubmissionMessage } from "@/lib/whatsappShare";
 import MaterialModal from "@/components/MaterialModal";
 import BudgetLines from "@/components/BudgetLines";
 import ProjectPipeline from "@/pages-components/ProjectPipeline";
@@ -239,10 +241,7 @@ export default function ProjectEdit() {
     };
 
     const shareWhatsApp = () => {
-        const msg = encodeURIComponent(
-            `Talentgram x ${project.brand_name}\n\nAudition submission link: ${submissionUrl}`,
-        );
-        window.open(`https://wa.me/?text=${msg}`, "_blank");
+        window.open(generateSubmissionMessage(project.brand_name, submissionUrl), "_blank");
     };
 
     const handleCancel = () => {
@@ -1538,14 +1537,10 @@ export default function ProjectEdit() {
                             >
                                 <Copy className="w-3.5 h-3.5" /> Copy
                             </button>
-                            <button
+                            <WhatsAppShareButton
                                 onClick={shareWhatsApp}
                                 data-testid="whatsapp-submit-link-btn"
-                                className="inline-flex items-center gap-2 text-xs px-3 py-2 bg-[#25D366] text-black hover:opacity-90 rounded-sm transition-opacity"
-                            >
-                                <MessageCircle className="w-3.5 h-3.5" />{" "}
-                                WhatsApp
-                            </button>
+                            />
                             <button
                                 type="button"
                                 onClick={() => setCollapsedSections(prev => ({ ...prev, submissionLink: !prev.submissionLink }))}

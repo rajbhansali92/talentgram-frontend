@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { AVAILABILITY_OPTIONS, BUDGET_OPTIONS } from "@/lib/talentSchema";
 import LocationSelector from "@/components/LocationSelector";
+import { formatLocation } from "@/lib/sanitize";
 
 function formatRelativeTime(ts) {
     if (!ts) return "—";
@@ -609,11 +610,7 @@ export default function SubmissionReviewCenter() {
                 }
                 if (sortBy === "location") {
                     const getLocStr = (s) => {
-                        const loc = s.form_data?.location;
-                        if (Array.isArray(loc)) {
-                            return loc[0]?.city || "";
-                        }
-                        return loc || "";
+                        return formatLocation(s.form_data?.location);
                     };
                     const locA = getLocStr(a).toLowerCase();
                     const locB = getLocStr(b).toLowerCase();
@@ -1315,8 +1312,8 @@ export default function SubmissionReviewCenter() {
                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
                                             {PERSONAL_FIELDS.filter(f => fv[f.key] !== false).map(f => {
                                                 let val = form[f.key];
-                                                if (f.key === "location" && Array.isArray(val)) {
-                                                    val = val.map(l => `${l.city}, ${l.country}`).join("; ");
+                                                if (f.key === "location") {
+                                                    val = formatLocation(val);
                                                 } else if (Array.isArray(val)) {
                                                     val = val.join(", ");
                                                 }

@@ -30,3 +30,8 @@ export function formatTalentLocation(location) {
     
     return "";
 }
+
+export function formatLocation(location) {
+    return formatTalentLocation(location);
+}
+

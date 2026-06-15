@@ -16,6 +16,7 @@ import {
     Filter,
 } from "lucide-react";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
+import { formatLocation } from "@/lib/sanitize";
 
 const STATUS_FILTERS = [
     { key: "all", label: "All" },
@@ -241,10 +242,10 @@ function ApplicationCard({ app, onReview, onDecide }) {
                         <Mail className="w-3 h-3 shrink-0 text-black/45" />
                         <span className="truncate">{app.talent_email}</span>
                     </div>
-                    {fd.location && (
+                    {formatLocation(fd.location) && (
                         <div className="flex items-center gap-1.5 truncate">
                             <MapPin className="w-3 h-3 shrink-0 text-black/45" />
-                            <span>{fd.location}</span>
+                            <span>{formatLocation(fd.location)}</span>
                         </div>
                     )}
                     {fd.instagram_handle && (
@@ -429,7 +430,7 @@ function ReviewModal({ app, onClose, onDecide }) {
                         />
                         <Field label="Height" value={fd.height} />
                         <Field label="Gender" value={fd.gender} />
-                        <Field label="Location" value={fd.location} />
+                        <Field label="Location" value={formatLocation(fd.location)} />
                         <Field label="Instagram" value={fd.instagram_handle ? displayInstagramHandle(fd.instagram_handle) : null} />
                         <Field label="Followers" value={fd.instagram_followers} />
                         {fd.skills && fd.skills.length > 0 && (

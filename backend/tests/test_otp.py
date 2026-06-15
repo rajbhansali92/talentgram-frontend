@@ -132,6 +132,9 @@ async def test_verify_otp_success_new_user():
     mock_db.talents = MagicMock()
     mock_db.talents.find_one = AsyncMock(return_value=None)
     mock_db.talents.insert_one = AsyncMock()
+    mock_db.submission_drafts = MagicMock()
+    mock_db.submission_drafts.find_one = AsyncMock(return_value=None)
+    mock_db.submission_drafts.insert_one = AsyncMock()
 
     with patch("routers.auth.db", mock_db):
         response = client.post("/api/auth/otp/verify", json={
@@ -143,7 +146,9 @@ async def test_verify_otp_success_new_user():
         data = response.json()
         assert data["existing"] is False
         assert data["email"] == "actor@yahoo.com"
-        mock_db.talents.insert_one.assert_called_once()
+        mock_db.talents.insert_one.assert_not_called()
+        mock_db.submission_drafts.insert_one.assert_called_once()
+
 
 @pytest.mark.asyncio
 async def test_verify_otp_success_returning_user():

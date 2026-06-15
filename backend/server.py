@@ -250,12 +250,72 @@ async def run_media_duplicate_cleanup_migration() -> None:
     logger.info("== MEDIA DUPLICATE CLEANUP MIGRATION COMPLETED ==")
 
 
+async def run_draft_talent_migration():
+    logger.info("== STARTING DRAFT TALENT CLEANUP & MIGRATION CHECK ==")
+    cursor = db.talents.find({})
+    talents = await cursor.to_list(length=10000)
+    migrated_count = 0
+    
+    for t in talents:
+        email = t.get("email")
+        if not email:
+            continue
+            
+        sub = await db.submissions.find_one({
+            "talent_email": email,
+            "status": {"$in": ["submitted", "updated", "shortlisted", "selected", "rejected"]}
+        })
+        app = await db.applications.find_one({
+            "talent_email": email,
+            "status": {"$in": ["submitted", "updated", "shortlisted", "selected", "rejected"]}
+        })
+        
+        if not sub and not app:
+            draft_id = t.get("id")
+            existing_draft = await db.submission_drafts.find_one({"email": email})
+            if not existing_draft:
+                new_draft = {
+                    "draft_id": draft_id,
+                    "project_id": "apply",
+                    "email": email,
+                    "google_id": t.get("google_id"),
+                    "draft_status": "draft",
+                    "form_data": {
+                        "first_name": t.get("name", "").split(" ")[0] if t.get("name") else "",
+                        "last_name": " ".join(t.get("name", "").split(" ")[1:]) if t.get("name") else "",
+                        "email": email,
+                        "phone": t.get("phone", ""),
+                        "location": t.get("location", []),
+                        "dob": t.get("dob", ""),
+                        "gender": t.get("gender", ""),
+                        "skills": t.get("skills", []),
+                        "work_links": t.get("work_links", []),
+                        "bio": t.get("bio", ""),
+                    },
+                    "created_at": t.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                await db.submission_drafts.insert_one(new_draft)
+            
+            await db.talents.delete_one({"id": t["id"]})
+            migrated_count += 1
+            logger.info("Migrated unsubmitted draft talent %s to submission_drafts", email)
+            
+    res = await db.talents.update_many(
+        {"status": {"$exists": False}},
+        {"$set": {"status": "SUBMITTED"}}
+    )
+    logger.info("Updated %d existing talents to status='SUBMITTED'", res.modified_count)
+    logger.info("== DRAFT TALENT CLEANUP & MIGRATION COMPLETED (migrated %d) ==", migrated_count)
+
+
 @app.on_event("startup")
 async def on_startup():
     try:
         logger.info("Starting Talentgram backend...")
 
         await run_media_duplicate_cleanup_migration()
+        await run_draft_talent_migration()
 
         await seed_admin()
         logger.info("Admin seed complete")

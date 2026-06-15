@@ -1043,6 +1043,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 },
                 "media": [],                 # keep global media separate (spec: media must NOT merge)
                 "cover_media_id": None,
+                "status": "SUBMITTED",
                 "created_at": _now(),
                 "created_by": "auto-audition",
             }
@@ -1401,6 +1402,7 @@ async def set_decision(
                 },
                 "media": [],
                 "cover_media_id": None,
+                "status": "SUBMITTED",
                 "created_at": _now(),
                 "created_by": "auto-decision-sync",
             }

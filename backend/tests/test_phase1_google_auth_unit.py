@@ -4,6 +4,17 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import sys
 import os
 
+os.environ["MONGO_URL"] = "mongodb://localhost:27017"
+os.environ["DB_NAME"] = "test"
+os.environ["JWT_SECRET"] = "dummy"
+os.environ["RESEND_API_KEY"] = "dummy"
+os.environ["SENDGRID_API_KEY"] = "dummy"
+os.environ["CLOUDINARY_CLOUD_NAME"] = "dummy"
+os.environ["CLOUDINARY_API_KEY"] = "dummy"
+os.environ["CLOUDINARY_API_SECRET"] = "dummy"
+os.environ["ADMIN_EMAIL"] = "admin@talentgram.co"
+os.environ["ADMIN_PASSWORD"] = "password"
+
 # Adjust path to find backend
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -20,9 +31,13 @@ async def test_google_auth_endpoint_new_talent():
     mock_db = MagicMock()
     mock_db.talents = MagicMock()
     mock_db.talents.find_one = AsyncMock(return_value=None)
+    mock_db.submission_drafts = MagicMock()
+    mock_db.submission_drafts.find_one = AsyncMock(return_value=None)
+    mock_db.submission_drafts.insert_one = AsyncMock()
     
-    with patch("requests.post", return_value=mock_response), \
-         patch("jwt.decode", return_value={
+    mock_post = AsyncMock(return_value=mock_response)
+    with patch("httpx.AsyncClient.post", mock_post), \
+         patch("google.oauth2.id_token.verify_oauth2_token", return_value={
              "email": "new@talentgram.com",
              "sub": "google123",
              "name": "New Talent",
@@ -42,6 +57,8 @@ async def test_google_auth_endpoint_new_talent():
         assert data["email"] == "new@talentgram.com"
         assert data["google_id"] == "google123"
         assert data["name"] == "New Talent"
+        mock_db.submission_drafts.insert_one.assert_called_once()
+
 
 @pytest.mark.asyncio
 async def test_google_auth_endpoint_existing_talent_no_submission():
@@ -67,8 +84,9 @@ async def test_google_auth_endpoint_existing_talent_no_submission():
     mock_db.submissions = MagicMock()
     mock_db.submissions.find_one = AsyncMock(return_value=None)
     
-    with patch("requests.post", return_value=mock_response), \
-         patch("jwt.decode", return_value={
+    mock_post = AsyncMock(return_value=mock_response)
+    with patch("httpx.AsyncClient.post", mock_post), \
+         patch("google.oauth2.id_token.verify_oauth2_token", return_value={
              "email": "existing@talentgram.com",
              "sub": "google456",
              "name": "Existing Talent",
@@ -120,8 +138,9 @@ async def test_google_auth_endpoint_existing_talent_with_submission():
         "status": "draft"
     })
     
-    with patch("requests.post", return_value=mock_response), \
-         patch("jwt.decode", return_value={
+    mock_post = AsyncMock(return_value=mock_response)
+    with patch("httpx.AsyncClient.post", mock_post), \
+         patch("google.oauth2.id_token.verify_oauth2_token", return_value={
              "email": "existing@talentgram.com",
              "sub": "google456",
              "name": "Existing Talent",

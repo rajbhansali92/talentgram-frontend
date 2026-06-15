@@ -561,6 +561,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
             "talent_email": app_doc.get("talent_email"),
             "reference_id": app_doc["id"],
         },
+        "status": "SUBMITTED",
         "created_at": _now(),
         "created_by": admin_id,
     }

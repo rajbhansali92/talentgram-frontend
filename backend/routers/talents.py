@@ -78,6 +78,7 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
     doc.update({
         "id": str(uuid.uuid4()),
         "media": [],
+        "status": "SUBMITTED",
         # Phase 0: standardised source shape.
         "source": {
             "type": "admin",
@@ -209,7 +210,7 @@ async def list_talents(
     limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
-    query: Dict[str, Any] = {}
+    query: Dict[str, Any] = {"status": {"$ne": "DRAFT"}}
     if q:
         needle = q.strip()
         terms = [t for t in re.split(r"[\s+\-,;]+", needle) if t]
@@ -286,6 +287,7 @@ async def search_talents(
 
     rgx = {"$regex": re.escape(needle), "$options": "i"}
     query = {
+        "status": {"$ne": "DRAFT"},
         "$or": [
             {"name": rgx},
             {"email": rgx},
@@ -338,7 +340,7 @@ async def bulk_talents(
         return {"success": True, "data": []}
 
     cursor = db.talents.find(
-        {"id": {"$in": ids}},
+        {"id": {"$in": ids}, "status": {"$ne": "DRAFT"}},
         {
             "_id": 0,
             "id": 1,

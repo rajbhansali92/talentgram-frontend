@@ -125,6 +125,22 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
 
     talent = await db.talents.find_one({"email": email})
     if not talent:
+        # STEP 3: Store a temporary submission draft instead of creating a Talent record.
+        draft = await db.submission_drafts.find_one({"email": email, "project_id": payload.slug or "apply"})
+        if not draft:
+            draft_id = str(uuid.uuid4())
+            new_draft = {
+                "draft_id": draft_id,
+                "project_id": payload.slug or "apply",
+                "email": email,
+                "google_id": google_id,
+                "draft_status": "draft",
+                "form_data": {},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.submission_drafts.insert_one(new_draft)
+
         return {
             "existing": False,
             "email": email,
@@ -821,25 +837,24 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
             "talent": await _get_talent_profile_response(talent)
         }
 
-    new_talent_id = str(uuid.uuid4())
-    new_talent = {
-        "id": new_talent_id,
-        "email": email,
-        "auth_method": "otp",
-        "created_at": now.isoformat(),
-        "name": "",
-        "phone": "",
-        "location": "",
-        "dob": "",
-        "gender": "",
-        "media": [],
-        "work_links": [],
-        "skills": []
-    }
-    await db.talents.insert_one(new_talent)
+    # STEP 3: Store a temporary submission draft instead of creating a Talent record.
+    draft = await db.submission_drafts.find_one({"email": email, "project_id": slug or "apply"})
+    if not draft:
+        draft_id = str(uuid.uuid4())
+        new_draft = {
+            "draft_id": draft_id,
+            "project_id": slug or "apply",
+            "email": email,
+            "google_id": None,
+            "draft_status": "draft",
+            "form_data": {},
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat()
+        }
+        await db.submission_drafts.insert_one(new_draft)
 
     return {
         "existing": False,
         "email": email,
-        "message": "New profile created successfully."
+        "message": "Verification successful. Draft submission initialized."
     }

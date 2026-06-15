@@ -17,6 +17,7 @@ from core import (
     _paginated,
     cloudinary_destroy,
     cloudinary_upload,
+    upload_and_track_asset,
     compute_age,
     current_admin,
     current_team_or_admin,
@@ -489,15 +490,19 @@ async def add_media(
         raise HTTPException(404, "Talent not found")
 
     media_id = str(uuid.uuid4())
-    folder = f"{APP_NAME}/talents/{tid}"
     data = await file.read()
     rt = "video" if category == "video" else "image"
-    result = cloudinary_upload(
+    asset_type = "portfolio_video" if category == "video" else "profile_image"
+
+    result = await upload_and_track_asset(
         data,
-        folder=folder,
-        public_id=media_id,
         resource_type=rt,
         content_type=file.content_type,
+        asset_type=asset_type,
+        talent_id=tid,
+        talent_name=talent.get("name"),
+        user_id=admin.get("id"),
+        keep_original=True,
     )
     is_video = rt == "video"
     is_image = rt == "image"

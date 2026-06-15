@@ -425,6 +425,238 @@ def cloudinary_upload(
     }
 
 
+def _slugify(name: str) -> str:
+    if not name:
+        return "unnamed"
+    return re.sub(r'[^a-zA-Z0-9_]', '', name.lower().replace(' ', '_'))
+
+
+async def log_storage_action(
+    user_id: Optional[str],
+    action_type: str, # 'UPLOAD', 'ARCHIVE', 'RESTORE', 'DELETE'
+    public_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    talent_id: Optional[str] = None,
+    submission_id: Optional[str] = None
+):
+    doc = {
+        "user_id": user_id,
+        "timestamp": datetime.now(timezone.utc),
+        "action_type": action_type,
+        "public_id": public_id,
+        "project_id": project_id,
+        "talent_id": talent_id,
+        "submission_id": submission_id
+    }
+    await db.storage_audit_log.insert_one(doc)
+
+
+async def upload_and_track_asset(
+    data: bytes,
+    resource_type: str,
+    content_type: Optional[str],
+    asset_type: str,
+    talent_id: str,
+    talent_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    submission_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    keep_original: bool = True,
+) -> dict:
+    # Lookup talent name if not provided
+    if not talent_name and talent_id:
+        talent_doc = await db.talents.find_one({"id": talent_id})
+        if talent_doc:
+            talent_name = talent_doc.get("name") or "unnamed"
+
+    talent_name_slug = _slugify(talent_name)
+    if project_id and submission_id:
+        folder = f"talentgram/projects/{project_id}/auditions/{talent_id}_{talent_name_slug}/submission_{submission_id}"
+    else:
+        subfolder = {
+            "profile_image": "profile_images",
+            "intro_video": "intro_video",
+            "portfolio_video": "portfolio_videos",
+        }.get(asset_type, f"{asset_type}s")
+        folder = f"talentgram/talents/{talent_id}_{talent_name_slug}/{subfolder}"
+
+    tags = []
+    if project_id:
+        tags.append(f"project_id={project_id}")
+    if talent_id:
+        tags.append(f"talent_id={talent_id}")
+    if submission_id:
+        tags.append(f"submission_id={submission_id}")
+    if asset_type:
+        tags.append(f"asset_type={asset_type}")
+
+    media_id = str(uuid.uuid4())
+    public_id_to_store = f"{folder}/{media_id}" if keep_original else f"{folder}/audition_web"
+
+    # Database First: Insert pending metadata record
+    pending_metadata = {
+        "public_id": public_id_to_store,
+        "asset_id": f"pending_{media_id}",
+        "folder_path": folder,
+        "asset_url": "",
+        "secure_url": "",
+        "file_name": "audition_web" if not keep_original else media_id,
+        "original_filename": f"{media_id}",
+        "file_size": len(data),
+        "asset_type": asset_type,
+        "project_id": project_id,
+        "talent_id": talent_id,
+        "submission_id": submission_id,
+        "tags": tags,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "upload_status": "pending",
+        "project_status": "active",
+        "submission_status": "submitted",
+        "width": None,
+        "height": None,
+        "duration": None,
+        "mime_type": content_type,
+        "resource_type": resource_type
+    }
+    await db.asset_metadata.update_one(
+        {"public_id": public_id_to_store},
+        {"$set": pending_metadata},
+        upsert=True
+    )
+
+    # 2. Synchronize to Cloudinary
+    if resource_type == "video" and not keep_original:
+        temp_public_id = f"original_{media_id}"
+        temp_result = cloudinary_upload(
+            data,
+            folder=folder,
+            public_id=temp_public_id,
+            resource_type="video",
+            content_type=content_type,
+            keep_original=True
+        )
+
+        eager_trans = [
+            {"width": 1920, "height": 1080, "crop": "limit", "video_codec": "h264", "bit_rate": "5m", "quality": "auto"},
+        ]
+        cloudinary_upload_args = {
+            "folder": folder,
+            "public_id": temp_public_id,
+            "resource_type": "video",
+            "overwrite": True,
+            "unique_filename": False,
+            "eager": [
+                {
+                    "format": "mp4",
+                    "transformation": eager_trans
+                },
+                {
+                    "format": "jpg",
+                    "transformation": [{"width": 600, "height": 338, "crop": "fill", "quality": "auto"}]
+                }
+            ],
+            "tags": tags
+        }
+        res = cloudinary.uploader.upload(data, **cloudinary_upload_args)
+
+        mp4_url = None
+        jpg_url = None
+        for eager_item in res.get("eager", []):
+            if eager_item.get("format") == "mp4":
+                mp4_url = eager_item.get("secure_url")
+            elif eager_item.get("format") == "jpg":
+                jpg_url = eager_item.get("secure_url")
+
+        if not mp4_url:
+            mp4_url = res.get("secure_url")
+
+        final_video_res = cloudinary.uploader.upload(
+            mp4_url,
+            folder=folder,
+            public_id="audition_web",
+            resource_type="video",
+            tags=tags
+        )
+
+        if jpg_url:
+            final_thumb_res = cloudinary.uploader.upload(
+                jpg_url,
+                folder=folder,
+                public_id="thumbnail",
+                resource_type="image",
+                tags=tags
+            )
+        else:
+            final_thumb_res = {}
+
+        cloudinary_destroy(f"{folder}/{temp_public_id}", resource_type="video")
+
+        result = {
+            "url": final_video_res.get("secure_url"),
+            "secure_url": final_video_res.get("secure_url"),
+            "public_id": final_video_res.get("public_id"),
+            "resource_type": "video",
+            "format": final_video_res.get("format"),
+            "bytes": final_video_res.get("bytes"),
+            "width": final_video_res.get("width"),
+            "height": final_video_res.get("height"),
+            "duration": final_video_res.get("duration"),
+            "asset_id": final_video_res.get("asset_id"),
+            "thumbnail_url": final_thumb_res.get("secure_url")
+        }
+    else:
+        upload_res = cloudinary_upload(
+            data,
+            folder=folder,
+            public_id=media_id,
+            resource_type=resource_type,
+            content_type=content_type,
+            keep_original=True
+        )
+        cloudinary.uploader.add_tag(",".join(tags), upload_res["public_id"])
+
+        result = {
+            "url": upload_res["url"],
+            "secure_url": upload_res["original_url"],
+            "public_id": upload_res["public_id"],
+            "resource_type": upload_res["resource_type"],
+            "format": upload_res["format"],
+            "bytes": upload_res["bytes"],
+            "width": upload_res["width"],
+            "height": upload_res["height"],
+            "duration": upload_res["duration"],
+            "asset_id": upload_res.get("asset_id") or upload_res["public_id"]
+        }
+
+    final_metadata = {
+        "asset_id": result.get("asset_id") or result["public_id"],
+        "asset_url": result["url"],
+        "secure_url": result["secure_url"],
+        "file_size": result.get("bytes") or len(data),
+        "upload_status": "completed",
+        "width": result.get("width"),
+        "height": result.get("height"),
+        "duration": result.get("duration"),
+        "updated_at": datetime.now(timezone.utc)
+    }
+    await db.asset_metadata.update_one(
+        {"public_id": result["public_id"]},
+        {"$set": final_metadata}
+    )
+
+    await log_storage_action(
+        user_id=user_id,
+        action_type="UPLOAD",
+        public_id=result["public_id"],
+        project_id=project_id,
+        talent_id=talent_id,
+        submission_id=submission_id
+    )
+
+    return result
+
+
 def cloudinary_destroy(public_id: str, resource_type: str = "image") -> bool:
     """Best-effort delete on Cloudinary. Returns True if deleted, False if
     asset was already missing or deletion failed (logged, never raises)."""

@@ -18,6 +18,7 @@ import AdminFeedback from "@/pages/AdminFeedback";
 import MarketingHub from "@/pages/MarketingHub";
 import NotificationsPage from "@/pages/NotificationsPage";
 import WorkflowPage from "@/pages/WorkflowPage";
+import StorageDashboard from "@/pages/StorageDashboard";
 
 export default function AdminApp() {
     return (
@@ -50,6 +51,7 @@ export default function AdminApp() {
                     <Route path="marketing" element={<MarketingHub />} />
                     <Route path="notifications" element={<NotificationsPage />} />
                     <Route path="workflow" element={<WorkflowPage />} />
+                    <Route path="storage" element={<StorageDashboard />} />
                 </Route>
                 <Route path="*" element={<Navigate to="/admin" replace />} />
             </Routes>

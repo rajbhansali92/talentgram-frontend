@@ -19,6 +19,7 @@ import {
   X,
   AlertCircle,
   ListTodo,
+  Cloud,
 } from "lucide-react";
 
 // ============================================================================
@@ -92,6 +93,7 @@ export const NAV_ITEMS = {
   ],
   adminOnly: [
     { to: "/admin/users", label: "Users", icon: Shield, adminOnly: true },
+    { to: "/admin/storage", label: "Storage", icon: Cloud, adminOnly: true },
   ],
 };
 

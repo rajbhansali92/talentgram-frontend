@@ -28,6 +28,7 @@ from core import (
     _resolve_cover_url,
     _submission_to_client_shape,
     cloudinary_upload,
+    upload_and_track_asset,
     compute_age,
     compute_effective_age,
     current_admin,
@@ -596,13 +597,34 @@ async def submission_upload(
 
     # v37m — direct Cloudinary upload.
     rt = "video" if is_video_slot else "image"
-    result = cloudinary_upload(
+    
+    if is_video_slot:
+        asset_type = "intro_video" if category == "intro_video" else "audition_video"
+    else:
+        asset_type = "profile_image"
+        
+    keep_orig = (asset_type != "audition_video")
+    
+    tid = sub.get("talent_id")
+    tname = sub.get("talent_name")
+    if not tid:
+        talent_doc = await db.talents.find_one({"email": sub.get("talent_email")})
+        if talent_doc:
+            tid = talent_doc.get("id")
+            tname = talent_doc.get("name")
+    if not tid:
+        tid = "unknown_talent"
+
+    result = await upload_and_track_asset(
         data,
-        folder=folder,
-        public_id=media_id,
         resource_type=rt,
         content_type=file.content_type,
-        keep_original=False,
+        asset_type=asset_type,
+        talent_id=tid,
+        talent_name=tname,
+        project_id=sub.get("project_id"),
+        submission_id=sid,
+        keep_original=keep_orig,
     )
     is_video = rt == "video"
     is_image = rt == "image"
@@ -620,8 +642,8 @@ async def submission_upload(
         "submission_id": sid,
         "project_id": sub["project_id"],
         "duration": result.get("duration"),
-        "thumbnail_url": media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image else None,
-        "poster_url": video_poster_url(result["public_id"]) if is_video else None,
+        "thumbnail_url": result.get("thumbnail_url") if (is_video and result.get("thumbnail_url")) else (media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image else None),
+        "poster_url": result.get("thumbnail_url") if (is_video and result.get("thumbnail_url")) else (video_poster_url(result["public_id"]) if is_video else None),
     }
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"

@@ -28,6 +28,7 @@ from routers import (
     users,
     workflow,
     portal,
+    cloudinary_admin,
 )
 
 app = FastAPI(title="Talentgram Portfolio Engine")
@@ -105,6 +106,7 @@ app.include_router(feedback.router)
 app.include_router(casting_pipeline.router)
 app.include_router(workflow.router)
 app.include_router(portal.router)
+app.include_router(cloudinary_admin.router)
 
 
 # CORS — env-var driven with Vercel preview regex fallback.

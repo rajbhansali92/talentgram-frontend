@@ -484,14 +484,22 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
     config = None
     profile_id = app_doc.get("profile_id")
     if profile_id:
-        config = await db.profile_configs.find_one({"id": profile_id})
+        try:
+            config = await db.profile_configs.find_one({"id": profile_id})
+        except Exception:
+            config = None
+
     if not config:
-        config = await db.profile_configs.find_one({"key": "global_onboarding"})
+        try:
+            config = await db.profile_configs.find_one({"key": "global_onboarding"})
+        except Exception:
+            config = None
+
     if not config:
         config = DEFAULT_ONBOARDING_CONFIG
 
-    prof_reqs = config.get("profile_requirements", DEFAULT_ONBOARDING_CONFIG["profile_requirements"])
-    port_reqs = config.get("portfolio_requirements", DEFAULT_ONBOARDING_CONFIG["portfolio_requirements"])
+    prof_reqs = config.get("profile_requirements") or DEFAULT_ONBOARDING_CONFIG["profile_requirements"]
+    port_reqs = config.get("portfolio_requirements") or DEFAULT_ONBOARDING_CONFIG["portfolio_requirements"]
 
     # 1. Profile Requirements Validation
     if prof_reqs.get("name") == "required":

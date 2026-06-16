@@ -1491,7 +1491,7 @@ export default function ApplicationPage() {
                         <div>
                             <div className="flex items-center justify-between mb-1">
                                 <p className="text-sm text-[#1a1a1a] font-medium">
-                                    Introduction Video <span className="text-[#8b8b8b] text-xs ml-1">(optional)</span>
+                                    Introduction Video
                                 </p>
                                 {intro && (
                                     <button
@@ -1538,9 +1538,9 @@ export default function ApplicationPage() {
                             />
                         </div>
 
-                        {/* Phase 2 — optional Indian/Western look images */}
+                        {/* Phase 2 Looks */}
                         <ApplyLookGroup
-                            label="Indian Look (optional)"
+                            label="Indian Look"
                             hint="Saree, lehenga, sherwani, or traditional/Indian-look references."
                             items={indianImages}
                             category="indian"
@@ -1553,7 +1553,7 @@ export default function ApplicationPage() {
                             testidPrefix="indian"
                         />
                         <ApplyLookGroup
-                            label="Western Look (optional)"
+                            label="Western Look"
                             hint="Casual, formal or western-styled references."
                             items={westernImages}
                             category="western"

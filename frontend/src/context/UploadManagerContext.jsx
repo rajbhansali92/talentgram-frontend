@@ -1,7 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState } from "react";
-import axios from "axios";
+import { api } from "../lib/api";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
 
@@ -106,7 +106,7 @@ export function UploadManagerProvider({ children }) {
                     headers["Authorization"] = `Bearer ${dynamicToken}`;
                 }
 
-                const { data } = await axios.post(dynamicEndpoint, fd, {
+                const { data } = await api.post(dynamicEndpoint, fd, {
                     headers,
                     timeout: 0, // No per-request timeout
                     onUploadProgress: (e) => {

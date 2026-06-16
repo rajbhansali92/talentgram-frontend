@@ -361,6 +361,82 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
         {"id": aid},
         {"$set": {"status": "submitted", "submitted_at": _now()}},
     )
+
+    # Fetch updated application document for talent sync
+    updated_app = await db.applications.find_one({"id": aid})
+    email = updated_app.get("talent_email")
+    if email:
+        email = email.lower().strip()
+        existing_talent = await db.talents.find_one(
+            {"$or": [{"email": email}, {"source.talent_email": email}]}
+        )
+        if existing_talent:
+            fd = updated_app.get("form_data") or {}
+            dob = (fd.get("dob") or "").strip() or None
+            age = compute_age(dob) if dob else None
+            
+            new_media = []
+            cover_mid = None
+            for m in updated_app.get("media", []) or []:
+                cat = m.get("category")
+                if cat == "image":
+                    new_cat = "portfolio"
+                elif cat == "indian":
+                    new_cat = "indian"
+                elif cat == "western":
+                    new_cat = "western"
+                elif cat == "intro_video":
+                    new_cat = "video"
+                else:
+                    continue
+                mid = m.get("id") or str(uuid.uuid4())
+                new_media.append({
+                    "id": mid,
+                    "category": new_cat,
+                    "url": m.get("url"),
+                    "public_id": m.get("public_id"),
+                    "resource_type": m.get("resource_type"),
+                    "content_type": m.get("content_type", "application/octet-stream"),
+                    "original_filename": m.get("original_filename"),
+                    "size": m.get("size", 0),
+                    "created_at": m.get("created_at") or _now(),
+                    "scope": "talent_portfolio",
+                    "talent_id": existing_talent["id"],
+                    "duration": m.get("duration"),
+                    "poster_url": m.get("poster_url"),
+                })
+                if new_cat in ("portfolio", "indian", "western") and not cover_mid:
+                    cover_mid = mid
+
+            VALID_INTERESTS = {
+                "Acting", "Modeling", "Print Campaigns", "TV Commercials",
+                "Digital Ads", "Instagram Collaborations", "Influencer Campaigns",
+                "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
+                "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
+            }
+            raw_interests = fd.get("interested_in") or []
+            interested_in = [i for i in raw_interests if isinstance(i, str) and i.strip() in VALID_INTERESTS]
+
+            update = {
+                "name": f"{fd.get('first_name','')} {fd.get('last_name','')}".strip() or updated_app.get("talent_name"),
+                "phone": (fd.get("phone") or updated_app.get("talent_phone") or None),
+                "age": age,
+                "dob": dob,
+                "height": fd.get("height") or None,
+                "location": fd.get("location") or None,
+                "ethnicity": fd.get("ethnicity") or None,
+                "gender": fd.get("gender") or None,
+                "instagram_handle": normalize_instagram_handle(fd.get("instagram_handle") or None),
+                "instagram_followers": fd.get("instagram_followers") or None,
+                "bio": fd.get("bio") or None,
+                "work_links": [w for w in (fd.get("work_links") or []) if isinstance(w, str) and w.strip()],
+                "skills": [s for s in (fd.get("skills") or []) if isinstance(s, str) and s.strip()],
+                "cover_media_id": cover_mid,
+                "interested_in": interested_in,
+                "media": new_media,
+            }
+            await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update})
+            await update_talent_cover_cache(existing_talent["id"])
     return {"ok": True}
 
 

@@ -58,6 +58,7 @@ export default function ApplicationPage() {
     const [token, setToken] = useState(null);
     const [finalized, setFinalized] = useState(false);
     const [hydrating, setHydrating] = useState(false);
+    const [isEditMode, setIsEditMode] = useState(false);
     const [basics, setBasics] = useState({
         first_name: "",
         last_name: "",
@@ -220,7 +221,10 @@ export default function ApplicationPage() {
                         console.log("[ApplicationPage] Fetch successful. Hydrating form fields.");
                         setForm((f) => ({ ...f, ...(data.form_data || {}) }));
                         setMedia(data.media || []);
-                        if (data.status === "submitted") setFinalized(true);
+                        if (data.status === "submitted") {
+                            setFinalized(true);
+                            setIsEditMode(true);
+                        }
                     } catch (err) {
                         console.error("[ApplicationPage] Hydration request failed. Invalid or expired token. Status:", err?.response?.status, err?.response?.data);
                         // expired/invalid token — reset
@@ -617,6 +621,7 @@ export default function ApplicationPage() {
                         finalMedia = appData.media || [];
                         setForm(finalForm);
                         setMedia(finalMedia);
+                        setIsEditMode(true);
                         if (appData.status === "submitted") setFinalized(true);
                     }
                 } catch (fetchErr) {
@@ -743,6 +748,7 @@ export default function ApplicationPage() {
                 { headers: { Authorization: `Bearer ${token}` } }
             );
             console.log("[enableEditing] Edit mode enabled by backend. Enabling form editing.");
+            setIsEditMode(true);
             setFinalized(false);
             localStorage.setItem(
                 LS_KEY,
@@ -1114,18 +1120,25 @@ export default function ApplicationPage() {
                         <div className="w-14 h-14 rounded-full bg-[#e6f7e6] text-[#2b6e2f] inline-flex items-center justify-center mb-6">
                             <Check className="w-6 h-6" />
                         </div>
-                        <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">Submitted</p>
+                        <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">
+                            {isEditMode ? "Saved" : "Submitted"}
+                        </p>
                         <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a] mb-4">
-                            Thank you, {basics.first_name}
+                            {isEditMode ? "Profile Updated" : `Thank you, ${basics.first_name}`}
                         </h1>
                         <p className="text-[#4a4a4a] text-sm leading-relaxed mb-4">
-                            Your profile has been successfully submitted.
+                            {isEditMode 
+                                ? "Your changes have been saved."
+                                : "Your profile has been successfully submitted."
+                            }
                         </p>
-                        <p className="text-[#4a4a4a] text-sm leading-relaxed mb-6">
-                            Our team carefully reviews every application. If any additional
-                            information, materials, or next steps are required, a member of
-                            our team will contact you directly.
-                        </p>
+                        {!isEditMode && (
+                            <p className="text-[#4a4a4a] text-sm leading-relaxed mb-6">
+                                Our team carefully reviews every application. If any additional
+                                information, materials, or next steps are required, a member of
+                                our team will contact you directly.
+                            </p>
+                        )}
                         <div className="text-xs text-[#8b8b8b] font-medium mb-6">
                             Thank you for your interest in joining Talentgram.
                         </div>

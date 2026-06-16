@@ -597,11 +597,27 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
                 "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
                 "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
             }
-            raw_interests = fd.get("interested_in") or []
+            raw_interests = fd.get("interested_in")
+            if not isinstance(raw_interests, list):
+                raw_interests = [raw_interests] if raw_interests else []
             interested_in = [i for i in raw_interests if isinstance(i, str) and i.strip() in VALID_INTERESTS]
 
+            first_name = fd.get("first_name") or ""
+            last_name = fd.get("last_name") or ""
+            name_combined = f"{first_name} {last_name}".strip()
+
+            raw_work_links = fd.get("work_links")
+            if not isinstance(raw_work_links, list):
+                raw_work_links = [raw_work_links] if raw_work_links else []
+            work_links = [w for w in raw_work_links if isinstance(w, str) and w.strip()]
+
+            raw_skills = fd.get("skills")
+            if not isinstance(raw_skills, list):
+                raw_skills = [raw_skills] if raw_skills else []
+            skills = [s for s in raw_skills if isinstance(s, str) and s.strip()]
+
             update = {
-                "name": f"{fd.get('first_name','')} {fd.get('last_name','')}".strip() or updated_app.get("talent_name"),
+                "name": name_combined or updated_app.get("talent_name") or "Unnamed",
                 "phone": (fd.get("phone") or updated_app.get("talent_phone") or None),
                 "age": age,
                 "dob": dob,
@@ -609,11 +625,11 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
                 "location": fd.get("location") or None,
                 "ethnicity": fd.get("ethnicity") or None,
                 "gender": fd.get("gender") or None,
-                "instagram_handle": normalize_instagram_handle(fd.get("instagram_handle") or None),
+                "instagram_handle": normalize_instagram_handle(fd.get("instagram_handle") or None) if fd.get("instagram_handle") else None,
                 "instagram_followers": fd.get("instagram_followers") or None,
                 "bio": fd.get("bio") or None,
-                "work_links": [w for w in (fd.get("work_links") or []) if isinstance(w, str) and w.strip()],
-                "skills": [s for s in (fd.get("skills") or []) if isinstance(s, str) and s.strip()],
+                "work_links": work_links,
+                "skills": skills,
                 "cover_media_id": cover_mid,
                 "interested_in": interested_in,
                 "media": new_media,

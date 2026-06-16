@@ -13,6 +13,7 @@ Admin:
   GET   /api/applications/{aid}          -> full doc
   POST  /api/applications/{aid}/decision -> approve/reject (approval pushes to master Talents DB)
 """
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -213,6 +214,30 @@ async def delete_admin_profile_config(id: str, admin: dict = Depends(current_tea
 # Talent → Application reconciliation
 # ---------------------------------------------------------------------------
 
+
+async def _find_talent_by_email(email: str) -> Optional[Dict]:
+    """Look up a talent by email using a case-insensitive regex.
+
+    MongoDB exact-match is case-sensitive, so stored emails with different
+    casing or surrounding whitespace would silently return None.
+    This helper normalizes both sides before matching.
+
+    Temporary diagnostic logging is included — remove once confirmed working.
+    """
+    email_norm = email.lower().strip()
+    email_regex = re.compile(f"^{re.escape(email_norm)}$", re.IGNORECASE)
+    print(f"[TALENT LOOKUP] LOOKUP EMAIL: {email_norm!r}", flush=True)
+    talent = await db.talents.find_one({
+        "$or": [
+            {"email": email_regex},
+            {"source.talent_email": email_regex},
+        ]
+    })
+    print(f"[TALENT LOOKUP] TALENT FOUND: {talent is not None}", flush=True)
+    print(f"[TALENT LOOKUP] TALENT ID: {talent.get('id') if talent else None}", flush=True)
+    return talent
+
+
 # Maps talent.media[].category → application media category
 _TALENT_TO_APP_CATEGORY: Dict[str, str] = {
     "portfolio": "image",
@@ -299,9 +324,7 @@ async def start_application(payload: ApplicationStartIn):
             }},
         )
         # Reconcile: back-fill any missing fields from the talent profile
-        talent = await db.talents.find_one(
-            {"$or": [{"email": email}, {"source.talent_email": email}]}
-        )
+        talent = await _find_talent_by_email(email)
         if talent:
             # Re-fetch so reconciliation sees the just-applied base update
             refreshed = await db.applications.find_one({"id": aid})
@@ -352,9 +375,7 @@ async def start_application(payload: ApplicationStartIn):
                 }}
             )
             # Reconcile: back-fill any missing fields from the talent profile
-            talent = await db.talents.find_one(
-                {"$or": [{"email": email}, {"source.talent_email": email}]}
-            )
+            talent = await _find_talent_by_email(email)
             if talent:
                 refreshed = await db.applications.find_one({"id": aid})
                 await _reconcile_draft_from_talent(refreshed or existing, talent, aid)

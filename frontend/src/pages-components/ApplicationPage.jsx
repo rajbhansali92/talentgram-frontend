@@ -100,6 +100,35 @@ export default function ApplicationPage() {
     const [otpLoading, setOtpLoading] = useState(false);
     const [otpResending, setOtpResending] = useState(false);
 
+    // Onboarding requirements and profile_id states
+    const [profileId, setProfileId] = useState(null);
+    const [requirements, setRequirements] = useState({
+        profile_requirements: { name: "required", location: "required", instagram_handle: "required", instagram_followers: "required" },
+        portfolio_requirements: { portfolio: "required", indian: "required", western: "required", video: "required" }
+    });
+
+    // Extract profile parameter on mount and fetch config
+    useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const queryProfileId = urlParams.get("profile");
+        if (queryProfileId) {
+            setProfileId(queryProfileId);
+        }
+
+        const fetchConfig = async () => {
+            try {
+                const params = queryProfileId ? { profile: queryProfileId } : {};
+                const { data } = await axios.get("/public/onboarding-config", { params });
+                if (data) {
+                    setRequirements(data);
+                }
+            } catch (err) {
+                console.error("Failed to fetch onboarding configuration:", err);
+            }
+        };
+        fetchConfig();
+    }, []);
+
     // Restore local draft
     useEffect(() => {
         // Google authentication checks
@@ -600,7 +629,10 @@ export default function ApplicationPage() {
         setSaving(true);
         try {
             console.log("[startApplication] Starting application request for:", basics.email);
-            const { data } = await axios.post(`/public/apply`, basics);
+            const { data } = await axios.post(`/public/apply`, {
+                ...basics,
+                profile_id: profileId
+            });
             const newAid = data.id;
             const newToken = data.token;
             let finalForm = { ...form };
@@ -716,6 +748,70 @@ export default function ApplicationPage() {
     };
 
     const finalize = async () => {
+        // Frontend Dynamic Requirements Validation
+        const prof = requirements.profile_requirements;
+        const port = requirements.portfolio_requirements;
+
+        if (prof.name === "required") {
+            if (!basics.first_name?.trim() || !basics.last_name?.trim()) {
+                toast.error("Full Name is required");
+                return;
+            }
+        }
+
+        if (prof.location === "required") {
+            if (!form.location || form.location.length === 0) {
+                toast.error("Current Location is required");
+                return;
+            }
+        }
+
+        if (prof.instagram_handle === "required") {
+            if (!form.instagram_handle?.trim()) {
+                toast.error("Instagram Handle is required");
+                return;
+            }
+        }
+
+        if (prof.instagram_followers === "required") {
+            if (!form.instagram_followers) {
+                toast.error("Instagram Followers is required");
+                return;
+            }
+        }
+
+        if (port.portfolio === "required") {
+            const count = media.filter((m) => m.category === "image").length;
+            if (count < 1) {
+                toast.error("Portfolio Images are required");
+                return;
+            }
+        }
+
+        if (port.indian === "required") {
+            const count = media.filter((m) => m.category === "indian").length;
+            if (count < 1) {
+                toast.error("Indian Look Images are required");
+                return;
+            }
+        }
+
+        if (port.western === "required") {
+            const count = media.filter((m) => m.category === "western").length;
+            if (count < 1) {
+                toast.error("Western Look Images are required");
+                return;
+            }
+        }
+
+        if (port.video === "required") {
+            const count = media.filter((m) => m.category === "intro_video").length;
+            if (count < 1) {
+                toast.error("Introduction Video is required");
+                return;
+            }
+        }
+
         setSaving(true);
         try {
             // Final sync of form_data

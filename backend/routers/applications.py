@@ -51,6 +51,135 @@ from drive_backup import drive_enabled, enqueue_drive_upload
 
 router = APIRouter(prefix="/api", tags=["applications"])
 
+from pydantic import BaseModel, Field
+
+class ProfileRequirements(BaseModel):
+    name: str = "required"  # "required" | "optional"
+    location: str = "required"  # "required" | "optional"
+    instagram_handle: str = "required"  # "required" | "optional"
+    instagram_followers: str = "required"  # "required" | "optional"
+
+class PortfolioRequirements(BaseModel):
+    portfolio: str = "required"  # "required" | "optional"
+    indian: str = "required"  # "required" | "optional"
+    western: str = "required"  # "required" | "optional"
+    video: str = "required"  # "required" | "optional"
+
+class OnboardingConfig(BaseModel):
+    profile_requirements: ProfileRequirements
+    portfolio_requirements: PortfolioRequirements
+
+DEFAULT_ONBOARDING_CONFIG = {
+    "profile_requirements": {
+        "name": "required",
+        "location": "required",
+        "instagram_handle": "required",
+        "instagram_followers": "required",
+    },
+    "portfolio_requirements": {
+        "portfolio": "required",
+        "indian": "required",
+        "western": "required",
+        "video": "required",
+    }
+}
+
+class ProfileConfigIn(BaseModel):
+    title: str
+    profile_requirements: ProfileRequirements
+    portfolio_requirements: PortfolioRequirements
+
+@router.get("/public/onboarding-config")
+async def get_public_onboarding_config(profile: Optional[str] = None):
+    if profile:
+        config = await db.profile_configs.find_one({"id": profile})
+        if config:
+            return {
+                "profile_requirements": config.get("profile_requirements", DEFAULT_ONBOARDING_CONFIG["profile_requirements"]),
+                "portfolio_requirements": config.get("portfolio_requirements", DEFAULT_ONBOARDING_CONFIG["portfolio_requirements"])
+            }
+    # Fall back to global/default config
+    config = await db.profile_configs.find_one({"key": "global_onboarding"})
+    if not config:
+        return DEFAULT_ONBOARDING_CONFIG
+    return {
+        "profile_requirements": config.get("profile_requirements", DEFAULT_ONBOARDING_CONFIG["profile_requirements"]),
+        "portfolio_requirements": config.get("portfolio_requirements", DEFAULT_ONBOARDING_CONFIG["portfolio_requirements"])
+    }
+
+@router.get("/admin/onboarding-config")
+async def get_admin_onboarding_config(admin: dict = Depends(current_team_or_admin)):
+    config = await db.profile_configs.find_one({"key": "global_onboarding"})
+    if not config:
+        return DEFAULT_ONBOARDING_CONFIG
+    return {
+        "profile_requirements": config.get("profile_requirements", DEFAULT_ONBOARDING_CONFIG["profile_requirements"]),
+        "portfolio_requirements": config.get("portfolio_requirements", DEFAULT_ONBOARDING_CONFIG["portfolio_requirements"])
+    }
+
+@router.put("/admin/onboarding-config")
+async def update_admin_onboarding_config(payload: OnboardingConfig, admin: dict = Depends(current_team_or_admin)):
+    config_dict = payload.dict()
+    await db.profile_configs.update_one(
+        {"key": "global_onboarding"},
+        {"$set": {
+            "profile_requirements": config_dict["profile_requirements"],
+            "portfolio_requirements": config_dict["portfolio_requirements"]
+        }},
+        upsert=True
+    )
+    return {"ok": True, "config": config_dict}
+
+# CRUD for multiple custom profile onboarding configs
+@router.get("/admin/profile-configs")
+async def list_admin_profile_configs(admin: dict = Depends(current_team_or_admin)):
+    configs = await db.profile_configs.find({}, {"_id": 0}).to_list(1000)
+    return configs
+
+@router.get("/admin/profile-configs/{id}")
+async def get_admin_profile_config(id: str, admin: dict = Depends(current_team_or_admin)):
+    config = await db.profile_configs.find_one({"id": id}, {"_id": 0})
+    if not config:
+        raise HTTPException(404, "Profile configuration not found")
+    return config
+
+@router.post("/admin/profile-configs")
+async def create_admin_profile_config(payload: ProfileConfigIn, admin: dict = Depends(current_team_or_admin)):
+    config_id = str(uuid.uuid4())
+    doc = {
+        "id": config_id,
+        "title": payload.title,
+        "profile_requirements": payload.profile_requirements.dict(),
+        "portfolio_requirements": payload.portfolio_requirements.dict(),
+        "created_at": _now()
+    }
+    await db.profile_configs.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@router.put("/admin/profile-configs/{id}")
+async def update_admin_profile_config(id: str, payload: ProfileConfigIn, admin: dict = Depends(current_team_or_admin)):
+    existing = await db.profile_configs.find_one({"id": id})
+    if not existing:
+        raise HTTPException(404, "Profile configuration not found")
+    await db.profile_configs.update_one(
+        {"id": id},
+        {"$set": {
+            "title": payload.title,
+            "profile_requirements": payload.profile_requirements.dict(),
+            "portfolio_requirements": payload.portfolio_requirements.dict(),
+        }}
+    )
+    return {"ok": True}
+
+@router.delete("/admin/profile-configs/{id}")
+async def delete_admin_profile_config(id: str, admin: dict = Depends(current_team_or_admin)):
+    existing = await db.profile_configs.find_one({"id": id})
+    if not existing:
+        raise HTTPException(404, "Profile configuration not found")
+    await db.profile_configs.delete_one({"id": id})
+    return {"ok": True}
+
 
 # --------------------------------------------------------------------------
 # Public (talent-facing)
@@ -78,6 +207,7 @@ async def start_application(payload: ApplicationStartIn):
                 "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
                 "talent_phone": payload.phone,
                 "access_token": token,
+                "profile_id": payload.profile_id or existing.get("profile_id"),
             }},
         )
         return {"id": aid, "token": token, "resumed": True}
@@ -107,6 +237,7 @@ async def start_application(payload: ApplicationStartIn):
         "decision": "pending",
         "created_at": _now(),
         "submitted_at": None,
+        "profile_id": payload.profile_id,
     }
     try:
         await db.applications.insert_one(doc)
@@ -117,7 +248,13 @@ async def start_application(payload: ApplicationStartIn):
         if existing:
             aid = existing["id"]
             token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
-            await db.applications.update_one({"id": aid}, {"$set": {"access_token": token}})
+            await db.applications.update_one(
+                {"id": aid},
+                {"$set": {
+                    "access_token": token,
+                    "profile_id": payload.profile_id or existing.get("profile_id"),
+                }}
+            )
             return {"id": aid, "token": token, "resumed": True}
         raise HTTPException(409, "An application already exists for this email")
     token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
@@ -343,20 +480,58 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
     if not app_doc:
         raise HTTPException(404, "Application not found")
     fd = app_doc.get("form_data") or {}
-    for field in ("first_name", "last_name", "dob", "height", "location", "gender"):
-        if not (fd.get(field) or "").strip() if isinstance(fd.get(field), str) else not fd.get(field):
-            raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
+
+    config = None
+    profile_id = app_doc.get("profile_id")
+    if profile_id:
+        config = await db.profile_configs.find_one({"id": profile_id})
+    if not config:
+        config = await db.profile_configs.find_one({"key": "global_onboarding"})
+    if not config:
+        config = DEFAULT_ONBOARDING_CONFIG
+
+    prof_reqs = config.get("profile_requirements", DEFAULT_ONBOARDING_CONFIG["profile_requirements"])
+    port_reqs = config.get("portfolio_requirements", DEFAULT_ONBOARDING_CONFIG["portfolio_requirements"])
+
+    # 1. Profile Requirements Validation
+    if prof_reqs.get("name") == "required":
+        if not (fd.get("first_name") or "").strip() or not (fd.get("last_name") or "").strip():
+            raise HTTPException(400, "Full Name is required")
+
+    if prof_reqs.get("location") == "required":
+        if not (fd.get("location") or "").strip():
+            raise HTTPException(400, "Current Location is required")
+
+    if prof_reqs.get("instagram_handle") == "required":
+        if not (fd.get("instagram_handle") or "").strip():
+            raise HTTPException(400, "Instagram Handle is required")
+
+    if prof_reqs.get("instagram_followers") == "required":
+        if not fd.get("instagram_followers"):
+            raise HTTPException(400, "Instagram Followers is required")
+
+    # 2. Portfolio Requirements Validation
     media = app_doc.get("media", [])
-    # Phase 1 v37c: balanced media requirement.
-    # - At least 1 portfolio/headshot image is REQUIRED (so admins always
-    #   have a recognisable photo to review).
-    # - Introduction video and additional images are OPTIONAL (recommended).
-    img_count = sum(1 for m in media if m["category"] in ("image", "indian", "western"))
-    if img_count < 1:
-        raise HTTPException(
-            400,
-            "Please upload at least 1 clear profile/headshot image to continue.",
-        )
+
+    if port_reqs.get("portfolio") == "required":
+        port_count = sum(1 for m in media if m.get("category") == "image")
+        if port_count < 1:
+            raise HTTPException(400, "Portfolio Images are required")
+
+    if port_reqs.get("indian") == "required":
+        indian_count = sum(1 for m in media if m.get("category") == "indian")
+        if indian_count < 1:
+            raise HTTPException(400, "Indian Look Images are required")
+
+    if port_reqs.get("western") == "required":
+        western_count = sum(1 for m in media if m.get("category") == "western")
+        if western_count < 1:
+            raise HTTPException(400, "Western Look Images are required")
+
+    if port_reqs.get("video") == "required":
+        video_count = sum(1 for m in media if m.get("category") == "intro_video")
+        if video_count < 1:
+            raise HTTPException(400, "Introduction Video is required")
     await db.applications.update_one(
         {"id": aid},
         {"$set": {"status": "submitted", "submitted_at": _now()}},

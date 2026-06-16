@@ -1553,6 +1553,7 @@ class ApplicationStartIn(BaseModel):
     last_name: str
     email: EmailStr
     phone: Optional[str] = None
+    profile_id: Optional[str] = None
 
 
 class BulkDeleteIn(BaseModel):

@@ -260,8 +260,8 @@ function OnboardingLinkCard() {
         setLoadingConfigs(true);
         try {
             const [globalRes, listRes] = await Promise.all([
-                adminApi.get("/onboarding-config"),
-                adminApi.get("/profile-configs")
+                adminApi.get("/admin/onboarding-config"),
+                adminApi.get("/admin/profile-configs")
             ]);
             setGlobalConfig(globalRes.data);
             setConfigs(listRes.data || []);
@@ -296,14 +296,14 @@ function OnboardingLinkCard() {
     const handleSaveConfig = async () => {
         try {
             if (selectedId === "default") {
-                await adminApi.put("/onboarding-config", {
+                await adminApi.put("/admin/onboarding-config", {
                     profile_requirements: editorProfile,
                     portfolio_requirements: editorPortfolio
                 });
                 toast.success("Global onboarding configuration updated");
                 await loadConfigs();
             } else {
-                await adminApi.put(`/profile-configs/${selectedId}`, {
+                await adminApi.put(`/admin/profile-configs/${selectedId}`, {
                     title: editorTitle,
                     profile_requirements: editorProfile,
                     portfolio_requirements: editorPortfolio
@@ -324,7 +324,7 @@ function OnboardingLinkCard() {
             return;
         }
         try {
-            const res = await adminApi.post("/profile-configs", {
+            const res = await adminApi.post("/admin/profile-configs", {
                 title: newTitle,
                 profile_requirements: { name: "required", location: "required", instagram_handle: "required", instagram_followers: "required" },
                 portfolio_requirements: { portfolio: "required", indian: "required", western: "required", video: "required" }
@@ -343,7 +343,7 @@ function OnboardingLinkCard() {
         if (selectedId === "default") return;
         if (!window.confirm("Are you sure you want to delete this custom configuration?")) return;
         try {
-            await adminApi.delete(`/profile-configs/${selectedId}`);
+            await adminApi.delete(`/admin/profile-configs/${selectedId}`);
             toast.success("Custom configuration deleted");
             setSelectedId("default");
             await loadConfigs();

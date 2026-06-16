@@ -57,6 +57,7 @@ export default function ApplicationPage() {
     const [aid, setAid] = useState(null);
     const [token, setToken] = useState(null);
     const [finalized, setFinalized] = useState(false);
+    const [hydrating, setHydrating] = useState(false);
     const [basics, setBasics] = useState({
         first_name: "",
         last_name: "",
@@ -209,6 +210,7 @@ export default function ApplicationPage() {
                 setBasics(saved.basics || basics);
                 setForm(saved.form || form);
                 (async () => {
+                    setHydrating(true);
                     try {
                         console.log("[ApplicationPage] Fetching active draft details for aid:", saved.aid);
                         const { data } = await axios.get(
@@ -226,6 +228,8 @@ export default function ApplicationPage() {
                         setStarted(false);
                         setAid(null);
                         setToken(null);
+                    } finally {
+                        setHydrating(false);
                     }
                 })();
             }
@@ -600,6 +604,7 @@ export default function ApplicationPage() {
 
             if (data.resumed) {
                 console.log("[startApplication] Application resumed. Hydrating details from backend for aid:", newAid);
+                setHydrating(true);
                 try {
                     const res = await axios.get(
                         `/public/apply/${newAid}`,
@@ -617,6 +622,8 @@ export default function ApplicationPage() {
                 } catch (fetchErr) {
                     console.error("[startApplication] Failed to fetch resumed application details:", fetchErr);
                     toast.error("Failed to load existing application data.");
+                } finally {
+                    setHydrating(false);
                 }
             }
 
@@ -648,7 +655,7 @@ export default function ApplicationPage() {
 
     // Autosave form_data (debounced) once started
     useEffect(() => {
-        if (!started || !aid || !token) return;
+        if (!started || !aid || !token || finalized || hydrating) return;
         const id = setTimeout(async () => {
             try {
                 await axios.put(
@@ -664,7 +671,7 @@ export default function ApplicationPage() {
         }, 800);
         return () => clearTimeout(id);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [form, started, aid, token]);
+    }, [form, started, aid, token, finalized, hydrating]);
 
     const upload = async (files, category) => {
         if (!files || !files.length) return;
@@ -721,6 +728,35 @@ export default function ApplicationPage() {
             localStorage.removeItem(LS_KEY);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Submission failed");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const enableEditing = async () => {
+        setSaving(true);
+        try {
+            console.log("[enableEditing] Requesting edit mode for application:", aid);
+            await axios.post(
+                `/public/apply/${aid}/edit`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            console.log("[enableEditing] Edit mode enabled by backend. Enabling form editing.");
+            setFinalized(false);
+            localStorage.setItem(
+                LS_KEY,
+                JSON.stringify({
+                    aid,
+                    token,
+                    basics,
+                    form,
+                    savedAt: Date.now(),
+                }),
+            );
+        } catch (e) {
+            console.error("[enableEditing] Failed to enable edit mode:", e);
+            toast.error(e?.response?.data?.detail || "Failed to enable edit mode");
         } finally {
             setSaving(false);
         }
@@ -1090,9 +1126,18 @@ export default function ApplicationPage() {
                             information, materials, or next steps are required, a member of
                             our team will contact you directly.
                         </p>
-                        <div className="text-xs text-[#8b8b8b] font-medium">
+                        <div className="text-xs text-[#8b8b8b] font-medium mb-6">
                             Thank you for your interest in joining Talentgram.
                         </div>
+                        <button
+                            onClick={enableEditing}
+                            disabled={saving}
+                            data-testid="apply-edit-profile-btn"
+                            className="mt-2 w-full bg-[#1a1a1a] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40 inline-flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.98]"
+                        >
+                            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                            Edit Profile
+                        </button>
                     </div>
                 </div>
             </div>

@@ -323,6 +323,19 @@ async def delete_application_media(
     return {"ok": True}
 
 
+@router.post("/public/apply/{aid}/edit")
+async def edit_application(aid: str, authorization: Optional[str] = Header(None)):
+    await _check_app_token(authorization, aid)
+    app_doc = await db.applications.find_one({"id": aid})
+    if not app_doc:
+        raise HTTPException(404, "Application not found")
+    await db.applications.update_one(
+        {"id": aid},
+        {"$set": {"status": "draft"}}
+    )
+    return {"ok": True, "status": "draft"}
+
+
 @router.post("/public/apply/{aid}/finalize")
 async def finalize_application(aid: str, authorization: Optional[str] = Header(None)):
     await _check_app_token(authorization, aid)

@@ -194,12 +194,15 @@ export default function ApplicationPage() {
         if (!raw) return;
         try {
             const saved = JSON.parse(raw);
+            console.log("[ApplicationPage] Saved draft found in localstorage on mount:", saved.aid);
             // TTL guard — purge stale drafts (tokens + PII) after DRAFT_TTL_MS.
             if (saved.savedAt && Date.now() - saved.savedAt > DRAFT_TTL_MS) {
+                console.warn("[ApplicationPage] Draft has expired. Purging local storage.");
                 localStorage.removeItem(LS_KEY);
                 return;
             }
             if (saved.aid && saved.token) {
+                console.log("[ApplicationPage] Resuming from draft token:", saved.token.slice(-10));
                 setAid(saved.aid);
                 setToken(saved.token);
                 setStarted(true);
@@ -207,14 +210,17 @@ export default function ApplicationPage() {
                 setForm(saved.form || form);
                 (async () => {
                     try {
+                        console.log("[ApplicationPage] Fetching active draft details for aid:", saved.aid);
                         const { data } = await axios.get(
                             `/public/apply/${saved.aid}`,
                             { headers: { Authorization: `Bearer ${saved.token}` } },
                         );
+                        console.log("[ApplicationPage] Fetch successful. Hydrating form fields.");
                         setForm((f) => ({ ...f, ...(data.form_data || {}) }));
                         setMedia(data.media || []);
                         if (data.status === "submitted") setFinalized(true);
-                    } catch {
+                    } catch (err) {
+                        console.error("[ApplicationPage] Hydration request failed. Invalid or expired token. Status:", err?.response?.status, err?.response?.data);
                         // expired/invalid token — reset
                         localStorage.removeItem(LS_KEY);
                         setStarted(false);
@@ -223,7 +229,8 @@ export default function ApplicationPage() {
                     }
                 })();
             }
-        } catch {
+        } catch (e) {
+            console.error("[ApplicationPage] Exception decoding saved draft details:", e);
             localStorage.removeItem(LS_KEY);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps

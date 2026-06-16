@@ -114,6 +114,7 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
         if application:
             talent = await db.talents.find_one({"email": email})
             token = make_token({"role": "submitter", "sid": application["id"], "kind": "application"}, days=7)
+            await db.applications.update_one({"id": application["id"]}, {"$set": {"access_token": token}})
             return {
                 "existing": True,
                 "email": email,
@@ -160,6 +161,7 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
     submission = await db.submissions.find_one({"project_id": project["id"], "talent_email": email})
     if submission:
         token = make_token({"role": "submitter", "sid": submission["id"], "slug": payload.slug}, days=3)
+        await db.submissions.update_one({"id": submission["id"]}, {"$set": {"access_token": token}})
         return {
             "existing": True,
             "email": email,
@@ -796,6 +798,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         talent = await db.talents.find_one({"email": email})
         if application:
             token = make_token({"role": "submitter", "sid": application["id"], "kind": "application"}, days=7)
+            await db.applications.update_one({"id": application["id"]}, {"$set": {"access_token": token}})
             return {
                 "existing": True,
                 "email": email,
@@ -819,6 +822,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         
         if submission:
             token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
+            await db.submissions.update_one({"id": submission["id"]}, {"$set": {"access_token": token}})
             talent = await db.talents.find_one({"email": email})
             return {
                 "existing": True,

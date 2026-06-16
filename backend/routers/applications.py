@@ -68,6 +68,7 @@ async def start_application(payload: ApplicationStartIn):
             )
         # Resume draft
         aid = existing["id"]
+        token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
         # Update base fields in case they changed
         await db.applications.update_one(
             {"id": aid},
@@ -76,9 +77,9 @@ async def start_application(payload: ApplicationStartIn):
                 "form_data.last_name": payload.last_name.strip(),
                 "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
                 "talent_phone": payload.phone,
+                "access_token": token,
             }},
         )
-        token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
         return {"id": aid, "token": token, "resumed": True}
 
     talent_age = None
@@ -116,6 +117,7 @@ async def start_application(payload: ApplicationStartIn):
         if existing:
             aid = existing["id"]
             token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
+            await db.applications.update_one({"id": aid}, {"$set": {"access_token": token}})
             return {"id": aid, "token": token, "resumed": True}
         raise HTTPException(409, "An application already exists for this email")
     token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)

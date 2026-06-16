@@ -584,22 +584,55 @@ export default function ApplicationPage() {
         }
         setSaving(true);
         try {
+            console.log("[startApplication] Starting application request for:", basics.email);
             const { data } = await axios.post(`/public/apply`, basics);
-            setAid(data.id);
-            setToken(data.token);
+            const newAid = data.id;
+            const newToken = data.token;
+            let finalForm = { ...form };
+            let finalMedia = [];
+
+            if (data.resumed) {
+                console.log("[startApplication] Application resumed. Hydrating details from backend for aid:", newAid);
+                try {
+                    const res = await axios.get(
+                        `/public/apply/${newAid}`,
+                        { headers: { Authorization: `Bearer ${newToken}` } }
+                    );
+                    const appData = res.data;
+                    if (appData) {
+                        console.log("[startApplication] Resumed app data retrieved successfully. Hydrating form and media.");
+                        finalForm = { ...form, ...(appData.form_data || {}) };
+                        finalMedia = appData.media || [];
+                        setForm(finalForm);
+                        setMedia(finalMedia);
+                        if (appData.status === "submitted") setFinalized(true);
+                    }
+                } catch (fetchErr) {
+                    console.error("[startApplication] Failed to fetch resumed application details:", fetchErr);
+                    toast.error("Failed to load existing application data.");
+                }
+            }
+
+            setAid(newAid);
+            setToken(newToken);
             setStarted(true);
             if (data.resumed) toast.success("Welcome back — your application is resumed");
             localStorage.setItem(
                 LS_KEY,
                 JSON.stringify({
-                    aid: data.id,
-                    token: data.token,
-                    basics,
-                    form,
+                    aid: newAid,
+                    token: newToken,
+                    basics: {
+                        ...basics,
+                        first_name: finalForm.first_name || basics.first_name,
+                        last_name: finalForm.last_name || basics.last_name,
+                    },
+                    form: finalForm,
                     savedAt: Date.now(),
                 }),
             );
         } catch (e) {
+            console.error("[startApplication] Failed to start/resume application:", e);
             toast.error(e?.response?.data?.detail || "Failed to start");
         } finally {
             setSaving(false);

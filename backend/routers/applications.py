@@ -84,6 +84,31 @@ DEFAULT_ONBOARDING_CONFIG = {
     }
 }
 
+
+def normalize_location_str(val) -> str:
+    """Safely extract a display string from a location value.
+
+    The frontend stores location as a list of dicts, e.g. [{"city": "Mumbai"}],
+    but legacy data or direct API calls may send a plain string.
+    Returns a stripped string (empty string if absent/empty).
+    """
+    if not val:
+        return ""
+    if isinstance(val, str):
+        return val.strip()
+    if isinstance(val, list):
+        if not val:
+            return ""
+        first = val[0]
+        if isinstance(first, dict):
+            # Extract city, state, or country — whichever is present
+            return (
+                str(first.get("city") or first.get("state") or first.get("country") or "")
+            ).strip()
+        return str(first).strip()
+    return str(val).strip()
+
+
 class ProfileConfigIn(BaseModel):
     title: str
     profile_requirements: ProfileRequirements
@@ -507,7 +532,7 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
             raise HTTPException(400, "Full Name is required")
 
     if prof_reqs.get("location") == "required":
-        if not (fd.get("location") or "").strip():
+        if not normalize_location_str(fd.get("location")):
             raise HTTPException(400, "Current Location is required")
 
     if prof_reqs.get("instagram_handle") == "required":

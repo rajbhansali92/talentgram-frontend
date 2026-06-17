@@ -398,6 +398,25 @@ async def get_application(aid: str, authorization: Optional[str] = Header(None))
     app_doc = await db.applications.find_one({"id": aid}, {"_id": 0})
     if not app_doc:
         raise HTTPException(404, "Application not found")
+
+    # Temporary diagnostic logging
+    print(f"[GET APPLICATION] aid: {aid}", flush=True)
+    print(f"[GET APPLICATION] form_data: {app_doc.get('form_data')}", flush=True)
+    print(f"[GET APPLICATION] media_count: {len(app_doc.get('media', []))}", flush=True)
+
+    # Lazy reconciliation: the localStorage resume path skips POST /apply
+    # entirely, so reconciliation from startApplication never runs.
+    # Guard: only attempt on non-submitted drafts.
+    if app_doc.get("status") != "submitted":
+        email = (app_doc.get("talent_email") or "").lower().strip()
+        if email:
+            talent = await _find_talent_by_email(email)
+            if talent:
+                await _reconcile_draft_from_talent(app_doc, talent, aid)
+                # Re-fetch so we return the freshly hydrated document
+                app_doc = await db.applications.find_one({"id": aid}, {"_id": 0}) or app_doc
+                print(f"[GET APPLICATION] After reconciliation — media_count: {len(app_doc.get('media', []))}", flush=True)
+
     return app_doc
 
 

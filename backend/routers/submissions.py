@@ -592,10 +592,10 @@ async def submission_upload(
             raise HTTPException(400, "Unsupported video format. Please upload MP4, MOV, or WEBM.")
     else:
         # Image categories
-        if ct in {"image/bmp", "image/tiff", "image/heic", "image/heif"} or fn.endswith((".bmp", ".tiff", ".heic", ".heif")):
-            raise HTTPException(400, "HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.")
-        if not (ct.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp"))):
-            raise HTTPException(400, "Unsupported image format. Please upload JPG, PNG, or WEBP.")
+        if ct in {"image/bmp", "image/tiff"} or fn.endswith((".bmp", ".tiff")):
+            raise HTTPException(400, "BMP and TIFF formats are not supported. Please upload JPEG, PNG, or HEIC.")
+        if not (ct.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"))):
+            raise HTTPException(400, "Unsupported image format. Please upload JPG, PNG, WEBP, or HEIC.")
 
     if category in PORTFOLIO_IMAGE_CATEGORIES:
         # Phase 3: per-category cap (10 each) — NOT a combined total.
@@ -1427,6 +1427,9 @@ async def set_decision(
     sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
     if not sub:
         raise HTTPException(404, "Submission not found")
+
+    if sub.get("decision") == payload.decision:
+        return {"ok": True}
 
     # Resolve talent_id if it is missing/null (fallback matching/creation logic)
     resolved_talent_id = sub.get("talent_id")

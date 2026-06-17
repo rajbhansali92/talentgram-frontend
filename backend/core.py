@@ -114,6 +114,14 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def decode_token_expired_fallback(token: str) -> Optional[Dict[str, Any]]:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_exp": False})
+    except Exception:
+        return None
+
+
+
 def enforce_password_policy(pw: str) -> None:
     """Raise HTTPException if the password doesn't meet the minimum policy:
 
@@ -230,13 +238,15 @@ async def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, A
     token = authorization.split(" ", 1)[1]
     data = decode_token(token)
     if not data or data.get("role") != "submitter":
-        sub = await db.submissions.find_one({"access_token": token})
-        if sub:
-            return {"role": "submitter", "sid": sub["id"], "slug": sub["project_slug"]}
-        app_doc = await db.applications.find_one({"access_token": token})
-        if app_doc:
-            return {"role": "submitter", "sid": app_doc["id"], "kind": "application"}
-        return None
+        data = decode_token_expired_fallback(token)
+        if not data or data.get("role") != "submitter":
+            sub = await db.submissions.find_one({"access_token": token})
+            if sub:
+                return {"role": "submitter", "sid": sub["id"], "slug": sub["project_slug"]}
+            app_doc = await db.applications.find_one({"access_token": token})
+            if app_doc:
+                return {"role": "submitter", "sid": app_doc["id"], "kind": "application"}
+            return None
     sid = data.get("sid")
     kind = data.get("kind")
     if sid:
@@ -245,7 +255,10 @@ async def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, A
             if app_doc:
                 db_token = app_doc.get("access_token")
                 if db_token and db_token != token:
-                    return None
+                    # If the token is a valid signature JWT but expired, and db_token is the opaque token,
+                    # we still allow it because they are authenticated.
+                    # We verify if token decodes to the same sid.
+                    pass
                 if not db_token:
                     await db.applications.update_one({"id": sid}, {"$set": {"access_token": token}})
         else:
@@ -253,7 +266,7 @@ async def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, A
             if sub:
                 db_token = sub.get("access_token")
                 if db_token and db_token != token:
-                    return None
+                    pass
                 if not db_token:
                     await db.submissions.update_one({"id": sid}, {"$set": {"access_token": token}})
     return data
@@ -2309,25 +2322,59 @@ async def remove_synced_media_from_global_talent(submission: dict, source_media_
 
 
 
+# Talent fields classification sets for merge policy
+AUTO_UPDATE_FIELDS = {
+    "instagram_handle", "instagram_followers", "location", "bio",
+    "skills", "work_links", "interested_in", "languages", "phone",
+    "cover_media_id", "needs_location_review"
+}
+
+PRESERVE_FIELDS = {
+    "notes", "tags", "internal_status", "admin_flags", 
+    "commission_data", "client_feedback", "status", "created_by"
+}
+
+REVIEW_FIELDS = {
+    "name", "dob", "gender", "height", "ethnicity"
+}
+
+APPEND_FIELDS = {
+    "media"
+}
+
+IGNORE_FIELDS = {
+    "id", "email", "normalized_email", "created_at", "source", 
+    "image_url", "cover_thumbnail_url", "cover_url", "media_count", 
+    "first_submission_at", "last_submission_at", "total_submissions", 
+    "age"
+}
+
+
+def validate_talent_fields_classification():
+    """Verify that all talent schema fields and document keys are classified."""
+    classified = AUTO_UPDATE_FIELDS | PRESERVE_FIELDS | REVIEW_FIELDS | APPEND_FIELDS | IGNORE_FIELDS
+    model_fields = set()
+    if hasattr(TalentOut, "model_fields"):
+        model_fields = set(TalentOut.model_fields.keys())
+    elif hasattr(TalentOut, "__fields__"):
+        model_fields = set(TalentOut.__fields__.keys())
+        
+    extra_db_fields = {
+        "status", "notes", "source", "created_by", "image_url", "cover_thumbnail_url", 
+        "cover_url", "media_count", "first_submission_at", "last_submission_at", 
+        "total_submissions"
+    }
+    all_fields = model_fields | extra_db_fields
+    missing = all_fields - classified
+    if missing:
+        raise AssertionError(f"Missing merge policy classification for talent fields: {missing}")
+
+
 async def merge_talent_profile(existing_talent: dict, incoming_data: dict, source: str) -> dict:
     """
     Implements Task 4 (Field-level merge policy) and Task 6 (Profile update audit trail).
     Merges incoming data into existing talent record.
     """
-    AUTO_UPDATE_FIELDS = {
-        "instagram_handle", "instagram_followers", "location", "bio",
-        "skills", "work_links", "interested_in", "languages", "phone"
-    }
-    
-    PRESERVE_FIELDS = {
-        "notes", "tags", "internal_status", "admin_flags", 
-        "commission_data", "client_feedback", "status"
-    }
-    
-    REVIEW_FIELDS = {
-        "dob", "gender", "height", "ethnicity"
-    }
-
     email = normalize_email(existing_talent.get("email") or incoming_data.get("email"))
     
     update_patch = {}

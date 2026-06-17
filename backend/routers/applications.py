@@ -479,10 +479,10 @@ async def upload_application_media(
             raise HTTPException(400, "Unsupported video format. Please upload MP4, MOV, or WEBM.")
     else:
         # Image categories
-        if ct in {"image/bmp", "image/tiff", "image/heic", "image/heif"} or fn.endswith((".bmp", ".tiff", ".heic", ".heif")):
-            raise HTTPException(400, "HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.")
-        if not (ct.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp"))):
-            raise HTTPException(400, "Unsupported image format. Please upload JPG, PNG, or WEBP.")
+        if ct in {"image/bmp", "image/tiff"} or fn.endswith((".bmp", ".tiff")):
+            raise HTTPException(400, "BMP and TIFF formats are not supported. Please upload JPEG, PNG, or HEIC.")
+        if not (ct.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"))):
+            raise HTTPException(400, "Unsupported image format. Please upload JPG, PNG, WEBP, or HEIC.")
 
     if category in ("image", "indian", "western"):
         # Phase 3: per-category cap (10 each) — NOT a combined total.
@@ -858,6 +858,9 @@ async def set_application_decision(
     if not app_doc:
         raise HTTPException(404, "Application not found")
 
+    if app_doc.get("decision") == payload.decision:
+        return {"ok": True, "talent_id": app_doc.get("talent_id"), "merged": app_doc.get("merged", True)}
+
     # Persist decision
     await db.applications.update_one(
         {"id": aid},
@@ -882,18 +885,45 @@ async def set_application_decision(
             from core import merge_talent_profile
             # Idempotent media merge with deduplication (Task 5)
             existing_media = existing.get("media", [])
-            existing_source_ids = {
-                x.get("source_application_media_id") 
-                for x in existing_media 
-                if x.get("source_application_media_id")
-            }
-            
             new_media = list(existing_media)
             for m in talent["media"]:
-                source_id = m.get("source_application_media_id")
-                if source_id and source_id in existing_source_ids:
-                    continue
-                new_media.append(m)
+                is_dup = False
+                in_pub = m.get("public_id")
+                in_url = m.get("url")
+                in_sec = m.get("secure_url") or in_url
+                in_id = m.get("asset_id") or m.get("id")
+                in_src_app = m.get("source_application_media_id")
+                in_src_sub = m.get("source_submission_media_id")
+                
+                for x in existing_media:
+                    x_pub = x.get("public_id")
+                    x_url = x.get("url")
+                    x_sec = x.get("secure_url") or x_url
+                    x_id = x.get("asset_id") or x.get("id")
+                    x_src_app = x.get("source_application_media_id")
+                    x_src_sub = x.get("source_submission_media_id")
+                    
+                    if in_pub and x_pub == in_pub:
+                        is_dup = True
+                        break
+                    if in_url and (x_url == in_url or x_sec == in_url):
+                        is_dup = True
+                        break
+                    if in_sec and (x_url == in_sec or x_sec == in_sec):
+                        is_dup = True
+                        break
+                    if in_id and x_id == in_id:
+                        is_dup = True
+                        break
+                    if in_src_app and in_src_app == x_src_app:
+                        is_dup = True
+                        break
+                    if in_src_sub and in_src_sub == x_src_sub:
+                        is_dup = True
+                        break
+                        
+                if not is_dup:
+                    new_media.append(m)
             
             await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
             existing["media"] = new_media
@@ -925,18 +955,45 @@ async def set_application_decision(
                 if existing:
                     from core import merge_talent_profile
                     existing_media = existing.get("media", [])
-                    existing_source_ids = {
-                        x.get("source_application_media_id") 
-                        for x in existing_media 
-                        if x.get("source_application_media_id")
-                    }
-                    
                     new_media = list(existing_media)
                     for m in talent["media"]:
-                        source_id = m.get("source_application_media_id")
-                        if source_id and source_id in existing_source_ids:
-                            continue
-                        new_media.append(m)
+                        is_dup = False
+                        in_pub = m.get("public_id")
+                        in_url = m.get("url")
+                        in_sec = m.get("secure_url") or in_url
+                        in_id = m.get("asset_id") or m.get("id")
+                        in_src_app = m.get("source_application_media_id")
+                        in_src_sub = m.get("source_submission_media_id")
+                        
+                        for x in existing_media:
+                            x_pub = x.get("public_id")
+                            x_url = x.get("url")
+                            x_sec = x.get("secure_url") or x_url
+                            x_id = x.get("asset_id") or x.get("id")
+                            x_src_app = x.get("source_application_media_id")
+                            x_src_sub = x.get("source_submission_media_id")
+                            
+                            if in_pub and x_pub == in_pub:
+                                is_dup = True
+                                break
+                            if in_url and (x_url == in_url or x_sec == in_url):
+                                is_dup = True
+                                break
+                            if in_sec and (x_url == in_sec or x_sec == in_sec):
+                                is_dup = True
+                                break
+                            if in_id and x_id == in_id:
+                                is_dup = True
+                                break
+                            if in_src_app and in_src_app == x_src_app:
+                                is_dup = True
+                                break
+                            if in_src_sub and in_src_sub == x_src_sub:
+                                is_dup = True
+                                break
+                                
+                        if not is_dup:
+                            new_media.append(m)
                     
                     await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
                     existing["media"] = new_media

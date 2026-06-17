@@ -48,12 +48,12 @@ export function UploadManagerProvider({ children }) {
                     toast.error(`Image too large (${Math.round(file.size / 1024 / 1024)} MB). Max ${CAP_MB} MB.`);
                     return;
                 }
-                if ([".bmp", ".tiff", ".heic", ".heif"].includes(ext) || ["image/bmp", "image/tiff", "image/heic", "image/heif"].includes(file.type)) {
-                    toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
+                if ([".bmp", ".tiff"].includes(ext) || ["image/bmp", "image/tiff"].includes(file.type)) {
+                    toast.error(`BMP and TIFF formats are not supported. Please upload JPEG, PNG, or HEIC.`);
                     return;
                 }
-                if (!file.type.startsWith("image/") && ![".jpg", ".jpeg", ".png", ".webp"].includes(ext)) {
-                    toast.error(`Unsupported image format. Please upload JPG, PNG, or WEBP.`);
+                if (!file.type.startsWith("image/") && ![".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"].includes(ext)) {
+                    toast.error(`Unsupported image format. Please upload JPG, PNG, WEBP, or HEIC.`);
                     return;
                 }
             }

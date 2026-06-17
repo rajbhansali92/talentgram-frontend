@@ -55,6 +55,7 @@ def mock_db():
     mdb.casting_pipeline = MagicMock()
     mdb.users = MagicMock()
     mdb.notification_logs = MagicMock()
+    mdb.profile_configs = MagicMock()
     
     # Setup AsyncMocks
     mdb.talents.find_one = AsyncMock(return_value=None)
@@ -73,6 +74,8 @@ def mock_db():
     mdb.submissions.find_one = AsyncMock(return_value=None)
     mdb.submissions.insert_one = AsyncMock()
     mdb.submissions.update_one = AsyncMock()
+    mdb.submissions.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
+    mdb.submissions.delete_many = AsyncMock(return_value=MagicMock(deleted_count=5))
     
     # Setup mock find chaining for submissions
     mock_cursor = MagicMock()
@@ -85,12 +88,19 @@ def mock_db():
     mdb.otp_codes.insert_one = AsyncMock()
     
     mdb.projects.find_one = AsyncMock(return_value={"id": "proj-123", "slug": "test-project"})
+    mdb.projects.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
+    
     mdb.asset_metadata.find_one = AsyncMock(return_value=None)
+    mdb.asset_metadata.delete_many = AsyncMock(return_value=MagicMock(deleted_count=0))
     mdb.casting_pipeline.find_one = AsyncMock(return_value=None)
     mdb.casting_pipeline.insert_one = AsyncMock()
+    mdb.casting_pipeline.delete_many = AsyncMock(return_value=MagicMock(deleted_count=0))
     mdb.users.find = MagicMock()
     mdb.users.find.return_value.to_list = AsyncMock(return_value=[])
     mdb.notification_logs.insert_one = AsyncMock()
+    
+    mdb.profile_configs.find_one = AsyncMock(return_value={"id": "conf-123"})
+    mdb.profile_configs.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
     
     return mdb
 
@@ -352,3 +362,215 @@ async def test_audit_log_creation(mock_db):
         assert inserted_audit["old_values"]["bio"] == "Old bio"
         assert inserted_audit["new_values"]["bio"] == "New bio"
         assert inserted_audit["source"] == "admin_edit"
+
+# --------------------------------------------------------------------------
+# Test 8: Project Deletion Safety (Audit Area 8)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_project_deletion_safety(mock_db):
+    # Setup delete mock to confirm cascaded deletion is safe
+    with patch("routers.projects.db", mock_db):
+        response = client.delete("/api/projects/proj-123")
+        assert response.status_code == 200
+        assert response.json()["deleted_id"] == "proj-123"
+        # Submissions should be cascaded
+        assert mock_db.submissions.delete_many.called
+        # Verify that talents delete is NEVER called
+        assert not mock_db.talents.delete_one.called
+        assert not mock_db.talents.delete_many.called
+
+# --------------------------------------------------------------------------
+# Test 9: Profile Config Deletion Safety (Audit Area 8)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_profile_config_deletion_safety(mock_db):
+    with patch("routers.applications.db", mock_db):
+        response = client.delete("/api/admin/profile-configs/conf-123")
+        assert response.status_code == 200
+        assert mock_db.profile_configs.delete_one.called
+        # Verify talents or talent media are untouched
+        assert not mock_db.talents.delete_one.called
+
+# --------------------------------------------------------------------------
+# Test 10: Safari Token Decodability (Audit Area 6)
+# --------------------------------------------------------------------------
+def test_safari_token_decodability():
+    from core import make_token
+    payload = {"role": "submitter", "sid": "sub-123", "kind": "application"}
+    token = make_token(payload, days=7)
+    
+    # Token must decode to the same payload
+    import jwt
+    from core import JWT_SECRET
+    decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    assert decoded["role"] == "submitter"
+    assert decoded["sid"] == "sub-123"
+    assert decoded["kind"] == "application"
+
+
+# --------------------------------------------------------------------------
+# Test 11: Identity Merge Name Protection (Issue #1)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_identity_merge_name_protection(mock_db):
+    existing_talent = {
+        "id": "talent-111",
+        "name": "Raj Bhansali",
+        "email": "raj@test.com",
+        "normalized_email": "raj@test.com"
+    }
+    
+    incoming_data = {
+        "name": "Deeya Damini"
+    }
+    
+    mock_db.talents.update_one = AsyncMock()
+    mock_db.profile_audits.insert_one = AsyncMock()
+    
+    with patch("core.db", mock_db):
+        await merge_talent_profile(existing_talent, incoming_data, "application_approval")
+        
+        # Verify that existing name was preserved (not updated via update_one)
+        assert not mock_db.talents.update_one.called
+        assert mock_db.profile_audits.insert_one.called
+        inserted_audit = mock_db.profile_audits.insert_one.call_args[0][0]
+        assert "name_conflict" in inserted_audit["changed_fields"]
+        assert inserted_audit["old_values"]["name_conflict"] == "Raj Bhansali"
+        assert inserted_audit["new_values"]["name_conflict"] == "Deeya Damini"
+
+
+# --------------------------------------------------------------------------
+# Test 12: Media Deduplication Fingerprint (Issue #2)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_media_deduplication_fingerprint(mock_db):
+    existing_talent = {
+        "id": "talent-222",
+        "name": "Test User",
+        "email": "dedupe@test.com",
+        "normalized_email": "dedupe@test.com",
+        "media": [
+            {
+                "id": "existing-media-id",
+                "category": "portfolio",
+                "url": "http://res.cloudinary.com/test/image.jpg",
+                "public_id": "test/image"
+            }
+        ]
+    }
+    
+    app_doc = {
+        "id": "app-222",
+        "talent_email": "dedupe@test.com",
+        "status": "submitted",
+        "form_data": {
+            "first_name": "Test",
+            "last_name": "User"
+        },
+        "media": [
+            {
+                "id": "new-media-id",
+                "category": "image",
+                "url": "http://res.cloudinary.com/test/image.jpg",
+                "public_id": "test/image"
+            }
+        ]
+    }
+    
+    mock_db.applications.find_one = AsyncMock(side_effect=[app_doc, app_doc])
+    mock_db.talents.find_one = AsyncMock(return_value=existing_talent)
+    mock_db.talents.update_one = AsyncMock()
+    mock_db.applications.update_one = AsyncMock()
+    
+    with patch("routers.applications.db", mock_db), patch("core.db", mock_db):
+        from routers.applications import set_application_decision
+        from routers.applications import SubmissionDecisionIn
+        
+        response = await set_application_decision(
+            "app-222",
+            SubmissionDecisionIn(decision="approved"),
+            admin={"id": "admin-123", "email": "admin@talentgram.co"}
+        )
+        assert response["ok"] is True
+        
+        # Verify that update_one for media set was called with empty/no new media (only existing preserved)
+        assert mock_db.talents.update_one.called
+        first_call_args = mock_db.talents.update_one.call_args_list[0][0]
+        # Should only write back the original 1 media item (not 2)
+        assert len(first_call_args[1]["$set"]["media"]) == 1
+
+
+# --------------------------------------------------------------------------
+# Test 13: Approval Idempotency (Issue #3)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_approval_idempotency(mock_db):
+    app_doc = {
+        "id": "app-333",
+        "talent_email": "idempotent@test.com",
+        "decision": "approved",
+        "talent_id": "talent-333",
+        "merged": True
+    }
+    
+    mock_db.applications.find_one = AsyncMock(return_value=app_doc)
+    mock_db.applications.update_one = AsyncMock()
+    mock_db.talents.find_one = AsyncMock()
+    
+    with patch("routers.applications.db", mock_db):
+        from routers.applications import set_application_decision
+        from routers.applications import SubmissionDecisionIn
+        
+        # Call it again
+        response = await set_application_decision(
+            "app-333",
+            SubmissionDecisionIn(decision="approved"),
+            admin={"id": "admin-123", "email": "admin@talentgram.co"}
+        )
+        assert response["ok"] is True
+        # Verify no database updates were made since it's already approved
+        assert not mock_db.applications.update_one.called
+
+
+# --------------------------------------------------------------------------
+# Test 14: Safari Upload Token Fallback (Issue #4)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_safari_upload_token_fallback(mock_db):
+    from core import make_token, decode_submitter
+    # Create an expired JWT token
+    token = make_token({"role": "submitter", "sid": "sub-444"}, days=-1)
+    
+    sub_doc = {
+        "id": "sub-444",
+        "project_slug": "test-slug",
+        "access_token": token
+    }
+    mock_db.submissions.find_one = AsyncMock(return_value=sub_doc)
+    
+    with patch("core.db", mock_db):
+        result = await decode_submitter(f"Bearer {token}")
+        assert result is not None
+        assert result["sid"] == "sub-444"
+
+
+# --------------------------------------------------------------------------
+# Test 15: Project Deletion Cascade casting_pipeline (Issue #5)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_project_deletion_cascade_pipeline(mock_db):
+    mock_db.projects.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
+    mock_db.submissions.delete_many = AsyncMock(return_value=MagicMock(deleted_count=2))
+    mock_db.casting_pipeline.delete_many = AsyncMock(return_value=MagicMock(deleted_count=2))
+    mock_db.asset_metadata.delete_many = AsyncMock(return_value=MagicMock(deleted_count=2))
+    
+    with patch("routers.projects.db", mock_db), patch("cloudinary.api.delete_resources_by_prefix"), patch("cloudinary.api.delete_folder"):
+        from routers.projects import delete_project
+        response = await delete_project(
+            "proj-123",
+            admin={"id": "admin-123", "email": "admin@talentgram.co", "role": "admin"}
+        )
+        assert response["ok"] is True
+        assert mock_db.casting_pipeline.delete_many.called
+        assert mock_db.asset_metadata.delete_many.called
+

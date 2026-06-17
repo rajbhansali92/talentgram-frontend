@@ -102,9 +102,22 @@ async def bulk_delete_projects(
     )
     res = await db.projects.delete_many({"id": {"$in": ids}})
     sub_res = await db.submissions.delete_many({"project_id": {"$in": ids}})
+    pipeline_res = await db.casting_pipeline.delete_many({"project_id": {"$in": ids}})
+    asset_res = await db.asset_metadata.delete_many({"project_id": {"$in": ids}})
+    
+    # Cascade Cloudinary bulk delete
+    import cloudinary.api
+    for pid in ids:
+        try:
+            folder_prefix = f"talentgram/projects/{pid}/"
+            cloudinary.api.delete_resources_by_prefix(folder_prefix)
+            cloudinary.api.delete_folder(f"talentgram/projects/{pid}")
+        except Exception as e:
+            logger.warning(f"Failed to fully delete Cloudinary project folder {pid}: {e}")
+
     logger.info(
-        "BULK DELETE /projects by admin=%s removed=%d submissions_cascade=%d",
-        admin.get("email"), res.deleted_count, sub_res.deleted_count,
+        "BULK DELETE /projects by admin=%s removed=%d submissions_cascade=%d pipeline_cascade=%d assets_cascade=%d",
+        admin.get("email"), res.deleted_count, sub_res.deleted_count, pipeline_res.deleted_count, asset_res.deleted_count,
     )
     return {
         "ok": True,
@@ -112,6 +125,8 @@ async def bulk_delete_projects(
         "deleted": res.deleted_count,
         "missing": len(ids) - res.deleted_count,
         "cascaded_submissions": sub_res.deleted_count,
+        "cascaded_pipeline": pipeline_res.deleted_count,
+        "cascaded_assets": asset_res.deleted_count,
     }
 
 
@@ -125,14 +140,33 @@ async def delete_project(pid: str, admin: dict = Depends(current_admin)):
     if not res.deleted_count:
         logger.warning("DELETE /projects/%s failed — not found", pid)
         raise HTTPException(404, "Project not found")
-    # Cascade: drop the project's submissions (they can never be revived once
-    # the parent project is gone) — keeps listings consistent.
+    # Cascade: drop the project's submissions
     sub_res = await db.submissions.delete_many({"project_id": pid})
+    # Cascade: clean up casting pipeline entries
+    pipeline_res = await db.casting_pipeline.delete_many({"project_id": pid})
+    # Cascade: clean up temporary project-scoped assets metadata
+    asset_res = await db.asset_metadata.delete_many({"project_id": pid})
+    
+    # Cascade Cloudinary delete
+    try:
+        import cloudinary.api
+        folder_prefix = f"talentgram/projects/{pid}/"
+        cloudinary.api.delete_resources_by_prefix(folder_prefix)
+        cloudinary.api.delete_folder(f"talentgram/projects/{pid}")
+    except Exception as e:
+        logger.warning(f"Failed to fully delete Cloudinary project folder {pid}: {e}")
+
     logger.info(
-        "DELETE /projects/%s succeeded (by %s); cascade removed %d submissions",
-        pid, admin.get("email"), sub_res.deleted_count,
+        "DELETE /projects/%s succeeded (by %s); cascade removed %d submissions, %d pipeline entries, %d assets",
+        pid, admin.get("email"), sub_res.deleted_count, pipeline_res.deleted_count, asset_res.deleted_count,
     )
-    return {"ok": True, "deleted_id": pid, "cascaded_submissions": sub_res.deleted_count}
+    return {
+        "ok": True, 
+        "deleted_id": pid, 
+        "cascaded_submissions": sub_res.deleted_count,
+        "cascaded_pipeline": pipeline_res.deleted_count,
+        "cascaded_assets": asset_res.deleted_count
+    }
 
 
 @router.post("/projects/{pid}/material")

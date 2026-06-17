@@ -9,7 +9,7 @@ from fastapi import APIRouter, FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
-from core import db, mongo_client, seed_admin, update_talent_cover_cache
+from core import db, mongo_client, seed_admin, update_talent_cover_cache, validate_talent_fields_classification
 from drive_backup import attach_db, drive_enabled, start_drive_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from routers import (
@@ -401,6 +401,7 @@ async def run_draft_expiration_and_backfill():
 async def on_startup():
     try:
         logger.info("Starting Talentgram backend...")
+        validate_talent_fields_classification()
 
         await run_media_duplicate_cleanup_migration()
         await run_draft_talent_migration()

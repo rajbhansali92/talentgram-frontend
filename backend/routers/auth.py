@@ -20,6 +20,7 @@ from core import (
     verify_password,
     _resolve_cover_url,
     compute_age,
+    normalize_email,
 )
 
 # Alias for readability inside login()
@@ -100,11 +101,10 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
         logger.error(f"Google Token Verification failed: {e}")
         raise HTTPException(status_code=400, detail="Invalid Google token signature")
 
-    email = id_info.get("email")
+    email = normalize_email(id_info.get("email"))
     if not email:
         raise HTTPException(status_code=400, detail="Google account has no email address")
 
-    email = email.lower().strip()
     google_id = id_info.get("sub")
     name = id_info.get("name") or ""
     picture = id_info.get("picture") or ""
@@ -112,7 +112,12 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
     if payload.slug == "apply":
         application = await db.applications.find_one({"talent_email": email})
         if application:
-            talent = await db.talents.find_one({"email": email})
+            talent = await db.talents.find_one({
+                "$or": [
+                    {"normalized_email": email},
+                    {"email": email}
+                ]
+            })
             token = make_token({"role": "submitter", "sid": application["id"], "kind": "application"}, days=7)
             await db.applications.update_one({"id": application["id"]}, {"$set": {"access_token": token}})
             return {
@@ -124,7 +129,12 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
                 "talent": (await _get_talent_profile_response(talent)) if talent else None
             }
 
-    talent = await db.talents.find_one({"email": email})
+    talent = await db.talents.find_one({
+        "$or": [
+            {"normalized_email": email},
+            {"email": email}
+        ]
+    })
     if not talent:
         # STEP 3: Store a temporary submission draft instead of creating a Talent record.
         draft = await db.submission_drafts.find_one({"email": email, "project_id": payload.slug or "apply"})
@@ -181,7 +191,8 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
 
 @router.post("/auth/login", response_model=TokenOut)
 async def login(payload: LoginIn):
-    user = await db.users.find_one({"email": payload.email.lower()})
+    email = normalize_email(payload.email)
+    user = await db.users.find_one({"email": email})
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if user.get("status") == "disabled":
@@ -656,7 +667,7 @@ async def _get_talent_profile_response(talent: dict) -> dict:
 
 @router.post("/auth/otp/send")
 async def send_otp(payload: OtpSendIn, request: Request):
-    email = payload.email.strip().lower()
+    email = normalize_email(payload.email)
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
 
@@ -722,7 +733,7 @@ async def send_otp(payload: OtpSendIn, request: Request):
 
 @router.post("/auth/otp/verify")
 async def verify_otp(payload: OtpVerifyIn, request: Request):
-    email = payload.email.strip().lower()
+    email = normalize_email(payload.email)
     otp = payload.otp.strip()
     slug = payload.slug.strip()
 
@@ -795,7 +806,12 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
 
     if slug == "apply":
         application = await db.applications.find_one({"talent_email": email})
-        talent = await db.talents.find_one({"email": email})
+        talent = await db.talents.find_one({
+            "$or": [
+                {"normalized_email": email},
+                {"email": email}
+            ]
+        })
         if application:
             token = make_token({"role": "submitter", "sid": application["id"], "kind": "application"}, days=7)
             await db.applications.update_one({"id": application["id"]}, {"$set": {"access_token": token}})
@@ -823,7 +839,12 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         if submission:
             token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
             await db.submissions.update_one({"id": submission["id"]}, {"$set": {"access_token": token}})
-            talent = await db.talents.find_one({"email": email})
+            talent = await db.talents.find_one({
+                "$or": [
+                    {"normalized_email": email},
+                    {"email": email}
+                ]
+            })
             return {
                 "existing": True,
                 "email": email,
@@ -833,7 +854,12 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "talent": (await _get_talent_profile_response(talent)) if talent else None
             }
 
-    talent = await db.talents.find_one({"email": email})
+    talent = await db.talents.find_one({
+        "$or": [
+            {"normalized_email": email},
+            {"email": email}
+        ]
+    })
     if talent:
         return {
             "existing": True,

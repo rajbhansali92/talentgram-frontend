@@ -43,6 +43,7 @@ from core import (
     media_url,
     video_poster_url,
     update_talent_cover_cache,
+    normalize_email,
 )
 from drive_backup import (
     drive_enabled,
@@ -55,16 +56,21 @@ router = APIRouter(prefix="/api", tags=["submissions"])
 
 
 async def update_talent_submission_metrics(email: str):
-    if not email:
+    norm_email = normalize_email(email)
+    if not norm_email:
         return
     cursor = db.submissions.find({
-        "talent_email": email.lower().strip(),
+        "talent_email": norm_email,
         "status": {"$ne": "draft"}
     }).sort("submitted_at", 1)
     subs = await cursor.to_list(length=1000)
     if not subs:
         await db.talents.update_one(
-            {"$or": [{"email": email}, {"source.talent_email": email}]},
+            {"$or": [
+                {"normalized_email": norm_email},
+                {"email": norm_email},
+                {"source.talent_email": norm_email}
+            ]},
             {"$set": {
                 "first_submission_at": None,
                 "last_submission_at": None,
@@ -87,7 +93,11 @@ async def update_talent_submission_metrics(email: str):
         last_sub = None
         
     await db.talents.update_one(
-        {"$or": [{"email": email}, {"source.talent_email": email}]},
+        {"$or": [
+            {"normalized_email": norm_email},
+            {"email": norm_email},
+            {"source.talent_email": norm_email}
+        ]},
         {"$set": {
             "first_submission_at": first_sub,
             "last_submission_at": last_sub,
@@ -143,18 +153,22 @@ async def prefill_for_email(
     if not _prefill_rate_limit_ok(request):
         raise HTTPException(429, "Too many lookups — please slow down")
 
-    email = (email or "").strip().lower()
-    if "@" not in email:
+    email = normalize_email(email)
+    if not email or "@" not in email:
         return {}
 
     # Remedy IDOR: Require valid OTP verified session token matching the query email
     submitter = await decode_submitter(authorization)
-    if not submitter or submitter.get("email") != email:
+    if not submitter or normalize_email(submitter.get("email")) != email:
         # Prevent email enumeration: return generic empty prefill schema on invalid auth
         return {}
 
     talent = await db.talents.find_one(
-        {"$or": [{"email": email}, {"source.talent_email": email}]},
+        {"$or": [
+            {"normalized_email": email},
+            {"email": email},
+            {"source.talent_email": email}
+        ]},
         {
             "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
             "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
@@ -311,7 +325,9 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
     project = await db.projects.find_one({"slug": slug})
     if not project:
         raise HTTPException(404, "Project not found")
-    email = payload.email.lower().strip()
+    email = normalize_email(payload.email)
+    if not email:
+        raise HTTPException(400, "Invalid email address")
 
     existing = await db.submissions.find_one({
         "project_id": project["id"],
@@ -339,7 +355,11 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
     prefill_media = []
     if email:
         talent_doc = await db.talents.find_one(
-            {"$or": [{"email": email}, {"source.talent_email": email}]},
+            {"$or": [
+                {"normalized_email": email},
+                {"email": email},
+                {"source.talent_email": email}
+            ]},
             {"age": 1, "dob": 1, "media": 1}
         )
         if talent_doc:
@@ -516,7 +536,15 @@ async def submission_update(
         talent_age = None
         email = sub.get("talent_email")
         if email:
-            talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+            norm_email = normalize_email(email)
+            talent_doc = await db.talents.find_one(
+                {"$or": [
+                    {"normalized_email": norm_email},
+                    {"email": norm_email},
+                    {"source.talent_email": norm_email}
+                ]},
+                {"age": 1, "dob": 1}
+            )
             if talent_doc:
                 talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
 
@@ -650,10 +678,18 @@ async def submission_upload(
     tid = sub.get("talent_id")
     tname = sub.get("talent_name")
     if not tid:
-        talent_doc = await db.talents.find_one({"email": sub.get("talent_email")})
-        if talent_doc:
-            tid = talent_doc.get("id")
-            tname = talent_doc.get("name")
+        norm_email = normalize_email(sub.get("talent_email"))
+        if norm_email:
+            talent_doc = await db.talents.find_one({
+                "$or": [
+                    {"normalized_email": norm_email},
+                    {"email": norm_email},
+                    {"source.talent_email": norm_email}
+                ]
+            })
+            if talent_doc:
+                tid = talent_doc.get("id")
+                tname = talent_doc.get("name")
     if not tid:
         tid = "unknown_talent"
 
@@ -815,6 +851,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
+    form = sub.get("form_data") or {}
     project = await db.projects.find_one({"id": sub["project_id"]})
     if not project:
         raise HTTPException(404, "Project not found")
@@ -822,7 +859,6 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     requirements = project.get("submission_requirements")
     if requirements and requirements.get("strictness") == "strict":
         fields_config = requirements.get("fields") or {}
-        form = sub.get("form_data") or {}
 
         # 1. Standard Profile Fields
         if fields_config.get("name") == "required":
@@ -1012,48 +1048,26 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # is consistent across all entry points (Phase 0).
     # ------------------------------------------------------------------
     if not is_retest and not sub.get("talent_id"):
-        email = (sub.get("talent_email") or "").lower().strip()
+        email = normalize_email(sub.get("talent_email"))
         talent_doc = None
         if email:
             talent_doc = await db.talents.find_one(
                 {"$or": [
+                    {"normalized_email": email},
                     {"email": email},
                     {"source.talent_email": email},
                 ]},
                 {"_id": 0},
             )
         if talent_doc:
-            # Q5 (Phase 2 schema unification): "fill empty only" sync. The
-            # admin's hand-edits are sacred — we only fill blanks from the
-            # talent's latest submission, never overwrite. Media is also
-            # never merged here (per Phase 0 spec).
-            update: Dict[str, Any] = {}
-            unified_fields = (
-                "phone", "dob", "height", "location", "ethnicity",
-                "gender", "instagram_handle", "instagram_followers", "bio", "skills",
-            )
-            for key in unified_fields:
-                if not talent_doc.get(key):
-                    val = form.get(key) if key != "phone" else (form.get("phone") or sub.get("talent_phone"))
-                    if val:
-                        update[key] = val
-            if not talent_doc.get("age"):
-                age_val = None
-                if form.get("age") not in (None, ""):
-                    try:
-                        age_val = int(form["age"])
-                    except Exception:
-                        age_val = None
-                if age_val is not None:
-                    update["age"] = age_val
-            new_links = [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()]
-            if new_links and not (talent_doc.get("work_links") or []):
-                update["work_links"] = new_links
-            if update:
-                await db.talents.update_one(
-                    {"id": talent_doc["id"]}, {"$set": update}
-                )
-                await update_talent_cover_cache(talent_doc["id"])
+            from core import merge_talent_profile
+            # Merge fields (Task 4 & 6)
+            form["email"] = email
+            form["normalized_email"] = email
+            if "phone" not in form or not form["phone"]:
+                form["phone"] = sub.get("talent_phone")
+            await merge_talent_profile(talent_doc, form, "project_submission")
+            await update_talent_cover_cache(talent_doc["id"])
         if not talent_doc:
             # Build a minimal talent record from the submission's form_data.
             full_name = (
@@ -1070,6 +1084,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 "id": str(uuid.uuid4()),
                 "name": full_name,
                 "email": email or None,
+                "normalized_email": email or None,
                 "phone": (form.get("phone") or sub.get("talent_phone") or None),
                 "age": age_val,
                 "dob": (form.get("dob") or None),
@@ -1107,11 +1122,20 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 # parallel. Re-fetch the winner and link to it.
                 talent_doc = await db.talents.find_one(
                     {"$or": [
+                        {"normalized_email": email},
                         {"email": email},
                         {"source.talent_email": email},
                     ]},
                     {"_id": 0},
                 )
+                if talent_doc:
+                    from core import merge_talent_profile
+                    form["email"] = email
+                    form["normalized_email"] = email
+                    if "phone" not in form or not form["phone"]:
+                        form["phone"] = sub.get("talent_phone")
+                    await merge_talent_profile(talent_doc, form, "project_submission")
+                    await update_talent_cover_cache(talent_doc["id"])
         if talent_doc:
             patch["talent_id"] = talent_doc["id"]
 
@@ -1407,11 +1431,12 @@ async def set_decision(
     # Resolve talent_id if it is missing/null (fallback matching/creation logic)
     resolved_talent_id = sub.get("talent_id")
     if not resolved_talent_id:
-        email = (sub.get("talent_email") or "").lower().strip()
+        email = normalize_email(sub.get("talent_email"))
         talent_doc = None
         if email:
             talent_doc = await db.talents.find_one(
                 {"$or": [
+                    {"normalized_email": email},
                     {"email": email},
                     {"source.talent_email": email},
                 ]},
@@ -1434,6 +1459,7 @@ async def set_decision(
                 "id": str(uuid.uuid4()),
                 "name": full_name,
                 "email": email or None,
+                "normalized_email": email or None,
                 "phone": (form.get("phone") or sub.get("talent_phone") or None),
                 "age": age_val,
                 "dob": (form.get("dob") or None),
@@ -1465,6 +1491,7 @@ async def set_decision(
                 # Race: another finalized in parallel. Re-fetch
                 talent_doc = await db.talents.find_one(
                     {"$or": [
+                        {"normalized_email": email},
                         {"email": email},
                         {"source.talent_email": email},
                     ]},
@@ -1603,7 +1630,15 @@ async def admin_edit_submission(
         talent_age = None
         email = sub.get("talent_email")
         if email:
-            talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+            norm_email = normalize_email(email)
+            talent_doc = await db.talents.find_one(
+                {"$or": [
+                    {"normalized_email": norm_email},
+                    {"email": norm_email},
+                    {"source.talent_email": norm_email}
+                ]},
+                {"age": 1, "dob": 1}
+            )
             if talent_doc:
                 talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
 

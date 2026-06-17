@@ -27,6 +27,7 @@ from core import (
     video_poster_url,
     resolve_cover_media,
     update_talent_cover_cache,
+    normalize_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,37 +44,24 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
     create email-less talents (e.g. legacy) — those bypass the dedup.
     """
     doc = payload.model_dump()
-    raw_email = (doc.get("email") or "")
-    if isinstance(raw_email, str):
-        raw_email = raw_email.strip().lower() or None
-        doc["email"] = raw_email
+    raw_email = normalize_email(doc.get("email"))
+    doc["email"] = raw_email
+    doc["normalized_email"] = raw_email
 
     if raw_email:
         existing = await db.talents.find_one(
             {"$or": [
+                {"normalized_email": raw_email},
                 {"email": raw_email},
                 {"source.talent_email": raw_email},
             ]},
             {"_id": 0},
         )
         if existing:
-            # Fill empty fields ONLY (never overwrite existing data).
-            patch: Dict[str, Any] = {}
-            for k, v in doc.items():
-                if k in {"id", "media", "created_at", "created_by"}:
-                    continue
-                if v in (None, "", [], {}):
-                    continue
-                if not existing.get(k):
-                    patch[k] = v
-            # Always canonicalise email to lower-case.
-            if existing.get("email") != raw_email:
-                patch["email"] = raw_email
-            if patch:
-                await db.talents.update_one({"id": existing["id"]}, {"$set": patch})
-                existing.update(patch)
-            existing.pop("created_by", None)
-            return enrich_talent(existing)
+            from core import merge_talent_profile
+            merged_talent = await merge_talent_profile(existing, doc, "admin_edit")
+            merged_talent.pop("created_by", None)
+            return enrich_talent(merged_talent)
 
     doc.update({
         "id": str(uuid.uuid4()),
@@ -384,22 +372,67 @@ async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
 @router.put("/talents/{tid}", response_model=TalentOut)
 async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
     update = payload.model_dump()
-    # Phase 0: canonicalise email; reject email re-assignment that would
-    # collide with another talent.
-    if isinstance(update.get("email"), str):
-        update["email"] = update["email"].strip().lower() or None
-    if update.get("email"):
+    email = normalize_email(update.get("email"))
+    update["email"] = email
+    update["normalized_email"] = email
+
+    existing = await db.talents.find_one({"id": tid})
+    if not existing:
+        raise HTTPException(404, "Talent not found")
+
+    if email:
         clash = await db.talents.find_one(
-            {"email": update["email"], "id": {"$ne": tid}}, {"_id": 0, "id": 1}
+            {"normalized_email": email, "id": {"$ne": tid}}, {"_id": 0, "id": 1}
         )
         if clash:
             raise HTTPException(409, "Another talent already has this email")
+
+    # Track changes for the audit log
+    AUTO_UPDATE_FIELDS = {
+        "instagram_handle", "instagram_followers", "location", "bio",
+        "skills", "work_links", "interested_in", "languages", "phone"
+    }
+    REVIEW_FIELDS = {
+        "dob", "gender", "height", "ethnicity"
+    }
+
+    changed_fields = []
+    old_values = {}
+    new_values = {}
+
+    for field in AUTO_UPDATE_FIELDS | REVIEW_FIELDS:
+        incoming_val = update.get(field)
+        existing_val = existing.get(field)
+        if existing_val != incoming_val:
+            changed_fields.append(field)
+            old_values[field] = existing_val
+            new_values[field] = incoming_val
+
+    # Also check if email changed
+    if existing.get("email") != email:
+        changed_fields.append("email")
+        old_values["email"] = existing.get("email")
+        new_values["email"] = email
+
     try:
         res = await db.talents.update_one({"id": tid}, {"$set": update})
     except DuplicateKeyError:
         raise HTTPException(409, "Another talent already has this email")
     if not res.matched_count:
         raise HTTPException(404, "Talent not found")
+
+    if changed_fields:
+        audit_log = {
+            "talent_id": tid,
+            "email": email or existing.get("email"),
+            "source": "admin_edit",
+            "changed_fields": changed_fields,
+            "old_values": old_values,
+            "new_values": new_values,
+            "timestamp": _now(),
+        }
+        await db.profile_audits.insert_one(audit_log)
+
     await update_talent_cover_cache(tid)
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     return enrich_talent(t)

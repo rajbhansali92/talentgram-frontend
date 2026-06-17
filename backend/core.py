@@ -34,6 +34,13 @@ ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
 # --------------------------------------------------------------------------
+# Email Normalization Helper
+# --------------------------------------------------------------------------
+def normalize_email(email: Optional[str]) -> Optional[str]:
+    if not email or not isinstance(email, str):
+        return None
+    return email.strip().lower() or None
+
 # Cloudinary — primary (and only) media storage as of v37m migration.
 # --------------------------------------------------------------------------
 import cloudinary  # noqa: E402
@@ -1025,8 +1032,19 @@ async def seed_admin() -> None:
             name="talents_email_unique",
             partialFilterExpression={"email": {"$type": "string"}},
         )
+
     except Exception as e:
         logger.warning(f"talents email unique index: {e}")
+
+    try:
+        await db.talents.create_index(
+            "normalized_email",
+            unique=True,
+            name="talents_normalized_email_unique",
+            partialFilterExpression={"normalized_email": {"$type": "string"}},
+        )
+    except Exception as e:
+        logger.warning(f"talents normalized_email unique index: {e}")
 
     # P0 production indexes — 6 collections.
     # Each is idempotent; create_index is a no-op if already present.
@@ -2219,14 +2237,19 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     if cat not in cat_mapping:
         return
     mapped_cat = cat_mapping[cat]
-    email = (submission.get("talent_email") or "").lower().strip()
-    if not email:
+    norm_email = normalize_email(submission.get("talent_email"))
+    if not norm_email:
         return
     source_id = media.get("id")
     if not source_id:
         return
 
-    talent = await db.talents.find_one({"email": email})
+    talent = await db.talents.find_one({
+        "$or": [
+            {"normalized_email": norm_email},
+            {"email": norm_email}
+        ]
+    })
     if not talent:
         return
 
@@ -2270,14 +2293,107 @@ async def remove_synced_media_from_global_talent(submission: dict, source_media_
     No-op when no mirror exists. Called from the submission media-delete
     endpoint so the global profile stays in sync.
     """
-    email = (submission.get("talent_email") or "").lower().strip()
-    if not email or not source_media_id:
+    norm_email = normalize_email(submission.get("talent_email"))
+    if not norm_email or not source_media_id:
         return
     await db.talents.update_one(
-        {"email": email},
+        {"$or": [{"normalized_email": norm_email}, {"email": norm_email}]},
         {"$pull": {"media": {"source_submission_media_id": source_media_id}}},
     )
-    talent = await db.talents.find_one({"email": email}, {"id": 1})
+    talent = await db.talents.find_one(
+        {"$or": [{"normalized_email": norm_email}, {"email": norm_email}]},
+        {"id": 1}
+    )
     if talent:
         await update_talent_cover_cache(talent["id"])
+
+
+
+async def merge_talent_profile(existing_talent: dict, incoming_data: dict, source: str) -> dict:
+    """
+    Implements Task 4 (Field-level merge policy) and Task 6 (Profile update audit trail).
+    Merges incoming data into existing talent record.
+    """
+    AUTO_UPDATE_FIELDS = {
+        "instagram_handle", "instagram_followers", "location", "bio",
+        "skills", "work_links", "interested_in", "languages", "phone"
+    }
+    
+    PRESERVE_FIELDS = {
+        "notes", "tags", "internal_status", "admin_flags", 
+        "commission_data", "client_feedback", "status"
+    }
+    
+    REVIEW_FIELDS = {
+        "dob", "gender", "height", "ethnicity"
+    }
+
+    email = normalize_email(existing_talent.get("email") or incoming_data.get("email"))
+    
+    update_patch = {}
+    changed_fields = []
+    old_values = {}
+    new_values = {}
+
+    # Standardize email and normalized_email
+    if email:
+        if existing_talent.get("normalized_email") != email:
+            update_patch["normalized_email"] = email
+        if existing_talent.get("email") != email:
+            update_patch["email"] = email
+
+    # 1. AUTO_UPDATE_FIELDS
+    for field in AUTO_UPDATE_FIELDS:
+        incoming_val = incoming_data.get(field)
+        if incoming_val not in (None, "", [], {}):
+            existing_val = existing_talent.get(field)
+            if existing_val != incoming_val:
+                update_patch[field] = incoming_val
+                changed_fields.append(field)
+                old_values[field] = existing_val
+                new_values[field] = incoming_val
+
+    # 2. REVIEW_FIELDS
+    for field in REVIEW_FIELDS:
+        incoming_val = incoming_data.get(field)
+        if incoming_val not in (None, "", [], {}):
+            existing_val = existing_talent.get(field)
+            if not existing_val:
+                update_patch[field] = incoming_val
+                changed_fields.append(field)
+                old_values[field] = None
+                new_values[field] = incoming_val
+            elif existing_val != incoming_val:
+                # Do NOT overwrite silently, log conflict
+                changed_fields.append(f"{field}_conflict")
+                old_values[f"{field}_conflict"] = existing_val
+                new_values[f"{field}_conflict"] = incoming_val
+
+    # Calculate age if dob is updated/set
+    if "dob" in update_patch and update_patch["dob"]:
+        age = compute_age(update_patch["dob"])
+        if age is not None:
+            update_patch["age"] = age
+            changed_fields.append("age")
+            old_values["age"] = existing_talent.get("age")
+            new_values["age"] = age
+
+    if update_patch:
+        await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update_patch})
+        existing_talent.update(update_patch)
+
+    if changed_fields:
+        audit_log = {
+            "talent_id": existing_talent["id"],
+            "email": email,
+            "source": source,
+            "changed_fields": changed_fields,
+            "old_values": old_values,
+            "new_values": new_values,
+            "timestamp": _now(),
+        }
+        await db.profile_audits.insert_one(audit_log)
+
+    return existing_talent
+
 

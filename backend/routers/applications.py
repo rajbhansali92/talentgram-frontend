@@ -47,6 +47,7 @@ from core import (
     normalize_instagram_handle,
     video_poster_url,
     update_talent_cover_cache,
+    normalize_email,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -216,20 +217,14 @@ async def delete_admin_profile_config(id: str, admin: dict = Depends(current_tea
 
 
 async def _find_talent_by_email(email: str) -> Optional[Dict]:
-    """Look up a talent by email using a case-insensitive regex.
-
-    MongoDB exact-match is case-sensitive, so stored emails with different
-    casing or surrounding whitespace would silently return None.
-    This helper normalizes both sides before matching.
-
-    Temporary diagnostic logging is included — remove once confirmed working.
-    """
-    email_norm = email.lower().strip()
-    email_regex = re.compile(f"^{re.escape(email_norm)}$", re.IGNORECASE)
+    email_norm = normalize_email(email)
+    if not email_norm:
+        return None
     talent = await db.talents.find_one({
         "$or": [
-            {"email": email_regex},
-            {"source.talent_email": email_regex},
+            {"normalized_email": email_norm},
+            {"email": email_norm},
+            {"source.talent_email": email_norm},
         ]
     })
     return talent
@@ -296,7 +291,9 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
 
 @router.post("/public/apply")
 async def start_application(payload: ApplicationStartIn):
-    email = payload.email.lower().strip()
+    email = normalize_email(payload.email)
+    if not email:
+        raise HTTPException(400, "Invalid email address")
     # Email is the unique identifier — reuse the in-progress draft if exists
     existing = await db.applications.find_one({"talent_email": email})
     if existing:
@@ -329,7 +326,7 @@ async def start_application(payload: ApplicationStartIn):
         return {"id": aid, "token": token, "resumed": True}
 
     talent_age = None
-    talent_doc = await db.talents.find_one({"$or": [{"email": email}, {"source.talent_email": email}]}, {"age": 1, "dob": 1})
+    talent_doc = await _find_talent_by_email(email)
     if talent_doc:
         talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
 
@@ -875,29 +872,35 @@ async def set_application_decision(
         # source.talent_email matches (covers manual adds, prior applications, and
         # legacy project-forwarded submissions).
         existing = await db.talents.find_one(
-            {"$or": [{"email": email}, {"source.talent_email": email}]}
+            {"$or": [
+                {"normalized_email": email},
+                {"email": email},
+                {"source.talent_email": email}
+            ]}
         )
         if existing:
-            # Merge: append new media, fill empty fields, never overwrite
-            new_media = existing.get("media", []) + [
-                m for m in talent["media"] if m["id"] not in {x["id"] for x in existing.get("media", [])}
-            ]
-            update = {"media": new_media}
-            for key in ("email", "phone", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio", "skills"):
-                if not existing.get(key) and talent.get(key):
-                    update[key] = talent[key]
-            # work_links: extend (dedupe) only if existing list is empty.
-            if not (existing.get("work_links") or []) and talent.get("work_links"):
-                update["work_links"] = talent["work_links"]
-            if not existing.get("cover_media_id") and talent.get("cover_media_id"):
-                update["cover_media_id"] = talent["cover_media_id"]
-            # interested_in: merge unique categories from application into existing profile.
-            existing_interests = set(existing.get("interested_in") or [])
-            incoming_interests = set(talent.get("interested_in") or [])
-            merged_interests = sorted(existing_interests | incoming_interests)
-            if merged_interests:
-                update["interested_in"] = merged_interests
-            await db.talents.update_one({"id": existing["id"]}, {"$set": update})
+            from core import merge_talent_profile
+            # Idempotent media merge with deduplication (Task 5)
+            existing_media = existing.get("media", [])
+            existing_source_ids = {
+                x.get("source_application_media_id") 
+                for x in existing_media 
+                if x.get("source_application_media_id")
+            }
+            
+            new_media = list(existing_media)
+            for m in talent["media"]:
+                source_id = m.get("source_application_media_id")
+                if source_id and source_id in existing_source_ids:
+                    continue
+                new_media.append(m)
+            
+            await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
+            existing["media"] = new_media
+            
+            # Merge fields (Task 4 & 6)
+            await merge_talent_profile(existing, talent, "application_approval")
+            
             await update_talent_cover_cache(existing["id"])
             await db.applications.update_one(
                 {"id": aid}, {"$set": {"talent_id": existing["id"], "merged": True}}
@@ -913,26 +916,33 @@ async def set_application_decision(
                 return {"ok": True, "talent_id": talent["id"], "merged": False}
             except DuplicateKeyError:
                 existing = await db.talents.find_one(
-                    {"$or": [{"email": email}, {"source.talent_email": email}]}
+                    {"$or": [
+                        {"normalized_email": email},
+                        {"email": email},
+                        {"source.talent_email": email}
+                    ]}
                 )
                 if existing:
-                    new_media = existing.get("media", []) + [
-                        m for m in talent["media"] if m["id"] not in {x["id"] for x in existing.get("media", [])}
-                    ]
-                    update = {"media": new_media}
-                    for key in ("email", "phone", "age", "dob", "height", "location", "ethnicity", "gender", "instagram_handle", "instagram_followers", "bio", "skills"):
-                        if not existing.get(key) and talent.get(key):
-                            update[key] = talent[key]
-                    if not (existing.get("work_links") or []) and talent.get("work_links"):
-                        update["work_links"] = talent["work_links"]
-                    if not existing.get("cover_media_id") and talent.get("cover_media_id"):
-                        update["cover_media_id"] = talent["cover_media_id"]
-                    existing_interests = set(existing.get("interested_in") or [])
-                    incoming_interests = set(talent.get("interested_in") or [])
-                    merged_interests = sorted(existing_interests | incoming_interests)
-                    if merged_interests:
-                        update["interested_in"] = merged_interests
-                    await db.talents.update_one({"id": existing["id"]}, {"$set": update})
+                    from core import merge_talent_profile
+                    existing_media = existing.get("media", [])
+                    existing_source_ids = {
+                        x.get("source_application_media_id") 
+                        for x in existing_media 
+                        if x.get("source_application_media_id")
+                    }
+                    
+                    new_media = list(existing_media)
+                    for m in talent["media"]:
+                        source_id = m.get("source_application_media_id")
+                        if source_id and source_id in existing_source_ids:
+                            continue
+                        new_media.append(m)
+                    
+                    await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
+                    existing["media"] = new_media
+                    
+                    await merge_talent_profile(existing, talent, "application_approval")
+                    
                     await update_talent_cover_cache(existing["id"])
                     await db.applications.update_one(
                         {"id": aid}, {"$set": {"talent_id": existing["id"], "merged": True}}
@@ -974,6 +984,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
             "talent_id": tid,
             "duration": m.get("duration"),
             "poster_url": m.get("poster_url"),
+            "source_application_media_id": m.get("id"),
         })
         if new_cat in ("portfolio", "indian", "western") and not cover_mid:
             cover_mid = mid
@@ -989,10 +1000,12 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
     }
     raw_interests = fd.get("interested_in") or []
     interested_in = [i for i in raw_interests if isinstance(i, str) and i.strip() in VALID_INTERESTS]
+    email = normalize_email(app_doc.get("talent_email"))
     return {
         "id": tid,
         "name": f"{fd.get('first_name','')} {fd.get('last_name','')}".strip() or app_doc.get("talent_name"),
-        "email": app_doc.get("talent_email"),
+        "email": email,
+        "normalized_email": email,
         "phone": (fd.get("phone") or app_doc.get("talent_phone") or None),
         "age": age,
         "dob": dob,
@@ -1011,7 +1024,7 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         "media": new_media,
         "source": {
             "type": "self_onboard",
-            "talent_email": app_doc.get("talent_email"),
+            "talent_email": email,
             "reference_id": app_doc["id"],
         },
         "status": "SUBMITTED",

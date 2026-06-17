@@ -220,56 +220,6 @@ async def prefill_for_email(
                 "created_at": m.get("created_at") or _now(),
             }
             break
-
-    # Priority 2: db.submissions
-    if not latest_intro:
-        latest_sub = await db.submissions.find_one(
-            {
-                "talent_email": email,
-                "media.category": {"$in": ["intro_video", "video"]}
-            },
-            sort=[("submitted_at", -1), ("created_at", -1)]
-        )
-        if latest_sub:
-            for m in (latest_sub.get("media") or []):
-                if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                    latest_intro = {
-                        "id": m.get("id"),
-                        "category": "intro_video",
-                        "url": m.get("url"),
-                        "public_id": m.get("public_id"),
-                        "resource_type": m.get("resource_type") or "video",
-                        "content_type": m.get("content_type") or "video/mp4",
-                        "original_filename": m.get("original_filename"),
-                        "size": m.get("size") or 0,
-                        "created_at": m.get("created_at") or _now(),
-                    }
-                    break
-
-    if not latest_intro:
-        latest_app = await db.applications.find_one(
-            {
-                "talent_email": email,
-                "media.category": {"$in": ["intro_video", "video"]}
-            },
-            sort=[("created_at", -1)]
-        )
-        if latest_app:
-            for m in (latest_app.get("media") or []):
-                if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                    latest_intro = {
-                        "id": m.get("id"),
-                        "category": "intro_video",
-                        "url": m.get("url"),
-                        "public_id": m.get("public_id"),
-                        "resource_type": m.get("resource_type") or "video",
-                        "content_type": m.get("content_type") or "video/mp4",
-                        "original_filename": m.get("original_filename"),
-                        "size": m.get("size") or 0,
-                        "created_at": m.get("created_at") or _now(),
-                    }
-                    break
-
     return {
         "first_name": first,
         "last_name": last,
@@ -1047,10 +997,89 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # Uses the SAME broad $or lookup as /apply approval so the merge logic
     # is consistent across all entry points (Phase 0).
     # ------------------------------------------------------------------
-    if not is_retest and not sub.get("talent_id"):
-        email = normalize_email(sub.get("talent_email"))
-        talent_doc = None
-        if email:
+    # ------------------------------------------------------------------
+    # Auto-link/update to global Talent DB (dedupe by email).
+    # ------------------------------------------------------------------
+    email = normalize_email(sub.get("talent_email"))
+    talent_doc = None
+    if sub.get("talent_id"):
+        talent_doc = await db.talents.find_one({"id": sub["talent_id"]}, {"_id": 0})
+    if not talent_doc and email:
+        talent_doc = await db.talents.find_one(
+            {"$or": [
+                {"normalized_email": email},
+                {"email": email},
+                {"source.talent_email": email},
+            ]},
+            {"_id": 0},
+        )
+
+    if talent_doc:
+        from core import merge_talent_profile
+        # Merge fields (Task 4 & 6)
+        form_to_merge = dict(form)
+        form_to_merge["email"] = email
+        form_to_merge["normalized_email"] = email
+        if "phone" not in form_to_merge or not form_to_merge["phone"]:
+            form_to_merge["phone"] = sub.get("talent_phone")
+        
+        # Exception: Project-specific overrides for location must remain separate
+        form_to_merge.pop("location", None)
+        
+        await merge_talent_profile(talent_doc, form_to_merge, "project_submission")
+        await update_talent_cover_cache(talent_doc["id"])
+    else:
+        # Build a minimal talent record from the submission's form_data.
+        full_name = (
+            f"{(form.get('first_name') or '').strip()} "
+            f"{(form.get('last_name') or '').strip()}"
+        ).strip() or sub.get("talent_name") or "Unnamed"
+        age_val = None
+        if form.get("age") not in (None, ""):
+            try:
+                age_val = int(form["age"])
+            except Exception:
+                age_val = None
+        new_talent = {
+            "id": str(uuid.uuid4()),
+            "name": full_name,
+            "email": email or None,
+            "normalized_email": email or None,
+            "phone": (form.get("phone") or sub.get("talent_phone") or None),
+            "age": age_val,
+            "dob": (form.get("dob") or None),
+            "height": (form.get("height") or None),
+            "location": (form.get("location") or None),
+            "ethnicity": (form.get("ethnicity") or None),
+            "gender": (form.get("gender") or None),
+            "instagram_handle": normalize_instagram_handle(form.get("instagram_handle") or None),
+            "instagram_followers": (form.get("instagram_followers") or None),
+            "bio": (form.get("bio") or None),
+            "skills": [s for s in (form.get("skills") or []) if isinstance(s, str) and s.strip()],
+            "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
+            "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
+            # Phase 0 — `source` is ALWAYS an object with the exact shape
+            # {type, talent_email, reference_id} so the merge $or lookup
+            # works symmetrically across all entry points.
+            "source": {
+                "type": "audition_submission",
+                "talent_email": email or None,
+                "reference_id": sid,
+            },
+            "media": [],                 # keep global media separate (spec: media must NOT merge)
+            "cover_media_id": None,
+            "status": "SUBMITTED",
+            "created_at": _now(),
+            "created_by": "auto-audition",
+        }
+        try:
+            await db.talents.insert_one(new_talent)
+            await update_talent_cover_cache(new_talent["id"])
+            new_talent.pop("_id", None)
+            talent_doc = new_talent
+        except DuplicateKeyError:
+            # Race: another submission for the same email finalised in
+            # parallel. Re-fetch the winner and link to it.
             talent_doc = await db.talents.find_one(
                 {"$or": [
                     {"normalized_email": email},
@@ -1059,98 +1088,51 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 ]},
                 {"_id": 0},
             )
-        if talent_doc:
-            from core import merge_talent_profile
-            # Merge fields (Task 4 & 6)
-            form["email"] = email
-            form["normalized_email"] = email
-            if "phone" not in form or not form["phone"]:
-                form["phone"] = sub.get("talent_phone")
-            await merge_talent_profile(talent_doc, form, "project_submission")
-            await update_talent_cover_cache(talent_doc["id"])
-        if not talent_doc:
-            # Build a minimal talent record from the submission's form_data.
-            full_name = (
-                f"{(form.get('first_name') or '').strip()} "
-                f"{(form.get('last_name') or '').strip()}"
-            ).strip() or sub.get("talent_name") or "Unnamed"
-            age_val = None
-            if form.get("age") not in (None, ""):
-                try:
-                    age_val = int(form["age"])
-                except Exception:
-                    age_val = None
-            new_talent = {
-                "id": str(uuid.uuid4()),
-                "name": full_name,
-                "email": email or None,
-                "normalized_email": email or None,
-                "phone": (form.get("phone") or sub.get("talent_phone") or None),
-                "age": age_val,
-                "dob": (form.get("dob") or None),
-                "height": (form.get("height") or None),
-                "location": (form.get("location") or None),
-                "ethnicity": (form.get("ethnicity") or None),
-                "gender": (form.get("gender") or None),
-                "instagram_handle": normalize_instagram_handle(form.get("instagram_handle") or None),
-                "instagram_followers": (form.get("instagram_followers") or None),
-                "bio": (form.get("bio") or None),
-                "skills": [s for s in (form.get("skills") or []) if isinstance(s, str) and s.strip()],
-                "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
-                "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
-                # Phase 0 — `source` is ALWAYS an object with the exact shape
-                # {type, talent_email, reference_id} so the merge $or lookup
-                # works symmetrically across all entry points.
-                "source": {
-                    "type": "audition_submission",
-                    "talent_email": email or None,
-                    "reference_id": sid,
-                },
-                "media": [],                 # keep global media separate (spec: media must NOT merge)
-                "cover_media_id": None,
-                "status": "SUBMITTED",
-                "created_at": _now(),
-                "created_by": "auto-audition",
-            }
-            try:
-                await db.talents.insert_one(new_talent)
-                await update_talent_cover_cache(new_talent["id"])
-                new_talent.pop("_id", None)
-                talent_doc = new_talent
-            except DuplicateKeyError:
-                # Race: another submission for the same email finalised in
-                # parallel. Re-fetch the winner and link to it.
-                talent_doc = await db.talents.find_one(
-                    {"$or": [
-                        {"normalized_email": email},
-                        {"email": email},
-                        {"source.talent_email": email},
-                    ]},
-                    {"_id": 0},
-                )
-                if talent_doc:
-                    from core import merge_talent_profile
-                    form["email"] = email
-                    form["normalized_email"] = email
-                    if "phone" not in form or not form["phone"]:
-                        form["phone"] = sub.get("talent_phone")
-                    await merge_talent_profile(talent_doc, form, "project_submission")
-                    await update_talent_cover_cache(talent_doc["id"])
-        if talent_doc:
-            patch["talent_id"] = talent_doc["id"]
+            if talent_doc:
+                from core import merge_talent_profile
+                form_to_merge = dict(form)
+                form_to_merge["email"] = email
+                form_to_merge["normalized_email"] = email
+                if "phone" not in form_to_merge or not form_to_merge["phone"]:
+                    form_to_merge["phone"] = sub.get("talent_phone")
+                form_to_merge.pop("location", None)
+                await merge_talent_profile(talent_doc, form_to_merge, "project_submission")
+                await update_talent_cover_cache(talent_doc["id"])
+    if talent_doc:
+        patch["talent_id"] = talent_doc["id"]
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 
-    # Phase 3 v37i — at first-time finalize, the talent record is created
-    # (or matched) above. ALL pre-finalize image uploads (image/indian/
-    # western) need to be retroactively mirrored into the talent's global
-    # media so the Global Profile reflects what was uploaded during this
-    # submission. Idempotent via source_submission_media_id.
-    if not is_retest:
-        finalized_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
-        if finalized_sub:
-            for m in finalized_sub.get("media") or []:
-                await sync_media_to_global_talent(finalized_sub, m)
+    # Sync all uploads retroactively into the talent's global media.
+    # Idempotent via source_submission_media_id.
+    finalized_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    if finalized_sub and talent_doc:
+        # Enforce replacement policy: clear existing canonical media for the incoming categories
+        incoming_categories = set()
+        cat_mapping = {
+            "image": "portfolio",
+            "portfolio": "portfolio",
+            "indian": "indian",
+            "western": "western",
+            "video": "video",
+            "intro_video": "video",
+            "headshot": "headshot",
+            "headshots": "headshot",
+            "additional_portfolio": "additional_portfolio"
+        }
+        for m in finalized_sub.get("media") or []:
+            cat = m.get("category")
+            if cat in cat_mapping:
+                incoming_categories.add(cat_mapping[cat])
+
+        if incoming_categories:
+            await db.talents.update_one(
+                {"id": talent_doc["id"]},
+                {"$pull": {"media": {"category": {"$in": list(incoming_categories)}}}}
+            )
+
+        for m in finalized_sub.get("media") or []:
+            await sync_media_to_global_talent(finalized_sub, m)
 
     # Auto-create pipeline entry on first-time finalize.
     # Ensures every submitted talent automatically appears in the casting

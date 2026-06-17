@@ -2227,11 +2227,13 @@ def _clean_ids(ids: List[str]) -> List[str]:
 # Categories that should be mirrored from submission to global talent.
 # Audition-only categories (intro_video, take, take_*) are project-scoped
 # and intentionally NOT mirrored.
-SYNC_TO_GLOBAL_CATEGORIES = {"image", "indian", "western"}
+SYNC_TO_GLOBAL_CATEGORIES = {
+    "image", "portfolio", "indian", "western", "video", "intro_video", "headshot", "headshots", "additional_portfolio"
+}
 
 
 async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
-    """Mirror a submission's image media into the global talent record.
+    """Mirror a submission's media into the global talent record.
 
     No-op when:
       - submission has no `talent_email` (anonymous draft)
@@ -2241,10 +2243,14 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     """
     cat_mapping = {
         "image": "portfolio",
+        "portfolio": "portfolio",
         "indian": "indian",
         "western": "western",
         "video": "video",
-        "intro_video": "video"
+        "intro_video": "video",
+        "headshot": "headshot",
+        "headshots": "headshot",
+        "additional_portfolio": "additional_portfolio"
     }
     cat = media.get("category")
     if cat not in cat_mapping:
@@ -2272,12 +2278,14 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
     for m in (talent.get("media") or []):
         if (pub_id and m.get("public_id") == pub_id) or \
            (url and m.get("url") == url) or \
-           (m.get("source_submission_media_id") == source_id):
+           (m.get("source_submission_media_id") == source_id) or \
+           (m.get("source_application_media_id") == source_id):
             return
 
     # Build the mirror item — preserves Cloudinary url + public_id so the
-    # global profile renders identically to the submission. New `id` is
+    # global profile renders identically to the submission/application. New `id` is
     # generated to keep talent.media ids unique across mirror sources.
+    is_app = media.get("scope") == "application" or "application_id" in media
     mirror = {
         "id": str(uuid.uuid4()),
         "category": mapped_cat,
@@ -2289,9 +2297,19 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
         "size": media.get("size"),
         "created_at": media.get("created_at") or _now(),
         "scope": "talent",
-        "source_submission_id": submission.get("id"),
-        "source_submission_media_id": source_id,
     }
+    if is_app:
+        mirror["source_application_id"] = submission.get("id")
+        mirror["source_application_media_id"] = source_id
+    else:
+        mirror["source_submission_id"] = submission.get("id")
+        mirror["source_submission_media_id"] = source_id
+
+    if mapped_cat == "video":
+        await db.talents.update_one(
+            {"id": talent["id"]},
+            {"$pull": {"media": {"category": "video"}}}
+        )
 
     await db.talents.update_one(
         {"id": talent["id"]},
@@ -2301,9 +2319,9 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
 
 
 async def remove_synced_media_from_global_talent(submission: dict, source_media_id: str) -> None:
-    """Remove the mirrored copy of a submission media from the global talent.
+    """Remove the mirrored copy of a submission or application media from the global talent.
 
-    No-op when no mirror exists. Called from the submission media-delete
+    No-op when no mirror exists. Called from the submission/application media-delete
     endpoint so the global profile stays in sync.
     """
     norm_email = normalize_email(submission.get("talent_email"))
@@ -2311,7 +2329,12 @@ async def remove_synced_media_from_global_talent(submission: dict, source_media_
         return
     await db.talents.update_one(
         {"$or": [{"normalized_email": norm_email}, {"email": norm_email}]},
-        {"$pull": {"media": {"source_submission_media_id": source_media_id}}},
+        {"$pull": {"media": {
+            "$or": [
+                {"source_submission_media_id": source_media_id},
+                {"source_application_media_id": source_media_id}
+            ]
+        }}},
     )
     talent = await db.talents.find_one(
         {"$or": [{"normalized_email": norm_email}, {"email": norm_email}]},

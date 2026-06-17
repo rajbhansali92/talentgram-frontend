@@ -585,66 +585,6 @@ async def _get_talent_profile_response(talent: dict) -> dict:
                 "size": m.get("size") or 0,
                 "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
             }
-            break
-
-    # Priority 2: db.submissions
-    if not latest_intro:
-        from unittest.mock import MagicMock, AsyncMock
-        if isinstance(db.submissions.find_one, MagicMock) and not isinstance(db.submissions.find_one, AsyncMock):
-            latest_sub = None
-        else:
-            latest_sub = await db.submissions.find_one(
-                {
-                    "talent_email": email,
-                    "media.category": {"$in": ["intro_video", "video"]}
-                },
-                sort=[("submitted_at", -1), ("created_at", -1)]
-            )
-        if latest_sub:
-            for m in (latest_sub.get("media") or []):
-                if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                    latest_intro = {
-                        "id": m.get("id"),
-                        "category": "intro_video",
-                        "url": m.get("url"),
-                        "public_id": m.get("public_id"),
-                        "resource_type": m.get("resource_type") or "video",
-                        "content_type": m.get("content_type") or "video/mp4",
-                        "original_filename": m.get("original_filename"),
-                        "size": m.get("size") or 0,
-                        "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    }
-                    break
-
-    # Priority 3: db.applications
-    if not latest_intro:
-        from unittest.mock import MagicMock, AsyncMock
-        if isinstance(db.applications.find_one, MagicMock) and not isinstance(db.applications.find_one, AsyncMock):
-            latest_app = None
-        else:
-            latest_app = await db.applications.find_one(
-                {
-                    "talent_email": email,
-                    "media.category": {"$in": ["intro_video", "video"]}
-                },
-                sort=[("created_at", -1)]
-            )
-        if latest_app:
-            for m in (latest_app.get("media") or []):
-                if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                    latest_intro = {
-                        "id": m.get("id"),
-                        "category": "intro_video",
-                        "url": m.get("url"),
-                        "public_id": m.get("public_id"),
-                        "resource_type": m.get("resource_type") or "video",
-                        "content_type": m.get("content_type") or "video/mp4",
-                        "original_filename": m.get("original_filename"),
-                        "size": m.get("size") or 0,
-                        "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    }
-                    break
-
     return {
         "email": talent.get("email"),
         "first_name": first_name,

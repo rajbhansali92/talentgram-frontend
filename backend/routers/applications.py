@@ -233,9 +233,14 @@ async def _find_talent_by_email(email: str) -> Optional[Dict]:
 # Maps talent.media[].category → application media category
 _TALENT_TO_APP_CATEGORY: Dict[str, str] = {
     "portfolio": "image",
+    "image": "image",
     "indian": "indian",
     "western": "western",
     "video": "intro_video",
+    "intro_video": "intro_video",
+    "headshot": "headshot",
+    "headshots": "headshot",
+    "additional_portfolio": "additional_portfolio",
 }
 
 
@@ -569,6 +574,9 @@ async def upload_application_media(
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
     updated = await db.applications.find_one({"id": aid}, {"_id": 0})
 
+    from core import sync_media_to_global_talent
+    await sync_media_to_global_talent(updated, media)
+
     # Drive secondary backup — applications don't have a brand, use a stable bucket.
     if drive_enabled():
         media["scope"] = "application"
@@ -588,6 +596,10 @@ async def delete_application_media(
     if app_doc.get("status") == "submitted":
         raise HTTPException(400, "Application already finalized")
     await db.applications.update_one({"id": aid}, {"$pull": {"media": {"id": mid}}})
+
+    from core import remove_synced_media_from_global_talent
+    await remove_synced_media_from_global_talent(app_doc, mid)
+
     return {"ok": True}
 
 
@@ -883,47 +895,11 @@ async def set_application_decision(
         )
         if existing:
             from core import merge_talent_profile
-            # Idempotent media merge with deduplication (Task 5)
             existing_media = existing.get("media", [])
-            new_media = list(existing_media)
+            incoming_categories = {m.get("category") for m in talent["media"] if m.get("category")}
+            new_media = [x for x in existing_media if x.get("category") not in incoming_categories]
             for m in talent["media"]:
-                is_dup = False
-                in_pub = m.get("public_id")
-                in_url = m.get("url")
-                in_sec = m.get("secure_url") or in_url
-                in_id = m.get("asset_id") or m.get("id")
-                in_src_app = m.get("source_application_media_id")
-                in_src_sub = m.get("source_submission_media_id")
-                
-                for x in existing_media:
-                    x_pub = x.get("public_id")
-                    x_url = x.get("url")
-                    x_sec = x.get("secure_url") or x_url
-                    x_id = x.get("asset_id") or x.get("id")
-                    x_src_app = x.get("source_application_media_id")
-                    x_src_sub = x.get("source_submission_media_id")
-                    
-                    if in_pub and x_pub == in_pub:
-                        is_dup = True
-                        break
-                    if in_url and (x_url == in_url or x_sec == in_url):
-                        is_dup = True
-                        break
-                    if in_sec and (x_url == in_sec or x_sec == in_sec):
-                        is_dup = True
-                        break
-                    if in_id and x_id == in_id:
-                        is_dup = True
-                        break
-                    if in_src_app and in_src_app == x_src_app:
-                        is_dup = True
-                        break
-                    if in_src_sub and in_src_sub == x_src_sub:
-                        is_dup = True
-                        break
-                        
-                if not is_dup:
-                    new_media.append(m)
+                new_media.append(m)
             
             await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
             existing["media"] = new_media
@@ -1016,14 +992,18 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
     cover_mid: Optional[str] = None
     for m in app_doc.get("media", []) or []:
         cat = m.get("category")
-        if cat == "image":
+        if cat in ("image", "portfolio"):
             new_cat = "portfolio"
         elif cat == "indian":
             new_cat = "indian"
         elif cat == "western":
             new_cat = "western"
-        elif cat == "intro_video":
+        elif cat in ("intro_video", "video"):
             new_cat = "video"
+        elif cat in ("headshot", "headshots"):
+            new_cat = "headshot"
+        elif cat == "additional_portfolio":
+            new_cat = "additional_portfolio"
         else:
             continue
         mid = str(uuid.uuid4())

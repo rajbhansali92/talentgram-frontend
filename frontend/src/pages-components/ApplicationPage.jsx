@@ -248,10 +248,7 @@ export default function ApplicationPage() {
                             { headers: { Authorization: `Bearer ${saved.token}` } },
                         );
                         console.log("[ApplicationPage] Fetch successful. Hydrating form fields.");
-                        console.log("[HYDRATE PAYLOAD]", data);
-                        const nextForm = { ...form, ...(data.form_data || {}) };
-                        console.log("[HYDRATED STATE]", nextForm);
-                        setForm(nextForm);
+                        setForm((f) => ({ ...f, ...(data.form_data || {}) }));
                         setMedia(data.media || []);
                         if (data.status === "submitted") {
                             setFinalized(true);
@@ -652,9 +649,7 @@ export default function ApplicationPage() {
                     const appData = res.data;
                     if (appData) {
                         console.log("[startApplication] Resumed app data retrieved successfully. Hydrating form and media.");
-                        console.log("[HYDRATE PAYLOAD]", appData);
                         finalForm = { ...form, ...(appData.form_data || {}) };
-                        console.log("[HYDRATED STATE]", finalForm);
                         finalMedia = appData.media || [];
                         setForm(finalForm);
                         setMedia(finalMedia);

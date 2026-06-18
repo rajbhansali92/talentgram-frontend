@@ -244,36 +244,96 @@ _TALENT_TO_APP_CATEGORY: Dict[str, str] = {
 }
 
 
+def split_full_name(name: str) -> tuple[str, str]:
+    name = (name or "").strip()
+    if not name:
+        return "", ""
+    parts = name.split()
+    if len(parts) == 1:
+        return parts[0], ""
+    first = " ".join(parts[:-1])
+    last = parts[-1]
+    return first, last
+
+
 async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) -> None:
     """Hydrate a sparse draft application from an existing talent profile.
 
     Rules:
-    - Only fills fields that are missing/empty in the application form_data.
-    - Never overwrites data already present in the application.
-    - Media is copied from talent only when the application has zero media.
+    - Only fills fields that are missing/empty in the application form_data, unless force_refresh is True.
+    - Never overwrites data already present in the application, unless force_refresh is True.
+    - Media is copied/synced if stale compared to db.talents.
     """
     fd = app_doc.get("form_data") or {}
     patch: Dict[str, Any] = {}
 
+    t_updated = talent.get("updated_at")
+    app_snapshot = app_doc.get("talent_profile_updated_at")
+    force_refresh = False
+    if t_updated and (not app_snapshot or t_updated > app_snapshot):
+        force_refresh = True
+
+    # Full Name hydration
+    talent_name = talent.get("name", "").strip()
+    if talent_name:
+        first, last = split_full_name(talent_name)
+        if force_refresh or not fd.get("first_name"):
+            patch["form_data.first_name"] = first
+        if force_refresh or not fd.get("last_name"):
+            patch["form_data.last_name"] = last
+        if force_refresh or not app_doc.get("talent_name"):
+            patch["talent_name"] = talent_name
+
     # Scalar form_data fields
     for field in ("location", "instagram_handle", "instagram_followers",
                   "bio", "height", "ethnicity", "gender", "dob"):
-        if not fd.get(field) and talent.get(field):
-            patch[f"form_data.{field}"] = talent[field]
+        talent_val = talent.get(field)
+        if force_refresh:
+            if talent_val not in (None, "", [], {}):
+                patch[f"form_data.{field}"] = talent_val
+        else:
+            if not fd.get(field) and talent_val:
+                patch[f"form_data.{field}"] = talent_val
 
     # List form_data fields
     for field in ("skills", "work_links", "interested_in"):
-        if not (fd.get(field) or []) and (talent.get(field) or []):
-            patch[f"form_data.{field}"] = talent[field]
+        talent_val = talent.get(field)
+        if force_refresh:
+            if talent_val not in (None, "", [], {}):
+                patch[f"form_data.{field}"] = talent_val
+        else:
+            if not (fd.get(field) or []) and (talent_val or []):
+                patch[f"form_data.{field}"] = talent_val
 
-    # Media: copy from talent only when application currently has no media
-    if not (app_doc.get("media") or []) and (talent.get("media") or []):
-        app_media = []
-        for m in talent["media"]:
+    # Media sync logic
+    app_media = app_doc.get("media") or []
+    talent_media = talent.get("media") or []
+    should_hydrate_media = False
+
+    if not app_media and talent_media:
+        should_hydrate_media = True
+    elif talent_media:
+        if len(app_media) != len(talent_media):
+            should_hydrate_media = True
+        else:
+            app_cats = sorted([m.get("category") for m in app_media if m.get("category")])
+            talent_mapped_cats = sorted([
+                _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
+                for m in talent_media
+                if _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
+            ])
+            if app_cats != talent_mapped_cats:
+                should_hydrate_media = True
+            elif force_refresh:
+                should_hydrate_media = True
+
+    if should_hydrate_media:
+        new_app_media = []
+        for m in talent_media:
             a_cat = _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
             if not a_cat:
                 continue
-            app_media.append({
+            new_app_media.append({
                 "id": m.get("id") or str(uuid.uuid4()),
                 "category": a_cat,
                 "url": m.get("url"),
@@ -287,11 +347,23 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
                 "duration": m.get("duration"),
                 "poster_url": m.get("poster_url"),
             })
-        if app_media:
-            patch["media"] = app_media
+        patch["media"] = new_app_media
+
+    if t_updated:
+        patch["talent_profile_updated_at"] = t_updated
 
     if patch:
         await db.applications.update_one({"id": aid}, {"$set": patch})
+        # Keep app_doc updated in-memory for immediate use / return
+        for k, v in patch.items():
+            if "." in k:
+                parts = k.split(".", 1)
+                if parts[0] == "form_data":
+                    if "form_data" not in app_doc:
+                        app_doc["form_data"] = {}
+                    app_doc["form_data"][parts[1]] = v
+            else:
+                app_doc[k] = v
 
 
 @router.post("/public/apply")
@@ -299,42 +371,60 @@ async def start_application(payload: ApplicationStartIn):
     email = normalize_email(payload.email)
     if not email:
         raise HTTPException(400, "Invalid email address")
-    # Email is the unique identifier — reuse the in-progress draft if exists
+    
+    talent = await _find_talent_by_email(email)
+    talent_age = None
+    if talent:
+        talent_age = talent.get("age") or (compute_age(talent.get("dob")) if talent.get("dob") else None)
+
     existing = await db.applications.find_one({"talent_email": email})
     if existing:
-        if existing.get("status") == "submitted":
-            raise HTTPException(
-                409,
-                "An application already exists for this email. Please contact the team for updates.",
-            )
-        # Resume draft
         aid = existing["id"]
         token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
-        # Update base fields in case they changed
-        await db.applications.update_one(
-            {"id": aid},
-            {"$set": {
-                "form_data.first_name": payload.first_name.strip(),
-                "form_data.last_name": payload.last_name.strip(),
-                "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
-                "talent_phone": payload.phone,
-                "access_token": token,
-                "profile_id": payload.profile_id or existing.get("profile_id"),
-            }},
-        )
-        # Reconcile: back-fill any missing fields from the talent profile
-        talent = await _find_talent_by_email(email)
-        if talent:
-            # Re-fetch so reconciliation sees the just-applied base update
-            refreshed = await db.applications.find_one({"id": aid})
-            await _reconcile_draft_from_talent(refreshed or existing, talent, aid)
-        return {"id": aid, "token": token, "resumed": True}
+        if existing.get("status") == "submitted":
+            # Reset submitted application to draft
+            await db.applications.update_one(
+                {"id": aid},
+                {"$set": {
+                    "status": "draft",
+                    "form_data": {
+                        "first_name": payload.first_name.strip(),
+                        "last_name": payload.last_name.strip(),
+                    },
+                    "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
+                    "talent_phone": payload.phone,
+                    "media": [],
+                    "submitted_at": None,
+                    "decision": "pending",
+                    "talent_profile_updated_at": None,
+                    "access_token": token,
+                    "profile_id": payload.profile_id or existing.get("profile_id"),
+                }}
+            )
+            # Reconcile immediately
+            if talent:
+                refreshed = await db.applications.find_one({"id": aid})
+                await _reconcile_draft_from_talent(refreshed or existing, talent, aid)
+            return {"id": aid, "token": token, "resumed": True}
+        else:
+            # Resume existing draft
+            await db.applications.update_one(
+                {"id": aid},
+                {"$set": {
+                    "form_data.first_name": payload.first_name.strip(),
+                    "form_data.last_name": payload.last_name.strip(),
+                    "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
+                    "talent_phone": payload.phone,
+                    "access_token": token,
+                    "profile_id": payload.profile_id or existing.get("profile_id"),
+                }},
+            )
+            if talent:
+                refreshed = await db.applications.find_one({"id": aid})
+                await _reconcile_draft_from_talent(refreshed or existing, talent, aid)
+            return {"id": aid, "token": token, "resumed": True}
 
-    talent_age = None
-    talent_doc = await _find_talent_by_email(email)
-    if talent_doc:
-        talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
-
+    # If it is a completely new application
     aid = str(uuid.uuid4())
     form_data = {
         "first_name": payload.first_name.strip(),
@@ -356,30 +446,55 @@ async def start_application(payload: ApplicationStartIn):
         "created_at": _now(),
         "submitted_at": None,
         "profile_id": payload.profile_id,
+        "talent_profile_updated_at": None,
     }
     try:
         await db.applications.insert_one(doc)
+        if talent:
+            await _reconcile_draft_from_talent(doc, talent, aid)
     except DuplicateKeyError:
-        # Race: another tab/device created an application for this email
-        # in parallel. Fall back to that one (resume).
+        # Race: another tab/device created it
         existing = await db.applications.find_one({"talent_email": email})
         if existing:
             aid = existing["id"]
             token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
-            await db.applications.update_one(
-                {"id": aid},
-                {"$set": {
-                    "access_token": token,
-                    "profile_id": payload.profile_id or existing.get("profile_id"),
-                }}
-            )
-            # Reconcile: back-fill any missing fields from the talent profile
-            talent = await _find_talent_by_email(email)
-            if talent:
-                refreshed = await db.applications.find_one({"id": aid})
-                await _reconcile_draft_from_talent(refreshed or existing, talent, aid)
-            return {"id": aid, "token": token, "resumed": True}
+            if existing.get("status") == "submitted":
+                await db.applications.update_one(
+                    {"id": aid},
+                    {"$set": {
+                        "status": "draft",
+                        "form_data": {
+                            "first_name": payload.first_name.strip(),
+                            "last_name": payload.last_name.strip(),
+                        },
+                        "talent_name": f"{payload.first_name} {payload.last_name}".strip(),
+                        "talent_phone": payload.phone,
+                        "media": [],
+                        "submitted_at": None,
+                        "decision": "pending",
+                        "talent_profile_updated_at": None,
+                        "access_token": token,
+                        "profile_id": payload.profile_id or existing.get("profile_id"),
+                    }}
+                )
+                if talent:
+                    refreshed = await db.applications.find_one({"id": aid})
+                    await _reconcile_draft_from_talent(refreshed or existing, talent, aid)
+                return {"id": aid, "token": token, "resumed": True}
+            else:
+                await db.applications.update_one(
+                    {"id": aid},
+                    {"$set": {
+                        "access_token": token,
+                        "profile_id": payload.profile_id or existing.get("profile_id"),
+                    }}
+                )
+                if talent:
+                    refreshed = await db.applications.find_one({"id": aid})
+                    await _reconcile_draft_from_talent(refreshed or existing, talent, aid)
+                return {"id": aid, "token": token, "resumed": True}
         raise HTTPException(409, "An application already exists for this email")
+    
     token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)
     return {"id": aid, "token": token, "resumed": False}
 
@@ -1066,5 +1181,6 @@ def _application_to_talent(app_doc: dict, admin_id: str) -> dict:
         },
         "status": "SUBMITTED",
         "created_at": _now(),
+        "updated_at": _now(),
         "created_by": admin_id,
     }

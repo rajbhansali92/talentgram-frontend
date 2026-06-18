@@ -638,30 +638,38 @@ export default function ApplicationPage() {
             let finalForm = { ...form };
             let finalMedia = [];
 
-            if (data.resumed) {
-                console.log("[startApplication] Application resumed. Hydrating details from backend for aid:", newAid);
-                setHydrating(true);
-                try {
-                    const res = await axios.get(
-                        `/public/apply/${newAid}`,
-                        { headers: { Authorization: `Bearer ${newToken}` } }
-                    );
-                    const appData = res.data;
-                    if (appData) {
-                        console.log("[startApplication] Resumed app data retrieved successfully. Hydrating form and media.");
-                        finalForm = { ...form, ...(appData.form_data || {}) };
-                        finalMedia = appData.media || [];
-                        setForm(finalForm);
-                        setMedia(finalMedia);
+            // Always fetch the application document after POST /apply.
+            // The backend _reconcile_draft_from_talent runs on every call
+            // (for both new and resumed drafts) and hydrates canonical profile
+            // data (media, fields) into the application document. We must
+            // always GET the document so that the frontend state reflects
+            // the canonical db.talents data, not the initial empty form.
+            console.log("[startApplication] Fetching hydrated draft from backend for aid:", newAid);
+            setHydrating(true);
+            try {
+                const res = await axios.get(
+                    `/public/apply/${newAid}`,
+                    { headers: { Authorization: `Bearer ${newToken}` } }
+                );
+                const appData = res.data;
+                if (appData) {
+                    console.log("[startApplication] Draft hydrated successfully. Loading form and media.");
+                    finalForm = { ...form, ...(appData.form_data || {}) };
+                    finalMedia = appData.media || [];
+                    setForm(finalForm);
+                    setMedia(finalMedia);
+                    if (data.resumed) {
                         setIsEditMode(true);
-                        if (appData.status === "submitted") setFinalized(true);
                     }
-                } catch (fetchErr) {
-                    console.error("[startApplication] Failed to fetch resumed application details:", fetchErr);
-                    toast.error("Failed to load existing application data.");
-                } finally {
-                    setHydrating(false);
+                    // Resumed applications should not be auto-finalized here;
+                    // the backend reset status to "draft" for returning talents.
+                    if (appData.status === "submitted") setFinalized(true);
                 }
+            } catch (fetchErr) {
+                console.error("[startApplication] Failed to fetch application details:", fetchErr);
+                // Non-fatal: form state is already set from payload defaults
+            } finally {
+                setHydrating(false);
             }
 
             setAid(newAid);

@@ -2313,7 +2313,7 @@ async def sync_media_to_global_talent(submission: dict, media: dict) -> None:
 
     await db.talents.update_one(
         {"id": talent["id"]},
-        {"$push": {"media": mirror}},
+        {"$push": {"media": mirror}, "$set": {"updated_at": _now()}},
     )
     await update_talent_cover_cache(talent["id"])
 
@@ -2329,12 +2329,15 @@ async def remove_synced_media_from_global_talent(submission: dict, source_media_
         return
     await db.talents.update_one(
         {"$or": [{"normalized_email": norm_email}, {"email": norm_email}]},
-        {"$pull": {"media": {
-            "$or": [
-                {"source_submission_media_id": source_media_id},
-                {"source_application_media_id": source_media_id}
-            ]
-        }}},
+        {
+            "$pull": {"media": {
+                "$or": [
+                    {"source_submission_media_id": source_media_id},
+                    {"source_application_media_id": source_media_id}
+                ]
+            }},
+            "$set": {"updated_at": _now()}
+        },
     )
     talent = await db.talents.find_one(
         {"$or": [{"normalized_email": norm_email}, {"email": norm_email}]},
@@ -2449,6 +2452,7 @@ async def merge_talent_profile(existing_talent: dict, incoming_data: dict, sourc
             new_values["age"] = age
 
     if update_patch:
+        update_patch["updated_at"] = _now()
         await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update_patch})
         existing_talent.update(update_patch)
 

@@ -1070,6 +1070,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             "cover_media_id": None,
             "status": "SUBMITTED",
             "created_at": _now(),
+            "updated_at": _now(),
             "created_by": "auto-audition",
         }
         try:

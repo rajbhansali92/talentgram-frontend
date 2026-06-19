@@ -323,9 +323,17 @@ def cloudinary_upload(
     if data.startswith(b"RIFF") and b"WEBP" in data[8:15]:
         detected_mime = "image/webp"
 
-    # MP4 check extension: MP4 files typically carry ftyp signature starting at index 4
+    # MP4/HEIC/HEIF/MOV check extension: files carrying ftyp signature starting at index 4
     if not detected_mime and b"ftyp" in data[4:12]:
-        detected_mime = "video/mp4"
+        brand = data[8:12]
+        if brand in (b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"):
+            detected_mime = "image/heic"
+        elif brand in (b"heif", b"hefs"):
+            detected_mime = "image/heif"
+        elif brand == b"qt  ":
+            detected_mime = "video/quicktime"
+        else:
+            detected_mime = "video/mp4"
 
     # Allow PDF files for admin attachments
     if not detected_mime and data.startswith(b"%PDF"):
@@ -1354,6 +1362,9 @@ class TalentIn(BaseModel):
     skills: List[str] = Field(default_factory=list)
     # Internal: admin-assigned structured tags [{"id": uuid, "name": label}]
     tags: List[Dict[str, str]] = Field(default_factory=list)
+    # WhatsApp Engine: exact group name (e.g. "Ayushi Thakur x Talentgram")
+    # If set, WhatsApp messages go to the group; otherwise falls back to phone.
+    whatsapp_group_name: Optional[str] = None
 
     @field_validator('instagram_handle', mode='before')
     @classmethod

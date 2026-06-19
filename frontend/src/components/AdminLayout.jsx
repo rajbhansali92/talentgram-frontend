@@ -20,6 +20,7 @@ import {
   AlertCircle,
   ListTodo,
   Cloud,
+  MessageCircle,
 } from "lucide-react";
 
 // ============================================================================
@@ -90,6 +91,7 @@ export const NAV_ITEMS = {
     { to: "/admin/marketing", label: "Marketing", icon: Briefcase },
     { to: "/admin/feedback", label: "Feedback", icon: MessageSquare },
     { to: "/admin/workflow", label: "Workflow", icon: ListTodo },
+    { to: "/admin/whatsapp", label: "WhatsApp", icon: MessageCircle },
   ],
   adminOnly: [
     { to: "/admin/users", label: "Users", icon: Shield, adminOnly: true },

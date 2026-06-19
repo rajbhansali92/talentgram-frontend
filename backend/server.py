@@ -16,19 +16,20 @@ from routers import (
     applications,
     auth,
     casting_pipeline,
+    cloudinary_admin,
     drive_admin,
     feedback,
     links,
     marketing as marketing_router,
     notifications as notifications_router,
     password,
+    portal,
     projects,
     submissions,
     talents,
     users,
+    whatsapp,
     workflow,
-    portal,
-    cloudinary_admin,
 )
 
 app = FastAPI(title="Talentgram Portfolio Engine")
@@ -107,6 +108,7 @@ app.include_router(casting_pipeline.router)
 app.include_router(workflow.router)
 app.include_router(portal.router)
 app.include_router(cloudinary_admin.router)
+app.include_router(whatsapp.router)
 
 
 # CORS — env-var driven with Vercel preview regex fallback.
@@ -461,6 +463,12 @@ async def on_startup():
             logger.warning("workflow indexes: %s", _e)
 
         logger.info("Mongo indexes ready")
+
+        # WhatsApp Engine — indexes, default templates, config defaults
+        try:
+            await whatsapp.ensure_whatsapp_ready()
+        except Exception as _e:
+            logger.warning("WhatsApp Engine startup init failed (non-fatal): %s", _e)
 
         if drive_enabled():
             logger.info("Google Drive backup ENABLED — starting retry worker")

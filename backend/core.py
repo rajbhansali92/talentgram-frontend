@@ -2368,7 +2368,8 @@ AUTO_UPDATE_FIELDS = {
 
 PRESERVE_FIELDS = {
     "notes", "tags", "internal_status", "admin_flags", 
-    "commission_data", "client_feedback", "status", "created_by"
+    "commission_data", "client_feedback", "status", "created_by",
+    "whatsapp_group_name"
 }
 
 REVIEW_FIELDS = {

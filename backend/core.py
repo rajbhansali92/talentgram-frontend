@@ -684,8 +684,17 @@ async def upload_and_track_asset(
         )
 
         return result
-    except Exception:
-        await db.asset_metadata.delete_one({"public_id": public_id_to_store})
+    except Exception as e:
+        await db.asset_metadata.update_one(
+            {"public_id": public_id_to_store},
+            {
+                "$set": {
+                    "upload_status": "failed",
+                    "error_reason": str(e),
+                    "updated_at": datetime.now(timezone.utc)
+                }
+            }
+        )
         raise
 
 

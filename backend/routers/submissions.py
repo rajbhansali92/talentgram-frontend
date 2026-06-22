@@ -966,6 +966,24 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # size limits). This block is intentionally empty — no media
     # minimums are enforced at finalize.
 
+    # Auto-expire pending assets older than 30 minutes to prevent indefinitely blocking the user
+    from datetime import datetime, timezone, timedelta
+    timeout_limit = datetime.now(timezone.utc) - timedelta(minutes=30)
+    await db.asset_metadata.update_many(
+        {
+            "submission_id": sid,
+            "upload_status": "pending",
+            "created_at": {"$lt": timeout_limit}
+        },
+        {
+            "$set": {
+                "upload_status": "failed",
+                "error_reason": "Upload timed out (30 minutes limit exceeded)",
+                "updated_at": datetime.now(timezone.utc)
+            }
+        }
+    )
+
     # Verify that all Cloudinary uploads associated with this submission have completed.
     active_public_ids = [m["public_id"] for m in sub.get("media", []) if m.get("public_id")]
     if active_public_ids:

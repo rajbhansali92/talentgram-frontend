@@ -4,7 +4,7 @@ import uuid
 from typing import Dict
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from core import (
     APP_NAME,
@@ -277,14 +277,14 @@ async def upload_file(
 # Email OTP Authentication
 # --------------------------------------------------------------------------
 import os
-import random
+import secrets
 import hashlib
 import httpx
 import boto3
 from datetime import datetime, timezone, timedelta
 
 class OtpSendIn(BaseModel):
-    email: str
+    email: EmailStr
 
 class OtpVerifyIn(BaseModel):
     email: str
@@ -608,7 +608,7 @@ async def _get_talent_profile_response(talent: dict) -> dict:
 @router.post("/auth/otp/send")
 async def send_otp(payload: OtpSendIn, request: Request):
     email = normalize_email(payload.email)
-    if not email or "@" not in email:
+    if not email:
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
 
     ip = get_client_ip(request)
@@ -639,8 +639,8 @@ async def send_otp(payload: OtpSendIn, request: Request):
         {"$set": {"used": True}}
     )
 
-    # Generate 6-digit numeric OTP
-    otp = f"{random.randint(100000, 999999)}"
+    # Generate 6-digit numeric OTP using cryptographically secure PRNG
+    otp = f"{secrets.randbelow(900000) + 100000}"
     hashed_otp = hashlib.sha256(otp.encode()).hexdigest()
 
     expires_at = now + timedelta(minutes=10)

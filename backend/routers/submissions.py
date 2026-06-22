@@ -2,12 +2,17 @@
 import uuid
 from typing import Any, Dict, List, Optional
 
+import time
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 import cloudinary
 from core import (
     APP_NAME,
     DEFAULT_FIELD_VISIBILITY,
+    DIRECT_VIDEO_UPLOAD,
+    DIRECT_VIDEO_CATEGORIES,
+    MAX_AUDITION_VIDEO_SECONDS,
     LEGACY_TAKE_CATEGORIES,
     MAX_SUBMISSION_IMAGES,
     MAX_SUBMISSION_IMAGE_BYTES,
@@ -17,6 +22,9 @@ from core import (
     PORTFOLIO_IMAGE_CATEGORIES,
     SUBMISSION_DECISIONS,
     SUBMISSION_UPLOAD_CATEGORIES,
+    CLOUDINARY_CLOUD_NAME,
+    audition_submission_folder,
+    audition_video_transformation,
     AdminSubmissionEditIn,
     SubmissionDecisionIn,
     SubmissionStartIn,
@@ -793,11 +801,325 @@ async def submission_delete_media(
     return {"ok": True}
 
 
+# ==========================================================================
+# Architecture C — direct browser→Cloudinary audition-video upload
+# (feature-flagged; images & all other flows unchanged)
+# ==========================================================================
+
+_DIRECT_VIDEO_CATS = {"intro_video", "take", "take_1", "take_2", "take_3"}
+
+
+class VideoSignatureIn(BaseModel):
+    category: str
+    label: Optional[str] = None
+    content_type: Optional[str] = None
+
+
+class VideoCompleteIn(BaseModel):
+    public_id: str
+    secure_url: Optional[str] = None
+    url: Optional[str] = None
+    resource_type: Optional[str] = "video"
+    bytes: Optional[int] = 0
+    duration: Optional[float] = None
+    format: Optional[str] = None
+
+
+async def _resolve_submission_talent(sub: dict):
+    """Resolve (talent_id, talent_name) for a submission — same logic as the
+    Railway upload path so the Cloudinary folder is identical."""
+    tid = sub.get("talent_id")
+    tname = sub.get("talent_name")
+    if not tid:
+        norm_email = normalize_email(sub.get("talent_email"))
+        if norm_email:
+            t = await db.talents.find_one({
+                "$or": [
+                    {"normalized_email": norm_email},
+                    {"email": norm_email},
+                    {"source.talent_email": norm_email},
+                ]
+            })
+            if t:
+                tid = t.get("id")
+                tname = t.get("name")
+    if not tid:
+        tid = "unknown_talent"
+    return tid, tname
+
+
+def _category_from_cloudinary_tags(tags) -> Optional[str]:
+    """Derive the audition category ONLY from backend-generated Cloudinary tags.
+    Never trust a client-supplied category. Unknown ⇒ None (quarantine)."""
+    for t in (tags or []):
+        if isinstance(t, str) and t.startswith("category="):
+            c = t.split("=", 1)[1].strip()
+            if c in _DIRECT_VIDEO_CATS:
+                return c
+    return None
+
+
+async def attach_video_media(sub: dict, asset: dict, category: str, label: Optional[str] = None) -> Optional[dict]:
+    """Attach a Cloudinary video asset to a submission. Single-slot for
+    intro_video; dedup by public_id (idempotent); preserves the re-approval
+    flip used by the Railway upload path."""
+    from datetime import datetime, timezone  # noqa: F401
+    sid = sub["id"]
+    public_id = asset.get("public_id")
+    if not public_id:
+        return None
+    # Idempotency: never attach the same public_id twice.
+    for m in (sub.get("media") or []):
+        if m.get("public_id") == public_id:
+            return m
+
+    secure = asset.get("secure_url") or asset.get("url")
+    media = {
+        "id": str(uuid.uuid4()),
+        "category": category,
+        "url": secure,
+        "public_id": public_id,
+        "resource_type": "video",
+        "content_type": "video/mp4",
+        "original_filename": None,
+        "size": asset.get("bytes") or 0,
+        "created_at": _now(),
+        "scope": "submission",
+        "submission_id": sid,
+        "project_id": sub.get("project_id"),
+        "duration": asset.get("duration"),
+        "thumbnail_url": video_poster_url(public_id),
+        "poster_url": video_poster_url(public_id),
+        "source": "direct_upload",
+    }
+    if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
+        media["label"] = (label or "").strip() or "Take"
+
+    # Single-slot replacement for intro_video (cannot mix $pull and $push on the
+    # same field in one update, so pull first).
+    if category == "intro_video":
+        await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"category": "intro_video"}}})
+
+    push: Dict[str, Any] = {"$push": {"media": media}}
+    fresh = await db.submissions.find_one({"id": sid})
+    if fresh and fresh.get("status") in ("submitted", "updated"):
+        proj = await db.projects.find_one(
+            {"id": sub.get("project_id")}, {"_id": 0, "require_reapproval_on_edit": 1}
+        )
+        set_patch = {"status": "updated", "updated_at": _now()}
+        if bool((proj or {}).get("require_reapproval_on_edit", True)):
+            set_patch["decision"] = "pending"
+        push["$set"] = set_patch
+    await db.submissions.update_one({"id": sid}, push)
+    try:
+        await db.asset_metadata.update_one(
+            {"public_id": public_id},
+            {"$set": {"upload_status": "completed", "updated_at": datetime.now(timezone.utc)}},
+        )
+    except Exception as e:
+        logger.warning(f"attach_video_media: asset_metadata flip failed {public_id}: {e}")
+    return media
+
+
+async def reconcile_submission_videos(sid: str) -> None:
+    """Finalize safety net: attach any audition video that reached Cloudinary
+    (scoped to this submission's folder) but isn't yet on the submission.
+    No-op when the feature flag is off. Idempotent + folder-scoped + category
+    gated; audition takes can never become a globally-synced category."""
+    if not DIRECT_VIDEO_UPLOAD:
+        return
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        return
+    tid, tname = await _resolve_submission_talent(sub)
+    folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
+    try:
+        resp = cloudinary.api.resources(
+            resource_type="video", type="upload", prefix=folder,
+            tags=True, context=True, max_results=100,
+        )
+    except Exception as e:
+        logger.warning(f"reconcile_submission_videos: cloudinary list failed for {sid}: {e}")
+        return
+    existing_pids = {m.get("public_id") for m in (sub.get("media") or []) if m.get("public_id")}
+    take_count = sum(
+        1 for m in (sub.get("media") or [])
+        if m.get("category") in ("take",) or m.get("category") in LEGACY_TAKE_CATEGORIES
+    )
+    for a in resp.get("resources", []):
+        pid = a.get("public_id")
+        if not pid or pid in existing_pids:
+            continue
+        category = _category_from_cloudinary_tags(a.get("tags"))
+        if category is None:
+            # SAFETY: never default an uncategorized asset to a synced category.
+            logger.warning(f"reconcile: quarantining uncategorized asset {pid} on submission {sid}")
+            continue
+        if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
+            if take_count >= MAX_SUBMISSION_TAKES:
+                continue
+            take_count += 1
+        attached = await attach_video_media(sub, a, category)
+        if attached:
+            existing_pids.add(pid)
+        sub = await db.submissions.find_one({"id": sid})  # refresh for single-slot pulls
+
+
+@router.post("/public/submissions/{sid}/video-signature")
+async def video_signature(
+    sid: str,
+    payload: VideoSignatureIn,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Issue a short-lived signed Cloudinary upload for ONE audition video slot.
+    Transformation/folder/public_id/category are pinned server-side."""
+    from datetime import datetime, timezone
+    if not _prefill_rate_limit_ok(request):
+        raise HTTPException(429, "Too many requests — please slow down")
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    category = (payload.category or "").strip()
+    if category not in _DIRECT_VIDEO_CATS:
+        raise HTTPException(400, "Invalid video category")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
+        existing_takes = sum(
+            1 for m in (sub.get("media") or [])
+            if m.get("category") in ("take",) or m.get("category") in LEGACY_TAKE_CATEGORIES
+        )
+        if existing_takes >= MAX_SUBMISSION_TAKES:
+            raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
+
+    tid, tname = await _resolve_submission_talent(sub)
+    folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
+    leaf = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex}"
+    public_id = f"{folder}/{leaf}"
+
+    # Pinned, string-encoded transformation + eager poster (signed verbatim).
+    transformation = "c_limit,h_720,w_1280/q_auto,vc_auto"
+    eager = "c_fill,h_338,w_600,q_auto/f_jpg"
+    tags = f"submission_id={sid},project_id={sub.get('project_id')},talent_id={tid},category={category},asset_kind=audition_video"
+    context = f"category={category}|label={(payload.label or '').strip()}"
+    timestamp = int(time.time())
+    params_to_sign = {
+        "timestamp": timestamp,
+        "folder": folder,
+        "public_id": public_id,
+        "transformation": transformation,
+        "format": "mp4",
+        "eager": eager,
+        "eager_async": "true",
+        "overwrite": "true",
+        "tags": tags,
+        "context": context,
+    }
+    cfg = cloudinary.config()
+    signature = cloudinary.utils.api_sign_request(params_to_sign, cfg.api_secret)
+
+    try:
+        await db.asset_metadata.update_one(
+            {"public_id": public_id},
+            {"$set": {
+                "public_id": public_id, "submission_id": sid, "talent_id": tid,
+                "project_id": sub.get("project_id"), "category": category,
+                "asset_type": "intro_video" if category == "intro_video" else "audition_video",
+                "resource_type": "video", "upload_status": "pending",
+                "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"video-signature: pending asset_metadata write failed {public_id}: {e}")
+
+    return {
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "api_key": cfg.api_key,
+        "timestamp": timestamp,
+        "signature": signature,
+        "upload_url": f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/video/upload",
+        "params": {
+            "folder": folder, "public_id": public_id, "transformation": transformation,
+            "format": "mp4", "eager": eager, "eager_async": "true", "overwrite": "true",
+            "tags": tags, "context": context,
+        },
+        "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
+    }
+
+
+@router.post("/public/submissions/{sid}/video-complete")
+async def video_complete(
+    sid: str,
+    payload: VideoCompleteIn,
+    authorization: Optional[str] = Header(None),
+):
+    """Optimistic fast-path: attach a just-uploaded direct video. Category and
+    folder are validated server-side; finalize reconciliation is the safety net
+    if this never fires."""
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    tid, tname = await _resolve_submission_talent(sub)
+    folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
+    public_id = (payload.public_id or "").strip()
+    # Folder scoping — reject assets that don't belong to this submission.
+    if not public_id.startswith(folder + "/"):
+        raise HTTPException(400, "Asset does not belong to this submission")
+
+    category = None
+    duration = payload.duration
+    asset: Dict[str, Any] = {
+        "public_id": public_id,
+        "secure_url": payload.secure_url or payload.url,
+        "bytes": payload.bytes,
+        "duration": payload.duration,
+    }
+    try:
+        res = cloudinary.api.resource(public_id, resource_type="video", tags=True)
+        category = _category_from_cloudinary_tags(res.get("tags"))
+        duration = res.get("duration", duration)
+        asset = res
+    except Exception as e:
+        logger.warning(f"video-complete: resource fetch failed {public_id}: {e}")
+        leaf = public_id.rsplit("/", 1)[-1]
+        if leaf == "intro_video":
+            category = "intro_video"
+        elif leaf.startswith("take_"):
+            category = "take"
+    if category is None:
+        raise HTTPException(400, "Could not determine media category")
+
+    if duration is not None and float(duration) > MAX_AUDITION_VIDEO_SECONDS:
+        try:
+            cloudinary.uploader.destroy(public_id, resource_type="video")
+        except Exception:
+            pass
+        raise HTTPException(400, f"Audition video must be {MAX_AUDITION_VIDEO_SECONDS // 60} minutes or less.")
+
+    media = await attach_video_media(sub, asset, category)
+    return {"ok": True, "media": media}
+
+
 @router.post("/public/submissions/{sid}/finalize")
 async def submission_finalize(sid: str, authorization: Optional[str] = Header(None)):
     submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    # Architecture C — attach any direct-upload audition videos that reached
+    # Cloudinary but weren't attached (lost /video-complete). No-op when the
+    # flag is off. Runs BEFORE media validation + the global-sync block so the
+    # existing category gate still protects audition takes.
+    await reconcile_submission_videos(sid)
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")

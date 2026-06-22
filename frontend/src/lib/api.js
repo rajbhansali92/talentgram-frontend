@@ -104,6 +104,11 @@ viewerApi.interceptors.request.use((cfg) => {
 // the backend only after OTP/Google email-ownership verification. The token —
 // not the localStorage email — is the credential.
 
+// Architecture C — direct browser→Cloudinary audition-video upload. OFF unless
+// NEXT_PUBLIC_DIRECT_VIDEO_UPLOAD is explicitly enabled at build time.
+export const DIRECT_VIDEO_UPLOAD =
+    String(process.env.NEXT_PUBLIC_DIRECT_VIDEO_UPLOAD || "").toLowerCase() === "true";
+
 export const PORTAL_TOKEN_KEY = "talentgram_portal_token";
 
 export const portalApi = axios.create({ baseURL: API });

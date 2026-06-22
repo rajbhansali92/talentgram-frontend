@@ -1,7 +1,8 @@
 "use client";
 
 import React, { createContext, useContext, useState } from "react";
-import { api } from "../lib/api";
+import { api, DIRECT_VIDEO_UPLOAD } from "../lib/api";
+import { directVideoUpload } from "../lib/directVideoUpload";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
 
@@ -94,24 +95,25 @@ export function UploadManagerProvider({ children }) {
 
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                const fd = new FormData();
-                fd.append("file", file);
-                fd.append("category", category);
-                if (label && category === "take") fd.append("label", label);
+                let data;
+                // Architecture C: direct browser→Cloudinary for video slots only,
+                // gated by the build flag. Everything else (images, flag off) keeps
+                // the existing Railway upload path untouched.
+                const useDirectVideo =
+                    DIRECT_VIDEO_UPLOAD &&
+                    isVideoSlot &&
+                    /\/public\/submissions\/[^/]+\/upload$/.test(dynamicEndpoint || "");
 
-                const headers = {
-                    "Content-Type": "multipart/form-data",
-                };
-                if (dynamicToken) {
-                    headers["Authorization"] = `Bearer ${dynamicToken}`;
-                }
-
-                const { data } = await api.post(dynamicEndpoint, fd, {
-                    headers,
-                    timeout: 0, // No per-request timeout
-                    onUploadProgress: (e) => {
-                        if (e.total) {
-                            const pct = Math.round((e.loaded / e.total) * 100);
+                if (useDirectVideo) {
+                    const sid = dynamicEndpoint.match(/\/public\/submissions\/([^/]+)\/upload$/)[1];
+                    data = await directVideoUpload({
+                        sid,
+                        token: dynamicToken,
+                        category,
+                        label,
+                        file,
+                        onProgress: (loaded, total) => {
+                            const pct = total ? Math.round((loaded / total) * 100) : 0;
                             setActiveUploads((prev) => {
                                 if (!prev[slotKey]) return prev;
                                 return {
@@ -124,8 +126,42 @@ export function UploadManagerProvider({ children }) {
                                 };
                             });
                         }
+                    });
+                } else {
+                    const fd = new FormData();
+                    fd.append("file", file);
+                    fd.append("category", category);
+                    if (label && category === "take") fd.append("label", label);
+
+                    const headers = {
+                        "Content-Type": "multipart/form-data",
+                    };
+                    if (dynamicToken) {
+                        headers["Authorization"] = `Bearer ${dynamicToken}`;
                     }
-                });
+
+                    const res = await api.post(dynamicEndpoint, fd, {
+                        headers,
+                        timeout: 0, // No per-request timeout
+                        onUploadProgress: (e) => {
+                            if (e.total) {
+                                const pct = Math.round((e.loaded / e.total) * 100);
+                                setActiveUploads((prev) => {
+                                    if (!prev[slotKey]) return prev;
+                                    return {
+                                        ...prev,
+                                        [slotKey]: {
+                                            ...prev[slotKey],
+                                            status: pct >= 100 ? "processing" : "uploading",
+                                            pct
+                                        }
+                                    };
+                                });
+                            }
+                        }
+                    });
+                    data = res.data;
+                }
 
                 if (onSuccess) onSuccess(data);
 
@@ -159,7 +195,8 @@ export function UploadManagerProvider({ children }) {
             } catch (err) {
                 lastErr = err;
                 const isNetwork = !err?.response;
-                if (!isNetwork || attempt === MAX_ATTEMPTS) break;
+                // Validation errors (e.g. >5 min video) must not be retried.
+                if (err?.noRetry || !isNetwork || attempt === MAX_ATTEMPTS) break;
 
                 const wait = 1000 * Math.pow(2, attempt - 1);
                 toast.message(`Network blip — retrying in ${wait / 1000}s (attempt ${attempt}/${MAX_ATTEMPTS})`);
@@ -173,10 +210,11 @@ export function UploadManagerProvider({ children }) {
             }
         }
 
-        // Failed after all retries
+        // Failed after all retries (or a non-retryable validation error)
+        const failMsg = lastErr?.response?.data?.detail || lastErr?.message || "Upload failed";
         setRetryQueue((q) => ({
             ...q,
-            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed" }
+            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: failMsg }
         }));
 
         setActiveUploads((prev) => ({
@@ -184,11 +222,11 @@ export function UploadManagerProvider({ children }) {
             [slotKey]: {
                 ...prev[slotKey],
                 status: "failed",
-                error: lastErr?.response?.data?.detail || "Upload failed"
+                error: failMsg
             }
         }));
 
-        toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
+        toast.error(lastErr?.noRetry ? failMsg : (lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again"));
     };
 
     const retryUpload = async (slotKey) => {

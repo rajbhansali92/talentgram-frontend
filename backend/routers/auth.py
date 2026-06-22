@@ -33,13 +33,22 @@ logger = logging.getLogger(__name__)
 
 async def _grant_portal_session(talent: dict) -> str:
     """Mint a portal session token for an ownership-verified talent and persist
-    it on the record so the session is revocable. Returns the token."""
+    it on the record so the session is revocable. Returns the token.
+
+    Persistence is best-effort: a Mongo write failure must never fail an
+    otherwise-successful OTP/Google login (the portal token is not required by
+    any active submit/apply flow). On write failure we log and still return the
+    minted token, mirroring the best-effort `last_login` write in `login()`.
+    """
     email = talent.get("email") or talent.get("normalized_email")
     token = mint_portal_token(email)
-    await db.talents.update_one(
-        {"id": talent["id"]},
-        {"$set": {"portal_access_token": token}},
-    )
+    try:
+        await db.talents.update_one(
+            {"id": talent["id"]},
+            {"$set": {"portal_access_token": token}},
+        )
+    except Exception as e:
+        logger.warning(f"portal token persistence failed for talent {talent.get('id')}: {e}")
     return token
 
 # Prefill/Auth IP sliding window storage bucket

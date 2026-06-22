@@ -892,8 +892,15 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
                 "interested_in": interested_in,
                 "media": new_media,
             }
-            await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update})
-            await update_talent_cover_cache(existing_talent["id"])
+            # F1: never let blank/empty application values overwrite populated
+            # master data. The master is the source of truth; an application
+            # that omits a field (or carries no media) must preserve the
+            # existing master value rather than wiping it. Drop empties so only
+            # the latest *valid* values are written.
+            update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
+            if update:
+                await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update})
+                await update_talent_cover_cache(existing_talent["id"])
     return {"ok": True}
 
 

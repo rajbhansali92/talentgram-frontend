@@ -46,6 +46,7 @@ def normalize_email(email: Optional[str]) -> Optional[str]:
 import cloudinary  # noqa: E402
 import cloudinary.uploader  # noqa: E402
 import cloudinary.utils  # noqa: E402
+import cloudinary.api  # noqa: E402  (Admin API — used by finalize video reconciliation)
 
 cloudinary.config(
     cloud_name=os.environ["CLOUDINARY_CLOUD_NAME"],
@@ -793,6 +794,29 @@ def stream_video_url(public_id: Optional[str]) -> Optional[str]:
     return url
 
 
+def audition_submission_folder(
+    talent_id: str, talent_name: Optional[str], project_id: str, submission_id: str
+) -> str:
+    """Per-submission Cloudinary folder for audition media — identical scheme to
+    `upload_and_track_asset` so the existing structure stays compatible and the
+    finalize reconciliation can list assets by this exact prefix.
+    """
+    return (
+        f"talentgram/projects/{project_id}/auditions/"
+        f"{talent_id}_{_slugify(talent_name)}/submission_{submission_id}"
+    )
+
+
+def audition_video_transformation() -> list:
+    """Incoming transformation pinned for direct audition-video uploads: 720p
+    H.264 q_auto. Cloudinary stores ONLY this derivative — the heavy 4K original
+    is discarded on ingest (mirrors the existing keep_original=False strategy)."""
+    return [
+        {"width": 1280, "height": 720, "crop": "limit"},
+        {"quality": "auto", "video_codec": "auto"},
+    ]
+
+
 def video_poster_url(public_id: Optional[str]) -> Optional[str]:
     """Cloudinary video thumbnail: extract first frame as JPEG/AVIF."""
     if not public_id:
@@ -1316,6 +1340,17 @@ MAX_IMAGES_PER_CATEGORY = 10
 # Enforced server-side to protect against accidental/malicious bloat.
 MAX_SUBMISSION_VIDEO_BYTES = 200 * 1024 * 1024
 MAX_SUBMISSION_IMAGE_BYTES = 20 * 1024 * 1024
+
+# Architecture C — direct browser→Cloudinary audition-video upload. Default OFF
+# so production behaviour is unchanged until explicitly enabled. When OFF, the
+# new endpoints still exist but the frontend keeps using the Railway path, and
+# finalize reconciliation is a no-op (no direct-upload assets to reconcile).
+DIRECT_VIDEO_UPLOAD = os.environ.get("DIRECT_VIDEO_UPLOAD", "false").strip().lower() in ("1", "true", "yes", "on")
+# Audition video duration ceiling (seconds) — 5 minutes.
+MAX_AUDITION_VIDEO_SECONDS = 300
+# Video categories eligible for direct upload. `intro_video` is the only video
+# category that syncs to Global Talent (via cat_mapping); takes stay project-specific.
+DIRECT_VIDEO_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3"}
 SUBMISSION_DECISIONS = {"pending", "approved", "rejected", "hold", "ask_to_test", "shortlisted", "does_not_work_for_this"}
 SUBMISSION_STATUSES = {"draft", "submitted", "updated"}
 

@@ -340,6 +340,7 @@ export default function SubmissionReviewCenter() {
     const [form, setForm] = useState({});
     const [fv, setFv] = useState({});
     const [mediaList, setMediaList] = useState([]);
+    const [talentPortfolioMedia, setTalentPortfolioMedia] = useState([]);
     const [isPreviewMode, setIsPreviewMode] = useState(false);
     const [saving, setSaving] = useState(false);
 
@@ -413,6 +414,7 @@ export default function SubmissionReviewCenter() {
     useEffect(() => {
         if (!selectedId) {
             setDetail(null);
+            setTalentPortfolioMedia([]);
             return;
         }
         const fetchDetail = async () => {
@@ -424,6 +426,10 @@ export default function SubmissionReviewCenter() {
                 setFv(data?.field_visibility || {});
                 setMediaList(data?.media || []);
                 setDecisionNote(data?.decision_note || "");
+                // talent_portfolio_media is fetched from db.talents (not the submission)
+                // and injected by the backend into the response. It includes items with
+                // category: 'portfolio', 'additional_portfolio', 'portfolio_general'.
+                setTalentPortfolioMedia(data?.talent_portfolio_media || []);
             } catch (e) {
                 toast.error("Failed to load submission details");
             } finally {
@@ -725,6 +731,14 @@ export default function SubmissionReviewCenter() {
     const portfolioImages = getCuratedMedia("image");
     const indianImages = getCuratedMedia("indian");
     const westernImages = getCuratedMedia("western");
+
+    // Talent-level portfolio media (fetched from db.talents, read-only in review).
+    const talentPortfolioImages = talentPortfolioMedia.filter(
+        (m) => m.category === "portfolio"
+    );
+    const talentAdditionalPortfolio = talentPortfolioMedia.filter(
+        (m) => m.category === "additional_portfolio" || m.category === "portfolio_general"
+    );
 
     const PERSONAL_FIELDS = [
         { key: "first_name", label: "First Name" },
@@ -1753,6 +1767,40 @@ export default function SubmissionReviewCenter() {
                                                 ))}
                                             </div>
                                         )}
+                                    </section>
+                                )}
+
+                                {/* Section 5: Talent Portfolio Images (from db.talents) */}
+                                {talentPortfolioImages.length > 0 && (
+                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
+                                            <p className="eyebrow">Portfolio Images ({talentPortfolioImages.length})</p>
+                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · read-only</span>
+                                        </div>
+                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                            {talentPortfolioImages.map((m, idx) => (
+                                                <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                                                    <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </section>
+                                )}
+
+                                {/* Section 6: Additional Portfolio (from db.talents) */}
+                                {talentAdditionalPortfolio.length > 0 && (
+                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
+                                            <p className="eyebrow">Additional Portfolio ({talentAdditionalPortfolio.length})</p>
+                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · read-only</span>
+                                        </div>
+                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                            {talentAdditionalPortfolio.map((m, idx) => (
+                                                <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                                                    <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                </div>
+                                            ))}
+                                        </div>
                                     </section>
                                 )}
                             </div>

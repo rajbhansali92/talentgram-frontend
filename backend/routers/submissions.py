@@ -1599,11 +1599,49 @@ async def get_admin_submission(
     sid: str,
     admin: dict = Depends(current_team_or_admin),
 ):
-    """Retrieve full, individual submission details (admin only)."""
+    """Retrieve full, individual submission details (admin only).
+    
+    Augmented to include talent_portfolio_media: media items from the talent's
+    global profile (db.talents) with categories 'portfolio' or
+    'additional_portfolio'. These are NOT stored on the submission itself —
+    they live on the talent record and represent the talent's own portfolio
+    library independent of any specific project submission.
+    """
     sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
     if not sub:
         raise HTTPException(404, "Submission not found")
-    return sub
+
+    # Augment response with talent-level portfolio media (read-only, view-only).
+    # Portfolio media lives on db.talents, not on the submission document.
+    talent_portfolio_media: list = []
+    talent_id = sub.get("talent_id")
+    talent_email = sub.get("talent_email")
+
+    talent_doc = None
+    if talent_id:
+        talent_doc = await db.talents.find_one({"id": talent_id}, {"_id": 0, "media": 1})
+    if not talent_doc and talent_email:
+        norm_email = normalize_email(talent_email)
+        talent_doc = await db.talents.find_one(
+            {"$or": [
+                {"normalized_email": norm_email},
+                {"email": norm_email},
+                {"source.talent_email": norm_email},
+            ]},
+            {"_id": 0, "media": 1},
+        )
+
+    if talent_doc:
+        PORTFOLIO_FETCH_CATEGORIES = {"portfolio", "additional_portfolio", "portfolio_general"}
+        for m in talent_doc.get("media") or []:
+            if m.get("category") in PORTFOLIO_FETCH_CATEGORIES:
+                # Ensure public_id items have resolvable URLs before including.
+                if m.get("url") or m.get("public_id"):
+                    talent_portfolio_media.append(m)
+
+    result = dict(sub)
+    result["talent_portfolio_media"] = talent_portfolio_media
+    return result
 
 
 @router.put("/projects/{pid}/submissions/{sid}")

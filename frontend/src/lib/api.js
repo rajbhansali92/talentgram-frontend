@@ -99,6 +99,37 @@ viewerApi.interceptors.request.use((cfg) => {
     return cfg;
 });
 
+// ================= PORTAL API =================
+// Talent self-service portal. Auth is a signed portal session token minted by
+// the backend only after OTP/Google email-ownership verification. The token —
+// not the localStorage email — is the credential.
+
+export const PORTAL_TOKEN_KEY = "talentgram_portal_token";
+
+export const portalApi = axios.create({ baseURL: API });
+
+portalApi.interceptors.request.use((cfg) => {
+    const t = localStorage.getItem(PORTAL_TOKEN_KEY);
+    if (t) cfg.headers.Authorization = `Bearer ${t}`;
+    return cfg;
+});
+
+// On an invalid/expired portal session, clear it and bounce to sign-in.
+portalApi.interceptors.response.use(
+    (r) => r,
+    (err) => {
+        if (err?.response?.status === 401) {
+            try {
+                localStorage.removeItem(PORTAL_TOKEN_KEY);
+                localStorage.removeItem("talentgram_portal_email");
+            } catch (e) {
+                console.error(e);
+            }
+        }
+        return Promise.reject(err);
+    }
+);
+
 // ================= SESSION HELPERS =================
 
 export function saveAdminSession(token, admin) {

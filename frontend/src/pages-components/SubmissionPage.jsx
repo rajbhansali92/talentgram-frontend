@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { api as axios } from "@/lib/api";
+import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import MaterialModal from "@/components/MaterialModal";
@@ -747,6 +747,10 @@ function SubmissionPage() {
                 toast.success("Successfully authenticated. Welcome to Talentgram!");
             }
 
+            // OTP proved ownership — persist the portal session token (Path B).
+            if (data.portal_token) {
+                localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
+            }
             localStorage.setItem("talentgram_portal_email", trimmedEmail);
             setForm((f) => ({ ...f, email: trimmedEmail }));
             setPrefillEmail(trimmedEmail);

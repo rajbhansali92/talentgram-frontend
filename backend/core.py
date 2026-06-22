@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import bcrypt
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException
+from fastapi import Depends, Header, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -112,14 +112,6 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         return None
-
-
-def decode_token_expired_fallback(token: str) -> Optional[Dict[str, Any]]:
-    try:
-        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_exp": False})
-    except Exception:
-        return None
-
 
 
 def enforce_password_policy(pw: str) -> None:
@@ -233,43 +225,94 @@ def decode_viewer(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 async def decode_submitter(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Authenticate a submitter.
+
+    Two valid credential forms, both revocation-aware:
+
+    1. A non-expired, signature-valid submitter JWT whose `sid` matches a
+       record AND whose value equals the `access_token` currently persisted on
+       that record. If the persisted token differs (rotated / revoked) the
+       presented token is rejected immediately.
+    2. The opaque persistent `access_token` stored verbatim on the record —
+       matched directly. This is the long-lived cross-device credential.
+
+    The previous `verify_exp=False` fallback (which accepted *any* expired but
+    signature-valid JWT) has been removed: expired JWTs are no longer honoured,
+    and a token that no longer matches the stored value can never be reused.
+    """
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     token = authorization.split(" ", 1)[1]
+
     data = decode_token(token)
-    if not data or data.get("role") != "submitter":
-        data = decode_token_expired_fallback(token)
-        if not data or data.get("role") != "submitter":
-            sub = await db.submissions.find_one({"access_token": token})
-            if sub:
-                return {"role": "submitter", "sid": sub["id"], "slug": sub["project_slug"]}
-            app_doc = await db.applications.find_one({"access_token": token})
-            if app_doc:
-                return {"role": "submitter", "sid": app_doc["id"], "kind": "application"}
-            return None
-    sid = data.get("sid")
-    kind = data.get("kind")
-    if sid:
-        if kind == "application":
-            app_doc = await db.applications.find_one({"id": sid})
-            if app_doc:
+    if data and data.get("role") == "submitter":
+        sid = data.get("sid")
+        kind = data.get("kind")
+        if sid:
+            if kind == "application":
+                app_doc = await db.applications.find_one({"id": sid})
+                if not app_doc:
+                    return None
                 db_token = app_doc.get("access_token")
                 if db_token and db_token != token:
-                    # If the token is a valid signature JWT but expired, and db_token is the opaque token,
-                    # we still allow it because they are authenticated.
-                    # We verify if token decodes to the same sid.
-                    pass
+                    # Token rotated / revoked — reject immediately.
+                    return None
                 if not db_token:
                     await db.applications.update_one({"id": sid}, {"$set": {"access_token": token}})
-        else:
-            sub = await db.submissions.find_one({"id": sid})
-            if sub:
+            else:
+                sub = await db.submissions.find_one({"id": sid})
+                if not sub:
+                    return None
                 db_token = sub.get("access_token")
                 if db_token and db_token != token:
-                    pass
+                    return None
                 if not db_token:
                     await db.submissions.update_one({"id": sid}, {"$set": {"access_token": token}})
-    return data
+        return data
+
+    # Not a valid submitter JWT (bad signature, expired, or wrong role).
+    # Fall back to matching the opaque persistent access_token verbatim. A
+    # rotated token will not match here either, so revocation still holds.
+    sub = await db.submissions.find_one({"access_token": token})
+    if sub:
+        return {"role": "submitter", "sid": sub["id"], "slug": sub["project_slug"]}
+    app_doc = await db.applications.find_one({"access_token": token})
+    if app_doc:
+        return {"role": "submitter", "sid": app_doc["id"], "kind": "application"}
+    return None
+
+
+async def current_portal_talent(
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Authenticate a talent for the self-service portal.
+
+    Identity is derived ENTIRELY from a signed, non-expired portal session
+    token (role `portal`) minted only after proof of email ownership (OTP or
+    Google). The token is also matched against `portal_access_token` persisted
+    on the talent record so a session can be revoked by clearing/rotating that
+    field. Client-supplied email parameters are never trusted for auth.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Portal authentication required")
+    token = authorization.split(" ", 1)[1]
+    data = decode_token(token)
+    if not data or data.get("role") != "portal":
+        raise HTTPException(status_code=401, detail="Invalid or expired portal session")
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid portal session")
+    talent = await db.talents.find_one({"$or": [{"email": email}, {"normalized_email": email}]})
+    if not talent:
+        raise HTTPException(status_code=401, detail="Portal session no longer valid")
+    if talent.get("portal_access_token") != token:
+        raise HTTPException(status_code=401, detail="Portal session expired — please sign in again")
+    return talent
+
+
+def mint_portal_token(email: str) -> str:
+    """Mint a signed portal session token bound to a verified talent email."""
+    return make_token({"role": "portal", "email": email}, days=30)
 
 
 # --------------------------------------------------------------------------

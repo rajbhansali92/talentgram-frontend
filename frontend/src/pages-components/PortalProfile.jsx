@@ -3,7 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { ArrowLeft, Sparkles, Instagram, Save } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
-import { api as axios } from "@/lib/api";
+import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
 
@@ -53,7 +53,7 @@ export default function PortalProfile() {
     const navigate = useNavigate();
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
-    const email = localStorage.getItem("talentgram_portal_email");
+    const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
 
     const [profile, setProfile] = useState({
         name: "",
@@ -73,7 +73,7 @@ export default function PortalProfile() {
     const categoryOptions = ["Acting", "Modeling", "Influencer Campaigns"];
 
     useEffect(() => {
-        if (!email) {
+        if (!token) {
             toast.error("Please sign in to access your portal");
             navigate("/");
             return;
@@ -81,7 +81,7 @@ export default function PortalProfile() {
 
         const fetchProfile = async () => {
             try {
-                const { data } = await axios.get(`/portal/profile?email=${encodeURIComponent(email)}`);
+                const { data } = await portalApi.get(`/portal/profile`);
                 setProfile({
                     name: data.name || "",
                     phone: data.phone || "",
@@ -105,7 +105,7 @@ export default function PortalProfile() {
         };
 
         fetchProfile();
-    }, [email, navigate]);
+    }, [token, navigate]);
 
     const handleFieldChange = (e) => {
         const { name, value } = e.target;
@@ -139,8 +139,8 @@ export default function PortalProfile() {
 
         setSaving(true);
         try {
-            await axios.put("/portal/profile", {
-                email,
+            // Target talent is derived from the portal token server-side.
+            await portalApi.put("/portal/profile", {
                 ...profile,
             });
 

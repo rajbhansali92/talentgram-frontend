@@ -83,7 +83,9 @@ async def test_google_auth_endpoint_existing_talent_no_submission():
     })
     mock_db.submissions = MagicMock()
     mock_db.submissions.find_one = AsyncMock(return_value=None)
-    
+    # Portal session token is now minted+persisted for ownership-verified talents.
+    mock_db.talents.update_one = AsyncMock()
+
     mock_post = AsyncMock(return_value=mock_response)
     with patch("httpx.AsyncClient.post", mock_post), \
          patch("google.oauth2.id_token.verify_oauth2_token", return_value={
@@ -93,13 +95,13 @@ async def test_google_auth_endpoint_existing_talent_no_submission():
              "picture": "avatar_url"
          }), \
          patch("routers.auth.db", mock_db):
-        
+
         response = client.post("/api/auth/google", json={
             "code": "mock_code",
             "redirect_uri": "http://localhost:3000/google-callback",
             "slug": "test-project"
         })
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["existing"] is True

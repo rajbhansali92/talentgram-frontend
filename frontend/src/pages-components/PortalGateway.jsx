@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Sparkles, MapPin, User, Mail, ChevronRight } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
-import { api as axios } from "@/lib/api";
+import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 
 export default function PortalGateway() {
     const { slug } = useParams();
@@ -14,6 +14,11 @@ export default function PortalGateway() {
     const [email, setEmail] = useState("");
     const [loading, setLoading] = useState(false);
     const [recognitionState, setRecognitionState] = useState(null); // talent data or null
+
+    // OTP gate (Path A): portal access requires proof of email ownership.
+    const [otpSent, setOtpSent] = useState(false);
+    const [otpCode, setOtpCode] = useState("");
+    const [otpBusy, setOtpBusy] = useState(false);
 
     useEffect(() => {
         // Prefill email if provided in query param
@@ -50,19 +55,56 @@ export default function PortalGateway() {
         }
     };
 
-    const handleContinueToPortal = () => {
+    // Step 2a: request an OTP to prove ownership before granting portal access.
+    const handleContinueToPortal = async () => {
         if (!recognitionState || !recognitionState.email) return;
-        
-        // Save simple local storage session
-        localStorage.setItem("talentgram_portal_email", recognitionState.email);
-        toast.success(`Welcome back, ${recognitionState.name}!`);
-        
-        // Route to home
-        navigate("/portal/home");
+        setOtpBusy(true);
+        try {
+            await axios.post("/auth/otp/send", { email: recognitionState.email });
+            setOtpSent(true);
+            toast.success("We sent a verification code to your email.");
+        } catch (error) {
+            console.error("OTP send error:", error);
+            toast.error(error?.response?.data?.detail || "Could not send a code. Please try again.");
+        } finally {
+            setOtpBusy(false);
+        }
+    };
+
+    // Step 2b: verify the OTP, persist the portal session token, enter portal.
+    const handleVerifyOtp = async () => {
+        const code = otpCode.trim();
+        if (!/^\d{6}$/.test(code)) {
+            toast.error("Please enter the 6-digit verification code.");
+            return;
+        }
+        setOtpBusy(true);
+        try {
+            const { data } = await axios.post("/auth/otp/verify", {
+                email: recognitionState.email,
+                otp: code,
+                slug,
+            });
+            if (!data?.portal_token) {
+                toast.error("Unable to open your portal. Please contact support.");
+                return;
+            }
+            localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
+            localStorage.setItem("talentgram_portal_email", recognitionState.email);
+            toast.success(`Welcome back, ${recognitionState.name}!`);
+            navigate("/portal/home");
+        } catch (error) {
+            console.error("OTP verify error:", error);
+            toast.error(error?.response?.data?.detail || "Invalid or expired verification code.");
+        } finally {
+            setOtpBusy(false);
+        }
     };
 
     const handleUseAnotherEmail = () => {
         setRecognitionState(null);
+        setOtpSent(false);
+        setOtpCode("");
         setEmail("");
     };
 
@@ -179,13 +221,40 @@ export default function PortalGateway() {
 
                         {/* CTAs */}
                         <div className="w-full flex flex-col gap-3">
-                            <button
-                                onClick={handleContinueToPortal}
-                                className="w-full inline-flex items-center justify-center gap-2 bg-black text-white px-6 py-3 rounded-lg text-sm font-medium hover:opacity-90 active:scale-[0.99] transition-all duration-150 h-[48px]"
-                            >
-                                Continue to Portal
-                                <ChevronRight className="w-4 h-4" />
-                            </button>
+                            {!otpSent ? (
+                                <button
+                                    onClick={handleContinueToPortal}
+                                    disabled={otpBusy}
+                                    className="w-full inline-flex items-center justify-center gap-2 bg-black text-white px-6 py-3 rounded-lg text-sm font-medium hover:opacity-90 active:scale-[0.99] transition-all duration-150 h-[48px] disabled:opacity-60"
+                                >
+                                    {otpBusy ? "Sending code..." : "Continue to Portal"}
+                                    <ChevronRight className="w-4 h-4" />
+                                </button>
+                            ) : (
+                                <>
+                                    <p className="text-xs text-black/55 text-center">
+                                        Enter the 6-digit code we emailed to {recognitionState.email}.
+                                    </p>
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        maxLength={6}
+                                        value={otpCode}
+                                        onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
+                                        placeholder="••••••"
+                                        style={{ fontSize: "16px", letterSpacing: "0.4em" }}
+                                        className="w-full text-center px-4 py-3 bg-white border border-black/15 rounded-lg text-black placeholder:text-black/25 focus:border-black/50 focus:outline-none transition-all duration-150 h-[48px]"
+                                    />
+                                    <button
+                                        onClick={handleVerifyOtp}
+                                        disabled={otpBusy}
+                                        className="w-full inline-flex items-center justify-center gap-2 bg-black text-white px-6 py-3 rounded-lg text-sm font-medium hover:opacity-90 active:scale-[0.99] transition-all duration-150 h-[48px] disabled:opacity-60"
+                                    >
+                                        {otpBusy ? "Verifying..." : "Verify & enter portal"}
+                                        <ChevronRight className="w-4 h-4" />
+                                    </button>
+                                </>
+                            )}
                             <button
                                 onClick={handleUseAnotherEmail}
                                 className="w-full inline-flex items-center justify-center gap-2 border border-black/15 hover:border-black/40 text-black/80 px-6 py-3 rounded-lg text-sm transition-all duration-150 h-[48px]"

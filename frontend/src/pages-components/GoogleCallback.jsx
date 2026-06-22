@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { api as axios } from "@/lib/api";
+import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
@@ -38,6 +38,13 @@ export default function GoogleCallback() {
                     if (s === "apply") return "/apply";
                     return `/submit/${s}`;
                 };
+
+                // Google verified email ownership — persist the portal session
+                // token so the talent can use the self-service portal.
+                if (data.portal_token) {
+                    localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
+                    localStorage.setItem("talentgram_portal_email", data.email);
+                }
 
                 if (data.existing) {
                     if (state === "apply" && data.token && data.application_id) {

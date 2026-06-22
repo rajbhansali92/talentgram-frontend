@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api as axios } from "@/lib/api";
+import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
@@ -428,6 +428,10 @@ export default function ApplicationPage() {
                 setEmailGateUnlocked(true);
             }
 
+            // OTP proved ownership — persist the portal session token (Path B).
+            if (data.portal_token) {
+                localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
+            }
             localStorage.setItem("talentgram_portal_email", trimmedEmail);
             setOtpSent(false);
         } catch (error) {

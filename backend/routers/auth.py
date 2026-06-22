@@ -17,6 +17,7 @@ from core import (
     current_user,
     db,
     make_token,
+    mint_portal_token,
     verify_password,
     _resolve_cover_url,
     compute_age,
@@ -28,6 +29,27 @@ _now_iso = _now
 
 router = APIRouter(prefix="/api", tags=["auth"])
 logger = logging.getLogger(__name__)
+
+
+async def _grant_portal_session(talent: dict) -> str:
+    """Mint a portal session token for an ownership-verified talent and persist
+    it on the record so the session is revocable. Returns the token.
+
+    Persistence is best-effort: a Mongo write failure must never fail an
+    otherwise-successful OTP/Google login (the portal token is not required by
+    any active submit/apply flow). On write failure we log and still return the
+    minted token, mirroring the best-effort `last_login` write in `login()`.
+    """
+    email = talent.get("email") or talent.get("normalized_email")
+    token = mint_portal_token(email)
+    try:
+        await db.talents.update_one(
+            {"id": talent["id"]},
+            {"$set": {"portal_access_token": token}},
+        )
+    except Exception as e:
+        logger.warning(f"portal token persistence failed for talent {talent.get('id')}: {e}")
+    return token
 
 # Prefill/Auth IP sliding window storage bucket
 _PREFILL_BUCKET = {}
@@ -126,7 +148,8 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
                 "token": token,
                 "application_id": application["id"],
                 "status": application.get("status", "draft"),
-                "talent": (await _get_talent_profile_response(talent)) if talent else None
+                "talent": (await _get_talent_profile_response(talent)) if talent else None,
+                "portal_token": (await _grant_portal_session(talent)) if talent else None,
             }
 
     talent = await db.talents.find_one({
@@ -160,11 +183,14 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
             "picture": picture
         }
 
+    portal_token = await _grant_portal_session(talent)
+
     project = await db.projects.find_one({"slug": payload.slug})
     if not project:
         profile_data = await _get_talent_profile_response(talent)
         return {
             "existing": True,
+            "portal_token": portal_token,
             **profile_data
         }
 
@@ -178,12 +204,14 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
             "token": token,
             "submission_id": submission["id"],
             "status": submission.get("status", "draft"),
-            "talent": await _get_talent_profile_response(talent)
+            "talent": await _get_talent_profile_response(talent),
+            "portal_token": portal_token,
         }
     else:
         profile_data = await _get_talent_profile_response(talent)
         return {
             "existing": True,
+            "portal_token": portal_token,
             **profile_data
         }
 
@@ -761,13 +789,15 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "token": token,
                 "application_id": application["id"],
                 "status": application.get("status", "draft"),
-                "talent": (await _get_talent_profile_response(talent)) if talent else None
+                "talent": (await _get_talent_profile_response(talent)) if talent else None,
+                "portal_token": (await _grant_portal_session(talent)) if talent else None,
             }
         elif talent:
             return {
                 "existing": True,
                 "email": email,
-                "talent": await _get_talent_profile_response(talent)
+                "talent": await _get_talent_profile_response(talent),
+                "portal_token": await _grant_portal_session(talent),
             }
     else:
         project = await db.projects.find_one({"slug": slug})
@@ -791,7 +821,8 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "token": token,
                 "submission_id": submission["id"],
                 "status": submission.get("status", "draft"),
-                "talent": (await _get_talent_profile_response(talent)) if talent else None
+                "talent": (await _get_talent_profile_response(talent)) if talent else None,
+                "portal_token": (await _grant_portal_session(talent)) if talent else None,
             }
 
     talent = await db.talents.find_one({
@@ -804,7 +835,8 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         return {
             "existing": True,
             "email": email,
-            "talent": await _get_talent_profile_response(talent)
+            "talent": await _get_talent_profile_response(talent),
+            "portal_token": await _grant_portal_session(talent),
         }
 
     # STEP 3: Store a temporary submission draft instead of creating a Talent record.

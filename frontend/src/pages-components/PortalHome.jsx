@@ -4,17 +4,17 @@ import { User, MapPin, ArrowUpRight, LogOut, Edit3, Briefcase, Award, CheckCircl
 import Logo from "@/components/Logo";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { toast } from "sonner";
-import { api as axios } from "@/lib/api";
+import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 
 export default function PortalHome() {
     const navigate = useNavigate();
     const [talent, setTalent] = useState(null);
     const [projects, setProjects] = useState({ ongoing: [], shortlisted: [], completed: [] });
     const [loading, setLoading] = useState(true);
-    const email = localStorage.getItem("talentgram_portal_email");
+    const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
 
     useEffect(() => {
-        if (!email) {
+        if (!token) {
             toast.error("Please sign in to access your portal");
             navigate("/");
             return;
@@ -22,12 +22,12 @@ export default function PortalHome() {
 
         const fetchPortalData = async () => {
             try {
-                // Fetch profile
-                const profileRes = await axios.get(`/portal/profile?email=${encodeURIComponent(email)}`);
+                // Identity is derived from the portal token; no email param.
+                const profileRes = await portalApi.get(`/portal/profile`);
                 setTalent(profileRes.data);
 
                 // Fetch synced projects
-                const projectsRes = await axios.get(`/portal/projects?email=${encodeURIComponent(email)}`);
+                const projectsRes = await portalApi.get(`/portal/projects`);
                 setProjects(projectsRes.data);
             } catch (err) {
                 console.error("Portal fetch error:", err);
@@ -37,6 +37,7 @@ export default function PortalHome() {
                 } else {
                     toast.error("Unable to load your profile. Please sign in again.");
                 }
+                localStorage.removeItem(PORTAL_TOKEN_KEY);
                 localStorage.removeItem("talentgram_portal_email");
                 navigate("/");
             } finally {
@@ -46,9 +47,10 @@ export default function PortalHome() {
 
 
         fetchPortalData();
-    }, [email, navigate]);
+    }, [token, navigate]);
 
     const handleSignOut = () => {
+        localStorage.removeItem(PORTAL_TOKEN_KEY);
         localStorage.removeItem("talentgram_portal_email");
         toast.success("Signed out successfully");
         navigate("/");

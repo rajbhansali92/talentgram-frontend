@@ -967,12 +967,15 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # minimums are enforced at finalize.
 
     # Verify that all Cloudinary uploads associated with this submission have completed.
-    pending_assets = await db.asset_metadata.find_one({
-        "submission_id": sid,
-        "upload_status": "pending"
-    })
-    if pending_assets:
-        raise HTTPException(400, "Cloudinary uploads are still in progress. Please wait until uploads are complete.")
+    active_public_ids = [m["public_id"] for m in sub.get("media", []) if m.get("public_id")]
+    if active_public_ids:
+        pending_assets = await db.asset_metadata.find_one({
+            "submission_id": sid,
+            "public_id": {"$in": active_public_ids},
+            "upload_status": "pending"
+        })
+        if pending_assets:
+            raise HTTPException(400, "Cloudinary uploads are still in progress. Please wait until uploads are complete.")
 
     # First-time finalize vs retest finalize
     is_retest = sub.get("status") in ("submitted", "updated")

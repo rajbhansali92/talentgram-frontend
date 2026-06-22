@@ -553,136 +553,140 @@ async def upload_and_track_asset(
         upsert=True
     )
 
-    # 2. Synchronize to Cloudinary
-    if resource_type == "video" and not keep_original:
-        temp_public_id = f"original_{media_id}"
-        temp_result = cloudinary_upload(
-            data,
-            folder=folder,
-            public_id=temp_public_id,
-            resource_type="video",
-            content_type=content_type,
-            keep_original=True
-        )
-
-        eager_trans = [
-            {"width": 1920, "height": 1080, "crop": "limit", "video_codec": "h264", "bit_rate": "5m", "quality": "auto"},
-        ]
-        cloudinary_upload_args = {
-            "folder": folder,
-            "public_id": temp_public_id,
-            "resource_type": "video",
-            "overwrite": True,
-            "unique_filename": False,
-            "eager": [
-                {
-                    "format": "mp4",
-                    "transformation": eager_trans
-                },
-                {
-                    "format": "jpg",
-                    "transformation": [{"width": 600, "height": 338, "crop": "fill", "quality": "auto"}]
-                }
-            ],
-            "tags": tags
-        }
-        res = cloudinary.uploader.upload(data, **cloudinary_upload_args)
-
-        mp4_url = None
-        jpg_url = None
-        for eager_item in res.get("eager", []):
-            if eager_item.get("format") == "mp4":
-                mp4_url = eager_item.get("secure_url")
-            elif eager_item.get("format") == "jpg":
-                jpg_url = eager_item.get("secure_url")
-
-        if not mp4_url:
-            mp4_url = res.get("secure_url")
-
-        final_video_res = cloudinary.uploader.upload(
-            mp4_url,
-            folder=folder,
-            public_id="audition_web",
-            resource_type="video",
-            tags=tags
-        )
-
-        if jpg_url:
-            final_thumb_res = cloudinary.uploader.upload(
-                jpg_url,
+    try:
+        # 2. Synchronize to Cloudinary
+        if resource_type == "video" and not keep_original:
+            temp_public_id = f"original_{media_id}"
+            temp_result = cloudinary_upload(
+                data,
                 folder=folder,
-                public_id="thumbnail",
-                resource_type="image",
+                public_id=temp_public_id,
+                resource_type="video",
+                content_type=content_type,
+                keep_original=True
+            )
+
+            eager_trans = [
+                {"width": 1920, "height": 1080, "crop": "limit", "video_codec": "h264", "bit_rate": "5m", "quality": "auto"},
+            ]
+            cloudinary_upload_args = {
+                "folder": folder,
+                "public_id": temp_public_id,
+                "resource_type": "video",
+                "overwrite": True,
+                "unique_filename": False,
+                "eager": [
+                    {
+                        "format": "mp4",
+                        "transformation": eager_trans
+                    },
+                    {
+                        "format": "jpg",
+                        "transformation": [{"width": 600, "height": 338, "crop": "fill", "quality": "auto"}]
+                    }
+                ],
+                "tags": tags
+            }
+            res = cloudinary.uploader.upload(data, **cloudinary_upload_args)
+
+            mp4_url = None
+            jpg_url = None
+            for eager_item in res.get("eager", []):
+                if eager_item.get("format") == "mp4":
+                    mp4_url = eager_item.get("secure_url")
+                elif eager_item.get("format") == "jpg":
+                    jpg_url = eager_item.get("secure_url")
+
+            if not mp4_url:
+                mp4_url = res.get("secure_url")
+
+            final_video_res = cloudinary.uploader.upload(
+                mp4_url,
+                folder=folder,
+                public_id="audition_web",
+                resource_type="video",
                 tags=tags
             )
+
+            if jpg_url:
+                final_thumb_res = cloudinary.uploader.upload(
+                    jpg_url,
+                    folder=folder,
+                    public_id="thumbnail",
+                    resource_type="image",
+                    tags=tags
+                )
+            else:
+                final_thumb_res = {}
+
+            cloudinary_destroy(f"{folder}/{temp_public_id}", resource_type="video")
+
+            result = {
+                "url": final_video_res.get("secure_url"),
+                "secure_url": final_video_res.get("secure_url"),
+                "public_id": final_video_res.get("public_id"),
+                "resource_type": "video",
+                "format": final_video_res.get("format"),
+                "bytes": final_video_res.get("bytes"),
+                "width": final_video_res.get("width"),
+                "height": final_video_res.get("height"),
+                "duration": final_video_res.get("duration"),
+                "asset_id": final_video_res.get("asset_id"),
+                "thumbnail_url": final_thumb_res.get("secure_url")
+            }
         else:
-            final_thumb_res = {}
+            upload_res = cloudinary_upload(
+                data,
+                folder=folder,
+                public_id=media_id,
+                resource_type=resource_type,
+                content_type=content_type,
+                keep_original=True
+            )
+            cloudinary.uploader.add_tag(",".join(tags), upload_res["public_id"])
 
-        cloudinary_destroy(f"{folder}/{temp_public_id}", resource_type="video")
+            result = {
+                "url": upload_res["url"],
+                "secure_url": upload_res["original_url"],
+                "public_id": upload_res["public_id"],
+                "resource_type": upload_res["resource_type"],
+                "format": upload_res["format"],
+                "bytes": upload_res["bytes"],
+                "width": upload_res["width"],
+                "height": upload_res["height"],
+                "duration": upload_res["duration"],
+                "asset_id": upload_res.get("asset_id") or upload_res["public_id"]
+            }
 
-        result = {
-            "url": final_video_res.get("secure_url"),
-            "secure_url": final_video_res.get("secure_url"),
-            "public_id": final_video_res.get("public_id"),
-            "resource_type": "video",
-            "format": final_video_res.get("format"),
-            "bytes": final_video_res.get("bytes"),
-            "width": final_video_res.get("width"),
-            "height": final_video_res.get("height"),
-            "duration": final_video_res.get("duration"),
-            "asset_id": final_video_res.get("asset_id"),
-            "thumbnail_url": final_thumb_res.get("secure_url")
+        final_metadata = {
+            "asset_id": result.get("asset_id") or result["public_id"],
+            "asset_url": result["url"],
+            "secure_url": result["secure_url"],
+            "file_size": result.get("bytes") or len(data),
+            "upload_status": "completed",
+            "width": result.get("width"),
+            "height": result.get("height"),
+            "duration": result.get("duration"),
+            "updated_at": datetime.now(timezone.utc)
         }
-    else:
-        upload_res = cloudinary_upload(
-            data,
-            folder=folder,
-            public_id=media_id,
-            resource_type=resource_type,
-            content_type=content_type,
-            keep_original=True
+        await db.asset_metadata.update_one(
+            {"public_id": result["public_id"]},
+            {"$set": final_metadata}
         )
-        cloudinary.uploader.add_tag(",".join(tags), upload_res["public_id"])
 
-        result = {
-            "url": upload_res["url"],
-            "secure_url": upload_res["original_url"],
-            "public_id": upload_res["public_id"],
-            "resource_type": upload_res["resource_type"],
-            "format": upload_res["format"],
-            "bytes": upload_res["bytes"],
-            "width": upload_res["width"],
-            "height": upload_res["height"],
-            "duration": upload_res["duration"],
-            "asset_id": upload_res.get("asset_id") or upload_res["public_id"]
-        }
+        await log_storage_action(
+            user_id=user_id,
+            action_type="UPLOAD",
+            public_id=result["public_id"],
+            project_id=project_id,
+            talent_id=talent_id,
+            submission_id=submission_id
+        )
 
-    final_metadata = {
-        "asset_id": result.get("asset_id") or result["public_id"],
-        "asset_url": result["url"],
-        "secure_url": result["secure_url"],
-        "file_size": result.get("bytes") or len(data),
-        "upload_status": "completed",
-        "width": result.get("width"),
-        "height": result.get("height"),
-        "duration": result.get("duration"),
-        "updated_at": datetime.now(timezone.utc)
-    }
-    await db.asset_metadata.update_one(
-        {"public_id": result["public_id"]},
-        {"$set": final_metadata}
-    )
-
-    await log_storage_action(
-        user_id=user_id,
-        action_type="UPLOAD",
-        public_id=result["public_id"],
-        project_id=project_id,
-        talent_id=talent_id,
-        submission_id=submission_id
-    )
-
-    return result
+        return result
+    except Exception:
+        await db.asset_metadata.delete_one({"public_id": public_id_to_store})
+        raise
 
 
 def cloudinary_destroy(public_id: str, resource_type: str = "image") -> bool:

@@ -51,6 +51,30 @@ SEL = {
     "loading_anim": '[data-testid="startup-screen-loading-animation"]',
 }
 
+# ---------------------------------------------------------------------------
+# Login-state detection. WhatsApp Web rotates data-testid / class names, so we
+# probe SEVERAL resilient candidates and require a POSITIVE match. We must never
+# infer "logged in" from the absence of a QR — that misread a fresh QR screen as
+# a "saved session" and then failed waiting for a stale chat-list selector.
+# Ordered most-stable-first; the worker logs which candidate matched so a live
+# run reveals the real DOM instead of guessing.
+# ---------------------------------------------------------------------------
+QR_SELECTORS = [
+    'div[data-ref] canvas',                 # QR canvas wrapped in a data-ref div
+    'canvas[aria-label*="Scan"]',           # aria-label on the QR canvas
+    '[data-testid="qrcode"]',               # legacy
+    'div[aria-label*="QR"]',
+    'div[data-ref]',                        # the QR wrapper itself
+]
+LOGGED_IN_SELECTORS = [
+    '#pane-side',                           # chat-list scroll pane (logged-in only; long-stable id)
+    'div[aria-label="Chat list"]',
+    'div[aria-label="Chats"]',
+    '[data-testid="chat-list"]',            # legacy
+    '#side',                                # left column container
+    'header [data-icon="new-chat-outline"]',
+]
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -135,68 +159,135 @@ class WhatsAppSession:
     # ------------------------------------------------------------------
 
     async def _authenticate(self) -> None:
-        """Navigate to WhatsApp Web, handle QR or reuse saved session."""
+        """Detect login state from POSITIVE signals only.
+
+        Never infer "logged in" from the absence of a QR (the previous logic
+        did, which misread a fresh QR screen as a saved session). We poll the
+        live page for either a logged-in signal (chat list) or a QR screen,
+        probing several resilient selectors and logging exactly what is present
+        so the real DOM is visible in the worker logs.
+        """
         logger.info("session: navigating to WhatsApp Web…")
         await self.page.goto(config.WHATSAPP_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
 
-        # Check if QR is displayed (not logged in)
-        qr_visible = False
-        try:
-            qr_visible = (
-                await self.page.is_visible(SEL["qr_canvas"], timeout=6_000)
-                or await self.page.is_visible(SEL["qr_alt"], timeout=3_000)
-            )
-        except PlaywrightTimeoutError:
-            pass
+        overall_deadline = time.monotonic() + (config.PAGE_LOAD_TIMEOUT_MS / 1000)
+        matched_login = None
 
-        if qr_visible:
-            logger.info("session: QR code detected — capturing for UI…")
-            await self._capture_and_store_qr()
-            logger.info("session: waiting up to %ds for QR scan…",
-                        config.QR_SCAN_TIMEOUT_MS // 1000)
-            try:
-                await self.page.wait_for_selector(
-                    SEL["chat_list"],
-                    timeout=config.QR_SCAN_TIMEOUT_MS,
-                )
-            except PlaywrightTimeoutError:
+        while time.monotonic() < overall_deadline:
+            await asyncio.sleep(2)
+            await self._log_page_state("detect")
+
+            matched_login = await self._probe("logged-in", LOGGED_IN_SELECTORS)
+            if matched_login:
+                logger.info("session: authenticated state detected via %s", matched_login)
+                break
+
+            qr_sel = await self._probe("qr", QR_SELECTORS)
+            if qr_sel:
+                logger.info("session: QR code detected via %s — capturing for UI…", qr_sel)
+                await self._capture_and_store_qr(qr_sel)
+                matched_login = await self._wait_for_login_after_qr()
+                if matched_login:
+                    break
                 await self._update_session_doc(
                     "error", error_message="QR scan timed out. Restart worker."
                 )
                 raise RuntimeError("QR scan timed out")
 
-            logger.info("session: QR scanned — authenticated!")
-        else:
-            logger.info("session: saved session detected — waiting for chat list…")
-            try:
-                await self.page.wait_for_selector(
-                    SEL["chat_list"],
-                    timeout=config.PAGE_LOAD_TIMEOUT_MS,
-                )
-            except PlaywrightTimeoutError:
-                await self._update_session_doc(
-                    "error", error_message="Chat list did not load. Session may be invalid."
-                )
-                raise RuntimeError("WhatsApp Web failed to load chat list")
+            logger.info("session: neither QR nor chat-list visible yet — page still loading, retrying…")
+
+        if not matched_login:
+            # Dump the live DOM so the real selectors are visible, then fail
+            # loudly instead of silently mislabelling the state.
+            await self._log_page_state("FAILED-no-signal", body=True)
+            await self._update_session_doc(
+                "error",
+                error_message=(
+                    "Could not detect a QR or chat-list element. WhatsApp Web DOM "
+                    "may have changed — check worker logs for the live selectors."
+                ),
+            )
+            raise RuntimeError(
+                "WhatsApp Web: neither QR nor chat-list detected (see instrumented logs)"
+            )
 
         await asyncio.sleep(2)  # let chats hydrate
         self._healthy = True
-        now = _utcnow()
         await self._update_session_doc(
             "authenticated",
-            extra={"authenticated_at": now, "qr_code_base64": None, "qr_expires_at": None},
+            extra={"authenticated_at": _utcnow(), "qr_code_base64": None, "qr_expires_at": None},
         )
         logger.info("session: ready ✅")
 
-    async def _capture_and_store_qr(self) -> None:
-        """Take a screenshot of the QR canvas and store as base64 in MongoDB."""
+    async def _wait_for_login_after_qr(self) -> Optional[str]:
+        """After a QR is shown, poll for a logged-in signal and refresh the
+        stored QR as WhatsApp rotates it. Returns the matched selector or None."""
+        deadline = time.monotonic() + (config.QR_SCAN_TIMEOUT_MS / 1000)
+        logger.info("session: waiting up to %ds for QR scan…",
+                    config.QR_SCAN_TIMEOUT_MS // 1000)
+        last_qr_refresh = time.monotonic()
+        while time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            matched = await self._probe("logged-in", LOGGED_IN_SELECTORS)
+            if matched:
+                logger.info("session: QR scanned — authenticated via %s!", matched)
+                return matched
+            # WhatsApp rotates the QR ~every 20s; refresh the stored image.
+            if time.monotonic() - last_qr_refresh > 20:
+                qr_sel = await self._probe("qr", QR_SELECTORS)
+                if qr_sel:
+                    await self._capture_and_store_qr(qr_sel)
+                    last_qr_refresh = time.monotonic()
+        return None
+
+    async def _probe(self, label: str, selectors: list) -> Optional[str]:
+        """Return the first present+visible selector, logging every candidate's
+        count/visibility so a live run reveals the real DOM (no guessing)."""
+        found: Optional[str] = None
+        for sel in selectors:
+            try:
+                loc = self.page.locator(sel)
+                count = await loc.count()
+                visible = False
+                if count:
+                    try:
+                        visible = await loc.first.is_visible()
+                    except Exception:
+                        visible = False
+                logger.info("session: probe[%s] %-34s count=%d visible=%s",
+                            label, sel, count, visible)
+                if visible and found is None:
+                    found = sel
+            except Exception as exc:
+                logger.info("session: probe[%s] %-34s error=%s", label, sel, exc)
+        return found
+
+    async def _log_page_state(self, tag: str, body: bool = False) -> None:
+        """Instrumentation: log live url/title (and optionally a body snippet)
+        so the actual WhatsApp Web screen is visible in the worker logs."""
         try:
-            # Try to screenshot the QR canvas element directly
-            qr_el = self.page.locator(SEL["qr_canvas"]).first
-            screenshot_bytes = await qr_el.screenshot(type="png")
-        except Exception:
-            # Fallback: full-page screenshot
+            url = self.page.url
+            title = await self.page.title()
+            logger.info("session: [%s] url=%s title=%r", tag, url, title)
+            if body:
+                try:
+                    text = (await self.page.inner_text("body"))[:600]
+                except Exception:
+                    text = "<unavailable>"
+                logger.info("session: [%s] body[:600]=%r", tag, text)
+        except Exception as exc:
+            logger.info("session: [%s] page-state error=%s", tag, exc)
+
+    async def _capture_and_store_qr(self, qr_selector: Optional[str] = None) -> None:
+        """Screenshot the QR (matched element if known, else full page) and
+        store as base64 in MongoDB for the admin UI."""
+        screenshot_bytes = None
+        if qr_selector:
+            try:
+                screenshot_bytes = await self.page.locator(qr_selector).first.screenshot(type="png")
+            except Exception as exc:
+                logger.info("session: QR element screenshot failed (%s) — using full page", exc)
+        if screenshot_bytes is None:
             screenshot_bytes = await self.page.screenshot(type="png", full_page=False)
 
         qr_b64 = "data:image/png;base64," + base64.b64encode(screenshot_bytes).decode()
@@ -221,8 +312,8 @@ class WhatsAppSession:
             self._healthy = False
             return False
         try:
-            visible = await self.page.is_visible(SEL["chat_list"], timeout=8_000)
-            if visible:
+            matched = await self._probe("heartbeat", LOGGED_IN_SELECTORS)
+            if matched:
                 self._healthy = True
                 await get_db().whatsapp_sessions.update_one(
                     {"id": "default"},
@@ -231,7 +322,7 @@ class WhatsAppSession:
                 )
                 return True
             else:
-                logger.warning("session: heartbeat FAILED — chat list not visible")
+                logger.warning("session: heartbeat FAILED — no chat-list signal")
                 self._healthy = False
                 await self._update_session_doc(
                     "error", error_message="Session lost — chat list not visible"

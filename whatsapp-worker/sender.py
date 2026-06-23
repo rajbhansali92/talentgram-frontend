@@ -122,11 +122,104 @@ OUTGOING_MSG_SELECTORS = [
 ]
 
 
+# TASK 4 — distinct send outcomes (never collapsed into a single FAILED).
+CHAT_NOT_OPENED = "CHAT_NOT_OPENED"                       # conversation never opened -> retry
+MESSAGE_NOT_SENT = "MESSAGE_NOT_SENT"                     # composer still full / send didn't fire -> retry
+MESSAGE_SENT_BUT_NOT_VERIFIED = "MESSAGE_SENT_BUT_NOT_VERIFIED"  # left composer, no bubble -> DO NOT retry
+MESSAGE_SENT_AND_VERIFIED = "MESSAGE_SENT_AND_VERIFIED"   # outgoing bubble confirmed -> SENT
+INVALID_DESTINATION = "INVALID_DESTINATION"              # bad number / group missing -> terminal
+
+# Conversation-open signals. #main is the open-chat pane (absent on the home
+# screen), so it is a reliable "a chat is actually open" signal — unlike the
+# compose box, which can exist on the home screen.
+CONV_PANEL_SELECTORS = ["#main", "div#main", "[data-testid='conversation-panel-wrapper']"]
+CONV_HEADER_SELECTORS = ["#main header", "header[data-testid='conversation-header']"]
+RECIPIENT_SELECTORS = [
+    "#main header span[title]",
+    "#main header [data-testid='conversation-info-header-chat-title']",
+    "#main header [title]",
+]
+
+
 def _first_line(message_body: str) -> str:
     for ln in (message_body or "").splitlines():
         if ln.strip():
             return ln.strip()[:40]
     return ""
+
+
+async def _first_present(page: Page, selectors: list) -> Tuple[bool, Optional[str]]:
+    for sel in selectors:
+        try:
+            if await page.locator(sel).count() and await page.locator(sel).first.is_visible():
+                return True, sel
+        except Exception:
+            pass
+    return False, None
+
+
+async def _verify_chat_open(page: Page) -> Tuple[bool, bool, bool, str]:
+    """TASK 1: prove a real conversation is open BEFORE typing.
+
+    Requires the conversation panel (#main), a header inside it, and a visible
+    recipient name/phone. The compose box alone is NOT accepted (it can exist on
+    the home screen). Returns (ready, header_found, recipient_found, recipient_text).
+    """
+    panel_found, panel_sel = await _first_present(page, CONV_PANEL_SELECTORS)
+    header_found, _ = await _first_present(page, CONV_HEADER_SELECTORS)
+
+    recipient_found = False
+    recipient_text = ""
+    for sel in RECIPIENT_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            if await loc.count():
+                recipient_text = (await loc.first.inner_text()).strip() or \
+                                 (await loc.first.get_attribute("title") or "").strip()
+                if recipient_text:
+                    recipient_found = True
+                    break
+        except Exception:
+            pass
+
+    conversation_ready = bool(panel_found and header_found)
+    logger.info("sender: CHAT OPEN VERIFICATION")
+    logger.info("sender:   panel_found=%s (%s)", panel_found, panel_sel)
+    logger.info("sender:   header_found=%s", header_found)
+    logger.info("sender:   recipient_found=%s", recipient_found)
+    logger.info("sender:   recipient_text=%r", recipient_text[:60])
+    logger.info("sender:   conversation_ready=%s", conversation_ready)
+    return conversation_ready, header_found, recipient_found, recipient_text
+
+
+async def _dump_outgoing_dom(page: Page) -> None:
+    """TASK 2 instrumentation: enumerate live message-like elements (data-id,
+    class, data-testid) inside the thread so the real outgoing selector is
+    captured in the worker logs — no guessing."""
+    try:
+        rows = await page.evaluate(
+            """() => {
+                const out = [];
+                const nodes = document.querySelectorAll(
+                    '#main [data-id], #main div[class*="message"], #main [data-testid]'
+                );
+                nodes.forEach(el => {
+                    const did = el.getAttribute('data-id');
+                    const cls = (el.getAttribute('class') || '').slice(0, 60);
+                    const tid = el.getAttribute('data-testid');
+                    if (did || tid || /message/.test(cls)) {
+                        out.push({ data_id: did, testid: tid, cls,
+                                   text: (el.innerText || '').trim().slice(0, 30) });
+                    }
+                });
+                return out.slice(-25);  // most recent 25
+            }"""
+        )
+        logger.info("sender: OUTGOING DOM DUMP — %d message-like elements (most recent):", len(rows))
+        for r in rows:
+            logger.info("sender:   %s", r)
+    except Exception as exc:
+        logger.info("sender: OUTGOING DOM DUMP failed: %s", exc)
 
 
 async def _modal_visible(page: Page) -> Optional[str]:
@@ -288,7 +381,7 @@ async def send_whatsapp_message(
     destination: str,
     message_body: str,
     media_url: Optional[str] = None,
-) -> None:
+) -> str:
     """
     Core automation logic for sending a single WhatsApp message.
     
@@ -350,26 +443,35 @@ async def send_whatsapp_message(
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")
 
-    # PROBLEM #1: do not proceed until the conversation is fully open.
-    await _wait_for_chat_ready(page)
-    logger.info("sender: message box found? True (via %s)", SEL["msg_box"])
+    # PROBLEM #1: wait for the composer to be interactive.
+    try:
+        await _wait_for_chat_ready(page)
+    except Exception as exc:
+        logger.warning("sender: chat not ready (%s) -> CHAT_NOT_OPENED", exc)
+        return CHAT_NOT_OPENED
 
-    # Instrumentation: dump the live DOM (send-button selectors) and the exact
-    # message string about to be typed (PROBLEM #3 trace).
+    # TASK 1: the compose box is NOT sufficient — confirm a real conversation is
+    # open (panel + header + recipient) before typing anything.
+    conversation_ready, _hdr, _rcp, _rtext = await _verify_chat_open(page)
+    if not conversation_ready:
+        logger.warning("sender: conversation NOT open -> CHAT_NOT_OPENED (refusing to type)")
+        return CHAT_NOT_OPENED
+
+    # Instrumentation: send-button DOM + the exact message string (PROBLEM #3 trace).
     await _dump_send_dom(page)
     logger.info(
         "sender: FINAL MESSAGE SENT TO WHATSAPP (len=%d, lines=%d): %r",
         len(message_body or ""), len((message_body or "").splitlines()), message_body,
     )
 
-    # PROBLEM #3 guard: if this exact message is already the newest outgoing
-    # bubble (delivered on a prior retry), do NOT type it again.
+    # TASK 3 (duplicate prevention): if this exact message is already a recent
+    # outgoing bubble (delivered on a prior attempt), do NOT send again.
     if await _already_delivered(page, message_body):
         logger.warning(
-            "sender: message already present as newest outgoing bubble — skipping "
-            "re-send to avoid duplicate (treating as already delivered)"
+            "sender: message already present as a recent outgoing bubble — NOT resending "
+            "(treating as already delivered / verified)"
         )
-        return
+        return MESSAGE_SENT_AND_VERIFIED
 
     # Handle media attachment if present
     if media_url:
@@ -464,20 +566,32 @@ async def send_whatsapp_message(
         await asyncio.sleep(1.0)
         await _safe_screenshot(page, "/tmp/post_send.png")
 
-    # PROBLEM #2: a click is NOT proof of delivery. Require a positive signal.
+    # TASK 2 instrumentation: dump the live outgoing-message DOM so the real
+    # selector is captured in the logs.
+    await _dump_outgoing_dom(page)
+
+    # PROBLEM #2 / TASK 4: classify the outcome — never collapse to one FAILED.
     await asyncio.sleep(1.5)
     logger.info("sender: verification started")
     verified, composer_cleared, bubble_match = await _verify_delivery(page, message_body)
-    if not verified:
-        await _safe_screenshot(page, "/tmp/verify_failed.png")
-        raise RuntimeError(
-            f"delivery NOT verified (composer_cleared={composer_cleared} "
-            f"bubble_match={bubble_match}) — marking FAILED, not SENT"
+
+    if verified:
+        logger.info("sender: MESSAGE_SENT_AND_VERIFIED — outgoing bubble confirmed")
+        return MESSAGE_SENT_AND_VERIFIED
+
+    await _safe_screenshot(page, "/tmp/verify_failed.png")
+    # No outgoing bubble. The composer state distinguishes "never sent" (safe to
+    # retry) from "left the composer but unconfirmed" (must NOT retry — retrying
+    # is exactly what duplicated Sahal's message).
+    if composer_cleared:
+        logger.warning(
+            "sender: MESSAGE_SENT_BUT_NOT_VERIFIED — composer cleared but no outgoing bubble "
+            "matched. Will NOT retry (prevents duplicate delivery)."
         )
-    logger.info(
-        "sender: verification signal found — outgoing bubble confirmed (bubble_match=%s; "
-        "composer_cleared=%s ignored as proof)", bubble_match, composer_cleared,
+        return MESSAGE_SENT_BUT_NOT_VERIFIED
+
+    logger.warning(
+        "sender: MESSAGE_NOT_SENT — composer still holds text and no outgoing bubble. "
+        "Safe to retry."
     )
-    logger.info("sender: message verified")
-    logger.info("sender: status changed to SENT")
-    logger.info("sender: message sent successfully")
+    return MESSAGE_NOT_SENT

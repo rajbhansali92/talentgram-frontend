@@ -691,8 +691,12 @@ function WEHistoryPanel() {
         <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
           {batches.map((batch) => {
             const active = selectedBatchId === batch.id;
-            const progress = batch.total_jobs > 0 
-              ? Math.round(((batch.sent_count + batch.failed_count) / batch.total_jobs) * 100)
+            // Distinct buckets — UNCONFIRMED is NEVER counted as verified.
+            const verified = batch.sent_count || 0;
+            const unconfirmed = batch.unconfirmed_count || 0;
+            const failed = batch.failed_count || 0;
+            const progress = batch.total_jobs > 0
+              ? Math.round(((verified + unconfirmed + failed) / batch.total_jobs) * 100)
               : 0;
 
             return (
@@ -726,7 +730,7 @@ function WEHistoryPanel() {
                   <div className="space-y-1">
                     <div className="flex justify-between text-[10px] text-black/40 font-medium">
                       <span>Progress</span>
-                      <span>{progress}% ({batch.sent_count}/{batch.total_jobs})</span>
+                      <span>{progress}% — {verified} verified · {unconfirmed} unconfirmed · {failed} failed</span>
                     </div>
                     <div className="w-full bg-black/[0.06] h-1.5 rounded-full overflow-hidden">
                       <div className="bg-black h-full transition-all duration-300" style={{ width: `${progress}%` }} />
@@ -803,12 +807,16 @@ function WEHistoryPanel() {
                         <td className="py-2.5">
                           <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
                             job.status === "sent" ? "bg-emerald-50 text-emerald-700" :
+                            job.status === "sent_unverified" ? "bg-orange-50 text-orange-700" :
                             job.status === "sending" ? "bg-sky-50 text-sky-700 animate-pulse" :
                             job.status === "pending" ? "bg-amber-50 text-amber-700" :
                             job.status === "dry_run_preview" ? "bg-purple-50 text-purple-700" :
                             "bg-red-50 text-red-700"
                           }`}>
-                            {job.status}
+                            {job.status === "sent" ? "Verified" :
+                             job.status === "sent_unverified" ? "Delivery Unconfirmed" :
+                             job.status === "failed" ? "Failed" :
+                             job.status}
                           </span>
                         </td>
                         <td className="py-2.5 font-mono">{job.attempt_count}</td>
@@ -816,7 +824,7 @@ function WEHistoryPanel() {
                           {job.error_message || "—"}
                         </td>
                         <td className="py-2.5 text-right">
-                          {(job.status === "failed" || job.status === "skipped") && (
+                          {(job.status === "failed" || job.status === "skipped" || job.status === "sent_unverified") && (
                             <button
                               onClick={() => handleRetryJob(job)}
                               className="text-[10px] font-bold text-black uppercase tracking-wider hover:underline border border-black/10 px-2 py-1 rounded-sm bg-white"

@@ -26,9 +26,7 @@ export function getSubdomainUrl(subdomain) {
     return `https://${subdomain}.talentgramagency.com`;
 }
 
-// 🔍 Debug (remove later if needed)
-console.log("🚀 Backend URL:", BACKEND_URL);
-console.log("🚀 API URL:", API);
+
 
 /**
  * Resolve the display URL for a media object.

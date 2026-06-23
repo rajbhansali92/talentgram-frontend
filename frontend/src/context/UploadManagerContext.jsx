@@ -1,10 +1,11 @@
 "use client";
 
 import React, { createContext, useContext, useState } from "react";
-import { api, DIRECT_VIDEO_UPLOAD } from "../lib/api";
-import { directVideoUpload } from "../lib/directVideoUpload";
+import { api } from "../lib/api";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
+import axios from "axios";
+
 
 const UploadManagerContext = createContext(null);
 
@@ -95,25 +96,42 @@ export function UploadManagerProvider({ children }) {
 
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                let data;
-                // Architecture C: direct browser→Cloudinary for video slots only,
-                // gated by the build flag. Everything else (images, flag off) keeps
-                // the existing Railway upload path untouched.
-                const useDirectVideo =
-                    DIRECT_VIDEO_UPLOAD &&
-                    isVideoSlot &&
-                    /\/public\/submissions\/[^/]+\/upload$/.test(dynamicEndpoint || "");
+                // 1. Get upload signature from backend
+                const headers = {};
+                if (dynamicToken) {
+                    headers["Authorization"] = `Bearer ${dynamicToken}`;
+                }
+                const signRes = await api.post(`${dynamicEndpoint}/sign`, {
+                    category,
+                    filename: file.name
+                }, { headers });
+                const signData = signRes.data;
 
-                if (useDirectVideo) {
-                    const sid = dynamicEndpoint.match(/\/public\/submissions\/([^/]+)\/upload$/)[1];
-                    data = await directVideoUpload({
-                        sid,
-                        token: dynamicToken,
-                        category,
-                        label,
-                        file,
-                        onProgress: (loaded, total) => {
-                            const pct = total ? Math.round((loaded / total) * 100) : 0;
+                // 2. Build signed upload FormData for Cloudinary
+                const fd = new FormData();
+                fd.append("file", file);
+                fd.append("api_key", signData.api_key);
+                fd.append("timestamp", signData.timestamp);
+                fd.append("signature", signData.signature);
+                fd.append("folder", signData.folder);
+                fd.append("public_id", signData.public_id);
+                if (signData.eager) {
+                    fd.append("eager", signData.eager);
+                }
+                if (signData.transformation) {
+                    fd.append("transformation", signData.transformation);
+                }
+
+                // 3. Upload directly to Cloudinary
+                const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${signData.cloud_name}/${signData.resource_type}/upload`;
+                const uploadRes = await axios.post(cloudinaryUrl, fd, {
+                    headers: {
+                        "Content-Type": "multipart/form-data",
+                    },
+                    timeout: 0,
+                    onUploadProgress: (e) => {
+                        if (e.total) {
+                            const pct = Math.round((e.loaded / e.total) * 100);
                             setActiveUploads((prev) => {
                                 if (!prev[slotKey]) return prev;
                                 return {
@@ -126,44 +144,24 @@ export function UploadManagerProvider({ children }) {
                                 };
                             });
                         }
-                    });
-                } else {
-                    const fd = new FormData();
-                    fd.append("file", file);
-                    fd.append("category", category);
-                    if (label && category === "take") fd.append("label", label);
-
-                    const headers = {
-                        "Content-Type": "multipart/form-data",
-                    };
-                    if (dynamicToken) {
-                        headers["Authorization"] = `Bearer ${dynamicToken}`;
                     }
+                });
 
-                    const res = await api.post(dynamicEndpoint, fd, {
-                        headers,
-                        timeout: 0, // No per-request timeout
-                        onUploadProgress: (e) => {
-                            if (e.total) {
-                                const pct = Math.round((e.loaded / e.total) * 100);
-                                setActiveUploads((prev) => {
-                                    if (!prev[slotKey]) return prev;
-                                    return {
-                                        ...prev,
-                                        [slotKey]: {
-                                            ...prev[slotKey],
-                                            status: pct >= 100 ? "processing" : "uploading",
-                                            pct
-                                        }
-                                    };
-                                });
-                            }
-                        }
-                    });
-                    data = res.data;
-                }
+                // 4. Submit completed metadata to backend to save
+                const completeRes = await api.post(`${dynamicEndpoint}/complete`, {
+                    media_id: signData.media_id,
+                    category,
+                    label: label && category === "take" ? label : undefined,
+                    public_id: signData.public_id,
+                    url: uploadRes.data.secure_url,
+                    bytes: uploadRes.data.bytes,
+                    duration: uploadRes.data.duration,
+                    content_type: file.type,
+                    original_filename: file.name,
+                    eager: uploadRes.data.eager
+                }, { headers });
 
-                if (onSuccess) onSuccess(data);
+                if (onSuccess) onSuccess(completeRes.data);
 
                 setRetryQueue((q) => {
                     const n = { ...q };
@@ -195,8 +193,7 @@ export function UploadManagerProvider({ children }) {
             } catch (err) {
                 lastErr = err;
                 const isNetwork = !err?.response;
-                // Validation errors (e.g. >5 min video) must not be retried.
-                if (err?.noRetry || !isNetwork || attempt === MAX_ATTEMPTS) break;
+                if (!isNetwork || attempt === MAX_ATTEMPTS) break;
 
                 const wait = 1000 * Math.pow(2, attempt - 1);
                 toast.message(`Network blip — retrying in ${wait / 1000}s (attempt ${attempt}/${MAX_ATTEMPTS})`);
@@ -210,11 +207,10 @@ export function UploadManagerProvider({ children }) {
             }
         }
 
-        // Failed after all retries (or a non-retryable validation error)
-        const failMsg = lastErr?.response?.data?.detail || lastErr?.message || "Upload failed";
+        // Failed after all retries
         setRetryQueue((q) => ({
             ...q,
-            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: failMsg }
+            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed" }
         }));
 
         setActiveUploads((prev) => ({
@@ -222,11 +218,11 @@ export function UploadManagerProvider({ children }) {
             [slotKey]: {
                 ...prev[slotKey],
                 status: "failed",
-                error: failMsg
+                error: lastErr?.response?.data?.detail || "Upload failed"
             }
         }));
 
-        toast.error(lastErr?.noRetry ? failMsg : (lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again"));
+        toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
     };
 
     const retryUpload = async (slotKey) => {

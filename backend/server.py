@@ -32,7 +32,9 @@ from routers import (
     workflow,
 )
 
-app = FastAPI(title="Talentgram Portfolio Engine")
+_docs_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/docs"
+_redoc_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/redoc"
+app = FastAPI(title="Talentgram Portfolio Engine", docs_url=_docs_url, redoc_url=_redoc_url)
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
@@ -60,10 +62,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
 
-        # Skip docs completely
-        if request.url.path.startswith("/docs") or request.url.path.startswith("/openapi"):
-            return response
-
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -71,6 +69,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Permissions-Policy",
             "geolocation=(), microphone=(), camera=()",
         )
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+        response.headers.setdefault("X-XSS-Protection", "1; mode=block")
 
         return response
 
@@ -156,7 +159,7 @@ app.add_middleware(
     allow_origins=cors_origins,
     allow_origin_regex=cors_origins_regex,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
 )
 
 

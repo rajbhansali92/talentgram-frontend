@@ -700,6 +700,163 @@ async def upload_application_media(
     return updated
 
 
+class SignAppUploadIn(BaseModel):
+    category: str
+    filename: str
+
+
+@router.post("/public/apply/{aid}/upload/sign")
+async def sign_application_upload(
+    aid: str,
+    payload: SignAppUploadIn,
+    authorization: Optional[str] = Header(None),
+):
+    from core import DIRECT_UPLOAD_ENABLED
+    if not DIRECT_UPLOAD_ENABLED:
+        raise HTTPException(400, "Direct uploads are currently disabled")
+        
+    await _check_app_token(authorization, aid)
+
+    category = payload.category
+    filename = payload.filename
+    
+    if category not in APPLICATION_UPLOAD_CATEGORIES:
+        raise HTTPException(400, "Invalid category")
+        
+    app_doc = await db.applications.find_one({"id": aid})
+    if not app_doc:
+        raise HTTPException(404, "Application not found")
+    if app_doc.get("status") == "submitted":
+        raise HTTPException(400, "Application already finalized")
+
+    is_video = category == "intro_video"
+    is_image = category in ("image", "indian", "western")
+
+    if is_image:
+        existing = sum(1 for m in app_doc.get("media", []) if m.get("category") == category)
+        if existing >= MAX_IMAGES_PER_CATEGORY:
+            raise HTTPException(400, "Limit reached")
+            
+    if is_video:
+        await db.applications.update_one(
+            {"id": aid}, {"$pull": {"media": {"category": "intro_video"}}}
+        )
+
+    media_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/applications/{aid}"
+    public_id = media_id
+    rt = "video" if is_video else "image"
+
+    eager = None
+    transformation = None
+
+    if is_video:
+        transformation = "w_1280,h_720,c_limit,q_auto,vc_auto"
+        eager = "w_600,h_338,c_fill,q_auto,f_jpg"
+    else:
+        eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
+
+    import time
+    import cloudinary.utils
+    timestamp = int(time.time())
+    
+    params = {
+        "folder": folder,
+        "public_id": public_id,
+        "timestamp": timestamp,
+    }
+    if eager:
+        params["eager"] = eager
+    if transformation:
+        params["transformation"] = transformation
+        
+    api_secret = cloudinary.config().api_secret
+    signature = cloudinary.utils.api_sign_request(params, api_secret)
+    
+    return {
+        "signature": signature,
+        "timestamp": timestamp,
+        "api_key": cloudinary.config().api_key,
+        "cloud_name": cloudinary.config().cloud_name,
+        "folder": folder,
+        "public_id": public_id,
+        "resource_type": rt,
+        "eager": eager,
+        "transformation": transformation,
+        "media_id": media_id,
+    }
+
+
+class CompleteAppUploadIn(BaseModel):
+    media_id: str
+    category: str
+    public_id: str
+    url: str
+    bytes: int
+    duration: Optional[float] = None
+    content_type: Optional[str] = None
+    original_filename: Optional[str] = None
+    eager: Optional[List[dict]] = None
+
+
+@router.post("/public/apply/{aid}/upload/complete")
+async def complete_application_upload(
+    aid: str,
+    payload: CompleteAppUploadIn,
+    authorization: Optional[str] = Header(None),
+):
+    await _check_app_token(authorization, aid)
+    app_doc = await db.applications.find_one({"id": aid})
+    if not app_doc:
+        raise HTTPException(404, "Application not found")
+    if app_doc.get("status") == "submitted":
+        raise HTTPException(400, "Application already finalized")
+
+    category = payload.category
+    is_video = category == "intro_video"
+    is_image = category in ("image", "indian", "western")
+
+    thumbnail_url = None
+    poster_url = None
+    eager_list = payload.eager or []
+    
+    if is_video:
+        poster_url = next((x.get("secure_url") for x in eager_list if x.get("format") == "jpg"), None)
+        compressed_mp4 = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
+        url = compressed_mp4 or payload.url
+    else:
+        url = payload.url
+        thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
+        
+    if not poster_url and is_video:
+        poster_url = video_poster_url(payload.public_id)
+
+    media = {
+        "id": payload.media_id,
+        "category": category,
+        "url": url,
+        "public_id": payload.public_id,
+        "resource_type": "video" if is_video else "image",
+        "content_type": payload.content_type or ("video/mp4" if is_video else "image/jpeg"),
+        "original_filename": payload.original_filename,
+        "size": payload.bytes,
+        "created_at": _now(),
+        "scope": "application",
+        "application_id": aid,
+        "duration": payload.duration,
+        "thumbnail_url": poster_url if is_video else thumbnail_url,
+        "poster_url": poster_url if is_video else None,
+    }
+
+    await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
+    updated = await db.applications.find_one({"id": aid}, {"_id": 0})
+
+    from core import sync_media_to_global_talent
+    await sync_media_to_global_talent(updated, media)
+
+    return updated
+
+
 @router.delete("/public/apply/{aid}/media/{mid}")
 async def delete_application_media(
     aid: str, mid: str, authorization: Optional[str] = Header(None)

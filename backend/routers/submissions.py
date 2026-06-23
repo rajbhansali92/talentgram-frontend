@@ -1,6 +1,8 @@
 """Public submission flow + admin review."""
 import uuid
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
+
 
 import time
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
@@ -745,6 +747,249 @@ async def submission_upload(
     # ------------------------------------------------------------------
     await sync_media_to_global_talent(updated, media)
 
+    return updated
+
+
+class SignUploadIn(BaseModel):
+    category: str
+    filename: str
+
+
+@router.post("/public/submissions/{sid}/upload/sign")
+async def submission_sign_upload(
+    sid: str,
+    payload: SignUploadIn,
+    authorization: Optional[str] = Header(None),
+):
+    from core import DIRECT_UPLOAD_ENABLED
+    if not DIRECT_UPLOAD_ENABLED:
+        raise HTTPException(400, "Direct uploads are currently disabled")
+        
+    submitter = await decode_submitter(authorization)
+
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    
+    category = payload.category
+    filename = payload.filename
+    
+    if category not in SUBMISSION_UPLOAD_CATEGORIES:
+        raise HTTPException(400, "Invalid category")
+        
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+        
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    
+    if category in PORTFOLIO_IMAGE_CATEGORIES:
+        existing = sum(1 for m in sub.get("media", []) if m.get("category") == category)
+        if existing >= MAX_IMAGES_PER_CATEGORY:
+            raise HTTPException(400, f"Limit reached")
+            
+    if category == "take":
+        existing_takes = sum(
+            1 for m in sub.get("media", []) 
+            if m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
+        )
+        if existing_takes >= MAX_SUBMISSION_TAKES:
+            raise HTTPException(400, f"Maximum takes reached")
+
+    single_slot = {"intro_video", "take_1", "take_2", "take_3"}
+    if category in single_slot:
+        await db.submissions.update_one(
+            {"id": sid}, {"$pull": {"media": {"category": category}}}
+        )
+
+    media_id = str(uuid.uuid4())
+    folder = f"{APP_NAME}/submissions/{sid}"
+    public_id = media_id
+    rt = "video" if is_video_slot else "image"
+    
+    eager = None
+    transformation = None
+    
+    if is_video_slot:
+        if category == "intro_video":
+            eager = "w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4|w_600,h_338,c_fill,q_auto,f_jpg"
+        else:
+            transformation = "w_1280,h_720,c_limit,q_auto,vc_auto"
+            eager = "w_600,h_338,c_fill,q_auto,f_jpg"
+    else:
+        eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
+
+    import time
+    import cloudinary.utils
+    
+    timestamp = int(time.time())
+    params = {
+        "folder": folder,
+        "public_id": public_id,
+        "timestamp": timestamp,
+    }
+    if eager:
+        params["eager"] = eager
+    if transformation:
+        params["transformation"] = transformation
+        
+    api_secret = cloudinary.config().api_secret
+    signature = cloudinary.utils.api_sign_request(params, api_secret)
+    
+    return {
+        "signature": signature,
+        "timestamp": timestamp,
+        "api_key": cloudinary.config().api_key,
+        "cloud_name": cloudinary.config().cloud_name,
+        "folder": folder,
+        "public_id": public_id,
+        "resource_type": rt,
+        "eager": eager,
+        "transformation": transformation,
+        "media_id": media_id,
+    }
+
+
+class CompleteUploadIn(BaseModel):
+    media_id: str
+    category: str
+    label: Optional[str] = None
+    public_id: str
+    url: str
+    bytes: int
+    duration: Optional[float] = None
+    content_type: Optional[str] = None
+    original_filename: Optional[str] = None
+    eager: Optional[List[dict]] = None
+
+
+@router.post("/public/submissions/{sid}/upload/complete")
+async def submission_complete_upload(
+    sid: str,
+    payload: CompleteUploadIn,
+    authorization: Optional[str] = Header(None),
+):
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+        
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+        
+    category = payload.category
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    is_video = is_video_slot
+    is_image = not is_video_slot
+    
+    thumbnail_url = None
+    poster_url = None
+    eager_list = payload.eager or []
+    
+    if is_video:
+        poster_url = next((x.get("secure_url") for x in eager_list if x.get("format") == "jpg"), None)
+        compressed_mp4 = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
+        url = compressed_mp4 or payload.url
+    else:
+        url = payload.url
+        thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
+        
+    if not poster_url and is_video:
+        poster_url = video_poster_url(payload.public_id)
+        
+    media = {
+        "id": payload.media_id,
+        "category": category,
+        "url": url,
+        "public_id": payload.public_id,
+        "resource_type": "video" if is_video else "image",
+        "content_type": payload.content_type or ("video/mp4" if is_video else "image/jpeg"),
+        "original_filename": payload.original_filename,
+        "size": payload.bytes,
+        "created_at": _now(),
+        "scope": "submission",
+        "submission_id": sid,
+        "project_id": sub["project_id"],
+        "duration": payload.duration,
+        "thumbnail_url": poster_url if is_video else thumbnail_url,
+        "poster_url": poster_url if is_video else None,
+    }
+    
+    existing_takes = 0
+    if category == "take":
+        existing_takes = sum(
+            1 for m in sub.get("media", []) 
+            if m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
+        )
+        media["label"] = (payload.label or "").strip() or f"Take {existing_takes + 1}"
+
+    tid = sub.get("talent_id")
+    tname = sub.get("talent_name")
+    if not tid:
+        norm_email = normalize_email(sub.get("talent_email"))
+        if norm_email:
+            talent_doc = await db.talents.find_one({
+                "$or": [
+                    {"normalized_email": norm_email},
+                    {"email": norm_email},
+                    {"source.talent_email": norm_email}
+                ]
+            })
+            if talent_doc:
+                tid = talent_doc.get("id")
+                tname = talent_doc.get("name")
+    if not tid:
+        tid = "unknown_talent"
+        
+    asset_type = "profile_image"
+    if is_video:
+        asset_type = "intro_video" if category == "intro_video" else "audition_video"
+        
+    await db.asset_metadata.insert_one({
+        "id": payload.media_id,
+        "public_id": payload.public_id,
+        "folder": f"{APP_NAME}/submissions/{sid}",
+        "resource_type": "video" if is_video else "image",
+        "asset_type": asset_type,
+        "talent_id": tid,
+        "talent_name": tname,
+        "project_id": sub.get("project_id"),
+        "submission_id": sid,
+        "file_size": payload.bytes,
+        "created_at": _now(),
+        "status": "completed"
+    })
+    
+    patch: Dict[str, Any] = {"$push": {"media": media}}
+    was_finalized = sub.get("status") in ("submitted", "updated")
+    re_approval = True
+    if was_finalized:
+        proj = await db.projects.find_one(
+            {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1, "brand_name": 1}
+        )
+        re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
+        set_patch = {
+            "status": "updated",
+            "updated_at": _now(),
+        }
+        if re_approval:
+            set_patch["decision"] = "pending"
+        patch["$set"] = set_patch
+        
+    await db.submissions.update_one({"id": sid}, patch)
+    updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    await sync_media_to_global_talent(updated, media)
+    
+    if was_finalized:
+        brand = (proj or {}).get("brand_name") or sub.get("project_slug") or "Project"
+        talent_name = sub.get("talent_name") or sub.get("talent_email") or "A talent"
+        await notify_fanout(
+            db,
+            type="submission_updated",
+            title=f"{talent_name} updated their submission",
+            body=f"{brand} — back to pending review.",
+            payload={"submission_id": sid, "project_id": sub["project_id"]},
+        )
+        
     return updated
 
 

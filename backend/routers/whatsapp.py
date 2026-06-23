@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -449,30 +449,29 @@ async def resolve_recipients(
             unresolvable.append({"talent_id": tid, "reason": "Talent record not found"})
             continue
 
-        group_name = talent.get("whatsapp_group_name")
-        phone = talent.get("phone")
+        name = talent.get("name", "")
+        group_name = (talent.get("whatsapp_group_name") or "").strip()
+        phone = (talent.get("phone") or "").strip()
+        dest_type, destination, reason = _resolve_destination(talent)
+        _log_routing_decision(name, phone, group_name, dest_type, destination)
 
-        if group_name:
+        if dest_type:
             recipients.append({
                 "talent_id": tid,
-                "talent_name": talent.get("name", ""),
-                "destination_type": "group",
-                "destination": group_name,
-                "stage": row["stage"],
-            })
-        elif phone:
-            recipients.append({
-                "talent_id": tid,
-                "talent_name": talent.get("name", ""),
-                "destination_type": "number",
-                "destination": phone,
+                "talent_name": name,
+                "phone": phone,                       # FEATURE 4: shown on resolve screen
+                "whatsapp_group_name": group_name,    # FEATURE 4: shown on resolve screen
+                "destination_type": dest_type,
+                "destination": destination,
                 "stage": row["stage"],
             })
         else:
             unresolvable.append({
                 "talent_id": tid,
-                "talent_name": talent.get("name", ""),
-                "reason": "No whatsapp_group_name and no phone number",
+                "talent_name": name,
+                "phone": phone,
+                "whatsapp_group_name": group_name,
+                "reason": reason,
             })
 
     return {
@@ -485,6 +484,32 @@ async def resolve_recipients(
 # ---------------------------------------------------------------------------
 # ── BATCHES ────────────────────────────────────────────────────────────────
 # ---------------------------------------------------------------------------
+
+def _resolve_destination(talent: dict) -> Tuple[str, Optional[str], Optional[str]]:
+    """FEATURE 2 — single source of routing truth (the talent record decides).
+
+    Group if `whatsapp_group_name` is set and non-empty, else phone. Returns
+    (destination_type, destination, reason_if_unresolvable). destination_type is
+    the internal value ('group' | 'number'); display is mapped to GROUP/PHONE.
+    """
+    group = (talent.get("whatsapp_group_name") or "").strip()
+    phone = (talent.get("phone") or "").strip()
+    if group:
+        return "group", group, None
+    if phone:
+        return "number", phone, None
+    return "", None, "No whatsapp_group_name and no phone number"
+
+
+def _log_routing_decision(name: str, phone: str, group: str, dest_type: str, dest: Optional[str]) -> None:
+    """FEATURE 3 — audit the routing decision before every send/resolution."""
+    display = "GROUP" if dest_type == "group" else ("PHONE" if dest_type == "number" else "UNRESOLVABLE")
+    logger.info(
+        "WHATSAPP ROUTING DECISION | Talent: %s | Phone: %s | WhatsApp Group: %s | "
+        "Resolved Destination Type: %s | Resolved Destination: %s",
+        name or "", phone or "", group or "", display, dest or "",
+    )
+
 
 def _render_message(template_body: str, variable_data: Dict[str, str], talent_name: str) -> str:
     """Substitute template variables. Always injects talent_name."""
@@ -553,23 +578,21 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
             skipped.append({"talent_id": tid, "reason": "Not found"})
             continue
 
-        group_name = talent.get("whatsapp_group_name")
-        phone = talent.get("phone")
+        group_name = (talent.get("whatsapp_group_name") or "").strip()
+        phone = (talent.get("phone") or "").strip()
         talent_name = talent.get("name", "")
 
-        if group_name:
-            dest_type = "group"
-            destination = group_name
-        elif phone:
-            dest_type = "number"
-            destination = phone
-        else:
+        dest_type, destination, reason = _resolve_destination(talent)
+        if not dest_type:
             skipped.append({
                 "talent_id": tid,
                 "talent_name": talent_name,
-                "reason": "No group name or phone number",
+                "reason": reason or "No group name or phone number",
             })
             continue
+
+        # FEATURE 3: audit the routing decision before the send is queued.
+        _log_routing_decision(talent_name, phone, group_name, dest_type, destination)
 
         message_body = _render_message(
             template["body_text"], payload.variable_data, talent_name

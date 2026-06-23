@@ -466,6 +466,57 @@ function WECampaignLauncher() {
             </div>
           )}
 
+          {/* FEATURE 4: Recipient resolution table — verify routing before launch. */}
+          {recipients.length > 0 && (
+            <div className="border border-black/10 rounded-sm overflow-hidden">
+              <div className="bg-[#f8f8f6] px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-black/60 border-b border-black/10">
+                Resolved Targets ({recipients.length}{unresolvable.length > 0 ? ` · ${unresolvable.length} skipped` : ""})
+              </div>
+              <div className="overflow-x-auto max-h-72 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-white sticky top-0">
+                    <tr className="text-left text-black/40 border-b border-black/[0.06]">
+                      <th className="py-2 px-3 font-semibold">Talent</th>
+                      <th className="py-2 px-3 font-semibold">Phone</th>
+                      <th className="py-2 px-3 font-semibold">WhatsApp Group</th>
+                      <th className="py-2 px-3 font-semibold">Type</th>
+                      <th className="py-2 px-3 font-semibold">Resolved Destination</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-black/[0.04]">
+                    {recipients.map((r) => {
+                      const type = r.destination_type === "group" ? "GROUP" : "PHONE";
+                      return (
+                        <tr key={r.talent_id} className="hover:bg-[#f8f8f6]">
+                          <td className="py-2 px-3 font-medium">{r.talent_name}</td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-black/60">{r.phone || "—"}</td>
+                          <td className="py-2 px-3 text-black/60">{r.whatsapp_group_name || "—"}</td>
+                          <td className="py-2 px-3">
+                            <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
+                              type === "GROUP" ? "bg-indigo-50 text-indigo-700" : "bg-sky-50 text-sky-700"
+                            }`}>{type}</span>
+                          </td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-black/70">{r.destination}</td>
+                        </tr>
+                      );
+                    })}
+                    {unresolvable.map((u) => (
+                      <tr key={u.talent_id} className="bg-amber-50/40">
+                        <td className="py-2 px-3 font-medium">{u.talent_name}</td>
+                        <td className="py-2 px-3 font-mono text-[11px] text-black/60">{u.phone || "—"}</td>
+                        <td className="py-2 px-3 text-black/60">{u.whatsapp_group_name || "—"}</td>
+                        <td className="py-2 px-3">
+                          <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm bg-red-50 text-red-700">SKIPPED</span>
+                        </td>
+                        <td className="py-2 px-3 text-[11px] text-amber-700">{u.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* Template Selection */}
           <div className="space-y-4 border-t border-black/[0.06] pt-5">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

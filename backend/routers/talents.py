@@ -44,6 +44,9 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
     create email-less talents (e.g. legacy) — those bypass the dedup.
     """
     doc = payload.model_dump()
+    # FEATURE 1: whatsapp_group_name is admin-only — non-admins cannot set it.
+    if admin.get("role") != "admin":
+        doc["whatsapp_group_name"] = None
     raw_email = normalize_email(doc.get("email"))
     doc["email"] = raw_email
     doc["normalized_email"] = raw_email
@@ -372,6 +375,10 @@ async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
 @router.put("/talents/{tid}", response_model=TalentOut)
 async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
     update = payload.model_dump()
+    # FEATURE 1: whatsapp_group_name is admin-only. Drop it for non-admins so the
+    # existing value is preserved (not overwritten).
+    if admin.get("role") != "admin":
+        update.pop("whatsapp_group_name", None)
     email = normalize_email(update.get("email"))
     update["email"] = email
     update["normalized_email"] = email

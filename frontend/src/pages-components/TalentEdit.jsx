@@ -55,6 +55,7 @@ const emptyTalent = {
     interested_in: [],
     tags: [],
     skills: [],
+    whatsapp_group_name: "",
 };
 
 // ISSUE 2: File validation constants
@@ -703,6 +704,17 @@ export default function TalentEdit() {
                         placeholder="optional"
                         disabled={!isEditing}
                     />
+                    {/* FEATURE 1: WhatsApp Group Name — admin-only (view + edit). */}
+                    {isAdmin() && (
+                        <Field
+                            label="WhatsApp Group Name"
+                            value={talent.whatsapp_group_name}
+                            onChange={(v) => updateTalent({ whatsapp_group_name: v })}
+                            data-testid="talent-whatsapp-group-input"
+                            placeholder="e.g. Sahal Mansuri x Talentgram"
+                            disabled={!isEditing}
+                        />
+                    )}
 
                     <label className="block" data-testid="field-dob">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">

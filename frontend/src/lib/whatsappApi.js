@@ -92,6 +92,10 @@ export async function clearQrCode() {
   await adminApi.post("/whatsapp/session/clear-qr");
 }
 
+export async function resetSession() {
+  await adminApi.post("/whatsapp/session/reset");
+}
+
 // --- CONFIG ---
 export async function getWaConfig() {
   const res = await adminApi.get("/whatsapp/config");

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
+import shutil
 import sys
 from datetime import datetime, timezone, timedelta
 
@@ -271,11 +273,52 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         await asyncio.sleep(5)
 
 
+async def _maybe_reset_session() -> None:
+    """Honor an admin-requested session reset BEFORE the browser launches.
+
+    An admin sets `reset_requested=True` on the singleton whatsapp_sessions
+    doc (via POST /api/whatsapp/session/reset). On the next (re)start the
+    worker wipes the persisted Chromium profile in config.SESSION_DIR so
+    WhatsApp Web falls back to a fresh QR linking screen. Runs before
+    session.start(), so it recovers even when a corrupt session crash-loops
+    the worker. The mount point itself is preserved — only its contents are
+    cleared — and the flag is cleared so the wipe happens exactly once.
+    """
+    db = get_db()
+    doc = await db.whatsapp_sessions.find_one({"id": "default"})
+    if not doc or not doc.get("reset_requested"):
+        return
+
+    logger.warning("worker: session reset requested — clearing %s", config.SESSION_DIR)
+    try:
+        if os.path.isdir(config.SESSION_DIR):
+            for entry in os.listdir(config.SESSION_DIR):
+                path = os.path.join(config.SESSION_DIR, entry)
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+        logger.info("worker: session directory cleared — a fresh QR will be generated")
+    except Exception as exc:
+        logger.error("worker: failed to clear session dir: %s", exc)
+
+    await db.whatsapp_sessions.update_one(
+        {"id": "default"},
+        {"$set": {"reset_requested": False, "status": "qr_pending", "error_message": None}},
+    )
+
+
 async def main() -> None:
     """Main execution lifecycle."""
     logger.info("worker: initializing database connection...")
     await init_db()
-    
+
+    # Honor a pending admin reset before touching the browser/session.
+    await _maybe_reset_session()
+
     # Add a helper function to config for UUID generation
     import uuid
     config.str_uuid = lambda: str(uuid.uuid4())

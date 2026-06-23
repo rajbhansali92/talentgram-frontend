@@ -385,6 +385,14 @@ async def main() -> None:
     # Start the heartbeat loop task in background
     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
+    # Startup DOM health check — log which registry selectors resolve on the live
+    # WhatsApp DOM so verification selector drift is visible immediately.
+    try:
+        import sender
+        await sender.dom_health_check(session.page, "startup")
+    except Exception as e:
+        logger.warning("worker: startup DOM health check failed: %s", e)
+
     logger.info("worker: entering job polling loop")
     try:
         while True:

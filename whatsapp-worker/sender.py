@@ -8,8 +8,9 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 import urllib.request
-from typing import Optional
+from typing import Optional, Tuple
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from session import SEL
@@ -100,6 +101,142 @@ async def _safe_screenshot(page: Page, path: str) -> None:
         logger.info("sender: screenshot %s failed: %s", path, exc)
 
 
+# Chat-ready / delivery-verification constants.
+CHAT_READY_TIMEOUT_MS = 60_000
+# "Starting chat" loading modal/spinner shown by the /send?phone= deep link.
+STARTING_CHAT_SELECTORS = [
+    "text=Starting chat",
+    "div[title='Starting chat']",
+    "[data-testid='spinner']",
+    "[role='progressbar']",
+]
+# Outgoing message bubbles (the long-stable signal a message actually posted).
+OUTGOING_MSG_SELECTORS = [
+    "div.message-out",
+    "div[class*='message-out']",
+    "[data-testid='msg-container'].message-out",
+]
+
+
+def _first_line(message_body: str) -> str:
+    for ln in (message_body or "").splitlines():
+        if ln.strip():
+            return ln.strip()[:40]
+    return ""
+
+
+async def _modal_visible(page: Page) -> Optional[str]:
+    for sel in STARTING_CHAT_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            if await loc.count() and await loc.first.is_visible():
+                return sel
+        except Exception:
+            pass
+    return None
+
+
+async def _wait_for_chat_ready(page: Page) -> None:
+    """PROBLEM #1: do not type until the conversation is genuinely open.
+
+    Waits for: (1) the 'Starting chat' modal/spinner to clear, (2) the compose
+    box to be visible AND editable, (3) the footer composer to be attached.
+    Fails loudly if the modal never clears or the composer never becomes
+    interactive — the caller must NOT proceed to type.
+    """
+    deadline = time.monotonic() + CHAT_READY_TIMEOUT_MS / 1000
+
+    modal = await _modal_visible(page)
+    if modal:
+        logger.info("sender: detected starting-chat modal via %s", modal)
+        logger.info("sender: waiting for modal to disappear...")
+        while time.monotonic() < deadline:
+            if not await _modal_visible(page):
+                logger.info("sender: modal disappeared")
+                break
+            await asyncio.sleep(0.5)
+        else:
+            await _safe_screenshot(page, "/tmp/chat_not_ready.png")
+            raise RuntimeError("starting-chat modal never cleared — chat not ready")
+
+    # Compose box visible + editable.
+    box_ready = False
+    while time.monotonic() < deadline:
+        try:
+            loc = page.locator(SEL["msg_box"]).first
+            if await loc.count() and await loc.is_visible():
+                editable = (await loc.get_attribute("contenteditable")) == "true"
+                if editable:
+                    box_ready = True
+                    break
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+    if not box_ready:
+        await _safe_screenshot(page, "/tmp/chat_not_ready.png")
+        raise RuntimeError("compose box not interactive — chat not ready")
+    logger.info("sender: compose box verified (visible + editable)")
+
+    try:
+        footer_n = await page.locator("footer").count()
+        logger.info("sender: footer composer attached? %s", footer_n > 0)
+    except Exception:
+        pass
+    logger.info("sender: conversation ready")
+
+
+async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, bool]:
+    """PROBLEM #2: require a POSITIVE signal that the message actually posted.
+
+    Two independent signals: (a) the compose box cleared after send (WhatsApp
+    empties it only on a successful send), (b) the newest outgoing bubble
+    contains the sent text. Returns (verified, composer_cleared, bubble_match).
+    """
+    composer_cleared = False
+    try:
+        txt = (await page.locator(SEL["msg_box"]).first.inner_text()).strip()
+        composer_cleared = (txt == "")
+        logger.info("sender: verify — compose box after send=%r (cleared=%s)", txt[:40], composer_cleared)
+    except Exception as exc:
+        logger.info("sender: verify — compose read error=%s", exc)
+
+    needle = _first_line(message_body)
+    bubble_match = False
+    for sel in OUTGOING_MSG_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            n = await loc.count()
+            if n:
+                last_text = (await loc.last.inner_text()).strip()
+                logger.info("sender: verify — outgoing[%s] count=%d last[:40]=%r", sel, n, last_text[:40])
+                if needle and needle in last_text:
+                    bubble_match = True
+                    break
+        except Exception as exc:
+            logger.info("sender: verify — outgoing[%s] error=%s", sel, exc)
+
+    return (composer_cleared or bubble_match), composer_cleared, bubble_match
+
+
+async def _already_delivered(page: Page, message_body: str) -> bool:
+    """PROBLEM #3 guard: on a retry the chat may already contain this exact
+    message from a prior attempt. If the newest outgoing bubble already matches,
+    treat it as delivered and DO NOT type again (prevents duplicates)."""
+    needle = _first_line(message_body)
+    if not needle:
+        return False
+    for sel in OUTGOING_MSG_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            if await loc.count():
+                last_text = (await loc.last.inner_text()).strip()
+                if needle in last_text:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 async def send_whatsapp_message(
     page: Page,
     destination_type: str,  # "group" | "number"
@@ -168,13 +305,26 @@ async def send_whatsapp_message(
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")
 
-    # Verify message box is active
-    await page.wait_for_selector(SEL["msg_box"], timeout=5_000)
+    # PROBLEM #1: do not proceed until the conversation is fully open.
+    await _wait_for_chat_ready(page)
     logger.info("sender: message box found? True (via %s)", SEL["msg_box"])
 
-    # Instrumentation: after opening the recipient chat, dump the live DOM so the
-    # currently-valid send-button selector is captured in the worker logs.
+    # Instrumentation: dump the live DOM (send-button selectors) and the exact
+    # message string about to be typed (PROBLEM #3 trace).
     await _dump_send_dom(page)
+    logger.info(
+        "sender: FINAL MESSAGE SENT TO WHATSAPP (len=%d, lines=%d): %r",
+        len(message_body or ""), len((message_body or "").splitlines()), message_body,
+    )
+
+    # PROBLEM #3 guard: if this exact message is already the newest outgoing
+    # bubble (delivered on a prior retry), do NOT type it again.
+    if await _already_delivered(page, message_body):
+        logger.warning(
+            "sender: message already present as newest outgoing bubble — skipping "
+            "re-send to avoid duplicate (treating as already delivered)"
+        )
+        return
 
     # Handle media attachment if present
     if media_url:
@@ -269,4 +419,20 @@ async def send_whatsapp_message(
         await asyncio.sleep(1.0)
         await _safe_screenshot(page, "/tmp/post_send.png")
 
+    # PROBLEM #2: a click is NOT proof of delivery. Require a positive signal.
+    await asyncio.sleep(1.5)
+    logger.info("sender: verification started")
+    verified, composer_cleared, bubble_match = await _verify_delivery(page, message_body)
+    if not verified:
+        await _safe_screenshot(page, "/tmp/verify_failed.png")
+        raise RuntimeError(
+            f"delivery NOT verified (composer_cleared={composer_cleared} "
+            f"bubble_match={bubble_match}) — marking FAILED, not SENT"
+        )
+    logger.info(
+        "sender: verification signal found (composer_cleared=%s, bubble_match=%s)",
+        composer_cleared, bubble_match,
+    )
+    logger.info("sender: message verified")
+    logger.info("sender: status changed to SENT")
     logger.info("sender: message sent successfully")

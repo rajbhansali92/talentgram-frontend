@@ -512,6 +512,11 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
     if not template:
         raise HTTPException(404, "Template not found")
 
+    # PROBLEM #3 trace: log the raw template once so duplication can be located
+    # (server-side compile vs. worker typing vs. retry re-send).
+    _raw = template.get("body_text", "")
+    logger.info("whatsapp: RAW TEMPLATE id=%s (len=%d): %r", payload.template_id, len(_raw), _raw)
+
     # Resolve recipients
     pipeline_rows = await db.casting_pipeline.find(
         {"project_id": payload.project_id, "stage": {"$in": payload.pipeline_stages}},
@@ -568,6 +573,13 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
 
         message_body = _render_message(
             template["body_text"], payload.variable_data, talent_name
+        )
+        # PROBLEM #3 trace: the exact compiled string stored on the job. If this
+        # is a single copy but WhatsApp shows duplicates, the source is the
+        # worker (typing/retry), not server-side compilation.
+        logger.info(
+            "whatsapp: COMPILED MESSAGE talent=%r (len=%d): %r",
+            talent_name, len(message_body), message_body,
         )
 
         jobs.append({

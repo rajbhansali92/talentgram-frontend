@@ -820,6 +820,30 @@ async def clear_qr(admin: dict = Depends(current_team_or_admin)):
     )
 
 
+@router.post("/session/reset", status_code=204)
+async def reset_session(admin: dict = Depends(current_admin)):
+    """Request the worker to wipe its persisted WhatsApp session and re-link.
+
+    Sets `reset_requested` on the singleton session doc. The worker honors it
+    on its next (re)start by clearing the Chromium profile in WA_SESSION_DIR,
+    after which WhatsApp Web shows a fresh QR. Admin-only (destructive — forces
+    re-authentication). The worker must be (re)started/redeployed to pick it up.
+    """
+    await db.whatsapp_sessions.update_one(
+        {"id": "default"},
+        {"$set": {
+            "reset_requested": True,
+            "status": "qr_pending",
+            "qr_code_base64": None,
+            "qr_expires_at": None,
+            "authenticated_at": None,
+            "last_heartbeat": None,
+            "error_message": None,
+        }},
+        upsert=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ── AUDIT LOG ──────────────────────────────────────────────────────────────
 # ---------------------------------------------------------------------------

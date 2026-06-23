@@ -10,7 +10,7 @@ import {
   getProjects, getPipelineSummary, resolveRecipients, 
   createBatch, getBatches, runBatchAction, 
   getJobs, retryJob, 
-  getSessionStatus, clearQrCode, 
+  getSessionStatus, clearQrCode, resetSession,
   getWaConfig, updateWaConfig, 
   getAuditLog 
 } from "@/lib/whatsappApi";
@@ -164,12 +164,27 @@ function WESessionPanel() {
           </div>
         )}
 
-        <div className="border-t border-black/[0.06] pt-4">
+        <div className="border-t border-black/[0.06] pt-4 space-y-2">
           <button
             onClick={() => setPolling(!polling)}
             className="text-xs font-semibold uppercase tracking-wider text-black/60 hover:text-black border border-black/10 px-3 py-2 rounded-sm w-full text-center transition-colors"
           >
             {polling ? "Pause Real-time Sync" : "Resume Real-time Sync"}
+          </button>
+          <button
+            onClick={async () => {
+              if (!window.confirm("Reset the WhatsApp session? This unlinks the current device and requires scanning a new QR code. The worker must restart to complete the reset.")) return;
+              try {
+                await resetSession();
+                toast.success("Session reset requested. Restart the worker, then scan the new QR code.");
+                fetchSession();
+              } catch (err) {
+                toast.error(err?.response?.data?.detail || "Failed to reset session.");
+              }
+            }}
+            className="text-xs font-semibold uppercase tracking-wider text-red-600 hover:text-white hover:bg-red-600 border border-red-200 px-3 py-2 rounded-sm w-full text-center transition-colors"
+          >
+            Reset WhatsApp Session
           </button>
         </div>
       </div>

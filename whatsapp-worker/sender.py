@@ -110,10 +110,14 @@ STARTING_CHAT_SELECTORS = [
     "[data-testid='spinner']",
     "[role='progressbar']",
 ]
-# Outgoing message bubbles (the long-stable signal a message actually posted).
+# Outgoing message bubbles — the ONLY proof a message actually posted.
+# data-id starting with 'true_' is WhatsApp's fromMe flag (most reliable);
+# message-out is the long-stable outgoing CSS class.
 OUTGOING_MSG_SELECTORS = [
+    "div[data-id^='true_']",
     "div.message-out",
     "div[class*='message-out']",
+    ".message-out .copyable-text",
     "[data-testid='msg-container'].message-out",
 ]
 
@@ -185,37 +189,78 @@ async def _wait_for_chat_ready(page: Page) -> None:
     logger.info("sender: conversation ready")
 
 
-async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, bool]:
-    """PROBLEM #2: require a POSITIVE signal that the message actually posted.
+async def _last_out_timestamp(page: Page, selector: str) -> str:
+    """Best-effort timestamp of the newest outgoing bubble, read from WhatsApp's
+    data-pre-plain-text (e.g. '[19:32, 6/23/2026] You:')."""
+    try:
+        return await page.evaluate(
+            """(sel) => {
+                const els = document.querySelectorAll(sel);
+                if (!els.length) return '';
+                const el = els[els.length - 1];
+                const cp = el.querySelector('[data-pre-plain-text]')
+                          || (el.matches && el.matches('[data-pre-plain-text]') ? el : null);
+                return cp ? (cp.getAttribute('data-pre-plain-text') || '') : '';
+            }""",
+            selector,
+        )
+    except Exception as exc:
+        logger.info("sender: verify — timestamp read error=%s", exc)
+        return ""
 
-    Two independent signals: (a) the compose box cleared after send (WhatsApp
-    empties it only on a successful send), (b) the newest outgoing bubble
-    contains the sent text. Returns (verified, composer_cleared, bubble_match).
+
+async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, bool]:
+    """Delivery is proven ONLY by an outgoing message bubble that contains the
+    sent text. A cleared compose box is NOT proof — it only means the input
+    emptied (text typed + send clicked) — so it is logged for diagnosis but
+    NEVER counts toward 'verified'. Returns (verified, composer_cleared,
+    bubble_match) where verified == bubble_match.
     """
+    # Diagnostic only — explicitly insufficient for SENT.
     composer_cleared = False
     try:
         txt = (await page.locator(SEL["msg_box"]).first.inner_text()).strip()
         composer_cleared = (txt == "")
-        logger.info("sender: verify — compose box after send=%r (cleared=%s)", txt[:40], composer_cleared)
+        logger.info("sender: verify — compose box after send=%r (cleared=%s) [DIAGNOSTIC ONLY, not proof]",
+                    txt[:40], composer_cleared)
     except Exception as exc:
         logger.info("sender: verify — compose read error=%s", exc)
 
     needle = _first_line(message_body)
-    bubble_match = False
+    matched_sel = None
+    matched_text = ""
+
+    # Dump EVERY outgoing-bubble selector's count (disambiguates "not sent" from
+    # "selector stale"), then require a text match on the newest bubble.
     for sel in OUTGOING_MSG_SELECTORS:
         try:
-            loc = page.locator(sel)
-            n = await loc.count()
-            if n:
-                last_text = (await loc.last.inner_text()).strip()
-                logger.info("sender: verify — outgoing[%s] count=%d last[:40]=%r", sel, n, last_text[:40])
-                if needle and needle in last_text:
-                    bubble_match = True
-                    break
+            n = await page.locator(sel).count()
         except Exception as exc:
-            logger.info("sender: verify — outgoing[%s] error=%s", sel, exc)
+            logger.info("sender: verify — outgoing[%s] count error=%s", sel, exc)
+            continue
+        logger.info("sender: verify — outgoing[%s] count=%d", sel, n)
+        if n and matched_sel is None:
+            try:
+                last_text = (await page.locator(sel).last.inner_text()).strip()
+                logger.info("sender: verify — outgoing[%s] last_text[:60]=%r", sel, last_text[:60])
+                if needle and needle in last_text:
+                    matched_sel = sel
+                    matched_text = last_text
+            except Exception as exc:
+                logger.info("sender: verify — outgoing[%s] read error=%s", sel, exc)
 
-    return (composer_cleared or bubble_match), composer_cleared, bubble_match
+    bubble_match = matched_sel is not None
+    if bubble_match:
+        ts = await _last_out_timestamp(page, matched_sel)
+        logger.info("sender: verify — MATCHED selector=%s | last_bubble_text[:80]=%r | timestamp=%r",
+                    matched_sel, matched_text[:80], ts)
+    else:
+        logger.warning("sender: verify — NO outgoing bubble matched the sent text "
+                       "(needle=%r) — delivery NOT proven, will mark FAILED", needle)
+
+    # SENT requires a real outgoing bubble. composer_cleared is ignored entirely.
+    verified = bubble_match
+    return verified, composer_cleared, bubble_match
 
 
 async def _already_delivered(page: Page, message_body: str) -> bool:
@@ -430,8 +475,8 @@ async def send_whatsapp_message(
             f"bubble_match={bubble_match}) — marking FAILED, not SENT"
         )
     logger.info(
-        "sender: verification signal found (composer_cleared=%s, bubble_match=%s)",
-        composer_cleared, bubble_match,
+        "sender: verification signal found — outgoing bubble confirmed (bubble_match=%s; "
+        "composer_cleared=%s ignored as proof)", bubble_match, composer_cleared,
     )
     logger.info("sender: message verified")
     logger.info("sender: status changed to SENT")

@@ -25,6 +25,16 @@ async def connect() -> AsyncIOMotorDatabase:
     return _db
 
 
+async def init_db() -> AsyncIOMotorDatabase:
+    """Startup entry point used by worker.py — alias for connect().
+
+    worker.py calls `await init_db()` during boot; without this name the
+    `from db import init_db` line raises ImportError and the worker exits
+    before it can start, so no session/QR is ever produced.
+    """
+    return await connect()
+
+
 async def close() -> None:
     global _client, _db
     if _client:

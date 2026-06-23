@@ -83,12 +83,16 @@ async def portal_update_profile(
     talent: dict = Depends(current_portal_talent),
 ):
     # Always update the authenticated talent — payload.email is ignored.
+    #
+    # IMPORTANT: `name`, `dob`, and `height` are admin-controlled REVIEW fields
+    # (see 03_BUSINESS_RULES.md — "Admin is source of truth"). The talent portal
+    # must NEVER overwrite them on the canonical record, so they are deliberately
+    # excluded from this $set even though the request model still accepts them
+    # (kept for backwards-compat, mirroring how `email` is accepted-but-ignored).
+    # Only the AUTO_UPDATE / talent-owned fields below are persisted.
     update_fields = {
-        "name": payload.name,
         "phone": payload.phone,
         "location": payload.location,
-        "height": payload.height,
-        "dob": payload.dob,
         "bio": payload.bio,
         "instagram_handle": payload.instagram_handle,
         "work_links": [w.strip() for w in payload.work_links if w.strip()],

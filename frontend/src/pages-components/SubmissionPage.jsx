@@ -1549,6 +1549,18 @@ function SubmissionPage() {
                             >
                                 Update Submission
                             </button>
+                            {/* Same-origin relative link only. The portal session token
+                                lives in this origin's localStorage (written at OTP verify),
+                                so the dashboard must be opened on this same subdomain. Do
+                                NOT change to an absolute/cross-subdomain URL — the token
+                                would not be present and the user would be bounced out. */}
+                            <a
+                                href="/portal/home"
+                                data-testid="view-dashboard-btn"
+                                className="mt-3 w-full border border-slate-300 text-slate-700 py-3.5 px-6 rounded-full text-xs font-semibold hover:bg-slate-50 hover:-translate-y-[1px] active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5"
+                            >
+                                View My Talent Dashboard
+                            </a>
                         </div>
                     </div>
 

@@ -200,16 +200,16 @@ export default function PortalProfile() {
 
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="text-xs text-black/60 font-medium">Full Name *</label>
+                                    <label className="text-xs text-black/60 font-medium">Full Name <span className="text-black/35 font-normal">· managed by Talentgram</span></label>
                                     <input
                                         type="text"
                                         name="name"
                                         value={profile.name || ""}
-                                        onChange={handleFieldChange}
+                                        readOnly
+                                        title="This field is managed by Talentgram and can't be edited here."
                                         placeholder="e.g. Elena Rostova"
                                         style={{ fontSize: "16px" }}
-                                        className="px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
-                                        required
+                                        className="px-3 py-2 bg-black/[0.03] border border-black/10 rounded-lg text-black/55 cursor-not-allowed focus:outline-none transition duration-150 h-[44px]"
                                     />
                                 </div>
                                 <div className="flex flex-col gap-1.5">
@@ -237,27 +237,29 @@ export default function PortalProfile() {
                                     />
                                 </div>
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="text-xs text-black/60 font-medium">Height (e.g. 5'8")</label>
+                                    <label className="text-xs text-black/60 font-medium">Height <span className="text-black/35 font-normal">· managed by Talentgram</span></label>
                                     <input
                                         type="text"
                                         name="height"
                                         value={profile.height || ""}
-                                        onChange={handleFieldChange}
+                                        readOnly
+                                        title="This field is managed by Talentgram and can't be edited here."
                                         placeholder={"e.g. 5'9\""}
                                         style={{ fontSize: "16px" }}
-                                        className="px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
+                                        className="px-3 py-2 bg-black/[0.03] border border-black/10 rounded-lg text-black/55 cursor-not-allowed focus:outline-none transition duration-150 h-[44px]"
                                     />
                                 </div>
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="text-xs text-black/60 font-medium">Date of Birth (YYYY-MM-DD)</label>
+                                    <label className="text-xs text-black/60 font-medium">Date of Birth <span className="text-black/35 font-normal">· managed by Talentgram</span></label>
                                     <input
                                         type="text"
                                         name="dob"
                                         value={profile.dob || ""}
-                                        onChange={handleFieldChange}
+                                        readOnly
+                                        title="This field is managed by Talentgram and can't be edited here."
                                         placeholder="YYYY-MM-DD"
                                         style={{ fontSize: "16px" }}
-                                        className="px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
+                                        className="px-3 py-2 bg-black/[0.03] border border-black/10 rounded-lg text-black/55 cursor-not-allowed focus:outline-none transition duration-150 h-[44px]"
                                     />
                                 </div>
                                 <div className="flex flex-col gap-1.5">

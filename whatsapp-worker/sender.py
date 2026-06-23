@@ -16,6 +16,89 @@ from session import SEL
 
 logger = logging.getLogger(__name__)
 
+# Resilient send-button fallback chain. WhatsApp Web rotates data-testid/class
+# names, so we try several signals in order and log which one matched. The
+# data-icon="send" span has been the most stable signal historically.
+SEND_BUTTON_SELECTORS = [
+    "[data-testid='send']",                  # legacy (the selector that just went stale)
+    "button[aria-label='Send']",
+    "button[aria-label*='Send']",
+    "footer button[aria-label*='Send']",
+    "button:has(span[data-icon='send'])",
+    "span[data-icon='send']",
+    "[data-icon='send']",
+]
+
+
+async def _find_and_click_send(page: Page) -> str:
+    """Locate and click the WhatsApp send button via the fallback chain.
+
+    Returns the selector that worked (or 'keyboard:Enter'). Logs every probe so
+    the live DOM tells us which selector is currently valid — no guessing.
+    """
+    for sel in SEND_BUTTON_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            count = await loc.count()
+            if count == 0:
+                logger.info("sender: send probe %-42s count=0", sel)
+                continue
+            visible = await loc.first.is_visible()
+            logger.info("sender: send probe %-42s count=%d visible=%s", sel, count, visible)
+            if visible:
+                await loc.first.click(timeout=5_000)
+                logger.info("sender: ✅ send button CLICKED via %s", sel)
+                return sel
+        except Exception as exc:
+            logger.info("sender: send probe %-42s error=%s", sel, exc)
+
+    # Resilient last resort: Enter sends a focused text message / media preview.
+    logger.warning("sender: no send button matched any selector — falling back to Enter key")
+    await page.keyboard.press("Enter")
+    logger.info("sender: ✅ send executed via keyboard Enter fallback")
+    return "keyboard:Enter"
+
+
+async def _dump_send_dom(page: Page) -> None:
+    """Instrumentation: log the live url/title and every visible candidate
+    element (data-testid / aria-label / role=button / button / data-icon) so the
+    real send-button selector is visible in the worker logs."""
+    try:
+        logger.info("sender: [chat] url=%s title=%r", page.url, await page.title())
+    except Exception as exc:
+        logger.info("sender: [chat] url/title error=%s", exc)
+    try:
+        elements = await page.evaluate(
+            """() => {
+                const pick = el => ({
+                    tag: el.tagName.toLowerCase(),
+                    testid: el.getAttribute('data-testid'),
+                    aria: el.getAttribute('aria-label'),
+                    role: el.getAttribute('role'),
+                    icon: el.getAttribute('data-icon'),
+                    text: (el.innerText || '').trim().slice(0, 24),
+                });
+                const q = '[data-testid],[aria-label],[role="button"],button,[data-icon]';
+                return Array.from(document.querySelectorAll(q))
+                    .filter(e => e.offsetParent !== null)
+                    .slice(0, 80)
+                    .map(pick);
+            }"""
+        )
+        logger.info("sender: DOM dump — %d visible candidate elements:", len(elements))
+        for e in elements:
+            logger.info("sender:   %s", e)
+    except Exception as exc:
+        logger.info("sender: DOM dump failed: %s", exc)
+
+
+async def _safe_screenshot(page: Page, path: str) -> None:
+    try:
+        await page.screenshot(path=path)
+        logger.info("sender: screenshot saved %s", path)
+    except Exception as exc:
+        logger.info("sender: screenshot %s failed: %s", path, exc)
+
 
 async def send_whatsapp_message(
     page: Page,
@@ -87,7 +170,12 @@ async def send_whatsapp_message(
 
     # Verify message box is active
     await page.wait_for_selector(SEL["msg_box"], timeout=5_000)
-    
+    logger.info("sender: message box found? True (via %s)", SEL["msg_box"])
+
+    # Instrumentation: after opening the recipient chat, dump the live DOM so the
+    # currently-valid send-button selector is captured in the worker logs.
+    await _dump_send_dom(page)
+
     # Handle media attachment if present
     if media_url:
         logger.info("sender: media_url provided, downloading %s", media_url)
@@ -141,9 +229,12 @@ async def send_whatsapp_message(
                     # Let's clear message_body so we don't send it as caption AND separate message
                     # But we'll keep it to send separately.
             
-            # Click send button on preview page
-            await page.click(SEL["send_btn"])
+            # Click send button on preview page (resilient fallback chain)
+            await _safe_screenshot(page, "/tmp/pre_send.png")
+            sent_via = await _find_and_click_send(page)
+            logger.info("sender: media send click executed via %s", sent_via)
             await asyncio.sleep(3.0)  # Wait for media upload and send to complete
+            await _safe_screenshot(page, "/tmp/post_send.png")
             
         finally:
             if temp_file_path and os.path.exists(temp_file_path):
@@ -169,9 +260,13 @@ async def send_whatsapp_message(
                 await page.keyboard.press("Enter")
                 await page.keyboard.up("Shift")
         
+        logger.info("sender: message text inserted? True (%d line(s))", len(lines))
         await asyncio.sleep(0.5)
-        # Click send button
-        await page.click(SEL["send_btn"])
+        # Click send button via resilient fallback chain
+        await _safe_screenshot(page, "/tmp/pre_send.png")
+        sent_via = await _find_and_click_send(page)
+        logger.info("sender: text send click executed via %s", sent_via)
         await asyncio.sleep(1.0)
-        
+        await _safe_screenshot(page, "/tmp/post_send.png")
+
     logger.info("sender: message sent successfully")

@@ -124,8 +124,12 @@ STARTING_CHAT_SELECTORS = [
 # =========================================================================
 SELECTOR_REGISTRY = {
     # Active-conversation container — scope for every message lookup.
+    # conversation-panel-messages / -body are the real production containers
+    # (confirmed from a live DOM snapshot); the rest are kept as extra layers.
     "active_conversation": {
         "primary": [
+            "[data-testid='conversation-panel-messages']",
+            "[data-testid='conversation-panel-body']",
             "[data-testid='conversation-panel-wrapper']",
             "[aria-label='Message list']",
             "div[role='application']",
@@ -140,8 +144,12 @@ SELECTOR_REGISTRY = {
         "fallback": ["#main header"],
     },
     # Individual message elements inside the active conversation.
+    # conv-msg-* is the real production message testid (each bubble is
+    # data-testid="conv-msg-<id>"); msg-container etc. kept as extra layers.
     "message_element": {
         "primary": [
+            "[data-testid^='conv-msg-']",
+            "[data-testid*='conv-msg']",
             "[data-testid='msg-container']",
             "div[role='row']",
             "[aria-label][data-testid*='msg']",
@@ -384,10 +392,41 @@ async def _find_outgoing_with_text(page: Page, needle: str) -> Tuple[Optional[st
             except Exception:
                 continue
             if needle and (needle in t or (norm_needle and norm_needle in _norm(t))):
-                logger.info("sender: verify — ✅ MATCHED chain=%r element#%d text[:60]=%r",
+                logger.info("sender: verify — ✅ MATCHED layer=%r element#%d text[:60]=%r",
                             full, i, t[:60])
                 return full, t
+
+    # TASK 6: final fallback — if the exact text exists ANYWHERE in the active
+    # conversation, treat as VERIFIED even when no message_element layer matched.
+    try:
+        scope_text = await page.locator(scope).first.inner_text()
+        if needle and (needle in scope_text or (norm_needle and norm_needle in _norm(scope_text))):
+            logger.info("sender: verify — ✅ MATCHED via active-conversation TEXT FALLBACK (scope=%r)", scope)
+            return f"{scope} ::text-fallback", needle
+    except Exception as exc:
+        logger.info("sender: verify — text fallback error=%s", exc)
     return None, ""
+
+
+async def _dump_conv_msgs(page: Page) -> None:
+    """TASK 2: dump the first 20 conv-msg-* nodes and their text from the live
+    conversation so the real message DOM is always visible in the logs."""
+    try:
+        rows = await page.evaluate(
+            """() => {
+                const nodes = document.querySelectorAll("[data-testid^='conv-msg-']");
+                return Array.from(nodes).slice(0, 20).map(el => ({
+                    testid: el.getAttribute('data-testid'),
+                    cls: (el.getAttribute('class') || '').slice(0, 40),
+                    text: (el.innerText || '').trim().slice(0, 50),
+                }));
+            }"""
+        )
+        logger.info("sender: CONV-MSG DUMP — %d conv-msg-* nodes (first 20):", len(rows))
+        for r in rows:
+            logger.info("sender:   %s", r)
+    except Exception as exc:
+        logger.info("sender: CONV-MSG DUMP failed: %s", exc)
 
 
 async def _selector_health(page: Page) -> dict:
@@ -456,6 +495,9 @@ async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, b
                     txt[:40], composer_cleared)
     except Exception as exc:
         logger.info("sender: verify — compose read error=%s", exc)
+
+    # TASK 2: always dump the live conv-msg-* nodes before matching.
+    await _dump_conv_msgs(page)
 
     needle = _needle(message_body)
     matched_sel, matched_text = await _find_outgoing_with_text(page, needle)

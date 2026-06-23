@@ -526,6 +526,83 @@ async def _already_delivered(page: Page, message_body: str) -> bool:
     return matched_sel is not None
 
 
+# Resilient chat-search box selectors. The legacy [data-testid="chat-list-search"]
+# no longer exists in the live DOM (production timeout). Current builds expose a
+# contenteditable search box (data-tab="3") / aria-labelled textbox. Discovered
+# at runtime; legacy kept last as a fallback.
+SEARCH_BOX_SELECTORS = [
+    'div[contenteditable="true"][data-tab="3"]',
+    '[aria-label="Search input textbox"]',
+    '[aria-label="Search or start a new chat"]',
+    'div[role="textbox"][contenteditable="true"]',
+    '[data-testid="chat-list-search"]',
+]
+
+
+async def _find_search_box(page: Page) -> Optional[str]:
+    """Runtime discovery of the chat-search box. Logs every probe and returns
+    the first present+visible selector, or None if none resolve."""
+    for sel in SEARCH_BOX_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            n = await loc.count()
+            vis = (await loc.first.is_visible()) if n else False
+            logger.info("sender: search-box probe %-48s count=%d visible=%s", sel, n, vis)
+            if vis:
+                return sel
+        except Exception as exc:
+            logger.info("sender: search-box probe %-48s error=%s", sel, exc)
+    return None
+
+
+async def _open_group_chat(page: Page, group_name: str) -> str:
+    """Open a group conversation. Returns:
+      'OPENED'        — group chat opened
+      'NOT_FOUND'     — group does not exist (terminal)
+      'SEARCH_FAILED' — could not locate/operate the search box (retryable)
+    Strategy: click the group row directly if already visible, else use a
+    resilient search box and click the matching title.
+    """
+    title = group_name.replace("'", "\\'")
+    title_xpath = f"xpath=//span[@title='{title}']"
+
+    # Strategy 1: the group is already visible in the chat list — click directly.
+    try:
+        loc = page.locator(title_xpath)
+        if await loc.count() and await loc.first.is_visible():
+            logger.info("sender: group %r already visible — opening directly", group_name)
+            await loc.first.click()
+            await asyncio.sleep(1.0)
+            return "OPENED"
+    except Exception as exc:
+        logger.info("sender: direct group-open probe error=%s", exc)
+
+    # Strategy 2: resilient search box → type → click result.
+    search_sel = await _find_search_box(page)
+    if not search_sel:
+        logger.warning("sender: NO search-box selector resolved — cannot search for group")
+        return "SEARCH_FAILED"
+    logger.info("sender: using search box via %s", search_sel)
+    try:
+        await page.click(search_sel)
+        await page.keyboard.press("Control+A")   # Linux worker — NOT macOS Meta+A
+        await page.keyboard.press("Backspace")
+        await asyncio.sleep(0.4)
+        await page.type(search_sel, group_name, delay=40)
+        await asyncio.sleep(1.5)
+    except Exception as exc:
+        logger.warning("sender: search-box interaction failed: %s", exc)
+        return "SEARCH_FAILED"
+
+    try:
+        await page.wait_for_selector(title_xpath, timeout=10_000)
+        await page.click(title_xpath)
+        await asyncio.sleep(1.0)
+        return "OPENED"
+    except PlaywrightTimeoutError:
+        return "NOT_FOUND"
+
+
 async def send_whatsapp_message(
     page: Page,
     destination_type: str,  # "group" | "number"
@@ -568,29 +645,19 @@ async def send_whatsapp_message(
             raise RuntimeError("Timed out waiting for chat window to load via wa.me link")
             
     elif destination_type == "group":
-        # For groups, search by exact name in the search box
         logger.info("sender: searching for group name '%s'", destination)
-        
-        # Focus search box
-        await page.click(SEL["search_box"])
-        # Clear search box first by selecting all and deleting (or clicking clear button if available)
-        await page.keyboard.press("Meta+A")
-        await page.keyboard.press("Backspace")
-        await asyncio.sleep(0.5)
-        
-        # Type group name
-        await page.type(SEL["search_box"], destination, delay=50)
-        await asyncio.sleep(1.5)
-        
-        # Find exact match in the search results
-        # We look for a list item that contains the exact title
-        xpath = f"//span[@title='{destination}']"
-        try:
-            await page.wait_for_selector(xpath, timeout=10_000)
-            await page.click(xpath)
-            await asyncio.sleep(1.0)
-        except PlaywrightTimeoutError:
+        result = await _open_group_chat(page, destination)
+        if result == "SEARCH_FAILED":
+            # Pre-send failure (stale/missing search box). Nothing was sent —
+            # snapshot the DOM and return a RETRYABLE state (never 'sent').
+            await _store_dom_snapshot(page, "group_search_failed", {"group": destination})
+            logger.warning("sender: group open SEARCH_FAILED for %r -> CHAT_NOT_OPENED (retryable)",
+                           destination)
+            return CHAT_NOT_OPENED
+        if result == "NOT_FOUND":
+            # Group genuinely absent — terminal (do not retry).
             raise ValueError(f"WhatsApp group '{destination}' not found in chat list")
+        # result == "OPENED" -> fall through to chat-ready + typing + verify (unchanged)
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")
 

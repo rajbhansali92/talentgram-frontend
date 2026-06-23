@@ -13,6 +13,8 @@ import shutil
 import sys
 from datetime import datetime, timezone, timedelta
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from db import init_db, get_db
 from session import WhatsAppSession
 from sender import send_whatsapp_message
@@ -174,6 +176,14 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         state = "INVALID_DESTINATION"
         error_msg = str(exc)
         logger.error("worker: invalid destination for job %s: %s", job_id, error_msg)
+    except PlaywrightTimeoutError as exc:
+        # A Playwright action timed out (e.g. a selector never resolved). These are
+        # PRE-SEND failures — nothing was delivered — so classify as retryable
+        # MESSAGE_NOT_SENT and NEVER as sent_unverified.
+        state = "MESSAGE_NOT_SENT"
+        error_msg = str(exc)
+        logger.error("worker: pre-send Playwright timeout for job %s (retryable, not sent): %s",
+                     job_id, error_msg)
     except Exception as exc:
         # Unknown error after we may have already typed/sent — treat conservatively
         # as sent-but-unverified so we DO NOT retry and risk a duplicate delivery.

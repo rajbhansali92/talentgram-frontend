@@ -292,7 +292,10 @@ async def _maybe_reset_session() -> None:
     logger.warning("worker: session reset requested — clearing %s", config.SESSION_DIR)
     try:
         if os.path.isdir(config.SESSION_DIR):
-            for entry in os.listdir(config.SESSION_DIR):
+            before = os.listdir(config.SESSION_DIR)
+            logger.info("worker: %d entries in session dir before wipe: %s",
+                        len(before), before)
+            for entry in before:
                 path = os.path.join(config.SESSION_DIR, entry)
                 if os.path.isdir(path) and not os.path.islink(path):
                     shutil.rmtree(path, ignore_errors=True)
@@ -301,7 +304,16 @@ async def _maybe_reset_session() -> None:
                         os.unlink(path)
                     except OSError:
                         pass
-        logger.info("worker: session directory cleared — a fresh QR will be generated")
+            # Verify the wipe actually emptied the user_data_dir.
+            after = os.listdir(config.SESSION_DIR)
+            if after:
+                logger.error("worker: session dir NOT fully cleared — %d entries remain: %s",
+                             len(after), after)
+            else:
+                logger.info("worker: session directory verified empty — a fresh QR will be generated")
+        else:
+            logger.info("worker: session dir %s does not exist yet — nothing to clear",
+                        config.SESSION_DIR)
     except Exception as exc:
         logger.error("worker: failed to clear session dir: %s", exc)
 

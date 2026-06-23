@@ -9,8 +9,15 @@ import os
 MONGO_URL: str = os.environ["MONGO_URL"]
 MONGO_DB_NAME: str = os.environ.get("MONGO_DB_NAME", "talentgram")
 
-# Playwright session storage (Railway persistent volume)
-SESSION_DIR: str = os.environ.get("WA_SESSION_DIR", "/data/wa-session")
+# Playwright session storage (Railway persistent volume).
+# Accept either env var name so deployment can't silently lose the session:
+# the code historically read WA_SESSION_DIR while the README documented
+# SESSION_DIR. Either now works; default matches the Railway volume mount.
+SESSION_DIR: str = (
+    os.environ.get("WA_SESSION_DIR")
+    or os.environ.get("SESSION_DIR")
+    or "/data/wa-session"
+)
 
 # Worker behaviour defaults (overridden by whatsapp_config collection at runtime)
 DEFAULT_MIN_DELAY: int = int(os.environ.get("WA_MIN_DELAY_SEC", "8"))

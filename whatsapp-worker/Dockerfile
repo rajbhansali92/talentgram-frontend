@@ -1,10 +1,14 @@
 FROM python:3.11-slim
 
 # Install system dependencies needed for Playwright/Chromium
+# NOTE: libgconf-2-4 was REMOVED from Debian after buster (10). The
+# python:3.11-slim base is Debian bookworm (12), where that package does not
+# exist, so installing it aborts the whole RUN and the image never builds.
+# It is a legacy GTK2 library modern Chromium does not need; the real runtime
+# libraries are installed by `playwright install-deps chromium` below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
-    libgconf-2-4 \
     libnss3 \
     libxss1 \
     libasound2 \

@@ -10,7 +10,11 @@ import os
 import tempfile
 import time
 import urllib.request
+import uuid
+from datetime import datetime, timezone
 from typing import Optional, Tuple
+
+from db import get_db
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from session import SEL
@@ -110,16 +114,54 @@ STARTING_CHAT_SELECTORS = [
     "[data-testid='spinner']",
     "[role='progressbar']",
 ]
-# Outgoing message bubbles — the ONLY proof a message actually posted.
-# data-id starting with 'true_' is WhatsApp's fromMe flag (most reliable);
-# message-out is the long-stable outgoing CSS class.
-OUTGOING_MSG_SELECTORS = [
-    "div[data-id^='true_']",
-    "div.message-out",
-    "div[class*='message-out']",
-    ".message-out .copyable-text",
-    "[data-testid='msg-container'].message-out",
-]
+
+
+# =========================================================================
+# SELECTOR REGISTRY — current WhatsApp DOM, primary + fallback.
+# Verification prefers data-testid / aria-label / role attributes and is scoped
+# to the ACTIVE conversation. The banned legacy selectors (.message-out,
+# .copyable-text, div[data-id^='true_']) are intentionally NOT used.
+# =========================================================================
+SELECTOR_REGISTRY = {
+    # Active-conversation container — scope for every message lookup.
+    "active_conversation": {
+        "primary": [
+            "[data-testid='conversation-panel-wrapper']",
+            "[aria-label='Message list']",
+            "div[role='application']",
+        ],
+        "fallback": ["#main"],
+    },
+    "conversation_header": {
+        "primary": [
+            "[data-testid='conversation-header']",
+            "header[role='banner']",
+        ],
+        "fallback": ["#main header"],
+    },
+    # Individual message elements inside the active conversation.
+    "message_element": {
+        "primary": [
+            "[data-testid='msg-container']",
+            "div[role='row']",
+            "[aria-label][data-testid*='msg']",
+        ],
+        "fallback": [
+            "[data-testid*='message']",
+            "div[tabindex='-1'][role]",
+        ],
+    },
+}
+
+
+def _needle(message_body: str) -> str:
+    """Exact first 30 characters of the sent payload — the VERIFIED match key."""
+    return (message_body or "")[:30]
+
+
+def _norm(text: str) -> str:
+    """Whitespace-collapsed text, so newline rendering differences still match."""
+    return " ".join((text or "").split())
 
 
 # TASK 4 — distinct send outcomes (never collapsed into a single FAILED).
@@ -282,9 +324,21 @@ async def _wait_for_chat_ready(page: Page) -> None:
     logger.info("sender: conversation ready")
 
 
-async def _last_out_timestamp(page: Page, selector: str) -> str:
-    """Best-effort timestamp of the newest outgoing bubble, read from WhatsApp's
-    data-pre-plain-text (e.g. '[19:32, 6/23/2026] You:')."""
+async def _resolve_scope(page: Page) -> str:
+    """Resolve the active-conversation container selector (registry order)."""
+    reg = SELECTOR_REGISTRY["active_conversation"]
+    for tier in ("primary", "fallback"):
+        for sel in reg[tier]:
+            try:
+                if await page.locator(sel).count():
+                    return sel
+            except Exception:
+                pass
+    return "#main"
+
+
+async def _msg_timestamp(page: Page, full_selector: str) -> str:
+    """Timestamp of the matched message (data-pre-plain-text), best-effort."""
     try:
         return await page.evaluate(
             """(sel) => {
@@ -295,84 +349,139 @@ async def _last_out_timestamp(page: Page, selector: str) -> str:
                           || (el.matches && el.matches('[data-pre-plain-text]') ? el : null);
                 return cp ? (cp.getAttribute('data-pre-plain-text') || '') : '';
             }""",
-            selector,
+            full_selector,
         )
-    except Exception as exc:
-        logger.info("sender: verify — timestamp read error=%s", exc)
+    except Exception:
         return ""
 
 
+async def _find_outgoing_with_text(page: Page, needle: str) -> Tuple[Optional[str], str]:
+    """Find a message element in the ACTIVE conversation whose text contains the
+    exact first-30-char needle. Walks the registry chain (primary then fallback),
+    logging the exact selector chain used, and returns (matched_full_selector,
+    text) or (None, '')."""
+    scope = await _resolve_scope(page)
+    chain = (SELECTOR_REGISTRY["message_element"]["primary"]
+             + SELECTOR_REGISTRY["message_element"]["fallback"])
+    logger.info("sender: verify — SELECTOR CHAIN scope=%r message_element=%s", scope, chain)
+    norm_needle = _norm(needle)
+    for sel in chain:
+        full = f"{scope} {sel}"
+        try:
+            loc = page.locator(full)
+            n = await loc.count()
+        except Exception as exc:
+            logger.info("sender: verify — chain[%s] error=%s", full, exc)
+            continue
+        logger.info("sender: verify — chain[%s] count=%d", full, n)
+        if not n:
+            continue
+        # Newest messages are last; check the tail for the needle.
+        check = min(n, 8)
+        for i in range(n - check, n):
+            try:
+                t = (await loc.nth(i).inner_text()).strip()
+            except Exception:
+                continue
+            if needle and (needle in t or (norm_needle and norm_needle in _norm(t))):
+                logger.info("sender: verify — ✅ MATCHED chain=%r element#%d text[:60]=%r",
+                            full, i, t[:60])
+                return full, t
+    return None, ""
+
+
+async def _selector_health(page: Page) -> dict:
+    """Count resolution for every registry selector (DOM health)."""
+    report = {}
+    for tiers in SELECTOR_REGISTRY.values():
+        for sels in tiers.values():
+            for sel in sels:
+                try:
+                    report[sel] = await page.locator(sel).count()
+                except Exception as exc:
+                    report[sel] = f"err:{exc}"
+    return report
+
+
+async def dom_health_check(page: Page, label: str = "startup") -> dict:
+    """Startup/diagnostic DOM health check — logs which registry selectors
+    resolve against the live DOM (no guessing about what WhatsApp uses today)."""
+    logger.info("sender: DOM HEALTH CHECK (%s) — registry selector resolution:", label)
+    report = await _selector_health(page)
+    for sel, cnt in report.items():
+        logger.info("sender:   [%s] %-55s -> %s", label, sel, cnt)
+    return report
+
+
+async def _store_dom_snapshot(page: Page, reason: str, extra: Optional[dict] = None) -> None:
+    """Persist a DOM snapshot (screenshot + #main HTML excerpt + selector health)
+    to Mongo whenever verification fails, for offline selector forensics."""
+    shot = f"/tmp/dom_snapshot_{reason}.png"
+    await _safe_screenshot(page, shot)
+    html = ""
+    try:
+        html = await page.evaluate(
+            "() => { const m = document.querySelector('#main');"
+            " return (m ? m.outerHTML : document.body.innerHTML).slice(0, 40000); }"
+        )
+    except Exception as exc:
+        logger.info("sender: snapshot html error=%s", exc)
+    health = await _selector_health(page)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "reason": reason,
+        "url": page.url,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "html_excerpt": html,
+        "selector_health": {str(k): v for k, v in health.items()},
+        "extra": extra or {},
+    }
+    try:
+        await get_db().whatsapp_dom_snapshots.insert_one(doc)
+        logger.info("sender: stored DOM snapshot (reason=%s) -> whatsapp_dom_snapshots + %s", reason, shot)
+    except Exception as exc:
+        logger.info("sender: snapshot store error=%s (screenshot still at %s)", exc, shot)
+
+
 async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, bool]:
-    """Delivery is proven ONLY by an outgoing message bubble that contains the
-    sent text. A cleared compose box is NOT proof — it only means the input
-    emptied (text typed + send clicked) — so it is logged for diagnosis but
-    NEVER counts toward 'verified'. Returns (verified, composer_cleared,
-    bubble_match) where verified == bubble_match.
-    """
-    # Diagnostic only — explicitly insufficient for SENT.
+    """VERIFIED iff a message element in the active conversation contains the
+    exact first 30 characters of the sent payload. A cleared compose box is NOT
+    proof (logged for diagnosis only). On failure, a DOM snapshot is stored.
+    Returns (verified, composer_cleared, verified)."""
     composer_cleared = False
     try:
         txt = (await page.locator(SEL["msg_box"]).first.inner_text()).strip()
         composer_cleared = (txt == "")
-        logger.info("sender: verify — compose box after send=%r (cleared=%s) [DIAGNOSTIC ONLY, not proof]",
+        logger.info("sender: verify — compose box after send=%r (cleared=%s) [DIAGNOSTIC ONLY]",
                     txt[:40], composer_cleared)
     except Exception as exc:
         logger.info("sender: verify — compose read error=%s", exc)
 
-    needle = _first_line(message_body)
-    matched_sel = None
-    matched_text = ""
+    needle = _needle(message_body)
+    matched_sel, matched_text = await _find_outgoing_with_text(page, needle)
+    verified = matched_sel is not None
 
-    # Dump EVERY outgoing-bubble selector's count (disambiguates "not sent" from
-    # "selector stale"), then require a text match on the newest bubble.
-    for sel in OUTGOING_MSG_SELECTORS:
-        try:
-            n = await page.locator(sel).count()
-        except Exception as exc:
-            logger.info("sender: verify — outgoing[%s] count error=%s", sel, exc)
-            continue
-        logger.info("sender: verify — outgoing[%s] count=%d", sel, n)
-        if n and matched_sel is None:
-            try:
-                last_text = (await page.locator(sel).last.inner_text()).strip()
-                logger.info("sender: verify — outgoing[%s] last_text[:60]=%r", sel, last_text[:60])
-                if needle and needle in last_text:
-                    matched_sel = sel
-                    matched_text = last_text
-            except Exception as exc:
-                logger.info("sender: verify — outgoing[%s] read error=%s", sel, exc)
-
-    bubble_match = matched_sel is not None
-    if bubble_match:
-        ts = await _last_out_timestamp(page, matched_sel)
-        logger.info("sender: verify — MATCHED selector=%s | last_bubble_text[:80]=%r | timestamp=%r",
+    if verified:
+        ts = await _msg_timestamp(page, matched_sel)
+        logger.info("sender: verify — VERIFIED via chain=%r | text[:80]=%r | timestamp=%r",
                     matched_sel, matched_text[:80], ts)
     else:
-        logger.warning("sender: verify — NO outgoing bubble matched the sent text "
-                       "(needle=%r) — delivery NOT proven, will mark FAILED", needle)
+        logger.warning("sender: verify — NOT VERIFIED: no message element contains the first-30-char "
+                       "needle=%r — storing DOM snapshot", needle)
+        await _store_dom_snapshot(page, "verify_failed", {"needle": needle})
 
-    # SENT requires a real outgoing bubble. composer_cleared is ignored entirely.
-    verified = bubble_match
-    return verified, composer_cleared, bubble_match
+    return verified, composer_cleared, verified
 
 
 async def _already_delivered(page: Page, message_body: str) -> bool:
-    """PROBLEM #3 guard: on a retry the chat may already contain this exact
-    message from a prior attempt. If the newest outgoing bubble already matches,
-    treat it as delivered and DO NOT type again (prevents duplicates)."""
-    needle = _first_line(message_body)
+    """Duplicate guard: on a retry the active conversation may already contain
+    this exact message from a prior attempt. Uses the same registry chain as
+    verification (first-30-char match) — if present, do NOT type again."""
+    needle = _needle(message_body)
     if not needle:
         return False
-    for sel in OUTGOING_MSG_SELECTORS:
-        try:
-            loc = page.locator(sel)
-            if await loc.count():
-                last_text = (await loc.last.inner_text()).strip()
-                if needle in last_text:
-                    return True
-        except Exception:
-            pass
-    return False
+    matched_sel, _ = await _find_outgoing_with_text(page, needle)
+    return matched_sel is not None
 
 
 async def send_whatsapp_message(

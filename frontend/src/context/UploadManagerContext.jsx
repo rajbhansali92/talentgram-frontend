@@ -4,6 +4,8 @@ import React, { createContext, useContext, useState } from "react";
 import { api } from "../lib/api";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
+import axios from "axios";
+
 
 const UploadManagerContext = createContext(null);
 
@@ -94,21 +96,39 @@ export function UploadManagerProvider({ children }) {
 
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                const fd = new FormData();
-                fd.append("file", file);
-                fd.append("category", category);
-                if (label && category === "take") fd.append("label", label);
-
-                const headers = {
-                    "Content-Type": "multipart/form-data",
-                };
+                // 1. Get upload signature from backend
+                const headers = {};
                 if (dynamicToken) {
                     headers["Authorization"] = `Bearer ${dynamicToken}`;
                 }
+                const signRes = await api.post(`${dynamicEndpoint}/sign`, {
+                    category,
+                    filename: file.name
+                }, { headers });
+                const signData = signRes.data;
 
-                const { data } = await api.post(dynamicEndpoint, fd, {
-                    headers,
-                    timeout: 0, // No per-request timeout
+                // 2. Build signed upload FormData for Cloudinary
+                const fd = new FormData();
+                fd.append("file", file);
+                fd.append("api_key", signData.api_key);
+                fd.append("timestamp", signData.timestamp);
+                fd.append("signature", signData.signature);
+                fd.append("folder", signData.folder);
+                fd.append("public_id", signData.public_id);
+                if (signData.eager) {
+                    fd.append("eager", signData.eager);
+                }
+                if (signData.transformation) {
+                    fd.append("transformation", signData.transformation);
+                }
+
+                // 3. Upload directly to Cloudinary
+                const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${signData.cloud_name}/${signData.resource_type}/upload`;
+                const uploadRes = await axios.post(cloudinaryUrl, fd, {
+                    headers: {
+                        "Content-Type": "multipart/form-data",
+                    },
+                    timeout: 0,
                     onUploadProgress: (e) => {
                         if (e.total) {
                             const pct = Math.round((e.loaded / e.total) * 100);
@@ -127,7 +147,21 @@ export function UploadManagerProvider({ children }) {
                     }
                 });
 
-                if (onSuccess) onSuccess(data);
+                // 4. Submit completed metadata to backend to save
+                const completeRes = await api.post(`${dynamicEndpoint}/complete`, {
+                    media_id: signData.media_id,
+                    category,
+                    label: label && category === "take" ? label : undefined,
+                    public_id: signData.public_id,
+                    url: uploadRes.data.secure_url,
+                    bytes: uploadRes.data.bytes,
+                    duration: uploadRes.data.duration,
+                    content_type: file.type,
+                    original_filename: file.name,
+                    eager: uploadRes.data.eager
+                }, { headers });
+
+                if (onSuccess) onSuccess(completeRes.data);
 
                 setRetryQueue((q) => {
                     const n = { ...q };

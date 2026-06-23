@@ -33,6 +33,10 @@ APP_NAME = os.environ.get("APP_NAME", "talentgram")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
+# Direct Cloudinary Upload feature flag (rollout mechanism)
+DIRECT_UPLOAD_ENABLED = os.environ.get("DIRECT_UPLOAD_ENABLED", "false").lower() == "true"
+
+
 # --------------------------------------------------------------------------
 # Email Normalization Helper
 # --------------------------------------------------------------------------

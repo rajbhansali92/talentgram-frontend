@@ -1985,11 +1985,12 @@ async def list_submissions(
         query["decision"] = decision
     if status:
         query["status"] = status
-    # P3-F: Lightweight list projection — strips form_data (large nested
-    # object), media[] (per-image metadata), and field_visibility from the
-    # admin review list. The recruiter list renders only summary fields.
-    # Full form_data + media are fetched on individual submission GET.
-    # NOTE: talent_name is stored at top-level (not inside form_data) — safe.
+    # List projection. NOTE: the recruiter list cards DO render derived data
+    # from media[] (intro/takes/image counts) and form_data (Qs count,
+    # location/age for sort), and client-side search/filter/sort operate over
+    # the whole list — so only the internal field_visibility toggle map is
+    # stripped here. A future lightweight-summary projection (server-computed
+    # counts) would require a coordinated card refactor; tracked separately.
     _SUB_LIST_PROJ = {
         "_id": 0,
         "field_visibility": 0, # internal toggle map — not rendered in list

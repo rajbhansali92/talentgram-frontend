@@ -43,7 +43,12 @@ const securityHeaders = [
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.talentgramagency.com",
       "media-src 'self' blob: https://res.cloudinary.com",
-      "connect-src 'self' https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com",
+      // nominatim.openstreetmap.org powers the city/location autocomplete in
+      // LocationSelector (apply, submit, talent edit). It is a fetch() XHR, so
+      // it must be allow-listed in connect-src or the browser blocks it with a
+      // CSP error. Scoped to the exact host — no wildcard, no other directive
+      // weakened.
+      "connect-src 'self' https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",

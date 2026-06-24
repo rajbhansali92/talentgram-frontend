@@ -79,20 +79,29 @@ const MAX_FILE_SIZE = {
 };
 
 function TextField({ label, value, onChange, type = "text", disabled = false, ...rest }) {
+    // View mode (disabled): present the value as a read-only record — full text
+    // wraps naturally (no single-line truncation), and it reads as content
+    // rather than a greyed-out input. Edit mode is unchanged.
+    const Wrapper = disabled ? "div" : "label";
     return (
-        <label className="block">
+        <Wrapper className="block">
             <span className="text-[11px] text-black/45 tracking-widest uppercase">
                 {label}
             </span>
-            <input
-                type={type}
-                value={value || ""}
-                onChange={(e) => onChange(e.target.value)}
-                disabled={disabled}
-                className="mt-2 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30 disabled:opacity-60 disabled:cursor-not-allowed"
-                {...rest}
-            />
-        </label>
+            {disabled ? (
+                <div className="mt-2 py-2.5 text-sm text-black/85 whitespace-pre-wrap break-words">
+                    {value ? value : <span className="text-black/30">—</span>}
+                </div>
+            ) : (
+                <input
+                    type={type}
+                    value={value || ""}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="mt-2 w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30"
+                    {...rest}
+                />
+            )}
+        </Wrapper>
     );
 }
 
@@ -530,26 +539,35 @@ export default function ProjectEdit() {
                             )}
                         </>
                     )}
-                    {/* Status — always visible, only interactive in edit mode */}
-                    <Select
-                        value={project.status || "ongoing"}
-                        onValueChange={(v) => isEditing && updateProject({ status: v })}
-                        disabled={!isEditing}
-                    >
-                        <SelectTrigger
-                            data-testid="project-status-select-trigger"
-                            disabled={!isEditing}
-                            className="bg-transparent border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                    {/* Status — interactive dropdown in edit mode; a static,
+                        unambiguously read-only chip in view mode (no dropdown
+                        affordance, so it never looks clickable when it isn't). */}
+                    {isEditing ? (
+                        <Select
+                            value={project.status || "ongoing"}
+                            onValueChange={(v) => isEditing && updateProject({ status: v })}
                         >
-                            <SelectValue placeholder="Status" />
-                        </SelectTrigger>
-                        <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
-                            <SelectItem value="ongoing">Ongoing</SelectItem>
-                            <SelectItem value="hold">Hold</SelectItem>
-                            <SelectItem value="complete">Complete</SelectItem>
-                            <SelectItem value="locked">Locked</SelectItem>
-                        </SelectContent>
-                    </Select>
+                            <SelectTrigger
+                                data-testid="project-status-select-trigger"
+                                className="bg-transparent border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-xs h-9 px-3 w-[120px] focus:ring-0 shadow-none text-black/70 font-medium"
+                            >
+                                <SelectValue placeholder="Status" />
+                            </SelectTrigger>
+                            <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                <SelectItem value="ongoing">Ongoing</SelectItem>
+                                <SelectItem value="hold">Hold</SelectItem>
+                                <SelectItem value="complete">Complete</SelectItem>
+                                <SelectItem value="locked">Locked</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    ) : (
+                        <span
+                            data-testid="project-status-readonly"
+                            className="inline-flex items-center rounded-sm border border-[#eaeaea] text-xs h-9 px-3 text-black/70 font-medium capitalize"
+                        >
+                            {project.status || "ongoing"}
+                        </span>
+                    )}
                     {/* View mode: Edit button */}
                     {isEdit && !isEditing && (
                         <button
@@ -640,31 +658,37 @@ export default function ProjectEdit() {
                                     Commission %
                                 </span>
                                 <div className="mt-2">
-                                    <Select
-                                        value={project.commission_percent || ""}
-                                        onValueChange={(v) => isEditing && updateProject({ commission_percent: v })}
-                                        disabled={!isEditing}
-                                    >
-                                        <SelectTrigger
-                                            data-testid="commission-select-trigger"
+                                    {!isEditing ? (
+                                        <div className="py-2.5 text-sm text-black/85">
+                                            {project.commission_percent ? project.commission_percent : <span className="text-black/30">—</span>}
+                                        </div>
+                                    ) : (
+                                        <Select
+                                            value={project.commission_percent || ""}
+                                            onValueChange={(v) => isEditing && updateProject({ commission_percent: v })}
                                             disabled={!isEditing}
-                                            className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-60 disabled:cursor-not-allowed"
                                         >
-                                            <SelectValue placeholder="Select commission" />
-                                        </SelectTrigger>
-                                        <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
-                                            {COMMISSION_OPTIONS.map((c) => (
-                                                <SelectItem
-                                                    key={c}
-                                                    value={c}
-                                                    className="focus:bg-black/5 focus:text-black"
-                                                    data-testid={`commission-option-${c}`}
-                                                >
-                                                    {c}
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
+                                            <SelectTrigger
+                                                data-testid="commission-select-trigger"
+                                                disabled={!isEditing}
+                                                className="bg-transparent border-0 border-b border-black/[0.10] rounded-none px-0 focus:border-black/40 focus:ring-0 shadow-none h-auto py-2.5 disabled:opacity-60 disabled:cursor-not-allowed"
+                                            >
+                                                <SelectValue placeholder="Select commission" />
+                                            </SelectTrigger>
+                                            <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                {COMMISSION_OPTIONS.map((c) => (
+                                                    <SelectItem
+                                                        key={c}
+                                                        value={c}
+                                                        className="focus:bg-black/5 focus:text-black"
+                                                        data-testid={`commission-option-${c}`}
+                                                    >
+                                                        {c}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    )}
                                 </div>
                             </div>
                             <TextField
@@ -702,13 +726,18 @@ export default function ProjectEdit() {
                                 </button>
                             </div>
                             {!collapsedSections.additionalDetails && (
-                                <textarea
-                                    value={project.additional_details || ""}
-                                    onChange={(e) => updateProject({ additional_details: e.target.value })}
-                                    rows={3}
-                                    disabled={!isEditing}
-                                    className="mt-2 w-full bg-transparent border border-[#eaeaea] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
-                                />
+                                isEditing ? (
+                                    <textarea
+                                        value={project.additional_details || ""}
+                                        onChange={(e) => updateProject({ additional_details: e.target.value })}
+                                        rows={3}
+                                        className="mt-2 w-full bg-transparent border border-[#eaeaea] focus:border-black/40 outline-none p-4 text-sm text-black/85 rounded-xl"
+                                    />
+                                ) : (
+                                    <div className="mt-2 text-sm text-black/85 whitespace-pre-wrap break-words leading-relaxed">
+                                        {project.additional_details ? project.additional_details : <span className="text-black/30">—</span>}
+                                    </div>
+                                )
                             )}
                         </div>
                     </>

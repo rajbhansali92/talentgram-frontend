@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { 
   Play, Pause, Square, QrCode, RefreshCw, AlertTriangle, CheckCircle, 
-  Settings, Clock, ShieldAlert, History, Edit, Send, Save, Plus, Trash2, Database, AlertCircle
+  Settings, Clock, ShieldAlert, History, Edit, Send, Save, Plus, Trash2, Database, AlertCircle,
+  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -19,31 +20,31 @@ import VirtualList from "@/components/VirtualList";
 import ProjectSearchModal from "@/components/ProjectSearchModal";
 
 export default function WhatsAppEnginePage() {
-  const [activeTab, setActiveTab] = useState("session"); // session | templates | campaign | history | config | audit
+  const [activeTab, setActiveTab] = useState("campaigns"); // campaigns | templates | analytics | settings
+  const [campaignSubTab, setCampaignSubTab] = useState("launch"); // launch | history
+  const [settingsSubTab, setSettingsSubTab] = useState("status"); // status | safety
 
   return (
-    <div className="min-h-screen bg-[#f8f8f6] p-4 md:p-8 text-black">
-      <div className="max-w-7xl mx-auto space-y-6">
+    <div className="min-h-screen bg-[#F8F8F7] px-8 py-12 text-[#111111] font-sans antialiased">
+      <div className="max-w-7xl mx-auto space-y-12">
         
         {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-black/[0.06] pb-5">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">WhatsApp Engine</h1>
-            <p className="text-black/50 text-sm mt-1">
+            <h1 className="text-3xl font-bold tracking-tight font-display text-[#111111]">WhatsApp Engine</h1>
+            <p className="text-[#6B7280] text-sm mt-1">
               Broadcast template updates, status notifications, and media attachments directly via automated browser execution.
             </p>
           </div>
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex flex-wrap gap-2 border-b border-black/[0.06] pb-px">
+        <div className="flex flex-wrap gap-2 border-b border-black/[0.04] pb-px">
           {[
-            { id: "session", label: "Session & Status", icon: QrCode },
-            { id: "campaign", label: "Launch Campaign", icon: Send },
-            { id: "history", label: "Campaign History", icon: History },
+            { id: "campaigns", label: "Campaigns", icon: Send },
             { id: "templates", label: "Templates", icon: Edit },
-            { id: "config", label: "Safety Configuration", icon: Settings },
-            { id: "audit", label: "Audit Logs", icon: ShieldAlert },
+            { id: "analytics", label: "Analytics", icon: ShieldAlert },
+            { id: "settings", label: "Settings", icon: Settings },
           ].map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
@@ -51,10 +52,10 @@ export default function WhatsAppEnginePage() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider border-b-2 transition-all ${
+                className={`flex items-center gap-2 px-5 py-3 text-xs font-semibold uppercase tracking-widest border-b-2 transition-all duration-150 ${
                   active 
-                    ? "border-black text-black" 
-                    : "border-transparent text-black/40 hover:text-black/70 hover:border-black/10"
+                    ? "border-[#111111] text-[#111111]" 
+                    : "border-transparent text-[#6B7280] hover:text-[#111111] hover:border-[#111111]/20"
                 }`}
               >
                 <Icon className="w-4 h-4" />
@@ -65,13 +66,61 @@ export default function WhatsAppEnginePage() {
         </div>
 
         {/* Tab Contents */}
-        <div className="mt-6">
-          {activeTab === "session" && <WESessionPanel />}
-          {activeTab === "campaign" && <WECampaignLauncher />}
-          {activeTab === "history" && <WEHistoryPanel />}
+        <div className="mt-8 transition-transform duration-200">
+          {activeTab === "campaigns" && (
+            <div className="space-y-8">
+              {/* Campaigns Sub-navigation */}
+              <div className="flex bg-[#111111]/[0.03] p-0.5 rounded-full w-fit">
+                <button
+                  onClick={() => setCampaignSubTab("launch")}
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wider transition-all duration-150 ${
+                    campaignSubTab === "launch" ? "bg-white text-black shadow-sm" : "text-[#6B7280] hover:text-[#111111]"
+                  }`}
+                >
+                  Launch Campaign
+                </button>
+                <button
+                  onClick={() => setCampaignSubTab("history")}
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wider transition-all duration-150 ${
+                    campaignSubTab === "history" ? "bg-white text-black shadow-sm" : "text-[#6B7280] hover:text-[#111111]"
+                  }`}
+                >
+                  Campaign History
+                </button>
+              </div>
+
+              {campaignSubTab === "launch" ? <WECampaignLauncher /> : <WEHistoryPanel />}
+            </div>
+          )}
+
           {activeTab === "templates" && <WETemplateManager />}
-          {activeTab === "config" && <WEConfigPanel />}
-          {activeTab === "audit" && <WEAuditLogPanel />}
+          {activeTab === "analytics" && <WEAuditLogPanel />}
+
+          {activeTab === "settings" && (
+            <div className="space-y-8">
+              {/* Settings Sub-navigation */}
+              <div className="flex bg-[#111111]/[0.03] p-0.5 rounded-full w-fit">
+                <button
+                  onClick={() => setSettingsSubTab("status")}
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wider transition-all duration-150 ${
+                    settingsSubTab === "status" ? "bg-white text-black shadow-sm" : "text-[#6B7280] hover:text-[#111111]"
+                  }`}
+                >
+                  Session Status
+                </button>
+                <button
+                  onClick={() => setSettingsSubTab("safety")}
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wider transition-all duration-150 ${
+                    settingsSubTab === "safety" ? "bg-white text-black shadow-sm" : "text-[#6B7280] hover:text-[#111111]"
+                  }`}
+                >
+                  Safety Configuration
+                </button>
+              </div>
+
+              {settingsSubTab === "status" ? <WESessionPanel /> : <WEConfigPanel />}
+            </div>
+          )}
         </div>
 
       </div>
@@ -109,9 +158,9 @@ function WESessionPanel() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center p-12 bg-white rounded-md border border-black/[0.06] min-h-[300px]">
-        <RefreshCw className="w-8 h-8 animate-spin text-black/40 mb-3" />
-        <p className="text-black/50 text-sm">Querying WhatsApp Web session state...</p>
+      <div className="flex flex-col items-center justify-center p-8 bg-white rounded-2xl min-h-[300px] shadow-sm">
+        <RefreshCw className="w-8 h-8 animate-spin text-[#111111]/30 mb-3" />
+        <p className="text-[#6B7280] text-sm font-medium">Querying WhatsApp Web session state...</p>
       </div>
     );
   }
@@ -122,35 +171,35 @@ function WESessionPanel() {
   const heartbeat = session?.last_heartbeat;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
       
       {/* Status Summary */}
-      <div className="bg-white p-6 rounded-md border border-black/[0.06] space-y-4">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Connection Status</h3>
+      <div className="bg-white p-8 rounded-2xl space-y-6 shadow-sm">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Connection Status</h3>
         
         <div className="flex items-center gap-3">
           <div className={`w-3.5 h-3.5 rounded-full ${
             status === "authenticated" ? "bg-emerald-500 animate-pulse" :
             status === "qr_pending" ? "bg-amber-500 animate-pulse" : "bg-red-500"
           }`} />
-          <span className="text-base font-semibold capitalize">{status.replace("_", " ")}</span>
+          <span className="text-lg font-semibold capitalize text-[#111111]">{status.replace("_", " ")}</span>
         </div>
 
-        <div className="border-t border-black/[0.06] pt-4 space-y-2 text-xs">
+        <div className="pt-4 space-y-3 text-xs border-t border-black/[0.04]">
           <div className="flex justify-between">
-            <span className="text-black/40 font-medium">Session Instance</span>
-            <span className="font-mono text-black/80">default</span>
+            <span className="text-[#6B7280] font-medium">Session Instance</span>
+            <span className="font-mono text-[#111111]">default</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-black/40 font-medium">Last Heartbeat</span>
-            <span className="text-black/80 font-mono">
+            <span className="text-[#6B7280] font-medium">Last Heartbeat</span>
+            <span className="text-[#111111] font-mono">
               {heartbeat ? new Date(heartbeat).toLocaleTimeString() : "Never"}
             </span>
           </div>
           {session?.authenticated_at && (
             <div className="flex justify-between">
-              <span className="text-black/40 font-medium">Authenticated At</span>
-              <span className="text-black/80">
+              <span className="text-[#6B7280] font-medium">Authenticated At</span>
+              <span className="text-[#111111]">
                 {new Date(session.authenticated_at).toLocaleString()}
               </span>
             </div>
@@ -158,19 +207,19 @@ function WESessionPanel() {
         </div>
 
         {errMsg && (
-          <div className="p-3 bg-red-50 border border-red-200/50 rounded-sm text-red-700 text-xs flex gap-2">
-            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="p-4 bg-red-500/10 rounded-xl text-red-700 text-xs flex gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
             <div>
               <p className="font-semibold">Session Error</p>
-              <p className="mt-0.5 opacity-90">{errMsg}</p>
+              <p className="mt-0.5 opacity-90 leading-relaxed">{errMsg}</p>
             </div>
           </div>
         )}
 
-        <div className="border-t border-black/[0.06] pt-4 space-y-2">
+        <div className="pt-4 space-y-3">
           <button
             onClick={() => setPolling(!polling)}
-            className="text-xs font-semibold uppercase tracking-wider text-black/60 hover:text-black border border-black/10 px-3 py-2 rounded-sm w-full text-center transition-colors"
+            className="text-xs font-semibold uppercase tracking-widest text-[#111111] border border-black/10 hover:border-black px-4 py-3 rounded-lg w-full text-center transition-colors h-[48px] active:scale-[0.98] duration-120"
           >
             {polling ? "Pause Real-time Sync" : "Resume Real-time Sync"}
           </button>
@@ -185,7 +234,7 @@ function WESessionPanel() {
                 toast.error(err?.response?.data?.detail || "Failed to reset session.");
               }
             }}
-            className="text-xs font-semibold uppercase tracking-wider text-red-600 hover:text-white hover:bg-red-600 border border-red-200 px-3 py-2 rounded-sm w-full text-center transition-colors"
+            className="text-xs font-semibold uppercase tracking-widest text-red-600 hover:text-white hover:bg-red-600 border border-red-200/50 px-4 py-3 rounded-lg w-full text-center transition-colors h-[48px] active:scale-[0.98] duration-120"
           >
             Reset WhatsApp Session
           </button>
@@ -193,37 +242,37 @@ function WESessionPanel() {
       </div>
 
       {/* QR Code Container */}
-      <div className="lg:col-span-2 bg-white p-6 rounded-md border border-black/[0.06] flex flex-col items-center justify-center min-h-[300px]">
+      <div className="lg:col-span-2 bg-white p-8 rounded-2xl flex flex-col items-center justify-center min-h-[300px] shadow-sm">
         {status === "authenticated" ? (
-          <div className="text-center space-y-3 p-6 max-w-sm">
-            <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto border border-emerald-100">
-              <CheckCircle className="w-8 h-8 text-emerald-500" />
+          <div className="text-center space-y-4 p-6 max-w-sm">
+            <div className="w-16 h-16 bg-[#0D8A5F]/10 rounded-full flex items-center justify-center mx-auto border border-[#0D8A5F]/20">
+              <CheckCircle className="w-8 h-8 text-[#0D8A5F]" />
             </div>
-            <h3 className="text-lg font-semibold">Active Session</h3>
-            <p className="text-xs text-black/50">
+            <h3 className="text-lg font-semibold text-[#111111]">Active Session</h3>
+            <p className="text-xs text-[#6B7280] leading-relaxed">
               The worker process is fully authenticated to WhatsApp Web and listening for jobs. You can safely launch message broadcasts.
             </p>
           </div>
         ) : status === "qr_pending" && qrBase64 ? (
-          <div className="text-center space-y-4 max-w-md">
-            <h3 className="text-base font-semibold">Link WhatsApp Account</h3>
-            <p className="text-xs text-black/50">
+          <div className="text-center space-y-5 max-w-md">
+            <h3 className="text-lg font-semibold text-[#111111]">Link WhatsApp Account</h3>
+            <p className="text-xs text-[#6B7280]">
               Scan the QR code below using the linked devices option in your WhatsApp mobile application.
             </p>
-            <div className="p-4 bg-white border border-black/[0.06] rounded-md inline-block shadow-inner mx-auto">
+            <div className="p-4 bg-white border border-black/[0.04] rounded-2xl inline-block shadow-inner mx-auto">
               <img src={qrBase64} alt="WhatsApp QR Code" className="w-56 h-56 mx-auto" />
             </div>
-            <p className="text-[10px] text-black/40 italic">
+            <p className="text-[10px] text-[#6B7280] italic">
               QR code updates automatically every 90 seconds.
             </p>
           </div>
         ) : (
-          <div className="text-center space-y-3 p-6 max-w-sm">
-            <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mx-auto border border-amber-100">
-              <AlertTriangle className="w-8 h-8 text-amber-500" />
+          <div className="text-center space-y-4 p-6 max-w-sm">
+            <div className="w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto border border-amber-500/20">
+              <AlertTriangle className="w-8 h-8 text-amber-600" />
             </div>
-            <h3 className="text-base font-semibold">Browser Launch Pending</h3>
-            <p className="text-xs text-black/50">
+            <h3 className="text-lg font-semibold text-[#111111]">Browser Launch Pending</h3>
+            <p className="text-xs text-[#6B7280] leading-relaxed">
               WhatsApp Web is disconnected or loading. Verify that the worker process is currently active and running.
             </p>
           </div>
@@ -255,7 +304,6 @@ function WECampaignLauncher() {
   const [dryRunResult, setDryRunResult] = useState(null);
   const [launching, setLaunching] = useState(false);
 
-  // Slice 5-7: unified targeting (PROJECT | CRM | MANUAL) + exclusion + search.
   const [sourceType, setSourceType] = useState("PROJECT");
   const [crmTypes, setCrmTypes] = useState([]);
   const [crmContactType, setCrmContactType] = useState("");
@@ -265,6 +313,9 @@ function WECampaignLauncher() {
   const [targetSearch, setTargetSearch] = useState("");
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [selectedProjectName, setSelectedProjectName] = useState("");
+
+  // Swipe preview states
+  const [previewTargetIndex, setPreviewTargetIndex] = useState(0);
 
   useEffect(() => {
     const loadInitialData = async () => {
@@ -281,7 +332,6 @@ function WECampaignLauncher() {
     loadInitialData();
   }, []);
 
-  // Build the source_params for the unified resolver from the current source.
   const buildSourceParams = () => {
     if (sourceType === "PROJECT") {
       return { project_id: selectedProjectId, pipeline_stages: selectedStages };
@@ -289,7 +339,6 @@ function WECampaignLauncher() {
     if (sourceType === "CRM") {
       return { contact_type: crmContactType || null, select_all_filtered: true };
     }
-    // MANUAL — parse "Name,+phone" lines
     const contacts = manualText.split("\n").map((line) => {
       const [name, phone] = line.split(",");
       return { name: (name || "").trim(), phone: (phone || "").trim() };
@@ -300,15 +349,57 @@ function WECampaignLauncher() {
   const resetResolution = () => {
     setRecipients([]); setUnresolvable([]); setDryRunResult(null);
     setExcludedIds(new Set()); setSelectedRowIds(new Set()); setTargetSearch("");
+    setPreviewTargetIndex(0);
   };
+
+  // AUTO RESOLVE (P0 Task 1.2)
+  // Whenever the targeting criteria change, trigger resolve automatically
+  useEffect(() => {
+    const autoResolve = async () => {
+      // Guard criteria based on source types
+      if (sourceType === "PROJECT" && (!selectedProjectId || selectedStages.length === 0)) {
+        resetResolution();
+        return;
+      }
+      if (sourceType === "CRM" && !crmContactType) {
+        // Option to not auto resolve if CRM parameters are unselected
+      }
+      if (sourceType === "MANUAL" && !manualText.trim()) {
+        resetResolution();
+        return;
+      }
+
+      setResolving(true);
+      try {
+        const data = await resolveTargets({
+          source_type: sourceType,
+          source_params: buildSourceParams(),
+          excluded_recipient_ids: [],
+        });
+        setRecipients(data.recipients || []);
+        setUnresolvable(data.unresolvable || []);
+        setExcludedIds(new Set());
+        setSelectedRowIds(new Set());
+        setPreviewTargetIndex(0);
+      } catch (err) {
+        console.error("Failed auto resolve:", err);
+      } finally {
+        setResolving(false);
+      }
+    };
+
+    const delayDebounce = setTimeout(() => {
+      autoResolve();
+    }, 400); // Debounce to allow quick changes without multiple requests
+
+    return () => clearTimeout(delayDebounce);
+  }, [sourceType, selectedProjectId, selectedStages, crmContactType, manualText]);
 
   const handleProjectChange = async (projectId) => {
     setSelectedProjectId(projectId);
     setPipelineSummary(null);
     setSelectedStages([]);
-    setRecipients([]);
-    setUnresolvable([]);
-    setDryRunResult(null);
+    resetResolution();
     
     if (!projectId) return;
 
@@ -325,7 +416,6 @@ function WECampaignLauncher() {
       ? selectedStages.filter(s => s !== stage)
       : [...selectedStages, stage];
     setSelectedStages(updated);
-    setRecipients([]);
     setDryRunResult(null);
   };
 
@@ -350,28 +440,6 @@ function WECampaignLauncher() {
     }
   };
 
-  const handleResolve = async () => {
-    if (sourceType === "PROJECT" && (!selectedProjectId || selectedStages.length === 0)) return;
-    setResolving(true);
-    try {
-      const data = await resolveTargets({
-        source_type: sourceType,
-        source_params: buildSourceParams(),
-        excluded_recipient_ids: [],
-      });
-      setRecipients(data.recipients || []);
-      setUnresolvable(data.unresolvable || []);
-      setExcludedIds(new Set());
-      setSelectedRowIds(new Set());
-      toast.success(`Resolved ${data.counts?.resolved ?? (data.recipients || []).length} recipients`);
-    } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to resolve recipients");
-    } finally {
-      setResolving(false);
-    }
-  };
-
-  // ---- exclusion / search helpers (Feature 3) ----
   const filteredRecipients = recipients.filter((r) => {
     if (!targetSearch.trim()) return true;
     const q = targetSearch.toLowerCase();
@@ -389,6 +457,7 @@ function WECampaignLauncher() {
       return next;
     });
   };
+
   const selectAllFiltered = (checked) => {
     setSelectedRowIds((prev) => {
       const next = new Set(prev);
@@ -396,6 +465,7 @@ function WECampaignLauncher() {
       return next;
     });
   };
+
   const applyExclusion = (exclude) => {
     setExcludedIds((prev) => {
       const next = new Set(prev);
@@ -450,30 +520,33 @@ function WECampaignLauncher() {
     }
   };
 
+  // Get active target name for preview (Task 8.2)
+  const activePreviewRecipient = filteredRecipients[previewTargetIndex] || null;
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <ProjectSearchModal
         open={projectModalOpen}
         onClose={() => setProjectModalOpen(false)}
         onSelect={(p) => { handleProjectChange(p.id); setSelectedProjectName(p.name || p.brand_name || ""); }}
       />
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
         {/* Configurations column */}
-        <div className="lg:col-span-2 bg-white p-6 rounded-md border border-black/[0.06] space-y-6">
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60 border-b border-black/[0.06] pb-3">Campaign Target & Template</h3>
+        <div className="lg:col-span-2 bg-white p-8 rounded-2xl space-y-8 shadow-sm">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Campaign Target & Template</h3>
 
-          {/* Target source selector (Feature 1 / Slices 5-7) */}
-          <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Target Source</label>
+          {/* Target source selector */}
+          <div className="space-y-3">
+            <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Target Source</label>
             <div className="flex gap-2">
               {["PROJECT", "CRM", "MANUAL"].map((src) => (
                 <button
                   key={src}
                   type="button"
                   onClick={() => { setSourceType(src); resetResolution(); }}
-                  className={`text-xs font-semibold px-3 py-2 rounded-sm border transition-all ${
-                    sourceType === src ? "bg-black text-white border-black" : "bg-[#f8f8f6] border-black/10 hover:border-black/30"
+                  className={`text-xs font-semibold px-4 py-2.5 rounded-lg border transition-all duration-150 select-none active:scale-[0.98] ${
+                    sourceType === src ? "bg-black text-white border-black" : "bg-[#f8f8f7] border-black/10 hover:border-black/30"
                   }`}
                   data-testid={`source-${src}`}
                 >
@@ -485,12 +558,12 @@ function WECampaignLauncher() {
 
           {/* CRM source */}
           {sourceType === "CRM" && (
-            <div className="space-y-2">
-              <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Contact Type</label>
+            <div className="space-y-3">
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Contact Type</label>
               <select
                 value={crmContactType}
                 onChange={(e) => { setCrmContactType(e.target.value); resetResolution(); }}
-                className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px] transition-all"
               >
                 <option value="">All contact types</option>
                 {crmTypes.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -500,14 +573,14 @@ function WECampaignLauncher() {
 
           {/* Manual source */}
           {sourceType === "MANUAL" && (
-            <div className="space-y-2">
-              <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Manual Contacts (one per line: Name,+countrycode…)</label>
+            <div className="space-y-3">
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Manual Contacts (Name,+countrycode per line)</label>
               <textarea
                 value={manualText}
                 onChange={(e) => { setManualText(e.target.value); }}
                 rows={5}
                 placeholder={"Rahul Sharma,+919876543210\nPriya Jain,+919123456789"}
-                className="w-full text-xs font-mono bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                className="w-full text-xs font-mono bg-[#f8f8f7] border border-black/10 rounded-lg p-3 focus:outline-none focus:ring-1 focus:ring-black transition-all"
                 data-testid="manual-contacts-input"
               />
             </div>
@@ -515,16 +588,16 @@ function WECampaignLauncher() {
 
           {/* Project & Stage selection */}
           {sourceType === "PROJECT" && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Casting Project</label>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-3">
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Casting Project</label>
               <button
                 type="button"
                 onClick={() => setProjectModalOpen(true)}
-                className="w-full text-left text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 hover:border-black/30 flex items-center justify-between"
+                className="w-full text-left text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 hover:border-black/30 flex items-center justify-between h-[56px] transition-all"
                 data-testid="open-project-search"
               >
-                <span className={selectedProjectId ? "text-black" : "text-black/40"}>
+                <span className={selectedProjectId ? "text-black" : "text-[#6B7280]"}>
                   {selectedProjectName || "Search project…"}
                 </span>
                 <span className="text-[10px] uppercase tracking-wider text-black/40">{selectedProjectId ? "Change" : "Search"}</span>
@@ -532,9 +605,9 @@ function WECampaignLauncher() {
             </div>
 
             {selectedProjectId && pipelineSummary && (
-              <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Target Pipeline Stages</label>
-                <div className="flex flex-wrap gap-2 p-2 bg-[#f8f8f6] border border-black/10 rounded-sm max-h-[140px] overflow-y-auto">
+              <div className="space-y-3">
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Target Pipeline Stages</label>
+                <div className="flex flex-wrap gap-2 p-2.5 bg-[#f8f8f7] border border-black/10 rounded-lg max-h-[140px] overflow-y-auto">
                   {Object.entries(pipelineSummary.stage_counts).map(([stage, count]) => {
                     const active = selectedStages.includes(stage);
                     return (
@@ -542,7 +615,7 @@ function WECampaignLauncher() {
                         key={stage}
                         type="button"
                         onClick={() => handleStageToggle(stage)}
-                        className={`text-xs px-2.5 py-1.5 rounded-sm border font-medium transition-all ${
+                        className={`text-xs px-3 py-2 rounded-lg border font-medium transition-all duration-120 active:scale-[0.98] ${
                           active 
                             ? "bg-black text-white border-black" 
                             : "bg-white text-black/60 border-black/10 hover:border-black/20"
@@ -553,7 +626,7 @@ function WECampaignLauncher() {
                     );
                   })}
                   {Object.keys(pipelineSummary.stage_counts).length === 0 && (
-                    <p className="text-[11px] text-black/40 p-1">No active stages in project.</p>
+                    <p className="text-[11px] text-[#6B7280] p-1">No active stages in project.</p>
                   )}
                 </div>
               </div>
@@ -561,67 +634,80 @@ function WECampaignLauncher() {
           </div>
           )}
 
-          {/* Resolve action — works for all sources (Slices 5-7) */}
+          {/* Auto Resolve count indicator (Task 1.2 button replacement) */}
           {(sourceType !== "PROJECT" || (selectedProjectId && selectedStages.length > 0)) && (
-            <div className="bg-[#f8f8f6] p-4 rounded-sm border border-black/10 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="bg-[#f8f8f7] p-4 rounded-xl border border-black/5 flex flex-col md:flex-row md:items-center justify-between gap-3 select-none">
               <div className="text-xs space-y-1">
-                <span className="font-semibold">Recipients Resolution:</span>
-                {recipients.length > 0 ? (
-                  <p className="text-black/60">
+                <span className="font-semibold text-black">Recipients:</span>
+                {resolving ? (
+                  <p className="text-[#6B7280] animate-pulse">Resolving target parameters...</p>
+                ) : recipients.length > 0 ? (
+                  <p className="text-[#6B7280]">
                     Ready to send to <strong className="text-black">{sendingCount}</strong> targets.
-                    {unresolvable.length > 0 && <span className="text-amber-600"> ({unresolvable.length} skipped due to missing identifiers).</span>}
+                    {unresolvable.length > 0 && <span className="text-amber-600"> ({unresolvable.length} skipped due to missing numbers).</span>}
                   </p>
                 ) : (
-                  <p className="text-black/40">Resolve targets before drafting placeholders.</p>
+                  <p className="text-[#6B7280]">No recipients matches criteria.</p>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={handleResolve}
-                disabled={resolving || (sourceType === "MANUAL" && !manualText.trim())}
-                className="text-xs font-semibold uppercase tracking-wider border border-black bg-white hover:bg-[#f8f8f6] disabled:opacity-50 px-3 py-2 rounded-sm"
-              >
-                {resolving ? "Resolving..." : "Resolve Targets"}
-              </button>
+              <div className="text-xs font-semibold uppercase tracking-wider text-[#6B7280]">
+                {resolving ? (
+                  <span className="flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Resolving...</span>
+                ) : recipients.length > 0 ? (
+                  <span className="text-[#0D8A5F]">✓ {recipients.length} resolved</span>
+                ) : (
+                  <span>Ready</span>
+                )}
+              </div>
             </div>
           )}
 
-          {/* Resolved Targets — search (1), bulk exclusion (2), virtualized rows. */}
-          {recipients.length > 0 && (
-            <div className="border border-black/10 rounded-sm overflow-hidden">
-              <div className="bg-[#f8f8f6] px-4 py-2 flex flex-wrap items-center justify-between gap-2 border-b border-black/10">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-black/60">
+          {/* Shimmer Recipient Skeleton (P0 Task 2.1) */}
+          {resolving && (
+            <div className="space-y-3" data-testid="shimmer-recipients">
+              {[...Array(4)].map((_, idx) => (
+                <div key={idx} className="h-[56px] w-full bg-[#f8f8f7] animate-pulse rounded-xl flex items-center justify-between px-4 border border-black/[0.02]">
+                  <div className="h-4 bg-[#111111]/5 rounded w-1/3 shimmer"></div>
+                  <div className="h-4 bg-[#111111]/5 rounded w-1/4 shimmer"></div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Resolved Targets list (Task 3.1 Border Reduction) */}
+          {!resolving && recipients.length > 0 && (
+            <div className="border border-black/[0.06] rounded-xl overflow-hidden shadow-sm bg-white">
+              <div className="bg-[#f8f8f7] px-5 py-3 flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.04]">
+                <span className="text-[11px] font-bold uppercase tracking-widest text-[#6B7280]">
                   Resolved Targets ({recipients.length})
                 </span>
-                <span className="text-[11px] font-mono">
+                <span className="text-[11px] font-mono text-xs">
                   <strong className="text-emerald-700">Sending: {sendingCount}</strong>
                   {" · "}
                   <span className="text-red-600">Excluded: {excludedIds.size}</span>
-                  {unresolvable.length > 0 && <span className="text-amber-600"> · {unresolvable.length} skipped</span>}
                 </span>
               </div>
 
               {/* Search + bulk actions */}
-              <div className="px-3 py-2 flex flex-wrap items-center gap-2 border-b border-black/[0.06]">
+              <div className="px-4 py-3 flex flex-wrap items-center gap-2 border-b border-black/[0.04]">
                 <input
                   value={targetSearch}
                   onChange={(e) => setTargetSearch(e.target.value)}
                   placeholder="Search name / phone / group…"
-                  className="flex-1 min-w-[160px] text-xs px-2 py-1.5 border border-black/15 rounded-sm focus:outline-none focus:border-black/40"
-                  data-testid="target-search"
+                  className="flex-1 min-w-[180px] text-xs px-3 py-2 border border-black/10 rounded-lg focus:outline-none focus:border-black/40 h-[40px] bg-[#f8f8f7]"
                 />
                 <button onClick={() => applyExclusion(true)} disabled={selectedRowIds.size === 0}
-                  className="text-[10px] font-bold uppercase tracking-wider px-2 py-1.5 rounded-sm border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40">
-                  Exclude Selected
+                  className="text-[10px] font-bold uppercase tracking-wider px-3 py-2 rounded-lg border border-red-200/50 text-red-600 hover:bg-red-500/10 disabled:opacity-40 transition-colors h-[40px] active:scale-[0.98] duration-120">
+                  Exclude
                 </button>
                 <button onClick={() => applyExclusion(false)} disabled={selectedRowIds.size === 0}
-                  className="text-[10px] font-bold uppercase tracking-wider px-2 py-1.5 rounded-sm border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40">
-                  Include Selected
+                  className="text-[10px] font-bold uppercase tracking-wider px-3 py-2 rounded-lg border border-emerald-200/50 text-[#0D8A5F] hover:bg-[#0D8A5F]/10 disabled:opacity-40 transition-colors h-[40px] active:scale-[0.98] duration-120">
+                  Include
                 </button>
               </div>
 
               {/* Header row */}
-              <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wider text-black/40 border-b border-black/[0.06] bg-white">
+              <div className="flex items-center gap-2 px-5 py-2 text-[10px] uppercase tracking-wider text-[#6B7280] bg-[#fafafa]">
                 <input type="checkbox"
                   checked={filteredRecipients.length > 0 && filteredRecipients.every((r) => selectedRowIds.has(r.recipient_id))}
                   onChange={(e) => selectAllFiltered(e.target.checked)} />
@@ -630,43 +716,43 @@ function WECampaignLauncher() {
                 <span className="flex-1">Destination</span>
               </div>
 
-              {/* Virtualized rows — never renders the full list */}
+              {/* Virtualized rows (removed table row borders to satisfy Task 3.1) */}
               <VirtualList
                 items={filteredRecipients}
-                rowHeight={34}
-                height={Math.min(filteredRecipients.length, 8) * 34 || 34}
-                renderRow={(r) => {
+                rowHeight={40}
+                height={Math.min(filteredRecipients.length, 6) * 40 || 40}
+                renderRow={(r, idx) => {
                   const excluded = excludedIds.has(r.recipient_id);
                   const type = r.destination_type === "group" ? "GROUP" : "PHONE";
+                  const isSelected = selectedRowIds.has(r.recipient_id);
                   return (
-                    <div className={`flex items-center gap-2 px-3 text-xs h-full border-b border-black/[0.03] ${excluded ? "opacity-40 line-through" : "hover:bg-[#f8f8f6]"}`}>
-                      <input type="checkbox" checked={selectedRowIds.has(r.recipient_id)} onChange={() => toggleRow(r.recipient_id)} />
-                      <span className="flex-1 font-medium truncate">{r.name || "—"}</span>
+                    <div className={`flex items-center gap-2 px-5 text-xs h-full transition-colors ${
+                      excluded ? "opacity-45 line-through" : isSelected ? "bg-black/[0.02]" : "hover:bg-black/[0.01]"
+                    }`}>
+                      <input type="checkbox" checked={isSelected} onChange={() => toggleRow(r.recipient_id)} />
+                      <span className="flex-1 font-medium truncate text-[#111111]">{r.name || "—"}</span>
                       <span className="w-28">
-                        <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${type === "GROUP" ? "bg-indigo-50 text-indigo-700" : "bg-sky-50 text-sky-700"}`}>{type}</span>
+                        <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${
+                          type === "GROUP" ? "bg-indigo-500/10 text-indigo-700" : "bg-sky-500/10 text-sky-700"
+                        }`}>{type}</span>
                       </span>
-                      <span className="flex-1 font-mono text-[11px] text-black/70 truncate">{r.destination}</span>
+                      <span className="flex-1 font-mono text-[11px] text-[#6B7280] truncate">{r.destination}</span>
                     </div>
                   );
                 }}
               />
-              {unresolvable.length > 0 && (
-                <div className="px-3 py-1.5 text-[10px] text-amber-700 border-t border-black/[0.06]">
-                  {unresolvable.length} unresolvable (no phone / group) — excluded automatically.
-                </div>
-              )}
             </div>
           )}
 
           {/* Template Selection */}
-          <div className="space-y-4 border-t border-black/[0.06] pt-5">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Message Template</label>
+          <div className="space-y-4 border-t border-black/[0.04] pt-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-3">
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Message Template</label>
                 <select
                   value={selectedTemplateId}
                   onChange={(e) => handleTemplateChange(e.target.value)}
-                  className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                  className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px] transition-all"
                 >
                   <option value="">Select Template...</option>
                   {templates.map(t => (
@@ -676,14 +762,14 @@ function WECampaignLauncher() {
               </div>
 
               {selectedTemplate && (
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Media Attachment (Cloudinary URL)</label>
+                <div className="space-y-3">
+                  <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Media Attachment Link</label>
                   <input
                     type="url"
                     value={mediaUrl}
                     onChange={(e) => setMediaUrl(e.target.value)}
                     placeholder="https://res.cloudinary.com/..."
-                    className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2 focus:outline-none focus:ring-1 focus:ring-black"
+                    className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px] transition-all"
                   />
                 </div>
               )}
@@ -691,17 +777,17 @@ function WECampaignLauncher() {
 
             {/* Variable Form Placeholders */}
             {selectedTemplate && Object.keys(variables).length > 0 && (
-              <div className="space-y-3 bg-[#f8f8f6] p-4 rounded-sm border border-black/10">
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-black/60 border-b border-black/10 pb-2">Inject Custom Variables</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-4 bg-[#f8f8f7] p-5 rounded-2xl border border-black/5">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-[#6B7280] pb-2 border-b border-black/[0.04]">Inject Custom Variables</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {Object.keys(variables).map(vKey => (
                     <div key={vKey} className="space-y-1">
-                      <label className="text-[11px] font-semibold text-black/50">{vKey}</label>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-[#6B7280]">{vKey}</label>
                       <input
                         type="text"
                         value={variables[vKey]}
                         onChange={(e) => setVariables({ ...variables, [vKey]: e.target.value })}
-                        className="w-full text-xs bg-white border border-black/10 rounded-sm p-2 focus:outline-none focus:ring-1 focus:ring-black"
+                        className="w-full text-xs bg-white border border-black/15 rounded-lg p-3 focus:outline-none focus:ring-1 focus:ring-black h-[40px] transition-all"
                         placeholder={`Value for {{${vKey}}}`}
                         required
                       />
@@ -714,36 +800,128 @@ function WECampaignLauncher() {
 
         </div>
 
-        {/* Live Draft Preview */}
-        <div className="bg-[#1e1e1e] text-white p-6 rounded-md shadow-lg flex flex-col justify-between min-h-[350px]">
-          <div className="space-y-4">
-            <h3 className="text-xs font-bold uppercase tracking-widest text-white/40 border-b border-white/10 pb-3">Template Preview</h3>
-            {selectedTemplate ? (
-              <div className="space-y-3">
-                {mediaUrl && (
-                  <div className="border border-white/10 rounded-sm p-2 bg-white/5 flex items-center gap-2">
-                    <Database className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span className="text-[11px] font-mono text-white/60 truncate">{mediaUrl}</span>
-                  </div>
-                )}
-                <div className="bg-[#2a2a2a] p-4 rounded-sm font-mono text-xs text-white/90 whitespace-pre-wrap leading-relaxed">
-                  {/* Local template rendering helper */}
-                  {selectedTemplate.body_text
-                    .replace("{{talent_name}}", "Ayushi Thakur")
-                    .replace(/\{\{(\w+)\}\}/g, (match, p1) => variables[p1] || `[${p1}]`)
-                  }
+        {/* WhatsApp Mobile Shell Preview Column (Task 4.1 & Task 8.2) */}
+        <div className="flex flex-col items-center justify-start space-y-6">
+          
+          {/* Smart Phone Container Mockup */}
+          <div className="w-[340px] h-[580px] bg-[#1a1a1a] rounded-[48px] p-3 shadow-2xl relative border-4 border-[#333333] flex flex-col overflow-hidden">
+            {/* Status bar notch */}
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 w-32 h-4 bg-black rounded-full z-20 flex items-center justify-between px-4">
+              <span className="w-1.5 h-1.5 rounded-full bg-white/20"></span>
+              <span className="w-8 h-1 bg-white/20 rounded-full"></span>
+            </div>
+
+            {/* WhatsApp Interface inside phone */}
+            <div className="flex-1 bg-[#efeae2] rounded-[36px] overflow-hidden flex flex-col relative">
+              
+              {/* WhatsApp Header bar */}
+              <div className="bg-[#075e54] text-white pt-6 pb-2 px-4 flex items-center gap-2.5 z-10 shrink-0">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center overflow-hidden border border-white/20">
+                  {selectedTemplate?.media_url ? (
+                    <img src={selectedTemplate.media_url} className="w-full h-full object-cover" />
+                  ) : (
+                    <User className="w-4 h-4 text-white/50" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12px] font-bold leading-tight truncate">
+                    {activePreviewRecipient ? activePreviewRecipient.name : "Casting Assistant"}
+                  </p>
+                  <p className="text-[9px] text-white/60 leading-none">Online</p>
                 </div>
               </div>
-            ) : (
-              <p className="text-xs text-white/30 italic">Select template to inspect formatting.</p>
-            )}
+
+              {/* Chat Conversation messages area */}
+              <div className="flex-1 p-3 overflow-y-auto space-y-3 flex flex-col justify-end">
+                
+                {/* Auto Resolve Skeleton placeholder */}
+                {resolving && (
+                  <div className="max-w-[85%] self-start bg-white rounded-lg p-2.5 shadow-sm space-y-2 border border-black/5 animate-pulse w-3/4">
+                    <div className="h-3 bg-black/10 rounded w-5/6"></div>
+                    <div className="h-3 bg-black/10 rounded w-2/3"></div>
+                  </div>
+                )}
+
+                {/* Main WhatsApp preview message bubble */}
+                {!resolving && selectedTemplate ? (
+                  <div className="max-w-[85%] self-start bg-white rounded-xl p-3 shadow-sm border border-black/5 space-y-2.5 text-[#111111]">
+                    {/* Media render if Cloudinary attachment exists */}
+                    {mediaUrl && (
+                      <div className="rounded-lg overflow-hidden border border-black/5 bg-[#fafaf9] max-h-36 flex items-center justify-center">
+                        <img src={mediaUrl} className="w-full h-full object-cover" onError={(e) => e.target.style.display='none'} />
+                      </div>
+                    )}
+                    <div className="text-[11px] leading-relaxed whitespace-pre-wrap select-text font-sans">
+                      {selectedTemplate.body_text
+                        .replace("{{talent_name}}", activePreviewRecipient ? activePreviewRecipient.name : "Ayushi Thakur")
+                        .replace(/\{\{(\w+)\}\}/g, (match, p1) => variables[p1] || `[${p1}]`)
+                      }
+                    </div>
+                    <div className="text-[8px] text-[#6B7280] text-right mt-1 leading-none">
+                      {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  </div>
+                ) : (
+                  !resolving && (
+                    <div className="text-center py-12 text-[#6B7280]/60 italic text-xs w-full">
+                      No template selected.
+                    </div>
+                  )
+                )}
+
+                {/* Typing indicator skeleton if resolving */}
+                {resolving && (
+                  <div className="self-start bg-white/70 px-3 py-1.5 rounded-full flex gap-1 items-center animate-bounce">
+                    <span className="w-1.5 h-1.5 bg-black/30 rounded-full animate-ping"></span>
+                    <span className="w-1.5 h-1.5 bg-black/30 rounded-full"></span>
+                    <span className="w-1.5 h-1.5 bg-black/30 rounded-full"></span>
+                  </div>
+                )}
+
+              </div>
+
+              {/* Typing box bottom bar */}
+              <div className="bg-[#f0f0f0] p-2 flex items-center gap-2 border-t border-black/5 shrink-0">
+                <div className="flex-1 bg-white rounded-full h-7 px-3 flex items-center text-[10px] text-black/30">
+                  Type a message...
+                </div>
+                <div className="w-7 h-7 rounded-full bg-[#075e54] flex items-center justify-center text-white">
+                  <Send className="w-3.5 h-3.5" />
+                </div>
+              </div>
+
+            </div>
           </div>
 
-          <div className="pt-6 border-t border-white/10 flex flex-col gap-2">
+          {/* Swipe Preview cycle buttons (Task 8.2) */}
+          {recipients.length > 1 && (
+            <div className="flex items-center gap-4 bg-white px-4 py-2 rounded-full border border-black/[0.06] shadow-sm select-none">
+              <button
+                onClick={() => setPreviewTargetIndex((prev) => (prev > 0 ? prev - 1 : filteredRecipients.length - 1))}
+                className="p-1 hover:bg-black/5 rounded-full transition-colors active:scale-90"
+                title="Previous Recipient"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-[#6B7280]">
+                {previewTargetIndex + 1} of {filteredRecipients.length}
+              </span>
+              <button
+                onClick={() => setPreviewTargetIndex((prev) => (prev < filteredRecipients.length - 1 ? prev + 1 : 0))}
+                className="p-1 hover:bg-black/5 rounded-full transition-colors active:scale-90"
+                title="Next Recipient"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {/* Launch Controls Container */}
+          <div className="w-[340px] flex flex-col gap-2">
             <button
               onClick={handleDryRun}
               disabled={launching || !selectedProjectId || !selectedTemplateId || recipients.length === 0}
-              className="text-xs font-bold uppercase tracking-wider bg-white text-black py-3 rounded-sm text-center hover:bg-white/90 disabled:opacity-50 transition-colors"
+              className="text-xs font-semibold uppercase tracking-widest bg-black text-white hover:opacity-90 active:scale-[0.98] duration-120 py-3.5 rounded-lg text-center disabled:opacity-50 transition-all shadow-sm w-full h-[52px] flex items-center justify-center"
             >
               Compile Dry Run Preview
             </button>
@@ -752,9 +930,9 @@ function WECampaignLauncher() {
               <button
                 onClick={handleLaunch}
                 disabled={launching}
-                className="text-xs font-bold uppercase tracking-wider bg-emerald-500 hover:bg-emerald-600 text-white py-3 rounded-sm text-center transition-colors"
+                className="text-xs font-semibold uppercase tracking-widest bg-[#0D8A5F] hover:bg-[#0D8A5F]/95 text-white active:scale-[0.98] duration-120 py-3.5 rounded-lg text-center transition-all shadow-sm w-full h-[52px] flex items-center justify-center"
               >
-                {launching ? "Launching..." : `Launch Batch Broadcast (${recipients.length})`}
+                {launching ? "Launching..." : `Launch Broadcast (${recipients.length})`}
               </button>
             )}
           </div>
@@ -764,35 +942,35 @@ function WECampaignLauncher() {
 
       {/* Compile Dry Run Preview Table */}
       {dryRunResult && (
-        <div className="bg-white p-6 rounded-md border border-black/[0.06] space-y-4">
-          <div className="flex justify-between items-center border-b border-black/[0.06] pb-3">
+        <div className="bg-white p-8 rounded-2xl space-y-6 shadow-sm">
+          <div className="flex justify-between items-center border-b border-black/[0.04] pb-4">
             <div>
               <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Dry Run Auditing</h3>
-              <p className="text-xs text-black/40 mt-0.5">Below is the exact output rendering showing simulated delivery destinations.</p>
+              <p className="text-xs text-[#6B7280] mt-0.5">Below is the exact output rendering showing simulated delivery destinations.</p>
             </div>
             <div className="flex gap-2">
-              <span className="text-xs bg-amber-50 text-amber-700 font-semibold px-2 py-1 border border-amber-100 rounded-sm">Dry Run Only</span>
-              <span className="text-xs bg-black text-white font-semibold px-2 py-1 rounded-sm">Total Jobs: {dryRunResult.batch?.total_jobs || 0}</span>
+              <span className="text-[10px] font-bold uppercase bg-amber-500/10 text-amber-700 px-2.5 py-1 border border-amber-500/10 rounded-full">Dry Run Only</span>
+              <span className="text-[10px] font-bold uppercase bg-black/5 text-[#111111] px-2.5 py-1 rounded-full">Total Jobs: {dryRunResult.batch?.total_jobs || 0}</span>
             </div>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs">
               <thead>
-                <tr className="border-b border-black/10 text-black/50 font-medium">
-                  <th className="py-2.5 font-semibold">Talent Name</th>
-                  <th className="py-2.5 font-semibold">Channel Type</th>
-                  <th className="py-2.5 font-semibold">Destination Address</th>
-                  <th className="py-2.5 font-semibold">Generated Message Body</th>
+                <tr className="border-b border-black/10 text-[#6B7280] font-semibold uppercase tracking-wider text-[10px]">
+                  <th className="py-3">Talent Name</th>
+                  <th className="py-3">Channel</th>
+                  <th className="py-3">Address</th>
+                  <th className="py-3">Rendered Message Body</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-black/[0.04]">
+              <tbody className="divide-y divide-black/[0.03]">
                 {dryRunResult.jobs?.map((job) => (
-                  <tr key={job.id} className="hover:bg-[#f8f8f6]">
-                    <td className="py-2.5 font-medium">{job.talent_name}</td>
-                    <td className="py-2.5 capitalize">{job.destination_type}</td>
-                    <td className="py-2.5 font-mono text-[11px] text-black/60">{job.destination}</td>
-                    <td className="py-2.5 max-w-md truncate font-mono text-[11px] text-black/50">{job.message_body}</td>
+                  <tr key={job.id} className="hover:bg-[#f8f8f7] transition-colors">
+                    <td className="py-3 font-semibold text-[#111111]">{job.talent_name}</td>
+                    <td className="py-3 capitalize text-[#6B7280]">{job.destination_type}</td>
+                    <td className="py-3 font-mono text-[11px] text-[#6B7280]">{job.destination}</td>
+                    <td className="py-3 max-w-md truncate font-mono text-[11px] text-[#6B7280]/80">{job.message_body}</td>
                   </tr>
                 ))}
               </tbody>
@@ -800,12 +978,13 @@ function WECampaignLauncher() {
           </div>
         </div>
       )}
+
     </div>
   );
 }
 
 // ==========================================
-// 3. CAMPAIGN HISTORY (Batches & Jobs)
+// 3. CAMPAIGN HISTORY
 // ==========================================
 function WEHistoryPanel() {
   const [batches, setBatches] = useState([]);
@@ -845,193 +1024,180 @@ function WEHistoryPanel() {
   const handleAction = async (batchId, action) => {
     try {
       await runBatchAction(batchId, action);
-      toast.success(`Batch successfully ${action}ed`);
+      toast.success(`Action: '${action}' executed successfully.`);
       fetchHistory();
       if (selectedBatchId === batchId) {
         handleBatchClick(batchId);
       }
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Action execution failed");
+      toast.error(err?.response?.data?.detail || "Execution failed");
     }
   };
 
   const handleRetryJob = async (job) => {
     try {
-      await retryJob(job.batch_id, job.id);
-      toast.success("Job successfully queued for retry");
-      handleBatchClick(job.batch_id);
+      await retryJob(job.id);
+      toast.success("Job re-queued successfully");
+      if (selectedBatchId) {
+        const jobList = await getJobs(selectedBatchId);
+        setJobs(jobList);
+      }
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to retry job");
+      toast.error("Retry failed");
     }
   };
 
   if (loading) {
     return (
-      <div className="flex justify-center p-12 bg-white rounded-md border border-black/[0.06]">
-        <RefreshCw className="w-6 h-6 animate-spin text-black/40" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-1 space-y-4">
+          {[...Array(3)].map((_, idx) => (
+            <div key={idx} className="bg-white p-6 rounded-2xl space-y-3 shadow-sm animate-pulse border border-black/[0.02]">
+              <div className="h-4 bg-[#111111]/5 rounded w-2/3"></div>
+              <div className="h-3 bg-[#111111]/5 rounded w-1/2"></div>
+            </div>
+          ))}
+        </div>
+        <div className="lg:col-span-2 bg-white rounded-2xl h-96 animate-pulse"></div>
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
       
-      {/* Batches Table */}
-      <div className="xl:col-span-1 bg-white p-6 rounded-md border border-black/[0.06] space-y-4">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60 border-b border-black/[0.06] pb-3">Execution Batches</h3>
-        
-        <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
-          {batches.map((batch) => {
-            const active = selectedBatchId === batch.id;
-            // Distinct buckets — UNCONFIRMED is NEVER counted as verified.
-            const verified = batch.sent_count || 0;
-            const unconfirmed = batch.unconfirmed_count || 0;
-            const failed = batch.failed_count || 0;
-            const progress = batch.total_jobs > 0
-              ? Math.round(((verified + unconfirmed + failed) / batch.total_jobs) * 100)
-              : 0;
-
+      {/* Left List of Campaigns batches */}
+      <div className="lg:col-span-1 bg-white p-6 rounded-2xl space-y-4 shadow-sm max-h-[600px] overflow-y-auto">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280] pb-2 border-b border-black/[0.04]">Campaign Batches</h3>
+        <div className="space-y-3">
+          {batches.map((b) => {
+            const isSelected = selectedBatchId === b.id;
+            const completed = b.processed_jobs || 0;
+            const total = b.total_jobs || 0;
+            const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
             return (
               <div
-                key={batch.id}
-                onClick={() => handleBatchClick(batch.id)}
-                className={`p-4 rounded-sm border transition-all cursor-pointer space-y-3 ${
-                  active 
-                    ? "bg-[#f8f8f6] border-black" 
-                    : "bg-white border-black/10 hover:border-black/20"
+                key={b.id}
+                onClick={() => handleBatchClick(b.id)}
+                className={`p-5 rounded-xl border cursor-pointer transition-all duration-150 space-y-3 select-none ${
+                  isSelected ? "bg-[#f8f8f7] border-black" : "bg-white border-black/[0.06] hover:border-black/20"
                 }`}
               >
                 <div className="flex justify-between items-start gap-2">
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <h4 className="font-semibold text-sm truncate max-w-[130px]">{batch.source_label || batch.project_name || "Untitled Broadcast"}</h4>
-                      {(() => {
-                        const st = batch.source_type || (batch.project_id ? "PROJECT" : "");
-                        if (!st) return null;
-                        const meta = st === "CRM"
-                          ? { label: "CRM", cls: "bg-purple-50 text-purple-700" }
-                          : st === "MANUAL"
-                            ? { label: "Manual", cls: "bg-teal-50 text-teal-700" }
-                            : { label: "Project", cls: "bg-blue-50 text-blue-700" };
-                        return <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>;
-                      })()}
-                    </div>
-                    <p className="text-[10px] text-black/40 font-mono mt-0.5">{batch.template_slug}</p>
-                  </div>
-                  <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 font-bold rounded-sm ${
-                    batch.status === "completed" ? "bg-emerald-50 text-emerald-700 border border-emerald-100" :
-                    batch.status === "running" ? "bg-sky-50 text-sky-700 border border-sky-100 animate-pulse" :
-                    batch.status === "paused" ? "bg-amber-50 text-amber-700 border border-amber-100" :
-                    batch.status === "dry_run_complete" ? "bg-purple-50 text-purple-700 border border-purple-100" :
-                    "bg-red-50 text-red-700 border border-red-100"
+                  <h4 className="font-semibold text-sm text-[#111111]">{b.template_name}</h4>
+                  <span className={`text-[9px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
+                    b.status === "processing" ? "bg-indigo-500/10 text-indigo-700 animate-pulse" :
+                    b.status === "completed" ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
+                    b.status === "paused" ? "bg-amber-500/10 text-amber-700" :
+                    "bg-black/5 text-[#6B7280]"
                   }`}>
-                    {batch.status.replace("_", " ")}
+                    {b.status}
                   </span>
                 </div>
 
-                {/* Progress bar */}
-                {batch.status !== "dry_run_complete" && (
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] text-black/40 font-medium">
-                      <span>Progress</span>
-                      <span>{progress}% — {verified} verified · {unconfirmed} unconfirmed · {failed} failed</span>
-                    </div>
-                    <div className="w-full bg-black/[0.06] h-1.5 rounded-full overflow-hidden">
-                      <div className="bg-black h-full transition-all duration-300" style={{ width: `${progress}%` }} />
-                    </div>
-                  </div>
-                )}
+                <div className="text-[10px] text-[#6B7280] font-mono flex justify-between">
+                  <span>Source: {b.source_type}</span>
+                  <span>{new Date(b.created_at).toLocaleDateString()}</span>
+                </div>
 
-                {/* Date & Trigger Actions */}
-                <div className="flex justify-between items-center text-[10px] text-black/40 pt-2 border-t border-black/[0.04]">
-                  <span>{new Date(batch.created_at).toLocaleString()}</span>
-                  
-                  {batch.status === "running" && (
+                {/* Progress bar */}
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[10px] text-[#6B7280]">
+                    <span>Delivered: {completed}/{total}</span>
+                    <span>{percent}%</span>
+                  </div>
+                  <div className="w-full bg-black/[0.04] h-1.5 rounded-full overflow-hidden">
+                    <div className="bg-[#111111] h-full" style={{ width: `${percent}%` }} />
+                  </div>
+                </div>
+
+                {/* Actions quick triggers */}
+                <div className="flex gap-1.5 pt-1 border-t border-black/[0.04] select-none">
+                  {b.status === "paused" && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); handleAction(batch.id, "pause"); }}
-                      className="flex items-center gap-1 text-[10px] font-bold text-amber-700 uppercase hover:underline"
+                      onClick={(e) => { e.stopPropagation(); handleAction(b.id, "resume"); }}
+                      className="text-[9px] font-bold uppercase tracking-wider border border-[#0D8A5F]/20 text-[#0D8A5F] hover:bg-[#0D8A5F]/10 px-2 py-1 rounded-lg"
                     >
-                      <Pause className="w-3 h-3" /> Pause
+                      Resume
                     </button>
                   )}
-                  {batch.status === "paused" && (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleAction(batch.id, "resume"); }}
-                        className="flex items-center gap-1 text-[10px] font-bold text-sky-700 uppercase hover:underline"
-                      >
-                        <Play className="w-3 h-3" /> Resume
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleAction(batch.id, "cancel"); }}
-                        className="flex items-center gap-1 text-[10px] font-bold text-red-700 uppercase hover:underline"
-                      >
-                        <Square className="w-3 h-3" /> Cancel
-                      </button>
-                    </div>
+                  {b.status === "processing" && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleAction(b.id, "pause"); }}
+                      className="text-[9px] font-bold uppercase tracking-wider border border-amber-200 text-amber-700 hover:bg-amber-500/10 px-2 py-1 rounded-lg"
+                    >
+                      Pause
+                    </button>
+                  )}
+                  {b.status !== "completed" && b.status !== "cancelled" && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleAction(b.id, "cancel"); }}
+                      className="text-[9px] font-bold uppercase tracking-wider border border-red-200 text-red-600 hover:bg-red-500/10 px-2 py-1 rounded-lg"
+                    >
+                      Cancel
+                    </button>
                   )}
                 </div>
               </div>
             );
           })}
           {batches.length === 0 && (
-            <p className="text-xs text-black/40 p-4 text-center">No broadcast campaigns launched yet.</p>
+            <p className="text-xs text-[#6B7280] text-center py-6 italic">No campaign runs registered.</p>
           )}
         </div>
       </div>
 
-      {/* Jobs Delivery Tracker */}
-      <div className="xl:col-span-2 bg-white p-6 rounded-md border border-black/[0.06] space-y-4">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60 border-b border-black/[0.06] pb-3">Delivery Tracker</h3>
-        
+      {/* Right Jobs audit list */}
+      <div className="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm min-h-[400px]">
         {selectedBatchId ? (
           loadingJobs ? (
-            <div className="flex justify-center p-12">
-              <RefreshCw className="w-6 h-6 animate-spin text-black/40" />
+            <div className="flex flex-col items-center justify-center p-12 h-full">
+              <RefreshCw className="w-6 h-6 animate-spin text-[#111111]/30 mb-2" />
+              <p className="text-xs text-[#6B7280]">Loading delivery breakdowns...</p>
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="overflow-x-auto">
+              <div className="border-b border-black/[0.04] pb-3">
+                <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Jobs Audit tracker</h3>
+                <p className="text-xs text-[#6B7280] mt-0.5">Execution logs for batch: <code className="text-xs font-mono">{selectedBatchId.slice(0, 8)}</code></p>
+              </div>
+
+              <div className="overflow-x-auto max-h-[500px] overflow-y-auto pr-1">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
-                    <tr className="border-b border-black/10 text-black/50 font-medium">
-                      <th className="py-2.5 font-semibold">Talent</th>
-                      <th className="py-2.5 font-semibold">Destination Address</th>
-                      <th className="py-2.5 font-semibold">Status</th>
-                      <th className="py-2.5 font-semibold">Attempts</th>
-                      <th className="py-2.5 font-semibold">Log Error</th>
-                      <th className="py-2.5 font-semibold text-right">Actions</th>
+                    <tr className="border-b border-black/10 text-[#6B7280] font-semibold uppercase tracking-wider text-[10px]">
+                      <th className="py-2.5">Talent</th>
+                      <th className="py-2.5">Destination</th>
+                      <th className="py-2.5">Status</th>
+                      <th className="py-2.5">Retries</th>
+                      <th className="py-2.5">Error Message</th>
+                      <th className="py-2.5 text-right">Action</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-black/[0.04]">
+                  <tbody className="divide-y divide-black/[0.03]">
                     {jobs.map((job) => (
-                      <tr key={job.id} className="hover:bg-[#f8f8f6]">
-                        <td className="py-2.5 font-medium">{job.talent_name}</td>
-                        <td className="py-2.5 font-mono text-[11px] text-black/60">{job.destination}</td>
+                      <tr key={job.id} className="hover:bg-[#f8f8f7] transition-colors">
+                        <td className="py-2.5 font-semibold text-[#111111]">{job.talent_name}</td>
+                        <td className="py-2.5 font-mono text-[11px] text-[#6B7280]">{job.destination}</td>
                         <td className="py-2.5">
-                          <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
-                            job.status === "sent" ? "bg-emerald-50 text-emerald-700" :
-                            job.status === "sent_unverified" ? "bg-orange-50 text-orange-700" :
-                            job.status === "sending" ? "bg-sky-50 text-sky-700 animate-pulse" :
-                            job.status === "pending" ? "bg-amber-50 text-amber-700" :
-                            job.status === "dry_run_preview" ? "bg-purple-50 text-purple-700" :
-                            "bg-red-50 text-red-700"
+                          <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
+                            job.status === "sent" ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
+                            job.status === "failed" ? "bg-red-500/10 text-red-600" :
+                            job.status === "skipped" ? "bg-amber-500/10 text-amber-700" :
+                            "bg-black/5 text-[#6B7280]"
                           }`}>
-                            {job.status === "sent" ? "Verified" :
-                             job.status === "sent_unverified" ? "Delivery Unconfirmed" :
-                             job.status === "failed" ? "Failed" :
-                             job.status}
+                            {job.status}
                           </span>
                         </td>
-                        <td className="py-2.5 font-mono">{job.attempt_count}</td>
+                        <td className="py-2.5 font-mono text-[#6B7280]">{job.retry_count || 0}</td>
                         <td className="py-2.5 max-w-xs truncate text-[11px] text-red-600 font-mono" title={job.error_message}>
                           {job.error_message || "—"}
                         </td>
-                        <td className="py-2.5 text-right">
-                          {(job.status === "failed" || job.status === "skipped" || job.status === "sent_unverified") && (
+                        <td className="py-2.5 text-right select-none">
+                          {(job.status === "failed" || job.status === "skipped") && (
                             <button
                               onClick={() => handleRetryJob(job)}
-                              className="text-[10px] font-bold text-black uppercase tracking-wider hover:underline border border-black/10 px-2 py-1 rounded-sm bg-white"
+                              className="text-[9px] font-bold text-black uppercase tracking-widest hover:underline border border-black/10 px-2 py-1 rounded-lg bg-white active:scale-95 duration-100"
                             >
                               Retry
                             </button>
@@ -1041,7 +1207,7 @@ function WEHistoryPanel() {
                     ))}
                     {jobs.length === 0 && (
                       <tr>
-                        <td colSpan="6" className="text-center py-6 text-black/40">No individual message logs found.</td>
+                        <td colSpan="6" className="text-center py-6 text-[#6B7280]">No individual message logs found.</td>
                       </tr>
                     )}
                   </tbody>
@@ -1050,9 +1216,9 @@ function WEHistoryPanel() {
             </div>
           )
         ) : (
-          <div className="flex flex-col items-center justify-center p-12 text-black/30 border border-dashed border-black/10 rounded-sm">
-            <History className="w-8 h-8 opacity-40 mb-2" />
-            <p className="text-xs">Select a campaign batch to view delivery breakdowns.</p>
+          <div className="flex flex-col items-center justify-center p-12 text-black/30 border border-dashed border-black/10 rounded-2xl min-h-[300px] h-full">
+            <History className="w-8 h-8 opacity-30 mb-2" />
+            <p className="text-xs text-[#6B7280]">Select a campaign batch to view delivery breakdowns.</p>
           </div>
         )}
       </div>
@@ -1169,49 +1335,49 @@ function WETemplateManager() {
 
   if (loading) {
     return (
-      <div className="flex justify-center p-12 bg-white rounded-md border border-black/[0.06]">
-        <RefreshCw className="w-6 h-6 animate-spin text-black/40" />
+      <div className="flex justify-center p-12 bg-white rounded-2xl border border-black/[0.06] shadow-sm">
+        <RefreshCw className="w-6 h-6 animate-spin text-[#111111]/30" />
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
       
       {/* List */}
-      <div className="xl:col-span-1 bg-white p-6 rounded-md border border-black/[0.06] space-y-4">
-        <div className="flex justify-between items-center border-b border-black/[0.06] pb-3">
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Saved Templates</h3>
+      <div className="xl:col-span-1 bg-white p-6 rounded-2xl shadow-sm space-y-4">
+        <div className="flex justify-between items-center border-b border-black/[0.04] pb-3">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Saved Templates</h3>
           <button
             onClick={handleCreateNewClick}
-            className="flex items-center gap-1.5 text-xs font-bold bg-black text-white px-2.5 py-1.5 rounded-sm hover:bg-black/90 transition-colors"
+            className="flex items-center gap-1.5 text-xs font-bold bg-black text-white px-3 py-2 rounded-lg hover:opacity-90 active:scale-[0.98] duration-120 transition-all"
           >
             <Plus className="w-3.5 h-3.5" /> Create
           </button>
         </div>
 
-        <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+        <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
           {templates.map(t => (
             <div
               key={t.id}
               onClick={() => handleEditClick(t)}
-              className={`p-4 rounded-sm border cursor-pointer transition-all space-y-2 ${
+              className={`p-5 rounded-xl border cursor-pointer transition-all duration-150 space-y-2 select-none ${
                 editingId === t.id 
-                  ? "bg-[#f8f8f6] border-black" 
-                  : "bg-white border-black/10 hover:border-black/20"
+                  ? "bg-[#f8f8f7] border-black" 
+                  : "bg-white border-black/[0.06] hover:border-black/25"
               }`}
             >
               <div className="flex justify-between items-start gap-2">
-                <h4 className="font-semibold text-sm">{t.name}</h4>
+                <h4 className="font-semibold text-sm text-[#111111]">{t.name}</h4>
                 {!t.is_custom && (
-                  <span className="text-[9px] font-bold uppercase tracking-wider bg-black/[0.04] px-1.5 py-0.5 rounded-sm text-black/50 border border-black/[0.06]">System</span>
+                  <span className="text-[9px] font-bold uppercase tracking-wider bg-black/[0.04] px-1.5 py-0.5 rounded-full text-black/50 border border-black/[0.06]">System</span>
                 )}
               </div>
-              <p className="text-xs text-black/50 font-mono truncate">{t.slug}</p>
+              <p className="text-xs text-[#6B7280] font-mono truncate">{t.slug}</p>
               
               <div className="flex flex-wrap gap-1 mt-2">
                 {t.variables?.map(v => (
-                  <span key={v} className="text-[9px] font-mono bg-black/[0.04] px-1.5 py-0.5 rounded-sm text-black/60 border border-black/[0.02]">
+                  <span key={v} className="text-[9px] font-mono bg-black/[0.04] px-2 py-0.5 rounded-full text-black/60 border border-black/[0.02]">
                     {v}
                   </span>
                 ))}
@@ -1222,47 +1388,47 @@ function WETemplateManager() {
       </div>
 
       {/* Editor Panel */}
-      <div className="xl:col-span-2 bg-white p-6 rounded-md border border-black/[0.06]">
+      <div className="xl:col-span-2 bg-white p-8 rounded-2xl shadow-sm">
         {editingId ? (
-          <form onSubmit={handleSave} className="space-y-4">
-            <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60 border-b border-black/[0.06] pb-3">
+          <form onSubmit={handleSave} className="space-y-6">
+            <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280] border-b border-black/[0.04] pb-3">
               {editingId === "new" ? "New Template Layout" : "Edit Template Layout"}
             </h3>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Template Label</label>
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Template Label</label>
                 <input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                   placeholder="e.g. Casting Callback"
-                  className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                  className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
                   required
                 />
               </div>
 
               <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Unique URL Slug Identifier</label>
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Unique URL Slug Identifier</label>
                 <input
                   type="text"
                   value={formData.slug}
                   onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/\s+/g, "_") })}
                   placeholder="e.g. casting_callback"
-                  className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                  className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
                   required
                   disabled={editingId !== "new" && !formData.is_custom}
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Media Type</label>
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Media Type</label>
                 <select
                   value={formData.media_type}
                   onChange={(e) => setFormData({ ...formData, media_type: e.target.value })}
-                  className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                  className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
                 >
                   <option value="none">None (Text Only)</option>
                   <option value="image">Image/Video Upload</option>
@@ -1272,39 +1438,39 @@ function WETemplateManager() {
 
               {formData.media_type !== "none" && (
                 <div className="space-y-2">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Cloudinary Static Media Attachment Link</label>
+                  <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Cloudinary Static Media Attachment Link</label>
                   <input
                     type="url"
                     value={formData.media_url}
                     onChange={(e) => setFormData({ ...formData, media_url: e.target.value })}
                     placeholder="https://res.cloudinary.com/..."
-                    className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                    className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
                   />
                 </div>
               )}
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-semibold uppercase tracking-wider text-black/60 flex justify-between">
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280] flex justify-between">
                 <span>Message Body Structure</span>
-                <span className="text-[10px] text-black/40 font-mono normal-case">Wrap placeholders in double curly braces: {"{{var}}"}</span>
+                <span className="text-[10px] text-[#6B7280] font-mono normal-case">Wrap placeholders in double curly braces: {"{{var}}"}</span>
               </label>
               <textarea
                 value={formData.body_text}
                 onChange={(e) => handleBodyTextChange(e.target.value)}
                 rows="8"
                 placeholder="Hi {{talent_name}}... We are locked for {{project_name}}."
-                className="w-full text-xs font-mono bg-[#f8f8f6] border border-black/10 rounded-sm p-3 focus:outline-none focus:ring-1 focus:ring-black leading-relaxed"
+                className="w-full text-xs font-mono bg-[#f8f8f7] border border-black/10 rounded-lg p-3 focus:outline-none focus:ring-1 focus:ring-black leading-relaxed"
                 required
               />
             </div>
 
             {formData.variables.length > 0 && (
               <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Extracted Dynamic Variables</label>
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Extracted Dynamic Variables</label>
                 <div className="flex flex-wrap gap-1.5">
                   {formData.variables.map(v => (
-                    <span key={v} className="text-xs font-mono bg-[#f8f8f6] px-2 py-1 rounded-sm border border-black/10 text-black/70">
+                    <span key={v} className="text-xs font-mono bg-[#f8f8f7] px-2.5 py-1 rounded-full border border-black/10 text-black/70 font-semibold">
                       {v}
                     </span>
                   ))}
@@ -1312,12 +1478,12 @@ function WETemplateManager() {
               </div>
             )}
 
-            <div className="flex justify-between items-center pt-4 border-t border-black/[0.06]">
+            <div className="flex justify-between items-center pt-4 border-t border-black/[0.04] select-none">
               {editingId !== "new" && formData.is_custom ? (
                 <button
                   type="button"
                   onClick={() => handleDelete(editingId)}
-                  className="flex items-center gap-1 text-xs font-bold text-red-600 uppercase hover:underline"
+                  className="flex items-center gap-1.5 text-xs font-bold text-red-600 uppercase hover:underline"
                 >
                   <Trash2 className="w-4 h-4" /> Delete Template
                 </button>
@@ -1327,13 +1493,13 @@ function WETemplateManager() {
                 <button
                   type="button"
                   onClick={() => setEditingId(null)}
-                  className="text-xs font-bold uppercase tracking-wider text-black/60 hover:text-black px-4 py-2 border border-black/10 rounded-sm bg-white"
+                  className="text-xs font-semibold uppercase tracking-widest text-black/60 hover:text-black px-4 py-3 border border-black/15 rounded-lg bg-white h-[48px] active:scale-95 duration-120"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider bg-black text-white px-4 py-2 rounded-sm hover:bg-black/90 transition-colors"
+                  className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-widest bg-black text-white px-5 py-3 rounded-lg hover:opacity-90 transition-colors h-[48px] active:scale-[0.98] duration-120"
                 >
                   <Save className="w-4 h-4" /> Save Template
                 </button>
@@ -1342,8 +1508,8 @@ function WETemplateManager() {
 
           </form>
         ) : (
-          <div className="flex flex-col items-center justify-center p-12 text-black/30 border border-dashed border-black/10 rounded-sm min-h-[300px]">
-            <Edit className="w-8 h-8 opacity-40 mb-2" />
+          <div className="flex flex-col items-center justify-center p-12 text-[#6B7280] border border-dashed border-black/10 rounded-2xl min-h-[300px]">
+            <Edit className="w-8 h-8 opacity-30 mb-2" />
             <p className="text-xs">Create or select a template to start designing message workflows.</p>
           </div>
         )}
@@ -1398,78 +1564,78 @@ function WEConfigPanel() {
 
   if (loading) {
     return (
-      <div className="flex justify-center p-12 bg-white rounded-md border border-black/[0.06]">
-        <RefreshCw className="w-6 h-6 animate-spin text-black/40" />
+      <div className="flex justify-center p-12 bg-white rounded-2xl border border-black/[0.06] shadow-sm">
+        <RefreshCw className="w-6 h-6 animate-spin text-[#111111]/30" />
       </div>
     );
   }
 
   return (
-    <div className="max-w-2xl bg-white p-6 rounded-md border border-black/[0.06] space-y-6">
-      <div className="border-b border-black/[0.06] pb-3">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Safety Controls & Anti-Ban Config</h3>
-        <p className="text-xs text-black/40 mt-1">Adjust delivery parameters. Slower execution reduces risk of meta banning. ONLY system admins can override these.</p>
+    <div className="max-w-2xl bg-white p-8 rounded-2xl shadow-sm space-y-8">
+      <div className="border-b border-black/[0.04] pb-4">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Safety Controls & Anti-Ban</h3>
+        <p className="text-xs text-[#6B7280] mt-1.5 leading-relaxed">Adjust delivery parameters. Slower execution reduces risk of meta banning. ONLY system admins can override these.</p>
       </div>
 
-      <form onSubmit={handleSave} className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <form onSubmit={handleSave} className="space-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Minimum Delay (Seconds)</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Minimum Delay (Seconds)</label>
             <input
               type="number"
               value={config.min_delay_sec || 8}
               onChange={(e) => handleChange("min_delay_sec", e.target.value)}
-              className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+              className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
               min="2"
               required
             />
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Maximum Delay (Seconds)</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Maximum Delay (Seconds)</label>
             <input
               type="number"
               value={config.max_delay_sec || 15}
               onChange={(e) => handleChange("max_delay_sec", e.target.value)}
-              className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+              className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
               min="3"
               required
             />
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Retry Attempts</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Retry Attempts</label>
             <input
               type="number"
               value={config.max_retries || 3}
               onChange={(e) => handleChange("max_retries", e.target.value)}
-              className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+              className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
               min="0"
               required
             />
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Circuit Breaker Threshold</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Circuit Breaker Threshold</label>
             <input
               type="number"
               value={config.circuit_breaker_threshold || 5}
               onChange={(e) => handleChange("circuit_breaker_threshold", e.target.value)}
-              className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+              className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
               min="1"
               required
             />
-            <p className="text-[10px] text-black/40">Number of consecutive failures before auto-pausing.</p>
+            <p className="text-[10px] text-[#6B7280]">Number of consecutive failures before auto-pausing.</p>
           </div>
         </div>
 
-        <div className="pt-4 border-t border-black/[0.06] flex justify-end">
+        <div className="pt-4 border-t border-black/[0.04] flex justify-end select-none">
           <button
             type="submit"
             disabled={saving}
-            className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider bg-black text-white px-5 py-2.5 rounded-sm hover:bg-black/90 transition-colors disabled:opacity-50"
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold uppercase tracking-widest bg-black text-white px-6 py-3.5 rounded-lg hover:opacity-90 transition-colors disabled:opacity-50 h-[52px] active:scale-[0.98] duration-120"
           >
             {saving ? "Saving..." : "Save Configurations"}
           </button>
@@ -1504,23 +1670,23 @@ function WEAuditLogPanel() {
 
   if (loading) {
     return (
-      <div className="flex justify-center p-12 bg-white rounded-md border border-black/[0.06]">
-        <RefreshCw className="w-6 h-6 animate-spin text-black/40" />
+      <div className="flex justify-center p-12 bg-white rounded-2xl border border-black/[0.06] shadow-sm">
+        <RefreshCw className="w-6 h-6 animate-spin text-[#111111]/30" />
       </div>
     );
   }
 
   return (
-    <div className="bg-white p-6 rounded-md border border-black/[0.06] space-y-4">
-      <div className="flex justify-between items-center border-b border-black/[0.06] pb-3">
+    <div className="bg-white p-8 rounded-2xl shadow-sm space-y-6">
+      <div className="flex justify-between items-center border-b border-black/[0.04] pb-4 select-none">
         <div>
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Immutable Audit Logs</h3>
-          <p className="text-xs text-black/40 mt-0.5">Continuous delivery auditing of automation flows.</p>
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Immutable Audit Logs</h3>
+          <p className="text-xs text-[#6B7280] mt-0.5">Continuous delivery auditing of automation flows.</p>
         </div>
         <select
           value={limit}
           onChange={(e) => setLimit(Number(e.target.value))}
-          className="text-xs bg-[#f8f8f6] border border-black/10 rounded-sm p-1.5 focus:outline-none"
+          className="text-xs bg-[#f8f8f7] border border-black/10 rounded-lg p-2 focus:outline-none"
         >
           <option value="50">Show 50</option>
           <option value="100">Show 100</option>
@@ -1531,37 +1697,37 @@ function WEAuditLogPanel() {
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse text-xs">
           <thead>
-            <tr className="border-b border-black/10 text-black/50 font-medium">
-              <th className="py-2.5 font-semibold">Timestamp</th>
-              <th className="py-2.5 font-semibold">Event Code</th>
-              <th className="py-2.5 font-semibold">Destination Address</th>
-              <th className="py-2.5 font-semibold">Actor / Node</th>
-              <th className="py-2.5 font-semibold">Render Preview</th>
+            <tr className="border-b border-black/10 text-[#6B7280] font-semibold uppercase tracking-wider text-[10px]">
+              <th className="py-3">Timestamp</th>
+              <th className="py-3">Event Code</th>
+              <th className="py-3">Destination</th>
+              <th className="py-3">Actor / Node</th>
+              <th className="py-3">Render Preview</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-black/[0.04] font-mono text-[11px] text-black/80">
+          <tbody className="divide-y divide-black/[0.03] font-mono text-[11px] text-[#111111]">
             {logs.map((log) => (
-              <tr key={log.id} className="hover:bg-[#f8f8f6]">
-                <td className="py-2.5 text-black/50">{new Date(log.timestamp).toLocaleString()}</td>
-                <td className="py-2.5">
-                  <span className={`px-1.5 py-0.5 rounded-sm font-bold uppercase ${
-                    log.event_type.includes("failed") ? "bg-red-50 text-red-700" :
-                    log.event_type.includes("sent") ? "bg-emerald-50 text-emerald-700" :
-                    "bg-black/[0.04] text-black/60"
+              <tr key={log.id} className="hover:bg-[#f8f8f7] transition-colors">
+                <td className="py-3 text-[#6B7280]">{new Date(log.timestamp).toLocaleString()}</td>
+                <td className="py-3">
+                  <span className={`px-2 py-0.5 rounded-full font-bold uppercase text-[9px] ${
+                    log.event_type.includes("failed") ? "bg-red-500/10 text-red-700" :
+                    log.event_type.includes("sent") ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
+                    "bg-black/5 text-[#6B7280]"
                   }`}>
                     {log.event_type}
                   </span>
                 </td>
-                <td className="py-2.5 text-black/60">{log.destination || "—"}</td>
-                <td className="py-2.5 text-black/50">{log.actor}</td>
-                <td className="py-2.5 max-w-sm truncate text-black/50" title={log.message_preview}>
+                <td className="py-3 text-[#6B7280]">{log.destination || "—"}</td>
+                <td className="py-3 text-[#6B7280]">{log.actor}</td>
+                <td className="py-3 max-w-sm truncate text-[#6B7280]" title={log.message_preview}>
                   {log.message_preview || "—"}
                 </td>
               </tr>
             ))}
             {logs.length === 0 && (
               <tr>
-                <td colSpan="5" className="text-center py-6 text-black/40 font-sans">No audit events logged yet.</td>
+                <td colSpan="5" className="text-center py-6 text-[#6B7280] font-sans">No audit events logged yet.</td>
               </tr>
             )}
           </tbody>

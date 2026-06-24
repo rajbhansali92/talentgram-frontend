@@ -372,7 +372,7 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
 @router.post("/public/apply")
 async def start_application(
     payload: ApplicationStartIn,
-    request: Request,
+    request: Request = None,
     authorization: Optional[str] = Header(None),
 ):
     email = normalize_email(payload.email)
@@ -381,12 +381,15 @@ async def start_application(
 
     # P1-4: burst / enumeration protection. Keyed per-IP and per-email so a
     # single attacker can neither sweep many emails from one IP nor hammer one
-    # victim email from a botnet of IPs.
-    ip = client_ip(request)
-    if not rate_limit_ok(f"apply:ip:{ip}", limit=20, window_seconds=60.0):
-        raise HTTPException(429, "Too many attempts — please try again shortly")
-    if not rate_limit_ok(f"apply:email:{email}", limit=10, window_seconds=300.0):
-        raise HTTPException(429, "Too many attempts for this email — please try again later")
+    # victim email from a botnet of IPs. `request` is always injected over
+    # HTTP; it is only None for in-process direct calls (tests), which are not
+    # an attack surface and skip the limiter.
+    if request is not None:
+        ip = client_ip(request)
+        if not rate_limit_ok(f"apply:ip:{ip}", limit=20, window_seconds=60.0):
+            raise HTTPException(429, "Too many attempts — please try again shortly")
+        if not rate_limit_ok(f"apply:email:{email}", limit=10, window_seconds=300.0):
+            raise HTTPException(429, "Too many attempts for this email — please try again later")
 
     talent = await _find_talent_by_email(email)
     talent_age = None

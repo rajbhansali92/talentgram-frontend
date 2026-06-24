@@ -300,7 +300,7 @@ def _prefill_rate_limit_ok(request: Request) -> bool:
 async def start_submission(
     slug: str,
     payload: SubmissionStartIn,
-    request: Request,
+    request: Request = None,
     authorization: Optional[str] = Header(None),
 ):
     """Start OR resume a submission.
@@ -323,11 +323,14 @@ async def start_submission(
         raise HTTPException(400, "Invalid email address")
 
     # P1-4: burst / enumeration protection (per-IP + per-(project,email)).
-    ip = client_ip(request)
-    if not rate_limit_ok(f"sub:ip:{ip}", limit=20, window_seconds=60.0):
-        raise HTTPException(429, "Too many attempts — please try again shortly")
-    if not rate_limit_ok(f"sub:{slug}:{email}", limit=10, window_seconds=300.0):
-        raise HTTPException(429, "Too many attempts for this email — please try again later")
+    # `request` is always injected over HTTP; only None for in-process direct
+    # calls (tests), which are not an attack surface and skip the limiter.
+    if request is not None:
+        ip = client_ip(request)
+        if not rate_limit_ok(f"sub:ip:{ip}", limit=20, window_seconds=60.0):
+            raise HTTPException(429, "Too many attempts — please try again shortly")
+        if not rate_limit_ok(f"sub:{slug}:{email}", limit=10, window_seconds=300.0):
+            raise HTTPException(429, "Too many attempts for this email — please try again later")
 
     existing = await db.submissions.find_one({
         "project_id": project["id"],

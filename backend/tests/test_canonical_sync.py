@@ -284,12 +284,15 @@ async def test_e_returning_talent_submitted_reset():
         profile_id=None,
     )
 
-    from fastapi import Request
-    # Call the function directly (not via HTTP client, to avoid auth complexity)
-    # We verify that update_one is called with status='draft' and media=[]
-    # The simplest proof is inspecting mock calls after calling start_application.
+    # Security hardening (security/public-flow-ownership-hardening): the reset
+    # of a SUBMITTED application now requires proof of email ownership. A
+    # legitimate returning talent holds a portal token (minted post-OTP/Google),
+    # so we present one here — this exercises the *secure* reset path while
+    # preserving the original product behaviour (returning talent -> draft).
+    from core import mint_portal_token
+    owner_auth = f"Bearer {mint_portal_token('returning@test.com')}"
     try:
-        await start_application(payload)
+        await start_application(payload, None, owner_auth)
     except Exception:
         pass  # May raise due to token generation or missing mocks; that is OK
 

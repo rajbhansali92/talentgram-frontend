@@ -113,6 +113,16 @@ _LIST_PROJECTION = {
     "created_by": 0,
     "source": 0,        # Internal provenance — not rendered in list UI
     "notes": 0,         # Long-form text — not needed by list cards
+    # Least-privilege: internal/financial fields that NO list consumer
+    # (Browse Talent modal, roster, link generator) renders. Excluding them
+    # keeps internal casting state out of the browser payload/devtools and
+    # trims the list response. Single-talent views (/talents/{id}) are
+    # unaffected — they fetch the full document.
+    "admin_flags": 0,       # internal casting flags
+    "internal_status": 0,   # internal lifecycle state
+    "commission_data": 0,   # financial terms
+    "client_feedback": 0,   # internal client notes
+    "whatsapp_group_name": 0,  # ops field (WhatsApp engine uses its own API)
 }
 
 

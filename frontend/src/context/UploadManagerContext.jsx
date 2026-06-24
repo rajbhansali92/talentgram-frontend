@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, useEffect } from "react";
 import { api } from "../lib/api";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
@@ -26,6 +26,24 @@ export function useUploadManager() {
 export function UploadManagerProvider({ children }) {
     const [activeUploads, setActiveUploads] = useState({});
     const [retryQueue, setRetryQueue] = useState({});
+
+    // Guard against accidental navigation/refresh while an upload is in flight.
+    // The in-flight File cannot be re-read after a reload, so warn before the
+    // page unloads. (Mitigates the controllable-loss case; OS-level mobile tab
+    // eviction can still occur and is handled by re-upload + finalize reconcile.)
+    useEffect(() => {
+        const hasActive = Object.values(activeUploads).some(
+            (u) => u.status === "uploading" || u.status === "processing"
+        );
+        if (!hasActive) return;
+        const handler = (e) => {
+            e.preventDefault();
+            e.returnValue = "An upload is still in progress. Leaving now will lose it.";
+            return e.returnValue;
+        };
+        window.addEventListener("beforeunload", handler);
+        return () => window.removeEventListener("beforeunload", handler);
+    }, [activeUploads]);
 
     const uploadFile = async (file, category, label, options = {}) => {
         const { endpoint, token, onSuccess, onBeforeUpload } = options;

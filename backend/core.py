@@ -1767,6 +1767,12 @@ class AdminSubmissionEditIn(BaseModel):
     # `custom_answers` to support per-question visibility.
     field_visibility: Optional[Dict[str, Any]] = None
     media: Optional[List[Dict[str, Any]]] = None # Custom media curated settings & ordering
+    # Per-submission visibility overrides for TALENT-level portfolio media
+    # (which live on db.talents, not on the submission). Shape:
+    # { "<talent_media_id>": {"client_visible": bool, "internal_only": bool} }.
+    # Lets a recruiter apply the SAME Client/Hidden/Internal model to talent
+    # portfolio media without duplicating the media onto the submission.
+    talent_media_visibility: Optional[Dict[str, Any]] = None
     restore_revision_id: Optional[str] = None
     regenerate_snapshot: Optional[bool] = None
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { 
   Play, Pause, Square, QrCode, RefreshCw, AlertTriangle, CheckCircle, 
   Settings, Clock, ShieldAlert, History, Edit, Send, Save, Plus, Trash2, Database, AlertCircle,
-  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info
+  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info, User
 } from "lucide-react";
 import { toast } from "sonner";
 

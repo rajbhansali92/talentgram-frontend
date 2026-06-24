@@ -486,19 +486,32 @@ export default function SubmissionReviewCenter() {
         if (!selectedId) return;
         setSaving(true);
         try {
+            // Unified visibility: talent-level portfolio media can't carry flags
+            // on the submission itself, so persist a small id->flags override map
+            // (no media duplication). Built from the current talent media state.
+            const talent_media_visibility = {};
+            for (const m of talentPortfolioMedia) {
+                if (!m.id) continue;
+                talent_media_visibility[m.id] = {
+                    client_visible: m.client_visible !== false,
+                    internal_only: !!m.internal_only,
+                };
+            }
             await adminApi.put(`/projects/${id}/submissions/${selectedId}`, {
                 form_data: form,
                 field_visibility: fv,
                 media: mediaList,
+                talent_media_visibility,
             });
             toast.success("Curation settings saved");
-            
+
             // Reload detailed snapshot
             const { data } = await adminApi.get(`/projects/${id}/submissions/${selectedId}`);
             setDetail(data);
             setForm(normalize(data?.form_data));
             setFv(data?.field_visibility || {});
             setMediaList(data?.media || []);
+            setTalentPortfolioMedia(data?.talent_portfolio_media || []);
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to save curation settings");
         } finally {
@@ -513,6 +526,21 @@ export default function SubmissionReviewCenter() {
     const setMediaVisibility = useCallback((mediaId, mode) => {
         // mode: "client" (visible to client) | "hidden" (hide from client) | "internal" (internal only)
         setMediaList((prev) =>
+            prev.map((m) => {
+                if (m.id !== mediaId) return m;
+                if (mode === "client") return { ...m, client_visible: true, internal_only: false };
+                if (mode === "hidden") return { ...m, client_visible: false, internal_only: false };
+                if (mode === "internal") return { ...m, client_visible: false, internal_only: true };
+                return m;
+            })
+        );
+    }, []);
+
+    // Unified model (no special cases): identical control for TALENT-level
+    // portfolio media. Updates talentPortfolioMedia state; persisted as a
+    // per-submission override map by handleSaveCuration (no media duplication).
+    const setTalentMediaVisibility = useCallback((mediaId, mode) => {
+        setTalentPortfolioMedia((prev) =>
             prev.map((m) => {
                 if (m.id !== mediaId) return m;
                 if (mode === "client") return { ...m, client_visible: true, internal_only: false };
@@ -797,12 +825,15 @@ export default function SubmissionReviewCenter() {
     const indianImages = getCuratedMedia("indian");
     const westernImages = getCuratedMedia("western");
 
-    // Talent-level portfolio media (fetched from db.talents, read-only in review).
+    // Talent-level portfolio media (fetched from db.talents). Visibility is
+    // controlled per-submission; in client preview, hidden/internal disappear —
+    // identical behavior to submission media.
+    const talentVisFilter = (m) => !isPreviewMode || (m.client_visible !== false && !m.internal_only);
     const talentPortfolioImages = talentPortfolioMedia.filter(
-        (m) => m.category === "portfolio"
+        (m) => m.category === "portfolio" && talentVisFilter(m)
     );
     const talentAdditionalPortfolio = talentPortfolioMedia.filter(
-        (m) => m.category === "additional_portfolio" || m.category === "portfolio_general"
+        (m) => (m.category === "additional_portfolio" || m.category === "portfolio_general") && talentVisFilter(m)
     );
 
     const PERSONAL_FIELDS = [
@@ -1678,9 +1709,15 @@ export default function SubmissionReviewCenter() {
                                                         ) : (
                                                             <PremiumImage src={m.thumbnail_url || m.url} alt="" className="w-full aspect-video object-cover" />
                                                         )}
-                                                        <div className="p-2">
+                                                        <div className="p-2 flex flex-col gap-1.5">
                                                             <p className="text-[9px] text-black/50 font-mono uppercase truncate">{m.label || m.category}</p>
+                                                            <MediaVisControls media={m} onChange={setMediaVisibility} />
                                                         </div>
+                                                        {(m.client_visible === false || m.internal_only) && (
+                                                            <span className="absolute top-1.5 left-1.5 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
                                                         <button
                                                             type="button"
                                                             onClick={() => handleRemoveMedia(m.id)}
@@ -1752,6 +1789,16 @@ export default function SubmissionReviewCenter() {
                                                     poster={introVideo.poster_url}
                                                     label="Intro Tape"
                                                 />
+                                                {!isPreviewMode && (
+                                                    <div className="mt-3 flex items-center gap-2">
+                                                        {(introVideo.client_visible === false || introVideo.internal_only) && (
+                                                            <span className="text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">
+                                                                {introVideo.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
+                                                        <MediaVisControls media={introVideo} onChange={setMediaVisibility} />
+                                                    </div>
+                                                )}
                                             </div>
                                         ) : (
                                             <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] aspect-video flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
@@ -1802,6 +1849,30 @@ export default function SubmissionReviewCenter() {
                                                 ))}
                                             </div>
                                         )}
+                                    </section>
+                                )}
+
+                                {/* Section 2b: Submission Images (category "image" — reaches client as portfolio) */}
+                                {(!isPreviewMode || portfolioImages.length > 0) && portfolioImages.length > 0 && (
+                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+                                        <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Submission Images ({portfolioImages.length})</p>
+                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                            {portfolioImages.map((m) => (
+                                                <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                                                    <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
+                                                    {(m.client_visible === false || m.internal_only) && (
+                                                        <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                            {m.internal_only ? "Internal" : "Hidden"}
+                                                        </span>
+                                                    )}
+                                                    {!isPreviewMode && (
+                                                        <div className="absolute bottom-1 left-1 z-10">
+                                                            <MediaVisControls media={m} onChange={setMediaVisibility} />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
                                     </section>
                                 )}
 
@@ -1870,12 +1941,22 @@ export default function SubmissionReviewCenter() {
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                                         <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
                                             <p className="eyebrow">Portfolio Images ({talentPortfolioImages.length})</p>
-                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · read-only</span>
+                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · visibility editable</span>
                                         </div>
                                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                             {talentPortfolioImages.map((m, idx) => (
                                                 <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
                                                     <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                    {(m.client_visible === false || m.internal_only) && (
+                                                        <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                            {m.internal_only ? "Internal" : "Hidden"}
+                                                        </span>
+                                                    )}
+                                                    {!isPreviewMode && m.id && (
+                                                        <div className="absolute bottom-1 left-1 z-10">
+                                                            <MediaVisControls media={m} onChange={setTalentMediaVisibility} />
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ))}
                                         </div>
@@ -1887,12 +1968,22 @@ export default function SubmissionReviewCenter() {
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                                         <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
                                             <p className="eyebrow">Additional Portfolio ({talentAdditionalPortfolio.length})</p>
-                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · read-only</span>
+                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · visibility editable</span>
                                         </div>
                                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                             {talentAdditionalPortfolio.map((m, idx) => (
                                                 <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
                                                     <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                    {(m.client_visible === false || m.internal_only) && (
+                                                        <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                            {m.internal_only ? "Internal" : "Hidden"}
+                                                        </span>
+                                                    )}
+                                                    {!isPreviewMode && m.id && (
+                                                        <div className="absolute bottom-1 left-1 z-10">
+                                                            <MediaVisControls media={m} onChange={setTalentMediaVisibility} />
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ))}
                                         </div>

@@ -2262,11 +2262,22 @@ async def get_admin_submission(
 
     if talent_doc:
         PORTFOLIO_FETCH_CATEGORIES = {"portfolio", "additional_portfolio", "portfolio_general"}
+        # Apply any per-submission visibility overrides so the recruiter's
+        # Client/Hidden/Internal choices persist across reloads and drive the
+        # in-page client preview. The talent record itself is never mutated.
+        tmv = sub.get("talent_media_visibility") or {}
         for m in talent_doc.get("media") or []:
             if m.get("category") in PORTFOLIO_FETCH_CATEGORIES:
                 # Ensure public_id items have resolvable URLs before including.
                 if m.get("url") or m.get("public_id"):
-                    talent_portfolio_media.append(m)
+                    item = dict(m)
+                    ov = tmv.get(item.get("id"))
+                    if isinstance(ov, dict):
+                        if "client_visible" in ov:
+                            item["client_visible"] = ov["client_visible"]
+                        if "internal_only" in ov:
+                            item["internal_only"] = ov["internal_only"]
+                    talent_portfolio_media.append(item)
 
     result = dict(sub)
     result["talent_portfolio_media"] = talent_portfolio_media
@@ -2330,6 +2341,13 @@ async def admin_edit_submission(
     if payload.field_visibility is not None:
         current_fv = sub.get("field_visibility") or {**DEFAULT_FIELD_VISIBILITY}
         update["field_visibility"] = {**current_fv, **payload.field_visibility}
+
+    # Per-submission visibility overrides for talent-level portfolio media.
+    # Merge so partial updates don't drop prior overrides. No media is copied —
+    # only a small id->flags map is stored on the submission.
+    if payload.talent_media_visibility is not None:
+        current_tmv = sub.get("talent_media_visibility") or {}
+        update["talent_media_visibility"] = {**current_tmv, **payload.talent_media_visibility}
 
     # Curation History Revision Restore OR Curation Save
     if payload.restore_revision_id:

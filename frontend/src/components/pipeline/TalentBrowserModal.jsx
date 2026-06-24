@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Briefcase, Activity, Calendar, CheckCircle, Award, List, Eye } from "lucide-react";
+import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Calendar, Award, List, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { adminApi } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
@@ -382,13 +382,6 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                         _interestedInSet: interestedInSet,
                         _skillsSet: skillsSet,
                         instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
-                        response_rate: talent.response_rate || 75,
-                        conversion_rate: talent.conversion_rate || 68,
-                        prior_projects: talent.prior_projects || 3,
-                        booking_history: talent.booking_history || [],
-                        shortlist_ratio: talent.shortlist_ratio || 0.4,
-                        availability_status: talent.availability_status || "available",
-                        last_active: talent.last_active || new Date().toISOString(),
                     };
                 });
                 
@@ -1516,16 +1509,6 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                     </div>
                 )}
 
-                {/* Availability status */}
-                <div className="space-y-2">
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Availability</h4>
-                    <div className="flex items-center gap-2">
-                        <span className={`w-2.5 h-2.5 rounded-full ${talent.availability_status === "available" ? "bg-green-500" : "bg-amber-500"}`} />
-                        <span className="text-xs font-medium text-[#111111] uppercase tracking-wide">
-                            {talent.availability_status === "available" ? "Active / Available" : "Booked / Hold"}
-                        </span>
-                    </div>
-                </div>
             </div>
         </div>
     );
@@ -2399,12 +2382,6 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
                                 <span className="text-[9px] font-medium text-white">{talent.matchScore}%</span>
                             </div>
                         </div>
-                        <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-md bg-black/80 backdrop-blur-sm">
-                            <div className="flex items-center gap-1">
-                                <Activity size={8} className="text-green-400" />
-                                <span className="text-[9px] font-medium text-white">{talent.response_rate}%</span>
-                            </div>
-                        </div>
                     </>
                 )}
             </div>
@@ -2436,19 +2413,6 @@ const TalentCard = memo(({ talent, selected, alreadyInPipeline, onToggle, onPrev
                     </a>
                 )}
                 
-                {/* Metrics */}
-                {showIntelligence && !isMobile && (
-                    <div className="flex items-center gap-2 mt-1.5 pt-1 border-t border-gray-100">
-                        <div className="flex items-center gap-1">
-                            <Briefcase size={8} className="text-[#333333]" />
-                            <span className="text-[8px] text-[#333333]">{talent.prior_projects || 0} projects</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                            <CheckCircle size={8} className="text-[#333333]" />
-                            <span className="text-[8px] text-[#333333]">{Math.round((talent.conversion_rate || 0) * 100)}%</span>
-                        </div>
-                    </div>
-                )}
             </div>
             
             {/* Selection Indicator */}

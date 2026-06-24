@@ -33,8 +33,6 @@ from core import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["talents"])
 
-_HAS_LOGGED_VERIFICATION = False
-
 
 @router.post("/talents", response_model=TalentOut)
 async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
@@ -96,18 +94,20 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
 # ---------------------------------------------------------------------------
 # Projections
 # ---------------------------------------------------------------------------
-# List projection: fetches only the scalar fields the roster card renders.
+# List projection — a deny-list excluding internal/provenance/financial fields.
 #
 # COVER IMAGE ARCHITECTURE:
 # cover_url is a denormalized scalar field written by set_cover, add_media
 # (auto-cover), and delete_media (when cover item is deleted). It mirrors
 # the URL that _resolve_cover_url(media[]) would return, but is stored
-# directly so the list endpoint never needs to fetch or walk media[].
+# directly so roster cards never need to walk media[].
 #
 # This guarantees: roster cover == detail cover, regardless of array
 # insertion order, array size, or $slice position.
 #
-# Payload per talent: ~250 bytes (single URL string, zero array data).
+# NOTE: media[] is NOT excluded here — it is still returned because the Browse
+# Talent modal renders it in the per-talent preview drawer. (Trimming it would
+# require lazy per-talent media loading; tracked as a separate scale follow-up.)
 _LIST_PROJECTION = {
     "_id": 0,
     "created_by": 0,
@@ -133,8 +133,6 @@ def _enrich_list(doc: dict) -> dict:
     Falls back to cover_url if absent. Sets media_count from the stored field if present.
     Computes age from dob. Returns doc in-place.
     """
-    global _HAS_LOGGED_VERIFICATION
-    
     # 1. Age derivation
     dob = doc.get("dob")
     if dob:
@@ -167,39 +165,6 @@ def _enrich_list(doc: dict) -> dict:
     if "media_count" not in doc:
         doc["media_count"] = len(media_list)
 
-    # 5. Log and print runtime verification exactly once (as required)
-    if not _HAS_LOGGED_VERIFICATION:
-        try:
-            sample_media = media_list[0] if media_list else None
-            
-            logger.info("=== BACKEND PAYLOAD AUDIT RUNTIME VERIFICATION ===")
-            logger.info("ONE FULL SAMPLE TALENT PAYLOAD:")
-            import json
-            def json_default(o):
-                if hasattr(o, "isoformat"):
-                    return o.isoformat()
-                return str(o)
-            logger.info(json.dumps(doc, default=json_default, indent=2))
-            
-            logger.info("ONE FULL MEDIA OBJECT:")
-            logger.info(json.dumps(sample_media, default=json_default, indent=2) if sample_media else "None")
-            
-            logger.info(f"RESOLVED THUMBNAIL SOURCE VALUE: {doc.get('image_url')}")
-            logger.info(f"RESOLVED COVER SOURCE VALUE: {doc.get('cover_url')}")
-            logger.info("==================================================")
-            
-            print("=== BACKEND PAYLOAD AUDIT RUNTIME VERIFICATION ===", flush=True)
-            print("ONE FULL SAMPLE TALENT PAYLOAD:", flush=True)
-            print(json.dumps(doc, default=json_default, indent=2), flush=True)
-            print("ONE FULL MEDIA OBJECT:", flush=True)
-            print(json.dumps(sample_media, default=json_default, indent=2) if sample_media else "None", flush=True)
-            print(f"RESOLVED THUMBNAIL SOURCE VALUE: {doc.get('image_url')}", flush=True)
-            print(f"RESOLVED COVER SOURCE VALUE: {doc.get('cover_url')}", flush=True)
-            print("==================================================", flush=True)
-            
-            _HAS_LOGGED_VERIFICATION = True
-        except Exception as e:
-            logger.error(f"Error logging backend verification audit: {e}")
     return doc
 
 
@@ -237,9 +202,11 @@ async def list_talents(
                     ]
                 })
             query["$and"] = and_clauses
-    # List projection: scalar fields only — no media[] fetch.
-    # cover_url is the denormalized cover scalar maintained by set_cover /
-    # add_media / delete_media. Zero array walk per roster row.
+    # List projection excludes internal/provenance fields (see _LIST_PROJECTION).
+    # NOTE: media[] IS returned — the Browse Talent modal renders it in the
+    # per-talent preview drawer. Roster cards prefer the denormalized
+    # cover_url/cover_thumbnail_url scalars (maintained by set_cover / add_media
+    # / delete_media) and do not walk media[].
     cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
     if page is None and limit is None:
         talents = await cursor.to_list(2000)

@@ -10,9 +10,6 @@ import {
     XCircle,
     PauseCircle,
     Clock,
-    Eye,
-    EyeOff,
-    Shield,
     Star,
     Lock,
     ExternalLink,
@@ -146,6 +143,43 @@ function EditableInput({ initialValue, onChange, type = "text", className, testi
             className={className}
             data-testid={testid}
         />
+    );
+}
+
+// P0-3: mirror the client-facing name privacy ("First L.") used by the real
+// client payload, so CLIENT VIEW preview matches what a client actually sees.
+function privatizeName(fullName) {
+    const parts = String(fullName || "").trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return "Talent";
+    if (parts.length === 1) return parts[0];
+    return `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.`;
+}
+
+// P0-4: compact per-media visibility control (recruiter view only). Reuses the
+// existing client_visible / internal_only flags; persistence is the shared Save.
+function MediaVisControls({ media, onChange }) {
+    const state = media.internal_only ? "internal" : media.client_visible === false ? "hidden" : "client";
+    const opts = [
+        { key: "client", label: "Client", title: "Show to client" },
+        { key: "hidden", label: "Hidden", title: "Hide from client" },
+        { key: "internal", label: "Internal", title: "Internal only" },
+    ];
+    return (
+        <div className="inline-flex rounded-md border border-black/[0.08] overflow-hidden bg-white/90 backdrop-blur-sm" onClick={(e) => e.stopPropagation()}>
+            {opts.map((o) => (
+                <button
+                    key={o.key}
+                    type="button"
+                    title={o.title}
+                    onClick={() => onChange(media.id, o.key)}
+                    className={`text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 transition-colors ${
+                        state === o.key ? "bg-black text-white" : "text-black/55 hover:bg-black/[0.05]"
+                    }`}
+                >
+                    {o.label}
+                </button>
+            ))}
+        </div>
     );
 }
 
@@ -472,6 +506,23 @@ export default function SubmissionReviewCenter() {
         }
     };
 
+    // P0-4: restore per-media client-visibility control (backend already
+    // supports client_visible / internal_only on the PUT media payload).
+    // Updates mediaList locally (badges + client preview react immediately);
+    // the existing Save button persists it via handleSaveCuration.
+    const setMediaVisibility = useCallback((mediaId, mode) => {
+        // mode: "client" (visible to client) | "hidden" (hide from client) | "internal" (internal only)
+        setMediaList((prev) =>
+            prev.map((m) => {
+                if (m.id !== mediaId) return m;
+                if (mode === "client") return { ...m, client_visible: true, internal_only: false };
+                if (mode === "hidden") return { ...m, client_visible: false, internal_only: false };
+                if (mode === "internal") return { ...m, client_visible: false, internal_only: true };
+                return m;
+            })
+        );
+    }, []);
+
     const openInDrive = async () => {
         if (!selectedId) return;
         try {
@@ -651,51 +702,65 @@ export default function SubmissionReviewCenter() {
 
     // Action handlers
     const handleDecision = useCallback(async (decision) => {
-        if (!selectedId) return;
+        if (!selectedId || saving) return;
+        // P0-2: capture the current visible order + the acted item BEFORE any
+        // state update, then advance to the *immediate next* item in that order.
+        // Selecting by id (not stale index) means it never skips, regardless of
+        // whether the acted item drops out of the active filter afterwards.
+        const order = filteredSubmissions;
+        const actedId = selectedId;
+        const pos = order.findIndex((s) => s.id === actedId);
+        const nextItem = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
+
         setSaving(true);
         try {
-            await adminApi.post(`/projects/${id}/submissions/${selectedId}/decision`, {
+            await adminApi.post(`/projects/${id}/submissions/${actedId}/decision`, {
                 decision,
                 note: decisionNote,
             });
-            
+
             const toastMessages = {
                 approved: "Approved and moved to next submission",
                 hold: "Held and moved to next submission",
                 rejected: "Rejected and moved to next submission",
             };
             toast.success(toastMessages[decision] || `${decision} registered`);
-            
-            // Reload submission lists and update statuses locally
-            const updatedList = submissions.map(s => s.id === selectedId ? { ...s, decision } : s);
-            setSubmissions(updatedList);
 
-            // Move to next submission automatically if exists, otherwise show completion view
-            if (currentIndex === filteredSubmissions.length - 1) {
-                setIsEndOfList(true);
-            } else {
-                const nextIndex = currentIndex >= filteredSubmissions.length - 1 ? 0 : currentIndex + 1;
-                setSelectedId(filteredSubmissions[nextIndex].id);
+            // Update status locally (functional update — no stale closure).
+            setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision } : s)));
+
+            // Advance to the next item in the order the recruiter was viewing.
+            if (nextItem) {
+                setSelectedId(nextItem.id);
                 setIsEndOfList(false);
+            } else {
+                setIsEndOfList(true);
             }
         } catch (e) {
             toast.error("Failed to register decision");
         } finally {
             setSaving(false);
         }
-    }, [selectedId, id, decisionNote, submissions, currentIndex, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
+    }, [selectedId, saving, id, decisionNote, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
 
     // Keyboard navigation shortcuts
     useEffect(() => {
         const handleKeyDown = (e) => {
-            if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
-                return;
-            }
+            // P0-1: never hijack OS/browser combos (Cmd/Ctrl/Alt/Shift — e.g.
+            // Cmd+A select-all must NOT approve), never act while typing, while
+            // saving, or while the resume modal is open.
+            if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+            if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+            if (document.activeElement?.isContentEditable) return;
+            if (saving || showResumePrompt) return;
 
             if (e.key === "ArrowLeft") {
                 handlePrev();
             } else if (e.key === "ArrowRight") {
                 handleNext();
+            } else if (isPreviewMode) {
+                // No decisions while previewing the client-facing view.
+                return;
             } else if (e.key.toLowerCase() === "a") {
                 handleDecision("approved");
             } else if (e.key.toLowerCase() === "r") {
@@ -707,7 +772,7 @@ export default function SubmissionReviewCenter() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [handlePrev, handleNext, handleDecision]);
+    }, [handlePrev, handleNext, handleDecision, saving, showResumePrompt, isPreviewMode]);
 
     // Media grouping helper
     const getCuratedMedia = (categoryGroup) => {
@@ -1245,16 +1310,23 @@ export default function SubmissionReviewCenter() {
                                 <div className="border-b border-black/[0.06] pb-5">
                                     <div className="flex items-center gap-3 flex-wrap">
                                         <h2 className="text-2xl md:text-3xl font-display font-semibold text-black/90">
-                                            {detail.talent_name}
+                                            {/* P0-3: client sees only the privatized name */}
+                                            {isPreviewMode ? privatizeName(detail.talent_name) : detail.talent_name}
                                         </h2>
-                                        <span className={`inline-flex items-center text-[9px] font-mono tracking-widest uppercase px-2.5 py-0.5 rounded border ${statusBadges[detail.decision || "pending"]}`}>
-                                            {detail.decision || "pending"}
-                                        </span>
+                                        {/* P0-3: decision status is internal — never shown in client view */}
+                                        {!isPreviewMode && (
+                                            <span className={`inline-flex items-center text-[9px] font-mono tracking-widest uppercase px-2.5 py-0.5 rounded border ${statusBadges[detail.decision || "pending"]}`}>
+                                                {detail.decision || "pending"}
+                                            </span>
+                                        )}
                                     </div>
-                                    <div className="mt-1.5 text-xs text-black/45 font-mono flex items-center gap-3 flex-wrap">
-                                        <span className="flex items-center gap-1"><Mail className="w-3.5 h-3.5" /> {detail.talent_email}</span>
-                                        {detail.talent_phone && <span className="flex items-center gap-1"><Phone className="w-3.5 h-3.5" /> {detail.talent_phone}</span>}
-                                    </div>
+                                    {/* P0-3: email + phone are internal — never shown in client view */}
+                                    {!isPreviewMode && (
+                                        <div className="mt-1.5 text-xs text-black/45 font-mono flex items-center gap-3 flex-wrap">
+                                            <span className="flex items-center gap-1"><Mail className="w-3.5 h-3.5" /> {detail.talent_email}</span>
+                                            {detail.talent_phone && <span className="flex items-center gap-1"><Phone className="w-3.5 h-3.5" /> {detail.talent_phone}</span>}
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Curators External Integration actions */}
@@ -1715,6 +1787,9 @@ export default function SubmissionReviewCenter() {
                                                                 {t.primary_take && (
                                                                     <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Primary</span>
                                                                 )}
+                                                                {!isPreviewMode && (
+                                                                    <MediaVisControls media={t} onChange={setMediaVisibility} />
+                                                                )}
                                                             </div>
                                                         </div>
                                                         <PremiumVideoPlayer
@@ -1743,6 +1818,16 @@ export default function SubmissionReviewCenter() {
                                                 {indianImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
                                                         <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        {(m.client_visible === false || m.internal_only) && (
+                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
+                                                        {!isPreviewMode && (
+                                                            <div className="absolute bottom-1 left-1 z-10">
+                                                                <MediaVisControls media={m} onChange={setMediaVisibility} />
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ))}
                                             </div>
@@ -1763,6 +1848,16 @@ export default function SubmissionReviewCenter() {
                                                 {westernImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
                                                         <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        {(m.client_visible === false || m.internal_only) && (
+                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
+                                                        {!isPreviewMode && (
+                                                            <div className="absolute bottom-1 left-1 z-10">
+                                                                <MediaVisControls media={m} onChange={setMediaVisibility} />
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ))}
                                             </div>

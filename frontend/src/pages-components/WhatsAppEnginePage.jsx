@@ -5,15 +5,18 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { 
+import {
   getTemplates, createTemplate, updateTemplate, deleteTemplate,
-  getProjects, getPipelineSummary, resolveRecipients, 
-  createBatch, getBatches, runBatchAction, 
-  getJobs, retryJob, 
+  getPipelineSummary,
+  createBatch, getBatches, runBatchAction,
+  getJobs, retryJob,
   getSessionStatus, clearQrCode, resetSession,
-  getWaConfig, updateWaConfig, 
-  getAuditLog 
+  getWaConfig, updateWaConfig,
+  getAuditLog,
+  resolveTargets, getCrmContactTypes, validateManual,
 } from "@/lib/whatsappApi";
+import VirtualList from "@/components/VirtualList";
+import ProjectSearchModal from "@/components/ProjectSearchModal";
 
 export default function WhatsAppEnginePage() {
   const [activeTab, setActiveTab] = useState("session"); // session | templates | campaign | history | config | audit
@@ -235,7 +238,6 @@ function WESessionPanel() {
 // 2. CAMPAIGN LAUNCHER (Compose & Launch)
 // ==========================================
 function WECampaignLauncher() {
-  const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [pipelineSummary, setPipelineSummary] = useState(null);
   const [selectedStages, setSelectedStages] = useState([]);
@@ -253,18 +255,52 @@ function WECampaignLauncher() {
   const [dryRunResult, setDryRunResult] = useState(null);
   const [launching, setLaunching] = useState(false);
 
+  // Slice 5-7: unified targeting (PROJECT | CRM | MANUAL) + exclusion + search.
+  const [sourceType, setSourceType] = useState("PROJECT");
+  const [crmTypes, setCrmTypes] = useState([]);
+  const [crmContactType, setCrmContactType] = useState("");
+  const [manualText, setManualText] = useState("");
+  const [excludedIds, setExcludedIds] = useState(() => new Set());
+  const [selectedRowIds, setSelectedRowIds] = useState(() => new Set());
+  const [targetSearch, setTargetSearch] = useState("");
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [selectedProjectName, setSelectedProjectName] = useState("");
+
   useEffect(() => {
     const loadInitialData = async () => {
       try {
-        const [projList, tempList] = await Promise.all([getProjects(), getTemplates()]);
-        setProjects(projList);
+        const [tempList, types] = await Promise.all([
+          getTemplates(), getCrmContactTypes().catch(() => []),
+        ]);
         setTemplates(tempList);
+        setCrmTypes(types);
       } catch (err) {
         console.error("Failed to load campaign selector options", err);
       }
     };
     loadInitialData();
   }, []);
+
+  // Build the source_params for the unified resolver from the current source.
+  const buildSourceParams = () => {
+    if (sourceType === "PROJECT") {
+      return { project_id: selectedProjectId, pipeline_stages: selectedStages };
+    }
+    if (sourceType === "CRM") {
+      return { contact_type: crmContactType || null, select_all_filtered: true };
+    }
+    // MANUAL — parse "Name,+phone" lines
+    const contacts = manualText.split("\n").map((line) => {
+      const [name, phone] = line.split(",");
+      return { name: (name || "").trim(), phone: (phone || "").trim() };
+    }).filter((c) => c.phone);
+    return { contacts };
+  };
+
+  const resetResolution = () => {
+    setRecipients([]); setUnresolvable([]); setDryRunResult(null);
+    setExcludedIds(new Set()); setSelectedRowIds(new Set()); setTargetSearch("");
+  };
 
   const handleProjectChange = async (projectId) => {
     setSelectedProjectId(projectId);
@@ -315,36 +351,75 @@ function WECampaignLauncher() {
   };
 
   const handleResolve = async () => {
-    if (!selectedProjectId || selectedStages.length === 0) return;
+    if (sourceType === "PROJECT" && (!selectedProjectId || selectedStages.length === 0)) return;
     setResolving(true);
     try {
-      const data = await resolveRecipients(selectedProjectId, selectedStages.join(","));
+      const data = await resolveTargets({
+        source_type: sourceType,
+        source_params: buildSourceParams(),
+        excluded_recipient_ids: [],
+      });
       setRecipients(data.recipients || []);
       setUnresolvable(data.unresolvable || []);
-      toast.success(`Resolved ${data.total} sendable recipients`);
+      setExcludedIds(new Set());
+      setSelectedRowIds(new Set());
+      toast.success(`Resolved ${data.counts?.resolved ?? (data.recipients || []).length} recipients`);
     } catch (err) {
-      toast.error("Failed to resolve recipients matching filters");
+      toast.error(err?.response?.data?.detail || "Failed to resolve recipients");
     } finally {
       setResolving(false);
     }
   };
 
+  // ---- exclusion / search helpers (Feature 3) ----
+  const filteredRecipients = recipients.filter((r) => {
+    if (!targetSearch.trim()) return true;
+    const q = targetSearch.toLowerCase();
+    return (r.name || "").toLowerCase().includes(q)
+      || (r.phone || "").toLowerCase().includes(q)
+      || (r.whatsapp_group_name || "").toLowerCase().includes(q)
+      || (r.destination || "").toLowerCase().includes(q);
+  });
+  const sendingCount = recipients.filter((r) => !excludedIds.has(r.recipient_id)).length;
+
+  const toggleRow = (rid) => {
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev);
+      next.has(rid) ? next.delete(rid) : next.add(rid);
+      return next;
+    });
+  };
+  const selectAllFiltered = (checked) => {
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev);
+      filteredRecipients.forEach((r) => checked ? next.add(r.recipient_id) : next.delete(r.recipient_id));
+      return next;
+    });
+  };
+  const applyExclusion = (exclude) => {
+    setExcludedIds((prev) => {
+      const next = new Set(prev);
+      selectedRowIds.forEach((rid) => exclude ? next.add(rid) : next.delete(rid));
+      return next;
+    });
+    setSelectedRowIds(new Set());
+  };
+
+  const _batchPayload = (isDryRun) => ({
+    source_type: sourceType,
+    source_params: buildSourceParams(),
+    excluded_recipient_ids: Array.from(excludedIds),
+    template_id: selectedTemplateId,
+    variable_data: variables,
+    media_url: mediaUrl || null,
+    is_dry_run: isDryRun,
+  });
+
   const handleDryRun = async () => {
-    if (!selectedProjectId || !selectedTemplateId || selectedStages.length === 0) {
-      toast.error("Please complete project, stage, and template selections");
-      return;
-    }
+    if (!selectedTemplateId) { toast.error("Select a template"); return; }
     setLaunching(true);
     try {
-      const payload = {
-        project_id: selectedProjectId,
-        template_id: selectedTemplateId,
-        pipeline_stages: selectedStages,
-        variable_data: variables,
-        media_url: mediaUrl || null,
-        is_dry_run: true
-      };
-      const res = await createBatch(payload);
+      const res = await createBatch(_batchPayload(true));
       setDryRunResult(res);
       toast.success("Dry run preview compiled successfully");
     } catch (err) {
@@ -355,32 +430,19 @@ function WECampaignLauncher() {
   };
 
   const handleLaunch = async () => {
-    if (!selectedProjectId || !selectedTemplateId || selectedStages.length === 0) {
-      toast.error("Validation failed");
-      return;
-    }
-    const confirm = window.confirm(`Are you absolutely sure you want to launch this broadcast to ${recipients.length} recipients?`);
+    if (!selectedTemplateId) { toast.error("Select a template"); return; }
+    const confirm = window.confirm(`Launch this broadcast to ${sendingCount} recipients (${excludedIds.size} excluded)?`);
     if (!confirm) return;
-
     setLaunching(true);
     try {
-      const payload = {
-        project_id: selectedProjectId,
-        template_id: selectedTemplateId,
-        pipeline_stages: selectedStages,
-        variable_data: variables,
-        media_url: mediaUrl || null,
-        is_dry_run: false
-      };
-      const res = await createBatch(payload);
+      await createBatch(_batchPayload(false));
       toast.success("Campaign launched successfully to worker queue!");
-      // Reset form or navigate
-      setDryRunResult(null);
       setSelectedProjectId("");
       setSelectedTemplateId("");
       setSelectedStages([]);
-      setRecipients([]);
-      setUnresolvable([]);
+      setManualText("");
+      setCrmContactType("");
+      resetResolution();
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Failed launching batch campaign");
     } finally {
@@ -390,26 +452,83 @@ function WECampaignLauncher() {
 
   return (
     <div className="space-y-6">
+      <ProjectSearchModal
+        open={projectModalOpen}
+        onClose={() => setProjectModalOpen(false)}
+        onSelect={(p) => { handleProjectChange(p.id); setSelectedProjectName(p.name || p.brand_name || ""); }}
+      />
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
+
         {/* Configurations column */}
         <div className="lg:col-span-2 bg-white p-6 rounded-md border border-black/[0.06] space-y-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60 border-b border-black/[0.06] pb-3">Campaign Target & Template</h3>
-          
+
+          {/* Target source selector (Feature 1 / Slices 5-7) */}
+          <div className="space-y-2">
+            <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Target Source</label>
+            <div className="flex gap-2">
+              {["PROJECT", "CRM", "MANUAL"].map((src) => (
+                <button
+                  key={src}
+                  type="button"
+                  onClick={() => { setSourceType(src); resetResolution(); }}
+                  className={`text-xs font-semibold px-3 py-2 rounded-sm border transition-all ${
+                    sourceType === src ? "bg-black text-white border-black" : "bg-[#f8f8f6] border-black/10 hover:border-black/30"
+                  }`}
+                  data-testid={`source-${src}`}
+                >
+                  {src === "PROJECT" ? "Project Pipeline" : src === "CRM" ? "Marketing CRM" : "Manual Contacts"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* CRM source */}
+          {sourceType === "CRM" && (
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Contact Type</label>
+              <select
+                value={crmContactType}
+                onChange={(e) => { setCrmContactType(e.target.value); resetResolution(); }}
+                className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+              >
+                <option value="">All contact types</option>
+                {crmTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          )}
+
+          {/* Manual source */}
+          {sourceType === "MANUAL" && (
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Manual Contacts (one per line: Name,+countrycode…)</label>
+              <textarea
+                value={manualText}
+                onChange={(e) => { setManualText(e.target.value); }}
+                rows={5}
+                placeholder={"Rahul Sharma,+919876543210\nPriya Jain,+919123456789"}
+                className="w-full text-xs font-mono bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+                data-testid="manual-contacts-input"
+              />
+            </div>
+          )}
+
           {/* Project & Stage selection */}
+          {sourceType === "PROJECT" && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-xs font-semibold uppercase tracking-wider text-black/60">Casting Project</label>
-              <select
-                value={selectedProjectId}
-                onChange={(e) => handleProjectChange(e.target.value)}
-                className="w-full text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 focus:outline-none focus:ring-1 focus:ring-black"
+              <button
+                type="button"
+                onClick={() => setProjectModalOpen(true)}
+                className="w-full text-left text-sm bg-[#f8f8f6] border border-black/10 rounded-sm p-2.5 hover:border-black/30 flex items-center justify-between"
+                data-testid="open-project-search"
               >
-                <option value="">Select Project...</option>
-                {projects.map(p => (
-                  <option key={p.id} value={p.id}>{p.brand_name || p.brand || p.id}</option>
-                ))}
-              </select>
+                <span className={selectedProjectId ? "text-black" : "text-black/40"}>
+                  {selectedProjectName || "Search project…"}
+                </span>
+                <span className="text-[10px] uppercase tracking-wider text-black/40">{selectedProjectId ? "Change" : "Search"}</span>
+              </button>
             </div>
 
             {selectedProjectId && pipelineSummary && (
@@ -440,15 +559,16 @@ function WECampaignLauncher() {
               </div>
             )}
           </div>
+          )}
 
-          {/* Recipients resolution banner */}
-          {selectedProjectId && selectedStages.length > 0 && (
+          {/* Resolve action — works for all sources (Slices 5-7) */}
+          {(sourceType !== "PROJECT" || (selectedProjectId && selectedStages.length > 0)) && (
             <div className="bg-[#f8f8f6] p-4 rounded-sm border border-black/10 flex flex-col md:flex-row md:items-center justify-between gap-3">
               <div className="text-xs space-y-1">
                 <span className="font-semibold">Recipients Resolution:</span>
                 {recipients.length > 0 ? (
                   <p className="text-black/60">
-                    Ready to send to <strong className="text-black">{recipients.length}</strong> targets.
+                    Ready to send to <strong className="text-black">{sendingCount}</strong> targets.
                     {unresolvable.length > 0 && <span className="text-amber-600"> ({unresolvable.length} skipped due to missing identifiers).</span>}
                   </p>
                 ) : (
@@ -458,7 +578,7 @@ function WECampaignLauncher() {
               <button
                 type="button"
                 onClick={handleResolve}
-                disabled={resolving}
+                disabled={resolving || (sourceType === "MANUAL" && !manualText.trim())}
                 className="text-xs font-semibold uppercase tracking-wider border border-black bg-white hover:bg-[#f8f8f6] disabled:opacity-50 px-3 py-2 rounded-sm"
               >
                 {resolving ? "Resolving..." : "Resolve Targets"}
@@ -466,54 +586,75 @@ function WECampaignLauncher() {
             </div>
           )}
 
-          {/* FEATURE 4: Recipient resolution table — verify routing before launch. */}
+          {/* Resolved Targets — search (1), bulk exclusion (2), virtualized rows. */}
           {recipients.length > 0 && (
             <div className="border border-black/10 rounded-sm overflow-hidden">
-              <div className="bg-[#f8f8f6] px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-black/60 border-b border-black/10">
-                Resolved Targets ({recipients.length}{unresolvable.length > 0 ? ` · ${unresolvable.length} skipped` : ""})
+              <div className="bg-[#f8f8f6] px-4 py-2 flex flex-wrap items-center justify-between gap-2 border-b border-black/10">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-black/60">
+                  Resolved Targets ({recipients.length})
+                </span>
+                <span className="text-[11px] font-mono">
+                  <strong className="text-emerald-700">Sending: {sendingCount}</strong>
+                  {" · "}
+                  <span className="text-red-600">Excluded: {excludedIds.size}</span>
+                  {unresolvable.length > 0 && <span className="text-amber-600"> · {unresolvable.length} skipped</span>}
+                </span>
               </div>
-              <div className="overflow-x-auto max-h-72 overflow-y-auto">
-                <table className="w-full text-xs">
-                  <thead className="bg-white sticky top-0">
-                    <tr className="text-left text-black/40 border-b border-black/[0.06]">
-                      <th className="py-2 px-3 font-semibold">Talent</th>
-                      <th className="py-2 px-3 font-semibold">Phone</th>
-                      <th className="py-2 px-3 font-semibold">WhatsApp Group</th>
-                      <th className="py-2 px-3 font-semibold">Type</th>
-                      <th className="py-2 px-3 font-semibold">Resolved Destination</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-black/[0.04]">
-                    {recipients.map((r) => {
-                      const type = r.destination_type === "group" ? "GROUP" : "PHONE";
-                      return (
-                        <tr key={r.talent_id} className="hover:bg-[#f8f8f6]">
-                          <td className="py-2 px-3 font-medium">{r.talent_name}</td>
-                          <td className="py-2 px-3 font-mono text-[11px] text-black/60">{r.phone || "—"}</td>
-                          <td className="py-2 px-3 text-black/60">{r.whatsapp_group_name || "—"}</td>
-                          <td className="py-2 px-3">
-                            <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
-                              type === "GROUP" ? "bg-indigo-50 text-indigo-700" : "bg-sky-50 text-sky-700"
-                            }`}>{type}</span>
-                          </td>
-                          <td className="py-2 px-3 font-mono text-[11px] text-black/70">{r.destination}</td>
-                        </tr>
-                      );
-                    })}
-                    {unresolvable.map((u) => (
-                      <tr key={u.talent_id} className="bg-amber-50/40">
-                        <td className="py-2 px-3 font-medium">{u.talent_name}</td>
-                        <td className="py-2 px-3 font-mono text-[11px] text-black/60">{u.phone || "—"}</td>
-                        <td className="py-2 px-3 text-black/60">{u.whatsapp_group_name || "—"}</td>
-                        <td className="py-2 px-3">
-                          <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm bg-red-50 text-red-700">SKIPPED</span>
-                        </td>
-                        <td className="py-2 px-3 text-[11px] text-amber-700">{u.reason}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+
+              {/* Search + bulk actions */}
+              <div className="px-3 py-2 flex flex-wrap items-center gap-2 border-b border-black/[0.06]">
+                <input
+                  value={targetSearch}
+                  onChange={(e) => setTargetSearch(e.target.value)}
+                  placeholder="Search name / phone / group…"
+                  className="flex-1 min-w-[160px] text-xs px-2 py-1.5 border border-black/15 rounded-sm focus:outline-none focus:border-black/40"
+                  data-testid="target-search"
+                />
+                <button onClick={() => applyExclusion(true)} disabled={selectedRowIds.size === 0}
+                  className="text-[10px] font-bold uppercase tracking-wider px-2 py-1.5 rounded-sm border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40">
+                  Exclude Selected
+                </button>
+                <button onClick={() => applyExclusion(false)} disabled={selectedRowIds.size === 0}
+                  className="text-[10px] font-bold uppercase tracking-wider px-2 py-1.5 rounded-sm border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40">
+                  Include Selected
+                </button>
               </div>
+
+              {/* Header row */}
+              <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wider text-black/40 border-b border-black/[0.06] bg-white">
+                <input type="checkbox"
+                  checked={filteredRecipients.length > 0 && filteredRecipients.every((r) => selectedRowIds.has(r.recipient_id))}
+                  onChange={(e) => selectAllFiltered(e.target.checked)} />
+                <span className="flex-1">Name</span>
+                <span className="w-28">Type</span>
+                <span className="flex-1">Destination</span>
+              </div>
+
+              {/* Virtualized rows — never renders the full list */}
+              <VirtualList
+                items={filteredRecipients}
+                rowHeight={34}
+                height={Math.min(filteredRecipients.length, 8) * 34 || 34}
+                renderRow={(r) => {
+                  const excluded = excludedIds.has(r.recipient_id);
+                  const type = r.destination_type === "group" ? "GROUP" : "PHONE";
+                  return (
+                    <div className={`flex items-center gap-2 px-3 text-xs h-full border-b border-black/[0.03] ${excluded ? "opacity-40 line-through" : "hover:bg-[#f8f8f6]"}`}>
+                      <input type="checkbox" checked={selectedRowIds.has(r.recipient_id)} onChange={() => toggleRow(r.recipient_id)} />
+                      <span className="flex-1 font-medium truncate">{r.name || "—"}</span>
+                      <span className="w-28">
+                        <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${type === "GROUP" ? "bg-indigo-50 text-indigo-700" : "bg-sky-50 text-sky-700"}`}>{type}</span>
+                      </span>
+                      <span className="flex-1 font-mono text-[11px] text-black/70 truncate">{r.destination}</span>
+                    </div>
+                  );
+                }}
+              />
+              {unresolvable.length > 0 && (
+                <div className="px-3 py-1.5 text-[10px] text-amber-700 border-t border-black/[0.06]">
+                  {unresolvable.length} unresolvable (no phone / group) — excluded automatically.
+                </div>
+              )}
             </div>
           )}
 
@@ -762,7 +903,19 @@ function WEHistoryPanel() {
               >
                 <div className="flex justify-between items-start gap-2">
                   <div>
-                    <h4 className="font-semibold text-sm truncate max-w-[150px]">{batch.project_name || "Untitled Broadcast"}</h4>
+                    <div className="flex items-center gap-1.5">
+                      <h4 className="font-semibold text-sm truncate max-w-[130px]">{batch.source_label || batch.project_name || "Untitled Broadcast"}</h4>
+                      {(() => {
+                        const st = batch.source_type || (batch.project_id ? "PROJECT" : "");
+                        if (!st) return null;
+                        const meta = st === "CRM"
+                          ? { label: "CRM", cls: "bg-purple-50 text-purple-700" }
+                          : st === "MANUAL"
+                            ? { label: "Manual", cls: "bg-teal-50 text-teal-700" }
+                            : { label: "Project", cls: "bg-blue-50 text-blue-700" };
+                        return <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${meta.cls}`}>{meta.label}</span>;
+                      })()}
+                    </div>
                     <p className="text-[10px] text-black/40 font-mono mt-0.5">{batch.template_slug}</p>
                   </div>
                   <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 font-bold rounded-sm ${

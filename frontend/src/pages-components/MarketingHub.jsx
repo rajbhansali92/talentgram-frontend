@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { adminApi } from "@/lib/api";
+import CommTimeline from "@/components/CommTimeline";
 import { toast } from "sonner";
 import {
     Sheet,
@@ -1924,6 +1925,12 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                         Timeline Records ({interactions.length})
                                     </h3>
                                 </div>
+                                {/* Unified WhatsApp timeline (Slice 4 / Feature 2) */}
+                                {client?.id && (
+                                    <div className="mb-5 pb-5 border-b border-[#eaeaea]">
+                                        <CommTimeline subjectType="CRM_CLIENT" subjectId={client.id} title="WhatsApp Timeline" />
+                                    </div>
+                                )}
                                 {loadingList ? (
                                     <div className="py-8 flex justify-center">
                                         <Loader2 className="w-5 h-5 animate-spin text-slate-300" />

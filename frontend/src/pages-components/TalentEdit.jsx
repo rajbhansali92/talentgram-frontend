@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
+import CommTimeline from "@/components/CommTimeline";
 import { toast } from "sonner";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import {
@@ -1519,7 +1520,14 @@ export default function TalentEdit() {
                     Save this talent first to start uploading media.
                 </p>
             )}
-            
+
+            {/* Unified communication timeline (Slice 4 / Feature 2) */}
+            {isEdit && id && (
+                <div className="mt-8 bg-white rounded-xl border border-[#eaeaea] p-5">
+                    <CommTimeline subjectType="TALENT" subjectId={id} />
+                </div>
+            )}
+
             <ConfirmDeleteDialog
                 open={confirmRemoveOpen}
                 title={`Remove this media?`}

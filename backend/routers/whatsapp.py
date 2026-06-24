@@ -114,6 +114,27 @@ async def _ensure_indexes() -> None:
     # whatsapp_templates
     await db.whatsapp_templates.create_index([("slug", 1)], unique=True, name="template_slug_idx")
 
+    # whatsapp_pins (Slice 3) — one pin per (user, project)
+    await db.whatsapp_pins.create_index(
+        [("user_id", 1), ("project_id", 1)], unique=True, name="pin_user_project_idx"
+    )
+    # projects filtered/sorted search (Slice 3)
+    await db.projects.create_index(
+        [("status", 1), ("created_at", -1)], name="proj_status_created_idx"
+    )
+
+    # interactions / unified comm timeline (Slice 4)
+    await db.interactions.create_index(
+        [("subject_type", 1), ("subject_id", 1), ("created_at", -1)], name="timeline_subject_idx"
+    )
+    await db.interactions.create_index(
+        [("client_id", 1), ("created_at", -1)], name="interactions_client_idx"
+    )
+    # RC-audit H1: worker upserts the timeline row keyed by job_id on every send.
+    await db.interactions.create_index(
+        [("job_id", 1)], unique=True, sparse=True, name="interactions_job_idx"
+    )
+
     logger.info("whatsapp: MongoDB indexes ensured")
 
 
@@ -281,10 +302,42 @@ class TemplateIn(BaseModel):
     is_custom: bool = False
 
 
+class ManualContact(BaseModel):
+    name: str = ""
+    phone: str
+
+
+class SourceParams(BaseModel):
+    # PROJECT
+    project_id: Optional[str] = None
+    pipeline_stages: List[str] = Field(default_factory=list)
+    # CRM (Marketing)
+    contact_type: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    q: Optional[str] = None
+    client_ids: List[str] = Field(default_factory=list)
+    select_all_filtered: bool = False
+    # MANUAL
+    contacts: List[ManualContact] = Field(default_factory=list)
+
+
+class ResolveIn(BaseModel):
+    source_type: str  # PROJECT | CRM | MANUAL
+    source_params: SourceParams = Field(default_factory=SourceParams)
+    excluded_recipient_ids: List[str] = Field(default_factory=list)
+
+
 class BatchIn(BaseModel):
-    project_id: str
+    # v2 source-typed targeting (Feature 6). Either provide source_type +
+    # source_params, OR the legacy project_id + pipeline_stages shortcut below.
+    source_type: Optional[str] = None
+    source_params: Optional[SourceParams] = None
+    excluded_recipient_ids: List[str] = Field(default_factory=list)
+    # Legacy project-only shortcut — still accepted (back-compat).
+    project_id: Optional[str] = None
+    pipeline_stages: List[str] = Field(default_factory=list)
+    # Common
     template_id: str
-    pipeline_stages: List[str]
     variable_data: Dict[str, str] = Field(default_factory=dict)
     media_url: Optional[str] = None
     is_dry_run: bool = False
@@ -406,6 +459,84 @@ async def get_pipeline_summary(
     }
 
 
+# ── PROJECT PICKER (Feature 4) — server-side search / recent / pins ──────────
+def _project_card(p: dict) -> dict:
+    return {
+        "id": p.get("id"),
+        "name": p.get("brand_name", ""),
+        "brand_name": p.get("brand_name", ""),
+        "status": p.get("status"),
+        "slug": p.get("slug"),
+        "created_at": p.get("created_at"),
+    }
+
+
+@router.get("/projects/search")
+async def search_projects(
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 30,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Paginated, server-side project search (name/brand + status). Replaces the
+    full-list dropdown so the picker scales to hundreds of projects."""
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    query: Dict[str, Any] = {}
+    if status:
+        query["status"] = status
+    if q:
+        rgx = {"$regex": _re.escape(q), "$options": "i"}
+        query["$or"] = [{"brand_name": rgx}, {"slug": rgx}]
+    total = await db.projects.count_documents(query)
+    docs = await db.projects.find(query, {"_id": 0}).sort("created_at", -1) \
+        .skip(offset).limit(limit).to_list(limit)
+    return {
+        "items": [_project_card(p) for p in docs],
+        "total": total, "offset": offset, "limit": limit,
+        "next_offset": (offset + limit) if (offset + limit) < total else None,
+    }
+
+
+@router.get("/projects/recent")
+async def recent_projects(limit: int = 10, admin: dict = Depends(current_team_or_admin)):
+    """Most recently created projects (quick-pick section)."""
+    limit = max(1, min(limit, 50))
+    docs = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    return {"items": [_project_card(p) for p in docs]}
+
+
+@router.get("/projects/pins")
+async def list_pinned_projects(admin: dict = Depends(current_team_or_admin)):
+    """Projects pinned by the current admin, hydrated with project data."""
+    pins = await db.whatsapp_pins.find(
+        {"user_id": admin["id"]}, {"_id": 0, "project_id": 1}
+    ).sort("created_at", -1).to_list(200)
+    pids = [p["project_id"] for p in pins]
+    if not pids:
+        return {"items": []}
+    pmap = {p["id"]: p for p in await db.projects.find({"id": {"$in": pids}}, {"_id": 0}).to_list(200)}
+    return {"items": [_project_card(pmap[pid]) for pid in pids if pid in pmap]}
+
+
+@router.post("/projects/pins/{project_id}", status_code=201)
+async def pin_project(project_id: str, admin: dict = Depends(current_team_or_admin)):
+    if not await db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Project not found")
+    await db.whatsapp_pins.update_one(
+        {"user_id": admin["id"], "project_id": project_id},
+        {"$setOnInsert": {"created_at": _utcnow()}},
+        upsert=True,
+    )
+    return {"pinned": True, "project_id": project_id}
+
+
+@router.delete("/projects/pins/{project_id}", status_code=204)
+async def unpin_project(project_id: str, admin: dict = Depends(current_team_or_admin)):
+    await db.whatsapp_pins.delete_one({"user_id": admin["id"], "project_id": project_id})
+
+
 @router.get("/projects/{project_id}/resolve-recipients")
 async def resolve_recipients(
     project_id: str,
@@ -520,6 +651,305 @@ def _render_message(template_body: str, variable_data: Dict[str, str], talent_na
     return result
 
 
+# ===========================================================================
+# FEATURE 6 — UNIFIED RECIPIENT RESOLUTION ENGINE
+# One engine for PROJECT | CRM | MANUAL. Output is source-agnostic, so the
+# worker never needs to know where a recipient came from.
+#   { name, phone, whatsapp_group_name, destination_type, destination,
+#     source, source_id, recipient_kind, recipient_id }
+# ===========================================================================
+import re as _re  # noqa: E402
+
+_PHONE_RE = _re.compile(r"^\+?\d{7,15}$")
+
+
+def _normalize_phone(raw: Optional[str]) -> Optional[str]:
+    """Strip formatting, keep an optional leading +. Returns an E.164-ish string
+    or None if it cannot be a valid international number (Feature 5 validation)."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    plus = s.startswith("+")
+    digits = _re.sub(r"\D", "", s)
+    if not digits:
+        return None
+    cand = ("+" + digits) if plus else digits
+    return cand if _PHONE_RE.match(cand) else None
+
+
+def _make_recipient(*, name, phone, group_name, source, source_id, kind, recipient_id):
+    """Route a raw contact and return (dest_type, destination, reason, recipient)."""
+    dest_type, destination, reason = _resolve_destination(
+        {"name": name, "phone": phone, "whatsapp_group_name": group_name}
+    )
+    rec = {
+        "name": name or "",
+        "phone": phone or "",
+        "whatsapp_group_name": group_name or "",
+        "destination_type": dest_type,
+        "destination": destination,
+        "source": source,
+        "source_id": source_id,
+        "recipient_kind": kind,
+        "recipient_id": recipient_id,
+    }
+    return dest_type, destination, reason, rec
+
+
+async def resolve_recipients_engine(source_type: str, params: "SourceParams",
+                                    excluded_ids=None) -> dict:
+    """Resolve recipients for PROJECT | CRM | MANUAL into the unified shape.
+    Returns {recipients[], unresolvable[], counts{resolved, sending, excluded}}.
+    Dedups by recipient_id; applies excluded_recipient_ids."""
+    excluded = set(excluded_ids or [])
+    recipients: List[dict] = []
+    unresolvable: List[dict] = []
+    seen: set = set()
+
+    def _add(dest_type, destination, reason, rec):
+        rid = rec["recipient_id"]
+        if rid in seen:
+            return
+        seen.add(rid)
+        if not dest_type:
+            unresolvable.append({
+                "name": rec["name"], "phone": rec["phone"],
+                "recipient_id": rid, "source": rec["source"],
+                "reason": reason or "Unresolvable",
+            })
+            return
+        _log_routing_decision(rec["name"], rec["phone"], rec["whatsapp_group_name"],
+                              dest_type, destination)
+        recipients.append(rec)
+
+    if source_type == "PROJECT":
+        if not params.project_id:
+            raise HTTPException(400, "project_id required for PROJECT source")
+        rows = await db.casting_pipeline.find(
+            {"project_id": params.project_id, "stage": {"$in": params.pipeline_stages}},
+            {"_id": 0, "talent_id": 1},
+        ).to_list(5000)
+        tids = list({r["talent_id"] for r in rows})
+        tmap = {t["id"]: t for t in await db.talents.find(
+            {"id": {"$in": tids}},
+            {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
+        ).to_list(5000)}
+        for tid in tids:
+            t = tmap.get(tid)
+            if not t:
+                continue
+            _add(*_make_recipient(
+                name=t.get("name", ""), phone=(t.get("phone") or "").strip(),
+                group_name=(t.get("whatsapp_group_name") or "").strip(),
+                source="PROJECT", source_id=params.project_id,
+                kind="TALENT", recipient_id=tid))
+
+    elif source_type == "CRM":
+        from bson import ObjectId
+        query: Dict[str, Any] = {"archived": {"$ne": True}, "deleted": {"$ne": True}}
+        if params.contact_type:
+            query["contact_type"] = params.contact_type
+        if params.tags:
+            query["tags"] = {"$in": params.tags}
+        if params.q:
+            rgx = {"$regex": _re.escape(params.q), "$options": "i"}
+            query["$or"] = [{"name": rgx}, {"company_name": rgx}]
+        if params.client_ids and not params.select_all_filtered:
+            oids = []
+            for cid in params.client_ids:
+                try:
+                    oids.append(ObjectId(cid))
+                except Exception:
+                    pass
+            query["_id"] = {"$in": oids}
+        clients = await db.clients.find(
+            query, {"name": 1, "phone_number": 1, "contact_type": 1}
+        ).to_list(10000)
+        for c in clients:
+            cid = str(c["_id"])
+            phone = _normalize_phone(c.get("phone_number"))
+            _add(*_make_recipient(
+                name=c.get("name", ""), phone=phone or "", group_name="",
+                source="CRM", source_id=(params.contact_type or "all"),
+                kind="CRM_CLIENT", recipient_id=cid))
+
+    elif source_type == "MANUAL":
+        for mc in params.contacts:
+            phone = _normalize_phone(mc.phone)
+            rid = "manual:" + (phone or (mc.phone or "").strip().lower())
+            if rid in seen:
+                continue
+            if not phone:
+                seen.add(rid)
+                unresolvable.append({
+                    "name": mc.name or "", "phone": mc.phone or "",
+                    "recipient_id": rid, "source": "MANUAL",
+                    "reason": "Invalid phone number",
+                })
+                continue
+            _add(*_make_recipient(
+                name=mc.name or "", phone=phone, group_name="",
+                source="MANUAL", source_id=None, kind="MANUAL", recipient_id=rid))
+    else:
+        raise HTTPException(400, f"Unknown source_type {source_type!r}")
+
+    before = len(recipients)
+    recipients = [r for r in recipients if r["recipient_id"] not in excluded]
+    return {
+        "recipients": recipients,
+        "unresolvable": unresolvable,
+        "counts": {
+            "resolved": before,
+            "sending": len(recipients),
+            "excluded": before - len(recipients),
+        },
+    }
+
+
+def _batch_source(payload: "BatchIn"):
+    """Resolve the effective (source_type, SourceParams) from a v2 batch payload,
+    falling back to the legacy project_id + pipeline_stages shortcut."""
+    if payload.source_type:
+        return payload.source_type, (payload.source_params or SourceParams())
+    if payload.project_id:
+        return "PROJECT", SourceParams(project_id=payload.project_id,
+                                       pipeline_stages=payload.pipeline_stages)
+    raise HTTPException(400, "Provide source_type+source_params or project_id+pipeline_stages")
+
+
+@router.post("/resolve")
+async def resolve_targets(payload: ResolveIn, admin: dict = Depends(current_team_or_admin)):
+    """FEATURE 6 — unified recipient preview for PROJECT | CRM | MANUAL.
+    Returns normalized recipients + counts for the resolve/exclusion screen."""
+    return await resolve_recipients_engine(
+        payload.source_type, payload.source_params, payload.excluded_recipient_ids
+    )
+
+
+# ── COMMUNICATION TIMELINE (Feature 2) — polymorphic, one timeline ──────────
+@router.get("/timeline")
+async def get_timeline(
+    subject_type: str,     # TALENT | CRM_CLIENT | MANUAL | CLIENT
+    subject_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Unified communication timeline for any subject (talent / CRM contact /
+    future client). Reads the (extended) interactions collection. Back-compatible
+    with legacy CRM rows that only carry client_id."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    clauses: List[dict] = [{"subject_type": subject_type, "subject_id": subject_id}]
+    if subject_type == "CRM_CLIENT":
+        # Legacy interactions predate subject_type — match on client_id too.
+        try:
+            from bson import ObjectId
+            clauses.append({"client_id": ObjectId(subject_id)})
+        except Exception:
+            pass
+    query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+    total = await db.interactions.count_documents(query)
+    docs = await db.interactions.find(query).sort("created_at", -1) \
+        .skip(offset).limit(limit).to_list(limit)
+    items = [{
+        "id": str(d.get("_id")),
+        "subject_type": d.get("subject_type") or ("CRM_CLIENT" if d.get("client_id") else None),
+        "subject_id": d.get("subject_id") or (str(d["client_id"]) if d.get("client_id") else None),
+        "type": d.get("type"),
+        "channel": d.get("channel") or d.get("type"),
+        "direction": d.get("direction"),
+        "template_name": d.get("template_name"),
+        "status": d.get("status"),
+        "preview": d.get("preview") or d.get("notes"),
+        "batch_id": d.get("batch_id"),
+        "created_at": d.get("created_at"),
+    } for d in docs]
+    return {"items": items, "total": total, "offset": offset, "limit": limit,
+            "next_offset": (offset + limit) if (offset + limit) < total else None}
+
+
+# ── CRM SOURCE (Feature 1) — server-side filtered + paginated ───────────────
+@router.get("/crm/contact-types")
+async def crm_contact_types(admin: dict = Depends(current_team_or_admin)):
+    """Distinct contact_type values for the CRM filter dropdown."""
+    types = await db.clients.distinct(
+        "contact_type", {"archived": {"$ne": True}, "deleted": {"$ne": True}}
+    )
+    return {"contact_types": sorted([t for t in types if t])}
+
+
+@router.get("/crm/contacts")
+async def crm_contacts(
+    contact_type: Optional[str] = None,
+    tags: Optional[str] = None,   # comma-separated
+    q: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 50,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Paginated CRM contacts for the WhatsApp target picker. Server-side
+    filtered by contact_type / tags / text — never returns the full collection."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    query: Dict[str, Any] = {"archived": {"$ne": True}, "deleted": {"$ne": True}}
+    if contact_type:
+        query["contact_type"] = contact_type
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        if tag_list:
+            query["tags"] = {"$in": tag_list}
+    if q:
+        rgx = {"$regex": _re.escape(q), "$options": "i"}
+        query["$or"] = [{"name": rgx}, {"company_name": rgx}]
+    total = await db.clients.count_documents(query)
+    docs = await db.clients.find(
+        query, {"name": 1, "company_name": 1, "phone_number": 1, "contact_type": 1, "tags": 1}
+    ).sort("last_contacted_date", -1).skip(offset).limit(limit).to_list(limit)
+    items = [{
+        "id": str(d["_id"]),
+        "name": d.get("name"),
+        "company_name": d.get("company_name"),
+        "phone": _normalize_phone(d.get("phone_number")),
+        "phone_raw": d.get("phone_number"),
+        "contact_type": d.get("contact_type"),
+        "tags": d.get("tags") or [],
+    } for d in docs]
+    return {
+        "items": items, "total": total, "offset": offset, "limit": limit,
+        "next_offset": (offset + limit) if (offset + limit) < total else None,
+    }
+
+
+# ── MANUAL CONTACTS (Feature 5) — validate before send ──────────────────────
+class ManualValidateIn(BaseModel):
+    contacts: List[ManualContact] = Field(default_factory=list)
+
+
+@router.post("/manual/validate")
+async def manual_validate(payload: ManualValidateIn, admin: dict = Depends(current_team_or_admin)):
+    """Validate manual contacts: phone + country code, dedup. Returns a preview."""
+    valid: List[dict] = []
+    invalid: List[dict] = []
+    duplicates: List[dict] = []
+    seen: Dict[str, str] = {}
+    for mc in payload.contacts:
+        norm = _normalize_phone(mc.phone)
+        if not norm:
+            invalid.append({"name": mc.name or "", "phone": mc.phone or "",
+                            "reason": "Invalid phone / missing country code"})
+            continue
+        if norm in seen:
+            duplicates.append({"name": mc.name or "", "phone": norm})
+            continue
+        seen[norm] = mc.name or ""
+        valid.append({"name": mc.name or "", "phone": norm, "destination_type": "number"})
+    return {
+        "valid": valid, "invalid": invalid, "duplicates": duplicates,
+        "counts": {"valid": len(valid), "invalid": len(invalid), "duplicates": len(duplicates)},
+    }
+
+
 @router.post("/batches", status_code=201)
 async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_admin)):
     """Create a batch (dry-run or live).
@@ -527,91 +957,56 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
     Dry-run batches resolve recipients + render messages but do NOT send.
     Live batches create pending jobs that the worker will pick up.
     """
-    # Validate project
-    project = await db.projects.find_one({"id": payload.project_id}, {"_id": 0})
-    if not project:
-        raise HTTPException(404, "Project not found")
-
     # Validate template
     template = await db.whatsapp_templates.find_one({"id": payload.template_id}, {"_id": 0})
     if not template:
         raise HTTPException(404, "Template not found")
-
-    # PROBLEM #3 trace: log the raw template once so duplication can be located
-    # (server-side compile vs. worker typing vs. retry re-send).
     _raw = template.get("body_text", "")
     logger.info("whatsapp: RAW TEMPLATE id=%s (len=%d): %r", payload.template_id, len(_raw), _raw)
 
-    # Resolve recipients
-    pipeline_rows = await db.casting_pipeline.find(
-        {"project_id": payload.project_id, "stage": {"$in": payload.pipeline_stages}},
-        {"_id": 0, "talent_id": 1, "stage": 1},
-    ).to_list(5000)
-
-    if not pipeline_rows:
-        raise HTTPException(400, "No talents found in selected pipeline stages")
-
-    talent_ids = list({r["talent_id"] for r in pipeline_rows})
-    talents_cursor = db.talents.find(
-        {"id": {"$in": talent_ids}},
-        {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
+    # FEATURE 6: resolve recipients via the unified engine (PROJECT|CRM|MANUAL).
+    source_type, params = _batch_source(payload)
+    resolved = await resolve_recipients_engine(
+        source_type, params, payload.excluded_recipient_ids
     )
-    talents = await talents_cursor.to_list(5000)
-    talent_map = {t["id"]: t for t in talents}
+    rec_list = resolved["recipients"]
+    skipped = resolved["unresolvable"]
+    if not rec_list:
+        raise HTTPException(400, f"No sendable recipients found ({len(skipped)} unresolvable).")
 
-    # Build jobs
+    # Human-readable source label for campaign history (Feature 7).
+    source_label = ""
+    if source_type == "PROJECT" and params.project_id:
+        proj = await db.projects.find_one({"id": params.project_id}, {"_id": 0, "brand_name": 1})
+        source_label = (proj or {}).get("brand_name", "") if proj else ""
+    elif source_type == "CRM":
+        source_label = params.contact_type or "All CRM contacts"
+    elif source_type == "MANUAL":
+        source_label = f"{len(rec_list)} manual contact(s)"
+
     job_status = "dry_run_preview" if payload.is_dry_run else "pending"
     now = _utcnow()
     batch_id = _new_id()
     jobs = []
-    skipped = []
-
-    seen_talent_ids: set = set()
-    for row in pipeline_rows:
-        tid = row["talent_id"]
-        if tid in seen_talent_ids:
-            continue
-        seen_talent_ids.add(tid)
-
-        talent = talent_map.get(tid)
-        if not talent:
-            skipped.append({"talent_id": tid, "reason": "Not found"})
-            continue
-
-        group_name = (talent.get("whatsapp_group_name") or "").strip()
-        phone = (talent.get("phone") or "").strip()
-        talent_name = talent.get("name", "")
-
-        dest_type, destination, reason = _resolve_destination(talent)
-        if not dest_type:
-            skipped.append({
-                "talent_id": tid,
-                "talent_name": talent_name,
-                "reason": reason or "No group name or phone number",
-            })
-            continue
-
-        # FEATURE 3: audit the routing decision before the send is queued.
-        _log_routing_decision(talent_name, phone, group_name, dest_type, destination)
-
-        message_body = _render_message(
-            template["body_text"], payload.variable_data, talent_name
-        )
-        # PROBLEM #3 trace: the exact compiled string stored on the job. If this
-        # is a single copy but WhatsApp shows duplicates, the source is the
-        # worker (typing/retry), not server-side compilation.
-        logger.info(
-            "whatsapp: COMPILED MESSAGE talent=%r (len=%d): %r",
-            talent_name, len(message_body), message_body,
-        )
-
+    for rec in rec_list:
+        message_body = _render_message(template["body_text"], payload.variable_data, rec["name"])
+        logger.info("whatsapp: COMPILED MESSAGE recipient=%r (len=%d): %r",
+                    rec["name"], len(message_body), message_body)
         jobs.append({
             "id": _new_id(),
             "batch_id": batch_id,
-            "talent_id": tid,
-            "talent_name": talent_name,
-            "destination_type": dest_type,
-            "destination": destination,
+            # Template ref for the comm timeline (Slice 4).
+            "template_id": payload.template_id,
+            "template_name": template.get("name") or template.get("slug") or "",
+            # Source attribution (Feature 6/7). talent_id kept for back-compat.
+            "source": rec["source"],
+            "source_id": rec["source_id"],
+            "recipient_kind": rec["recipient_kind"],
+            "recipient_id": rec["recipient_id"],
+            "talent_id": rec["recipient_id"] if rec["recipient_kind"] == "TALENT" else None,
+            "talent_name": rec["name"],
+            "destination_type": rec["destination_type"],
+            "destination": rec["destination"],
             "message_body": message_body,
             "media_url": payload.media_url,
             "is_dry_run": payload.is_dry_run,
@@ -624,20 +1019,17 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
             "created_at": now,
         })
 
-    if not jobs:
-        raise HTTPException(
-            400,
-            f"No sendable recipients found. {len(skipped)} talent(s) had no destination.",
-        )
-
     # Create batch document
     batch_doc = {
         "id": batch_id,
-        "project_id": payload.project_id,
-        "project_name": project.get("brand_name", ""),
+        "source_type": source_type,          # Feature 7
+        "source_label": source_label,
+        # Legacy fields retained for existing UI/back-compat.
+        "project_id": params.project_id,
+        "project_name": source_label if source_type == "PROJECT" else "",
         "template_id": payload.template_id,
         "template_slug": template.get("slug", ""),
-        "pipeline_stages": payload.pipeline_stages,
+        "pipeline_stages": params.pipeline_stages,
         "variable_data": payload.variable_data,
         "media_url": payload.media_url,
         "is_dry_run": payload.is_dry_run,
@@ -648,6 +1040,7 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
         "sent_count": 0,
         "failed_count": 0,
         "unconfirmed_count": 0,
+        "excluded_count": resolved["counts"]["excluded"],
         "skipped_recipients": skipped,
         "created_by": admin["id"],
         "created_at": now,

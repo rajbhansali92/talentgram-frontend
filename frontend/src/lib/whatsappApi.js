@@ -46,6 +46,57 @@ export async function resolveRecipients(projectId, stages) {
   return res.data;
 }
 
+// --- UNIFIED RESOLUTION (Slice 1/6) ---
+// body: { source_type: "PROJECT"|"CRM"|"MANUAL", source_params, excluded_recipient_ids }
+export async function resolveTargets(body) {
+  const res = await adminApi.post("/whatsapp/resolve", body);
+  return res.data;
+}
+
+// --- CRM SOURCE (Slice 2) ---
+export async function getCrmContactTypes() {
+  const res = await adminApi.get("/whatsapp/crm/contact-types");
+  return res.data.contact_types || [];
+}
+export async function getCrmContacts(params = {}) {
+  const res = await adminApi.get("/whatsapp/crm/contacts", { params });
+  return res.data;
+}
+
+// --- MANUAL (Slice 2 / Feature 5) ---
+export async function validateManual(contacts) {
+  const res = await adminApi.post("/whatsapp/manual/validate", { contacts });
+  return res.data;
+}
+
+// --- PROJECT PICKER (Slice 3 / Feature 4) ---
+export async function searchProjects(params = {}) {
+  const res = await adminApi.get("/whatsapp/projects/search", { params });
+  return res.data;
+}
+export async function getRecentProjects(limit = 10) {
+  const res = await adminApi.get("/whatsapp/projects/recent", { params: { limit } });
+  return res.data.items || [];
+}
+export async function getPinnedProjects() {
+  const res = await adminApi.get("/whatsapp/projects/pins");
+  return res.data.items || [];
+}
+export async function pinProject(projectId) {
+  await adminApi.post(`/whatsapp/projects/pins/${projectId}`);
+}
+export async function unpinProject(projectId) {
+  await adminApi.delete(`/whatsapp/projects/pins/${projectId}`);
+}
+
+// --- COMMUNICATION TIMELINE (Slice 4 / Feature 2) ---
+export async function getTimeline(subjectType, subjectId, params = {}) {
+  const res = await adminApi.get("/whatsapp/timeline", {
+    params: { subject_type: subjectType, subject_id: subjectId, ...params },
+  });
+  return res.data;
+}
+
 // --- BATCHES ---
 export async function createBatch(data) {
   const res = await adminApi.post("/whatsapp/batches", data);

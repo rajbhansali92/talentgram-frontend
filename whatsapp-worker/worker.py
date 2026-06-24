@@ -66,6 +66,46 @@ async def write_audit_log(
     await db.whatsapp_audit_log.insert_one(doc)
 
 
+async def _write_timeline(job: dict, status: str) -> None:
+    """Slice 4 — upsert one unified comm-timeline row (interactions collection)
+    per job on terminal status, so the send appears on the talent / CRM profile.
+    Keyed by job_id (idempotent). Derives the subject from the job's recipient."""
+    db = get_db()
+    kind = job.get("recipient_kind") or ("TALENT" if job.get("talent_id") else "")
+    rid = job.get("recipient_id") or job.get("talent_id")
+    if not kind or not rid:
+        return
+    doc = {
+        "subject_type": kind,
+        "subject_id": str(rid),
+        "type": "whatsapp",
+        "channel": "whatsapp",
+        "direction": "out",
+        "template_id": job.get("template_id"),
+        "template_name": job.get("template_name"),
+        "status": status,
+        "batch_id": job.get("batch_id"),
+        "job_id": job.get("id"),
+        "destination": job.get("destination"),
+        "destination_type": job.get("destination_type"),
+        "preview": (job.get("message_body") or "")[:120],
+        "created_at": _utcnow(),
+    }
+    if kind == "CRM_CLIENT":
+        # Back-compat: existing CRM reads query by client_id (ObjectId).
+        try:
+            from bson import ObjectId
+            doc["client_id"] = ObjectId(str(rid))
+        except Exception:
+            pass
+    try:
+        await db.interactions.update_one(
+            {"job_id": job.get("id")}, {"$set": doc}, upsert=True
+        )
+    except Exception as exc:
+        logger.warning("worker: timeline write failed for job %s: %s", job.get("id"), exc)
+
+
 async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     """Poll for a single pending job, claim it, send the message, update status."""
     db = get_db()
@@ -224,7 +264,9 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             destination_type=job["destination_type"],
             message_preview=job["message_body"],
         )
-        
+        # Slice 4: unified comm timeline (talent / CRM profile).
+        await _write_timeline(job, "sent")
+
         # Apply randomized human-like delay
         logger.info("worker: sleeping for %.2f seconds before next job...", delay)
         await asyncio.sleep(delay)
@@ -282,7 +324,10 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             message_preview=job["message_body"],
             metadata={"state": state, "error": err, "attempt": attempt_count, "will_retry": is_retryable},
         )
-        
+        # Slice 4: record terminal outcomes on the timeline (not retryable 'pending').
+        if new_status in ("sent_unverified", "failed"):
+            await _write_timeline(job, new_status)
+
         # Circuit Breaker check
         # Count consecutive failures in the last 10 jobs of this batch
         recent_jobs = await db.whatsapp_jobs.find(

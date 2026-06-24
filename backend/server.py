@@ -438,6 +438,9 @@ async def on_startup():
 
         # Marketing Hub / CRM indexes
         await db.clients.create_index([("last_contacted_date", -1)])
+        # WhatsApp CRM targeting (Slice 2): filter by contact_type / tags at scale.
+        await db.clients.create_index([("contact_type", 1)])
+        await db.clients.create_index([("tags", 1)])
         try:
             await db.clients.create_index([("name", "text"), ("company_name", "text"), ("tags", "text")])
         except Exception as _e:

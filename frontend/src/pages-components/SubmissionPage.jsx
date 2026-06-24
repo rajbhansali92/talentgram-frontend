@@ -1453,6 +1453,11 @@ function SubmissionPage() {
     const missingRequirements = getMissingRequirements();
     const readyToSubmit = missingRequirements.length === 0;
     const missing = missingRequirements.map(req => req.label);
+    // Block Submit while any upload is still uploading/processing so the talent
+    // never hits a confusing "required" failure for media that is mid-upload.
+    const uploadsInProgress = Object.values(activeUploads).some(
+        (u) => u.status === "uploading" || u.status === "processing"
+    );
 
     const MAX_TAKES = 5;
     const canAddTake = takes.length < MAX_TAKES;
@@ -3137,7 +3142,7 @@ function SubmissionPage() {
                             </p>
                             <button
                                 onClick={finalize}
-                                disabled={finalizing}
+                                disabled={finalizing || uploadsInProgress}
                                 data-testid="finalize-submission-btn"
                                 className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                                 style={{ WebkitTapHighlightColor: "transparent" }}
@@ -3150,6 +3155,11 @@ function SubmissionPage() {
                                 }
                                 Submit Audition
                             </button>
+                            {uploadsInProgress && (
+                                <p className="text-[11px] text-[#333333] text-center mt-3 font-mono" data-testid="uploads-in-progress-msg">
+                                    Uploads are still in progress. Please wait until all uploads finish.
+                                </p>
+                            )}
                             {!readyToSubmit && (
                                 <p className="text-[11px] text-[#333333] text-center mt-3 font-mono">
                                     Need: First+Last name · Height · Location ·

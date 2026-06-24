@@ -6,6 +6,7 @@ import { api } from "./api";
 
 const CHUNK_SIZE = 20 * 1024 * 1024; // 20 MB (>5 MB Cloudinary minimum)
 const MAX_DURATION_SECONDS = 300; // 5 minutes
+const MAX_CHUNK_ATTEMPTS = 4; // per-chunk network retries before failing the upload
 
 // Read a video's duration from its file metadata (client-side guard).
 function readVideoDuration(file) {
@@ -58,6 +59,25 @@ function uploadChunk(uploadUrl, formParams, blob, start, total, uploadId, onProg
     });
 }
 
+// Upload one chunk with bounded retries + exponential backoff. Because the
+// caller's loop only advances `start` after a chunk resolves, retrying the
+// SAME chunk here means a network blip resumes from the last successful chunk
+// (never restarts the whole video from byte 0).
+async function uploadChunkWithRetry(uploadUrl, formParams, blob, start, total, uploadId, onProgress, baseLoaded) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
+        try {
+            return await uploadChunk(uploadUrl, formParams, blob, start, total, uploadId, onProgress, baseLoaded);
+        } catch (err) {
+            lastErr = err;
+            if (err?.noRetry || attempt === MAX_CHUNK_ATTEMPTS) break;
+            // 1s, 2s, 4s …
+            await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+        }
+    }
+    throw lastErr;
+}
+
 // Returns the backend /video-complete response: { ok, media }.
 export async function directVideoUpload({ sid, token, category, label, file, onProgress }) {
     // Client-side duration guard (server re-validates authoritatively).
@@ -91,7 +111,7 @@ export async function directVideoUpload({ sid, token, category, label, file, onP
     for (let start = 0; start < total; start += CHUNK_SIZE) {
         const end = Math.min(start + CHUNK_SIZE, total);
         const blob = file.slice(start, end);
-        lastResponse = await uploadChunk(
+        lastResponse = await uploadChunkWithRetry(
             s.upload_url, formParams, blob, start, total, uploadId, onProgress, start
         );
     }

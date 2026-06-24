@@ -12,11 +12,7 @@ import {
   AlertTriangle,
   FolderOpen
 } from "lucide-react";
-import { getAdmin } from "@/lib/api";
-import axios from "axios";
-
-// Read API URL from env
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "";
+import { adminApi } from "@/lib/api";
 
 export default function StorageDashboard() {
   const [analytics, setAnalytics] = useState(null);
@@ -25,22 +21,19 @@ export default function StorageDashboard() {
   const [error, setError] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null); // { type, id, data }
 
-  // Axios authorization header config
-  const getAuthHeaders = () => {
-    const admin = getAdmin();
-    return {
-      headers: {
-        Authorization: `Bearer ${admin?.token || ""}`
-      }
-    };
-  };
+  // NOTE: use the shared `adminApi` instance (baseURL = `${BACKEND_URL}/api`)
+  // exactly like every other admin page. Its request interceptor attaches the
+  // admin JWT from `tg_admin_token` and its response interceptor handles 401s.
+  // The previous hand-rolled header read `getAdmin()?.token`, but the admin
+  // *profile* object carries no token (the token lives in `tg_admin_token`),
+  // so it always sent an empty Bearer and the cloudinary endpoints 401'd.
 
   const fetchData = async () => {
     setLoading(true);
     try {
       const [resAnal, resProj] = await Promise.all([
-        axios.get(`${BACKEND_URL}/api/admin/cloudinary/analytics`, getAuthHeaders()),
-        axios.get(`${BACKEND_URL}/api/admin/cloudinary/projects`, getAuthHeaders())
+        adminApi.get(`/admin/cloudinary/analytics`),
+        adminApi.get(`/admin/cloudinary/projects`)
       ]);
       setAnalytics(resAnal.data);
       setProjects(resProj.data);
@@ -59,7 +52,7 @@ export default function StorageDashboard() {
 
   const handleArchive = async (projectId) => {
     try {
-      await axios.post(`${BACKEND_URL}/api/admin/cloudinary/projects/${projectId}/archive`, {}, getAuthHeaders());
+      await adminApi.post(`/admin/cloudinary/projects/${projectId}/archive`, {});
       fetchData();
     } catch (err) {
       alert("Failed to archive project");
@@ -68,7 +61,7 @@ export default function StorageDashboard() {
 
   const handleRestore = async (projectId) => {
     try {
-      await axios.post(`${BACKEND_URL}/api/admin/cloudinary/projects/${projectId}/restore`, {}, getAuthHeaders());
+      await adminApi.post(`/admin/cloudinary/projects/${projectId}/restore`, {});
       fetchData();
     } catch (err) {
       alert("Failed to restore project");
@@ -77,7 +70,7 @@ export default function StorageDashboard() {
 
   const handleDeleteProject = async (projectId) => {
     try {
-      await axios.delete(`${BACKEND_URL}/api/admin/cloudinary/projects/${projectId}`, getAuthHeaders());
+      await adminApi.delete(`/admin/cloudinary/projects/${projectId}`);
       setConfirmDialog(null);
       fetchData();
     } catch (err) {

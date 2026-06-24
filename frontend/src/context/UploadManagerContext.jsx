@@ -1,10 +1,16 @@
 "use client";
 
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, useEffect } from "react";
 import { api } from "../lib/api";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
 import axios from "axios";
+import { directVideoUpload } from "../lib/directVideoUpload";
+
+// Submission audition videos go through the chunked browser→Cloudinary
+// transport (directVideoUpload). Detected by the submission upload endpoint;
+// the apply flow keeps the single-POST path.
+const SUBMISSION_VIDEO_ENDPOINT_RE = /\/public\/submissions\/([^/]+)\/upload\/?$/;
 
 
 const UploadManagerContext = createContext(null);
@@ -21,6 +27,24 @@ export function UploadManagerProvider({ children }) {
     const [activeUploads, setActiveUploads] = useState({});
     const [retryQueue, setRetryQueue] = useState({});
 
+    // Guard against accidental navigation/refresh while an upload is in flight.
+    // The in-flight File cannot be re-read after a reload, so warn before the
+    // page unloads. (Mitigates the controllable-loss case; OS-level mobile tab
+    // eviction can still occur and is handled by re-upload + finalize reconcile.)
+    useEffect(() => {
+        const hasActive = Object.values(activeUploads).some(
+            (u) => u.status === "uploading" || u.status === "processing"
+        );
+        if (!hasActive) return;
+        const handler = (e) => {
+            e.preventDefault();
+            e.returnValue = "An upload is still in progress. Leaving now will lose it.";
+            return e.returnValue;
+        };
+        window.addEventListener("beforeunload", handler);
+        return () => window.removeEventListener("beforeunload", handler);
+    }, [activeUploads]);
+
     const uploadFile = async (file, category, label, options = {}) => {
         const { endpoint, token, onSuccess, onBeforeUpload } = options;
 
@@ -31,7 +55,14 @@ export function UploadManagerProvider({ children }) {
 
         // Size & type validation
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
-        const CAP_MB = isVideoSlot ? 200 : 20;
+        // Submission videos use the chunked transport (no single-POST size
+        // ceiling) → allow large audition takes. A null endpoint also resolves
+        // to a submission endpoint via onBeforeUpload (SubmissionPage). The apply
+        // single-POST path keeps the 200 MB cap. Duration is guarded (300s) by
+        // directVideoUpload; this is just a sane upper safety bound.
+        const isChunkedSubmissionVideo =
+            isVideoSlot && (!endpoint || SUBMISSION_VIDEO_ENDPOINT_RE.test(endpoint));
+        const CAP_MB = isVideoSlot ? (isChunkedSubmissionVideo ? 2048 : 200) : 20;
 
         if (file) {
             const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
@@ -90,6 +121,81 @@ export function UploadManagerProvider({ children }) {
             ...q,
             [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size, file, options }
         }));
+
+        // ── Chunked transport for submission audition videos ──────────────────
+        // Reuses directVideoUpload (chunked, resumable, duration-guarded) while
+        // driving the SAME activeUploads state machine, so FloatingUploadManager
+        // and the SubmissionPage upload cards/progress bars are unchanged.
+        const subVideoMatch = isVideoSlot && SUBMISSION_VIDEO_ENDPOINT_RE.exec(dynamicEndpoint || "");
+        if (subVideoMatch) {
+            const sid = subVideoMatch[1];
+            try {
+                await directVideoUpload({
+                    sid,
+                    token: dynamicToken,
+                    category,
+                    label,
+                    file,
+                    onProgress: (loaded, total) => {
+                        const pct = total ? Math.round((loaded / total) * 100) : 0;
+                        setActiveUploads((prev) => {
+                            if (!prev[slotKey]) return prev;
+                            return {
+                                ...prev,
+                                [slotKey]: {
+                                    ...prev[slotKey],
+                                    status: pct >= 100 ? "processing" : "uploading",
+                                    pct,
+                                },
+                            };
+                        });
+                    },
+                });
+
+                // Re-fetch the full submission so onSuccess receives the SAME
+                // shape as the single-POST /complete path (setSubmission(doc)).
+                if (onSuccess) {
+                    try {
+                        const headers = dynamicToken ? { Authorization: `Bearer ${dynamicToken}` } : {};
+                        const res = await api.get(`/public/submissions/${sid}`, { headers });
+                        onSuccess(res.data);
+                    } catch (_) {
+                        // Non-fatal: the asset is attached server-side and finalize
+                        // reconciles; the next state refresh will surface it.
+                    }
+                }
+
+                setRetryQueue((q) => {
+                    const n = { ...q };
+                    delete n[slotKey];
+                    return n;
+                });
+                setActiveUploads((prev) => ({
+                    ...prev,
+                    [slotKey]: { ...prev[slotKey], status: "completed", pct: 100 },
+                }));
+                setTimeout(() => {
+                    setActiveUploads((prev) => {
+                        const next = { ...prev };
+                        if (next[slotKey]?.status === "completed") delete next[slotKey];
+                        return next;
+                    });
+                }, 3000);
+                return;
+            } catch (err) {
+                const msg = err?.message || err?.response?.data?.detail || "Upload failed";
+                setRetryQueue((q) => ({
+                    ...q,
+                    [slotKey]: { ...(q[slotKey] || {}), failed: true, error: msg },
+                }));
+                setActiveUploads((prev) => ({
+                    ...prev,
+                    [slotKey]: { ...prev[slotKey], status: "failed", error: msg },
+                }));
+                toast.error(`${msg} — tap Retry to try again`);
+                return;
+            }
+        }
 
         const MAX_ATTEMPTS = 3;
         let lastErr = null;

@@ -1119,6 +1119,10 @@ class VideoSignatureIn(BaseModel):
     category: str
     label: Optional[str] = None
     content_type: Optional[str] = None
+    # Re-sign an in-progress chunked upload: pass the public_id from the first
+    # signature so a fresh timestamp/signature targets the SAME asset (prevents
+    # stale-signature failures on multi-hour uploads). Validated server-side.
+    public_id: Optional[str] = None
 
 
 class VideoCompleteIn(BaseModel):
@@ -1293,18 +1297,28 @@ async def video_signature(
     if not sub:
         raise HTTPException(404, "Submission not found")
 
-    if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
-        existing_takes = sum(
-            1 for m in (sub.get("media") or [])
-            if m.get("category") in ("take",) or m.get("category") in LEGACY_TAKE_CATEGORIES
-        )
-        if existing_takes >= MAX_SUBMISSION_TAKES:
-            raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
-
     tid, tname = await _resolve_submission_talent(sub)
     folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
-    leaf = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex}"
-    public_id = f"{folder}/{leaf}"
+
+    is_resign = bool(payload.public_id)
+    if is_resign:
+        # Re-sign the SAME in-progress target. Validate it lives inside THIS
+        # submission's folder so a token can never sign an arbitrary public_id.
+        if not payload.public_id.startswith(folder + "/"):
+            raise HTTPException(400, "Invalid public_id for this submission")
+        public_id = payload.public_id
+    else:
+        # First signature for a new upload: enforce the take limit (a re-sign is
+        # a continuation of an existing in-flight upload, not a new take).
+        if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
+            existing_takes = sum(
+                1 for m in (sub.get("media") or [])
+                if m.get("category") in ("take",) or m.get("category") in LEGACY_TAKE_CATEGORIES
+            )
+            if existing_takes >= MAX_SUBMISSION_TAKES:
+                raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
+        leaf = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex}"
+        public_id = f"{folder}/{leaf}"
 
     # Pinned, string-encoded transformation + eager poster (signed verbatim).
     transformation = "c_limit,h_720,w_1280/q_auto,vc_auto"

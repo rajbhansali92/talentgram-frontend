@@ -44,6 +44,28 @@ export const IMAGE_URL = (media) => {
 
 export const api = axios.create({ baseURL: API });
 
+// Attach the talent's portal session token (minted only after OTP/Google
+// email-ownership verification) to public calls that need to prove ownership
+// of an email — /public/prefill, /public/apply, and the project submission
+// start endpoint. The backend ignores it where it isn't needed. An explicit
+// per-request Authorization header (e.g. a draft submitter token) always wins
+// because axios only fills headers that are not already set.
+api.interceptors.request.use((cfg) => {
+    try {
+        const hasAuth =
+            cfg.headers?.Authorization ||
+            cfg.headers?.authorization ||
+            cfg.headers?.common?.Authorization;
+        if (!hasAuth && typeof window !== "undefined") {
+            const t = localStorage.getItem(PORTAL_TOKEN_KEY);
+            if (t) cfg.headers.Authorization = `Bearer ${t}`;
+        }
+    } catch (e) {
+        // localStorage unavailable (SSR / privacy mode) — proceed unauthenticated.
+    }
+    return cfg;
+});
+
 // ================= ADMIN API =================
 
 export const adminApi = axios.create({ baseURL: API });

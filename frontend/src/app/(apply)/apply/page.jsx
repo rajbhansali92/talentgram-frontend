@@ -1,5 +1,6 @@
 import React from 'react';
 import ApplicationPage from '@/pages-components/ApplicationPage';
+import ErrorBoundary from '@/components/ErrorBoundary';
 
 export const metadata = {
   title: 'Talentgram Agency',
@@ -27,6 +28,10 @@ export const metadata = {
 };
 
 export default function ApplyPage() {
-    return <ApplicationPage />;
+    return (
+        <ErrorBoundary>
+            <ApplicationPage />
+        </ErrorBoundary>
+    );
 }
 

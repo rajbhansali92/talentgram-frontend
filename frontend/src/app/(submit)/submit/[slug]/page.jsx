@@ -1,5 +1,6 @@
 import React from 'react';
 import SubmissionPage from '@/pages-components/SubmissionPage';
+import ErrorBoundary from '@/components/ErrorBoundary';
 
 export async function generateMetadata({ params }) {
   const { slug } = await params;
@@ -31,6 +32,10 @@ export async function generateMetadata({ params }) {
 }
 
 export default function SubmitPage() {
-    return <SubmissionPage />;
+    return (
+        <ErrorBoundary>
+            <SubmissionPage />
+        </ErrorBoundary>
+    );
 }
 

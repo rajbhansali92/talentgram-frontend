@@ -696,7 +696,29 @@ export default function ApplicationPage() {
             );
         } catch (e) {
             console.error("[startApplication] Failed to start/resume application:", e);
-            toast.error(e?.response?.data?.detail || "Failed to start");
+            // P0-1: the backend now requires proof of email ownership before it
+            // will touch an existing application/talent. If we hit that gate
+            // (403), route the returning user through the one-time-code flow
+            // instead of showing a dead error — then they retry automatically.
+            if (e?.response?.status === 403) {
+                const verifyEmail = (basics.email || "").trim().toLowerCase();
+                setEmailGateUnlocked(false);
+                setGatewayEmail(verifyEmail);
+                try {
+                    await axios.post("/auth/otp/send", { email: verifyEmail });
+                    setOtpSent(true);
+                    toast.message("Please verify your email", {
+                        description: "We've sent a one-time code to continue.",
+                    });
+                } catch (otpErr) {
+                    toast.error(
+                        otpErr?.response?.data?.detail ||
+                            "Please verify your email to continue.",
+                    );
+                }
+            } else {
+                toast.error(e?.response?.data?.detail || "Failed to start");
+            }
         } finally {
             setSaving(false);
         }
@@ -839,6 +861,14 @@ export default function ApplicationPage() {
             );
             setFinalized(true);
             localStorage.removeItem(LS_KEY);
+            // P2-8: the local draft is the only place we mirrored PII; once the
+            // submission is server-side we no longer need the bulky Google
+            // profile blob cached in localStorage. Drop it to minimise PII at
+            // rest (the portal token/email remain so "Edit Profile" still works).
+            try {
+                localStorage.removeItem("talentgram_google_profile_data");
+                localStorage.removeItem("talentgram_google_avatar");
+            } catch (_) { /* localStorage unavailable — non-fatal */ }
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Submission failed");
         } finally {

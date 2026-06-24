@@ -54,6 +54,9 @@ from core import (
     video_poster_url,
     update_talent_cover_cache,
     normalize_email,
+    verify_email_ownership,
+    rate_limit_ok,
+    client_ip,
 )
 from drive_backup import (
     drive_enabled,
@@ -140,11 +143,27 @@ def deduplicate_media(media_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------
 # Public (talent-facing) flow
 # --------------------------------------------------------------------------
+# P0-3: explicit allow-list of project fields that may ever reach an
+# unauthenticated talent on the public submission page. Anything NOT in this
+# set (e.g. client_budget/agency margin, created_by, future internal notes)
+# can never leak by accident — new internal fields are private by default.
+_PUBLIC_PROJECT_FIELDS = {
+    "id", "slug", "brand_name", "brand_link", "character", "shoot_dates",
+    "budget_per_day", "commission_percent", "medium_usage", "director",
+    "production_house", "additional_details", "video_links",
+    "competitive_brand_enabled", "custom_questions", "talent_budget",
+    "require_reapproval_on_edit", "hide_budget_from_talent", "status",
+    "submission_requirements", "materials", "created_at",
+}
+
+
 @router.get("/public/projects/{slug}")
 async def public_project(slug: str):
-    project = await db.projects.find_one({"slug": slug}, {"_id": 0, "created_by": 0, "client_budget": 0})
+    project = await db.projects.find_one({"slug": slug}, {"_id": 0})
     if not project:
         raise HTTPException(404, "Project not found")
+    # Strict allow-list: drop everything that is not explicitly talent-facing.
+    project = {k: v for k, v in project.items() if k in _PUBLIC_PROJECT_FIELDS}
     # Gate budget visibility: if admin has toggled "Hide Budget From Talent",
     # strip budget_per_day and talent_budget from the public payload.
     if project.get("hide_budget_from_talent"):
@@ -167,10 +186,13 @@ async def prefill_for_email(
     if not email or "@" not in email:
         return {}
 
-    # Remedy IDOR: Require valid OTP verified session token matching the query email
-    submitter = await decode_submitter(authorization)
-    if not submitter or normalize_email(submitter.get("email")) != email:
-        # Prevent email enumeration: return generic empty prefill schema on invalid auth
+    # Remedy IDOR: require PROOF OF OWNERSHIP of the queried email. Accepts a
+    # portal token (OTP/Google) or an existing submitter credential bound to
+    # this email (see verify_email_ownership). This is the same gate used by
+    # the apply/submission start flows, so the frontend only needs to present
+    # the portal token it already holds after verification.
+    if not await verify_email_ownership(authorization, email):
+        # Prevent email enumeration: generic empty schema on invalid auth.
         return {}
 
     talent = await db.talents.find_one(
@@ -275,12 +297,23 @@ def _prefill_rate_limit_ok(request: Request) -> bool:
 
 
 @router.post("/public/projects/{slug}/submission")
-async def start_submission(slug: str, payload: SubmissionStartIn):
+async def start_submission(
+    slug: str,
+    payload: SubmissionStartIn,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """Start OR resume a submission.
 
     If a submission already exists for (project, email), returns a fresh token
     that unlocks edits — this is the retest / re-upload entry point. The
     decision is NOT reset here; only `finalize` flips it back to pending.
+
+    P0-2: token + persistent access_token issuance, and any talent-media
+    prefill, are gated behind proof of email ownership whenever there is
+    pre-existing data for the email (an existing submission OR a canonical
+    talent profile). A brand-new (project, email) with no talent record has no
+    PII to leak, so it keeps the friction-free first-time flow.
     """
     project = await db.projects.find_one({"slug": slug})
     if not project:
@@ -289,10 +322,35 @@ async def start_submission(slug: str, payload: SubmissionStartIn):
     if not email:
         raise HTTPException(400, "Invalid email address")
 
+    # P1-4: burst / enumeration protection (per-IP + per-(project,email)).
+    ip = client_ip(request)
+    if not rate_limit_ok(f"sub:ip:{ip}", limit=20, window_seconds=60.0):
+        raise HTTPException(429, "Too many attempts — please try again shortly")
+    if not rate_limit_ok(f"sub:{slug}:{email}", limit=10, window_seconds=300.0):
+        raise HTTPException(429, "Too many attempts for this email — please try again later")
+
     existing = await db.submissions.find_one({
         "project_id": project["id"],
         "talent_email": email,
     })
+
+    # P0-2: gate when pre-existing data exists for this email.
+    talent_exists = await db.talents.find_one(
+        {"$or": [
+            {"normalized_email": email},
+            {"email": email},
+            {"source.talent_email": email},
+        ]},
+        {"_id": 1},
+    )
+    if existing or talent_exists:
+        owns = await verify_email_ownership(authorization, email)
+        if not owns:
+            raise HTTPException(
+                403,
+                "Please verify your email to continue. We'll send you a one-time code.",
+            )
+
     if existing:
         sid = existing["id"]
         # Reuse the existing persistent access_token, or mint one if legacy

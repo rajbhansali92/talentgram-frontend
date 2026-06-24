@@ -48,6 +48,9 @@ from core import (
     video_poster_url,
     update_talent_cover_cache,
     normalize_email,
+    verify_email_ownership,
+    rate_limit_ok,
+    client_ip,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -367,17 +370,44 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
 
 
 @router.post("/public/apply")
-async def start_application(payload: ApplicationStartIn):
+async def start_application(
+    payload: ApplicationStartIn,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     email = normalize_email(payload.email)
     if not email:
         raise HTTPException(400, "Invalid email address")
-    
+
+    # P1-4: burst / enumeration protection. Keyed per-IP and per-email so a
+    # single attacker can neither sweep many emails from one IP nor hammer one
+    # victim email from a botnet of IPs.
+    ip = client_ip(request)
+    if not rate_limit_ok(f"apply:ip:{ip}", limit=20, window_seconds=60.0):
+        raise HTTPException(429, "Too many attempts — please try again shortly")
+    if not rate_limit_ok(f"apply:email:{email}", limit=10, window_seconds=300.0):
+        raise HTTPException(429, "Too many attempts for this email — please try again later")
+
     talent = await _find_talent_by_email(email)
     talent_age = None
     if talent:
         talent_age = talent.get("age") or (compute_age(talent.get("dob")) if talent.get("dob") else None)
 
     existing = await db.applications.find_one({"talent_email": email})
+
+    # P0-1: an anonymous caller must NOT be able to mint a submitter token for
+    # an email that already has data. Whenever an application OR a canonical
+    # talent profile already exists for this email, require proof of ownership
+    # (OTP/Google portal token, or an existing valid submitter credential).
+    # Brand-new emails (no existing record => no PII to leak / nothing to
+    # reset) keep the friction-free first-time apply flow.
+    if existing or talent:
+        owns = await verify_email_ownership(authorization, email)
+        if not owns:
+            raise HTTPException(
+                403,
+                "Please verify your email to continue. We'll send you a one-time code.",
+            )
     if existing:
         aid = existing["id"]
         token = make_token({"role": "submitter", "sid": aid, "kind": "application"}, days=7)

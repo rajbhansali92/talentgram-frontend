@@ -546,6 +546,26 @@ function SubmissionPage() {
             toast.success("✓ Details saved successfully.");
             return next;
         } catch (e) {
+            // P0-2: ownership now required when a record already exists for the
+            // email. Route the returning talent through the one-time-code flow.
+            if (e?.response?.status === 403) {
+                const verifyEmail = (form.email || "").trim().toLowerCase();
+                setEmailGateUnlocked(false);
+                setGatewayEmail(verifyEmail);
+                try {
+                    await axios.post("/auth/otp/send", { email: verifyEmail });
+                    setOtpSent(true);
+                    toast.message("Please verify your email", {
+                        description: "We've sent a one-time code to continue.",
+                    });
+                } catch (otpErr) {
+                    toast.error(
+                        otpErr?.response?.data?.detail ||
+                            "Please verify your email to continue.",
+                    );
+                }
+                return null;
+            }
             toast.error(e?.response?.data?.detail || "Could not save profile");
             return null;
         } finally {

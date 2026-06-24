@@ -59,10 +59,15 @@ const emptyTalent = {
     whatsapp_group_name: "",
 };
 
-// ISSUE 2: File validation constants
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
-const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/jpg"];
-const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
+// P1-6: client-side limits MUST match the backend (04_MEDIA_RULES + core.py
+// signature validation) so a file that passes here never fails server-side.
+//  - image  : 20 MB  (MAX_SUBMISSION_IMAGE_BYTES)
+//  - video  : 200 MB (MAX_SUBMISSION_VIDEO_BYTES)
+//  - WebM is REJECTED by backend magic-byte validation, so it is excluded here.
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_VIDEO_SIZE = 200 * 1024 * 1024; // 200MB
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/jpg", "image/heic", "image/heif"];
+const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime"];
 
 function calcAge(dob) {
     if (!dob) return null;
@@ -335,24 +340,29 @@ export default function TalentEdit() {
         }
     };
 
-    // ISSUE 2: File validation function
+    // P1-6: validation aligned with backend limits/signatures.
     const validateFile = (file, category) => {
-        // Check file size
-        if (file.size > MAX_FILE_SIZE) {
-            toast.error(`${file.name} is too large. Max size is 25MB`);
-            return false;
-        }
-        
-        // Check file type based on category
         const isVideo = category === "video";
-        const allowedTypes = isVideo ? ALLOWED_VIDEO_TYPES : ALLOWED_IMAGE_TYPES;
-        
-        if (!allowedTypes.includes(file.type)) {
-            const allowedExtensions = isVideo ? "MP4, MOV, WEBM" : "JPEG, PNG, WEBP";
-            toast.error(`${file.name} has invalid format. Allowed: ${allowedExtensions}`);
+        const maxSize = isVideo ? MAX_VIDEO_SIZE : MAX_IMAGE_SIZE;
+        if (file.size > maxSize) {
+            const mb = Math.round(maxSize / (1024 * 1024));
+            toast.error(`${file.name} is too large. Max size is ${mb}MB`);
             return false;
         }
-        
+
+        const allowedTypes = isVideo ? ALLOWED_VIDEO_TYPES : ALLOWED_IMAGE_TYPES;
+        // Some browsers report an empty type for HEIC/HEIF; fall back to the
+        // extension so genuine Apple media isn't blocked client-side (the
+        // backend still magic-byte validates).
+        const okType =
+            allowedTypes.includes(file.type) ||
+            (!file.type && /\.(heic|heif|mp4|mov|jpe?g|png|webp)$/i.test(file.name || ""));
+        if (!okType) {
+            const allowed = isVideo ? "MP4, MOV" : "JPEG, PNG, WEBP, HEIC";
+            toast.error(`${file.name} has invalid format. Allowed: ${allowed}`);
+            return false;
+        }
+
         return true;
     };
 
@@ -544,62 +554,73 @@ export default function TalentEdit() {
         return JSON.stringify(talent) !== JSON.stringify(originalTalent);
     }, [talent, originalTalent]);
 
-    // Unsaved changes warning across all navigation pathways
+    // P1-7: SINGLE unsaved-changes guard covering every navigation vector
+    // (tab close / refresh / external nav, browser Back, and in-app links).
+    // A shared `promptingRef` ensures only ONE confirm() can be in flight, so
+    // the old triple-handler double-prompt and the popstate re-entry loop are
+    // both impossible.
+    const promptingRef = useRef(false);
     useEffect(() => {
-        if (loading) return;
-        
+        if (loading || !isDirty) return;
+
+        const MESSAGE = "You have unsaved changes. Leave without saving?";
+
+        // Returns true if the user confirms leaving. Deduped so overlapping
+        // events (e.g. an anchor click that also triggers popstate) prompt once.
+        const confirmLeave = () => {
+            if (promptingRef.current) return false;
+            promptingRef.current = true;
+            try {
+                return window.confirm(MESSAGE);
+            } finally {
+                promptingRef.current = false;
+            }
+        };
+
+        // Vector 1: browser/tab close, refresh, hard external navigation.
         const handleBeforeUnload = (e) => {
-            if (isDirty) {
-                e.preventDefault();
-                e.returnValue = "You have unsaved changes. Leave without saving?";
-                return e.returnValue;
-            }
+            e.preventDefault();
+            e.returnValue = MESSAGE;
+            return e.returnValue;
         };
-        
-        window.addEventListener("beforeunload", handleBeforeUnload);
-        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-    }, [isDirty, loading]);
 
-    useEffect(() => {
-        if (!isDirty || !isEditing) return;
-
-        const handlePopState = (e) => {
-            window.history.pushState(null, "", window.location.pathname);
-            const leave = window.confirm("You have unsaved changes. Leave without saving?");
-            if (leave) {
+        // Vector 2: browser Back button. Re-push our entry and only allow the
+        // back navigation if the user confirms (no recursive re-trigger because
+        // confirmLeave is deduped and we only nav(-1) on an explicit yes).
+        const handlePopState = () => {
+            if (confirmLeave()) {
+                window.removeEventListener("popstate", handlePopState);
                 nav(-1);
+            } else {
+                window.history.pushState(null, "", window.location.pathname);
             }
         };
 
-        window.history.pushState(null, "", window.location.pathname);
-        window.addEventListener("popstate", handlePopState);
-
-        return () => {
-            window.removeEventListener("popstate", handlePopState);
-        };
-    }, [isDirty, isEditing, nav]);
-
-    useEffect(() => {
-        if (!isDirty || !isEditing) return;
-
+        // Vector 3: in-app links (React Router <Link> / anchors).
         const handleAnchorClick = (e) => {
+            if (e.defaultPrevented) return;
             const anchor = e.target.closest("a");
             if (!anchor) return;
             const href = anchor.getAttribute("href");
-            if (href && (href.startsWith("/") || href.includes(window.location.host))) {
-                const leave = window.confirm("You have unsaved changes. Leave without saving?");
-                if (!leave) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                }
+            if (!href || href.startsWith("#")) return;
+            const internal = href.startsWith("/") || href.includes(window.location.host);
+            if (internal && !confirmLeave()) {
+                e.preventDefault();
+                e.stopPropagation();
             }
         };
 
+        window.addEventListener("beforeunload", handleBeforeUnload);
+        window.history.pushState(null, "", window.location.pathname);
+        window.addEventListener("popstate", handlePopState);
         document.addEventListener("click", handleAnchorClick, true);
+
         return () => {
+            window.removeEventListener("beforeunload", handleBeforeUnload);
+            window.removeEventListener("popstate", handlePopState);
             document.removeEventListener("click", handleAnchorClick, true);
         };
-    }, [isDirty, isEditing]);
+    }, [isDirty, loading, nav]);
 
     // ISSUE 1: Fixed loading skeleton
     if (loading) {
@@ -1327,7 +1348,7 @@ export default function TalentEdit() {
                                                 </div>
                                                 <div>
                                                     <p className="text-xs font-semibold text-black/70">Upload Audition / Intro Video</p>
-                                                    <p className="text-[10px] text-black/40 mt-1">Supports MP4, MOV, WEBM up to 25MB</p>
+                                                    <p className="text-[10px] text-black/40 mt-1">Supports MP4, MOV up to 200MB</p>
                                                 </div>
                                             </div>
                                         ) : (

@@ -320,6 +320,108 @@ def mint_portal_token(email: str) -> str:
     return make_token({"role": "portal", "email": email}, days=30)
 
 
+async def verify_email_ownership(authorization: Optional[str], email: str) -> bool:
+    """Return True only if the caller has *proven ownership* of ``email``.
+
+    This is the gate that protects the otherwise-public start/prefill flows
+    (`/public/apply`, `/public/projects/{slug}/submission`, `/public/prefill`)
+    against anonymous PII disclosure, draft hijack and destructive resets.
+
+    Three accepted, revocation-aware credential forms — all of which can only
+    exist *after* a real ownership proof (OTP / Google) or a prior verified
+    session:
+
+    1. A signature-valid, non-expired **portal token** (role ``portal``) whose
+       ``email`` claim matches. Portal tokens are minted exclusively by the OTP
+       and Google verification paths, so possession == prior proof of ownership.
+       Forgery requires the server-side ``JWT_SECRET``.
+    2. A valid **submitter** credential (JWT or opaque ``access_token``) already
+       bound to an application/submission whose ``talent_email`` matches. This
+       preserves legitimate cross-device "resume" without re-OTP.
+
+    A completely anonymous caller (no/invalid token) returns ``False``.
+    """
+    target = normalize_email(email)
+    if not target:
+        return False
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return False
+    token = authorization.split(" ", 1)[1]
+
+    # --- Form 1: portal token (pure JWT check, no DB) ----------------------
+    data = decode_token(token)
+    if data and data.get("role") == "portal":
+        if normalize_email(data.get("email")) == target:
+            return True
+
+    # --- Form 2: existing submitter credential bound to this email ---------
+    submitter = await decode_submitter(authorization)
+    if submitter:
+        sid = submitter.get("sid")
+        if submitter.get("kind") == "application":
+            doc = await db.applications.find_one({"id": sid}, {"talent_email": 1})
+        else:
+            doc = await db.submissions.find_one({"id": sid}, {"talent_email": 1})
+        if doc and normalize_email(doc.get("talent_email")) == target:
+            return True
+
+    return False
+
+
+# --------------------------------------------------------------------------
+# Generic in-process rate limiter (sliding window, per-key)
+# --------------------------------------------------------------------------
+import time as _time
+import threading as _threading
+
+_RL_BUCKETS: Dict[str, list] = {}
+_RL_LOCK = _threading.Lock()
+
+
+def rate_limit_ok(key: str, limit: int, window_seconds: float) -> bool:
+    """Sliding-window limiter. Returns False when ``key`` exceeds ``limit``
+    hits within ``window_seconds``. Process-local (per worker) — adequate as
+    burst/abuse protection in front of the heavier OTP DB-audit limiter.
+
+    NOTE: in a multi-replica deployment each replica keeps its own window, so
+    the effective global limit is ``limit * replicas``. This is intentional —
+    it is a cheap first line of defence, not a billing-grade quota.
+    """
+    now = _time.monotonic()
+    cutoff = now - window_seconds
+    with _RL_LOCK:
+        bucket = _RL_BUCKETS.setdefault(key, [])
+        # Drop timestamps outside the window in place.
+        i = 0
+        for ts in bucket:
+            if ts >= cutoff:
+                break
+            i += 1
+        if i:
+            del bucket[:i]
+        if len(bucket) >= limit:
+            return False
+        bucket.append(now)
+        # Opportunistic memory bound: forget fully-idle keys occasionally.
+        if len(_RL_BUCKETS) > 50000:
+            for k in [k for k, v in _RL_BUCKETS.items() if not v or v[-1] < cutoff]:
+                _RL_BUCKETS.pop(k, None)
+        return True
+
+
+def client_ip(request) -> str:
+    """Best-effort client IP for rate-limiting keys, honouring the first
+    X-Forwarded-For hop (Railway/Vercel set this) and falling back to the
+    socket peer."""
+    try:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+    except Exception:
+        return "unknown"
+
+
 # --------------------------------------------------------------------------
 # Storage — Cloudinary (v37m migration)
 # --------------------------------------------------------------------------
@@ -499,12 +601,6 @@ def cloudinary_upload(
         "height": result.get("height"),
         "duration": result.get("duration"),
     }
-
-
-def _slugify(name: str) -> str:
-    if not name:
-        return "unnamed"
-    return re.sub(r'[^a-zA-Z0-9_]', '', name.lower().replace(' ', '_'))
 
 
 async def log_storage_action(
@@ -1096,7 +1192,10 @@ def _slugify(title: str) -> str:
     safe = "".join(c if c.isalnum() else "-" for c in title.lower()).strip("-")
     while "--" in safe:
         safe = safe.replace("--", "-")
-    return (safe or "link") + "-" + uuid.uuid4().hex[:6]
+    # P0-3: the slug doubles as a bearer secret for the public brief/link, so
+    # the random suffix must have enough entropy to resist enumeration. 12 hex
+    # chars = 48 bits (~2.8e14). Existing shorter slugs keep working unchanged.
+    return (safe or "link") + "-" + uuid.uuid4().hex[:12]
 
 
 async def seed_admin() -> None:

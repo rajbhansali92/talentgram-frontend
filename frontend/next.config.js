@@ -17,10 +17,9 @@ const securityHeaders = [
     key: "X-Content-Type-Options",
     value: "nosniff",
   },
-  {
-    key: "X-XSS-Protection",
-    value: "1; mode=block",
-  },
+  // NOTE: X-XSS-Protection intentionally removed — it is deprecated and the
+  // legacy auditor heuristic can itself introduce XSS on some browsers. CSP
+  // below is the real XSS control.
   {
     key: "Referrer-Policy",
     value: "strict-origin-when-cross-origin",
@@ -30,11 +29,16 @@ const securityHeaders = [
     value: "geolocation=(), microphone=(), camera=()",
   },
   {
-    // CSP: allows Next.js inline scripts/styles + Cloudinary media + Google OAuth
+    // CSP: allows Next.js inline scripts/styles + Cloudinary media + Google OAuth.
+    // P2-9: 'unsafe-eval' removed from script-src — modern Next.js App Router
+    // production bundles do not require eval(). 'unsafe-inline' is retained
+    // because Next injects inline bootstrap scripts; migrating to per-request
+    // nonces is the documented follow-up. Verify with `next build && next start`
+    // before promoting (if a dependency needs eval the console will report it).
     key: "Content-Security-Policy",
     value: [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://apis.google.com",
+      "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.talentgramagency.com",

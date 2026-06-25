@@ -15,6 +15,7 @@ import {
   getWaConfig, updateWaConfig,
   getAuditLog,
   resolveTargets, getCrmContactTypes, validateManual,
+  getContactLists, createContactList, updateContactList, deleteContactList,
   // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
   testInternalNotification,
 } from "@/lib/whatsappApi";
@@ -44,6 +45,7 @@ export default function WhatsAppEnginePage() {
         <div className="flex flex-wrap gap-2 border-b border-black/[0.04] pb-px">
           {[
             { id: "campaigns", label: "Campaigns", icon: Send },
+            { id: "contact-lists", label: "Contact Lists", icon: Database },
             { id: "templates", label: "Templates", icon: Edit },
             { id: "analytics", label: "Analytics", icon: ShieldAlert },
             { id: "settings", label: "Settings", icon: Settings },
@@ -95,6 +97,7 @@ export default function WhatsAppEnginePage() {
             </div>
           )}
 
+          {activeTab === "contact-lists" && <WEContactListManager />}
           {activeTab === "templates" && <WETemplateManager />}
           {activeTab === "analytics" && <WEAuditLogPanel />}
 
@@ -316,17 +319,24 @@ function WECampaignLauncher() {
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [selectedProjectName, setSelectedProjectName] = useState("");
 
+  // Saved Lists targeting states
+  const [contactLists, setContactLists] = useState([]);
+  const [selectedListIds, setSelectedListIds] = useState([]);
+
   // Swipe preview states
   const [previewTargetIndex, setPreviewTargetIndex] = useState(0);
 
   useEffect(() => {
     const loadInitialData = async () => {
       try {
-        const [tempList, types] = await Promise.all([
-          getTemplates(), getCrmContactTypes().catch(() => []),
+        const [tempList, types, lists] = await Promise.all([
+          getTemplates(),
+          getCrmContactTypes().catch(() => []),
+          getContactLists().catch(() => []),
         ]);
         setTemplates(tempList);
         setCrmTypes(types);
+        setContactLists(lists || []);
       } catch (err) {
         console.error("Failed to load campaign selector options", err);
       }
@@ -341,6 +351,9 @@ function WECampaignLauncher() {
     if (sourceType === "CRM") {
       return { contact_type: crmContactType || null, select_all_filtered: true };
     }
+    if (sourceType === "SAVED_LISTS") {
+      return { contact_list_ids: selectedListIds };
+    }
     const contacts = manualText.split("\n").map((line) => {
       const [name, phone] = line.split(",");
       return { name: (name || "").trim(), phone: (phone || "").trim() };
@@ -352,6 +365,7 @@ function WECampaignLauncher() {
     setRecipients([]); setUnresolvable([]); setDryRunResult(null);
     setExcludedIds(new Set()); setSelectedRowIds(new Set()); setTargetSearch("");
     setPreviewTargetIndex(0);
+    setSelectedListIds([]);
   };
 
   // AUTO RESOLVE (P0 Task 1.2)
@@ -365,6 +379,12 @@ function WECampaignLauncher() {
       }
       if (sourceType === "CRM" && !crmContactType) {
         // Option to not auto resolve if CRM parameters are unselected
+      }
+      if (sourceType === "SAVED_LISTS" && selectedListIds.length === 0) {
+        setRecipients([]); setUnresolvable([]); setDryRunResult(null);
+        setExcludedIds(new Set()); setSelectedRowIds(new Set());
+        setPreviewTargetIndex(0);
+        return;
       }
       if (sourceType === "MANUAL" && !manualText.trim()) {
         resetResolution();
@@ -395,7 +415,7 @@ function WECampaignLauncher() {
     }, 400); // Debounce to allow quick changes without multiple requests
 
     return () => clearTimeout(delayDebounce);
-  }, [sourceType, selectedProjectId, selectedStages, crmContactType, manualText]);
+  }, [sourceType, selectedProjectId, selectedStages, crmContactType, manualText, selectedListIds]);
 
   const handleProjectChange = async (projectId) => {
     setSelectedProjectId(projectId);
@@ -410,6 +430,36 @@ function WECampaignLauncher() {
       setPipelineSummary(summary);
     } catch (err) {
       toast.error("Failed to fetch project stages summary");
+    }
+  };
+
+  const handleSaveAsListClick = async () => {
+    const listName = prompt("Enter a name for this Contact List:");
+    if (!listName) return;
+    if (!listName.trim()) {
+      toast.error("List name cannot be empty");
+      return;
+    }
+    const contacts = manualText.split("\n").map((line) => {
+      const [name, phone] = line.split(",");
+      return { name: (name || "").trim(), phone: (phone || "").trim() };
+    }).filter((c) => c.phone);
+
+    if (contacts.length === 0) {
+      toast.error("No valid contacts found in textarea");
+      return;
+    }
+
+    try {
+      const newList = await createContactList({
+        name: listName.trim(),
+        description: "Created from manual contacts input",
+        contacts
+      });
+      toast.success(`Saved list "${listName.trim()}" successfully!`);
+      setContactLists(prev => [newList, ...prev]);
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Failed to save contact list");
     }
   };
 
@@ -541,8 +591,8 @@ function WECampaignLauncher() {
           {/* Target source selector */}
           <div className="space-y-3">
             <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Target Source</label>
-            <div className="flex gap-2">
-              {["PROJECT", "CRM", "MANUAL"].map((src) => (
+            <div className="flex flex-wrap gap-2">
+              {["PROJECT", "SAVED_LISTS", "CRM", "MANUAL"].map((src) => (
                 <button
                   key={src}
                   type="button"
@@ -552,11 +602,75 @@ function WECampaignLauncher() {
                   }`}
                   data-testid={`source-${src}`}
                 >
-                  {src === "PROJECT" ? "Project Pipeline" : src === "CRM" ? "Marketing CRM" : "Manual Contacts"}
+                  {src === "PROJECT" ? "Project Pipeline" : src === "SAVED_LISTS" ? "Saved Lists" : src === "CRM" ? "Marketing CRM" : "Manual Contacts"}
                 </button>
               ))}
             </div>
           </div>
+
+          {/* Saved Lists source */}
+          {sourceType === "SAVED_LISTS" && (
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Select Saved Lists</label>
+                <p className="text-xs text-[#6B7280]">Select one or more contact lists. Recipients will be automatically merged and deduplicated.</p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-black/40" />
+                  <input
+                    type="text"
+                    placeholder="Search contact lists..."
+                    value={targetSearch}
+                    onChange={(e) => setTargetSearch(e.target.value)}
+                    className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg pl-10 pr-4 py-3 focus:outline-none focus:ring-1 focus:ring-black h-[50px] transition-all"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[220px] overflow-y-auto p-1 bg-white border border-black/[0.04] rounded-xl scrollbar-thin">
+                  {contactLists
+                    .filter(lst => lst.name.toLowerCase().includes(targetSearch.toLowerCase()))
+                    .map((lst) => {
+                      const selected = selectedListIds.includes(lst.id);
+                      return (
+                        <div
+                          key={lst.id}
+                          onClick={() => {
+                            const updated = selected
+                              ? selectedListIds.filter(id => id !== lst.id)
+                              : [...selectedListIds, lst.id];
+                            setSelectedListIds(updated);
+                          }}
+                          className={`flex items-center justify-between p-3.5 rounded-xl border cursor-pointer select-none transition-all duration-150 ${
+                            selected
+                              ? "bg-black border-black text-white"
+                              : "bg-[#f8f8f7] border-black/5 text-[#111111] hover:border-black/20"
+                          }`}
+                        >
+                          <div className="space-y-0.5">
+                            <div className="text-xs font-semibold">{lst.name}</div>
+                            <div className={`text-[10px] ${selected ? "text-white/70" : "text-[#6B7280]"}`}>
+                              {lst.contacts?.length || 0} contacts
+                            </div>
+                          </div>
+                          <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${
+                            selected ? "bg-white border-white text-black" : "border-black/20 bg-white"
+                          }`}>
+                            {selected && <div className="w-1.5 h-1.5 bg-black rounded-sm" />}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  {contactLists.filter(lst => lst.name.toLowerCase().includes(targetSearch.toLowerCase())).length === 0 && (
+                    <div className="col-span-full text-center py-6 text-xs text-[#6B7280]">
+                      No contact lists match your search.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* CRM source */}
           {sourceType === "CRM" && (
@@ -576,7 +690,17 @@ function WECampaignLauncher() {
           {/* Manual source */}
           {sourceType === "MANUAL" && (
             <div className="space-y-3">
-              <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Manual Contacts (Name,+countrycode per line)</label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Manual Contacts (Name,+countrycode per line)</label>
+                <button
+                  type="button"
+                  onClick={handleSaveAsListClick}
+                  disabled={!manualText.trim()}
+                  className="text-[10px] font-bold uppercase tracking-wider text-black hover:underline disabled:opacity-40"
+                >
+                  Save As Contact List
+                </button>
+              </div>
               <textarea
                 value={manualText}
                 onChange={(e) => { setManualText(e.target.value); }}
@@ -637,17 +761,39 @@ function WECampaignLauncher() {
           )}
 
           {/* Auto Resolve count indicator (Task 1.2 button replacement) */}
-          {(sourceType !== "PROJECT" || (selectedProjectId && selectedStages.length > 0)) && (
+          {((sourceType === "PROJECT" && selectedProjectId && selectedStages.length > 0) ||
+            (sourceType === "SAVED_LISTS" && selectedListIds.length > 0) ||
+            (sourceType === "CRM") ||
+            (sourceType === "MANUAL")) && (
             <div className="bg-[#f8f8f7] p-4 rounded-xl border border-black/5 flex flex-col md:flex-row md:items-center justify-between gap-3 select-none">
               <div className="text-xs space-y-1">
                 <span className="font-semibold text-black">Recipients:</span>
                 {resolving ? (
                   <p className="text-[#6B7280] animate-pulse">Resolving target parameters...</p>
                 ) : recipients.length > 0 ? (
-                  <p className="text-[#6B7280]">
-                    Ready to send to <strong className="text-black">{sendingCount}</strong> targets.
-                    {unresolvable.length > 0 && <span className="text-amber-600"> ({unresolvable.length} skipped due to missing numbers).</span>}
-                  </p>
+                  <div className="space-y-1 mt-1">
+                    <p className="text-[#6B7280]">
+                      Ready to send to <strong className="text-black">{sendingCount}</strong> targets.
+                      {unresolvable.length > 0 && <span className="text-amber-600"> ({unresolvable.length} skipped due to missing numbers).</span>}
+                    </p>
+                    {sourceType === "SAVED_LISTS" && (
+                      <div className="pt-2 border-t border-black/[0.04] mt-2 space-y-1">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-black/50">Lists Included:</div>
+                        <div className="flex flex-wrap gap-2">
+                          {contactLists
+                            .filter(lst => selectedListIds.includes(lst.id))
+                            .map(lst => (
+                              <span key={lst.id} className="inline-flex items-center px-2 py-0.5 rounded bg-black/5 text-black/70 text-[10px] font-medium">
+                                {lst.name}: {lst.contacts?.length || 0}
+                              </span>
+                            ))}
+                        </div>
+                        <div className="text-[10px] font-medium text-[#6B7280]">
+                          Total Unique Recipients: <strong className="text-black">{recipients.length}</strong>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <p className="text-[#6B7280]">No recipients matches criteria.</p>
                 )}
@@ -1841,6 +1987,401 @@ function WEAuditLogPanel() {
             )}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+
+// ==========================================
+// 7. CONTACT LIST MANAGER
+// ==========================================
+function WEContactListManager() {
+  const [lists, setLists] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState(null); // 'new' or listId
+
+  const [formData, setFormData] = useState({
+    name: "",
+    description: "",
+    contacts: []
+  });
+  const [bulkText, setBulkText] = useState("");
+
+  const fetchLists = async () => {
+    try {
+      const data = await getContactLists();
+      setLists(data);
+    } catch (err) {
+      toast.error("Failed to load contact lists");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchLists();
+  }, []);
+
+  const handleEditClick = (lst) => {
+    setEditingId(lst.id);
+    setFormData({
+      name: lst.name,
+      description: lst.description || "",
+      contacts: lst.contacts || []
+    });
+    setBulkText("");
+  };
+
+  const handleCreateNewClick = () => {
+    setEditingId("new");
+    setFormData({
+      name: "",
+      description: "",
+      contacts: []
+    });
+    setBulkText("");
+  };
+
+  const handleAddContactRow = () => {
+    setFormData(prev => ({
+      ...prev,
+      contacts: [...prev.contacts, { name: "", phone: "" }]
+    }));
+  };
+
+  const handleContactChange = (index, field, val) => {
+    const updated = [...formData.contacts];
+    updated[index] = { ...updated[index], [field]: val };
+    setFormData(prev => ({ ...prev, contacts: updated }));
+  };
+
+  const handleRemoveContactRow = (index) => {
+    setFormData(prev => ({
+      ...prev,
+      contacts: prev.contacts.filter((_, idx) => idx !== index)
+    }));
+  };
+
+  const handleBulkImport = () => {
+    if (!bulkText.trim()) {
+      toast.error("Bulk import text is empty");
+      return;
+    }
+    const parsed = bulkText.split("\n").map(line => {
+      const parts = line.split(",");
+      let name = "";
+      let phone = "";
+      if (parts.length > 1) {
+        name = parts[0].trim();
+        phone = parts.slice(1).join(",").trim();
+      } else {
+        phone = parts[0].trim();
+      }
+      return { name, phone };
+    }).filter(c => c.phone);
+
+    if (parsed.length === 0) {
+      toast.error("No valid contacts found in bulk import text");
+      return;
+    }
+
+    // De-duplicate and normalize locally
+    const normRe = /^\+?\d{7,15}$/;
+    const addedContacts = [];
+    const seen = new Set(formData.contacts.map(c => c.phone.replace(/\D/g, "")));
+
+    parsed.forEach(c => {
+      const rawPhone = c.phone.trim();
+      const plus = rawPhone.startsWith("+");
+      const digits = rawPhone.replace(/\D/g, "");
+      const normPhone = plus ? "+" + digits : digits;
+
+      if (!digits || !normRe.test(normPhone)) {
+        return;
+      }
+      if (seen.has(digits)) {
+        return;
+      }
+      seen.add(digits);
+      addedContacts.push({ name: c.name, phone: normPhone });
+    });
+
+    if (addedContacts.length === 0) {
+      toast.info("No new unique valid contacts were found");
+      return;
+    }
+
+    setFormData(prev => ({
+      ...prev,
+      contacts: [...prev.contacts, ...addedContacts]
+    }));
+    setBulkText("");
+    toast.success(`Imported ${addedContacts.length} contacts successfully!`);
+  };
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    if (!formData.name.trim()) {
+      toast.error("List name is required");
+      return;
+    }
+    const validContacts = formData.contacts.filter(c => c.phone.trim());
+
+    try {
+      if (editingId === "new") {
+        await createContactList({
+          name: formData.name.trim(),
+          description: formData.description.trim(),
+          contacts: validContacts
+        });
+        toast.success("Contact list created successfully");
+      } else {
+        await updateContactList(editingId, {
+          name: formData.name.trim(),
+          description: formData.description.trim(),
+          contacts: validContacts
+        });
+        toast.success("Contact list updated successfully");
+      }
+      setEditingId(null);
+      fetchLists();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Failed to save contact list");
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm("Are you sure you want to delete this contact list?")) return;
+    try {
+      await deleteContactList(editingId);
+      toast.success("Contact list deleted successfully");
+      setEditingId(null);
+      fetchLists();
+    } catch (err) {
+      toast.error("Failed to delete contact list");
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 items-start">
+      {/* Sidebar List */}
+      <div className="bg-white p-8 rounded-2xl shadow-sm space-y-6">
+        <div className="flex justify-between items-center border-b border-black/[0.04] pb-4">
+          <div>
+            <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Saved Lists</h3>
+            <p className="text-[11px] text-[#6B7280] mt-0.5">Manage reusable recipient contacts</p>
+          </div>
+          <button
+            onClick={handleCreateNewClick}
+            className="flex items-center justify-center w-8 h-8 rounded-full bg-black text-white hover:opacity-90 transition-opacity active:scale-95"
+            title="Create Contact List"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center p-8"><RefreshCw className="w-5 h-5 animate-spin text-black/50" /></div>
+        ) : lists.length === 0 ? (
+          <div className="text-center py-12 border border-dashed border-black/10 rounded-xl space-y-2">
+            <Database className="w-6 h-6 mx-auto text-black/20" />
+            <p className="text-xs text-[#6B7280]">No contact lists created yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
+            {lists.map(lst => (
+              <div
+                key={lst.id}
+                onClick={() => handleEditClick(lst)}
+                className={`p-5 rounded-xl border cursor-pointer transition-all duration-150 space-y-1.5 select-none ${
+                  editingId === lst.id 
+                    ? "bg-[#f8f8f7] border-black shadow-sm" 
+                    : "bg-white border-black/[0.06] hover:border-black/25"
+                }`}
+              >
+                <div className="flex justify-between items-center">
+                  <h4 className="font-semibold text-xs text-[#111111]">{lst.name}</h4>
+                  <span className="text-[10px] font-medium bg-black/[0.04] px-2 py-0.5 rounded-full text-black/60 border border-black/[0.02]">
+                    {lst.contacts?.length || 0} contacts
+                  </span>
+                </div>
+                {lst.description && (
+                  <p className="text-[11px] text-[#6B7280] line-clamp-1">{lst.description}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Editor Panel */}
+      <div className="xl:col-span-2 bg-white p-8 rounded-2xl shadow-sm min-h-[450px] flex flex-col">
+        {editingId ? (
+          <form onSubmit={handleSave} className="space-y-6 flex-1 flex flex-col justify-between">
+            <div className="space-y-6">
+              <div className="flex justify-between items-center border-b border-black/[0.04] pb-3">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">
+                  {editingId === "new" ? "Create Contact List" : "Edit Contact List"}
+                </h3>
+                {editingId !== "new" && (
+                  <button
+                    type="button"
+                    onClick={handleDelete}
+                    className="text-[10px] font-bold uppercase tracking-wider text-red-500 hover:text-red-600 flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> Delete List
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">List Name</label>
+                  <input
+                    type="text"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    placeholder="e.g. Mumbai Casting Directors"
+                    className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
+                    required
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Description</label>
+                  <input
+                    type="text"
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                    placeholder="Optional description of this list..."
+                    className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
+                  />
+                </div>
+              </div>
+
+              {/* Contacts Table */}
+              <div className="space-y-3 pt-4 border-t border-black/[0.04]">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">
+                    Contacts ({formData.contacts.length})
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleAddContactRow}
+                    className="text-[10px] font-bold uppercase tracking-wider text-black border border-black/10 hover:border-black bg-[#f8f8f7] px-3 py-1.5 rounded-lg flex items-center gap-1 transition-colors"
+                  >
+                    <Plus className="w-3 h-3" /> Add Contact Row
+                  </button>
+                </div>
+
+                <div className="border border-black/[0.06] rounded-xl overflow-hidden shadow-sm bg-white max-h-[300px] overflow-y-auto scrollbar-thin">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-[#f8f8f7] border-b border-black/[0.04] text-[#6B7280] font-bold uppercase tracking-wider select-none">
+                        <th className="px-5 py-3.5 w-1/2">Name</th>
+                        <th className="px-5 py-3.5 w-5/12">Phone Number</th>
+                        <th className="px-5 py-3.5 text-center w-1/12">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {formData.contacts.map((c, index) => (
+                        <tr key={index} className="border-b border-black/[0.03] last:border-b-0 hover:bg-black/[0.01]">
+                          <td className="px-5 py-2.5">
+                            <input
+                              type="text"
+                              value={c.name}
+                              onChange={(e) => handleContactChange(index, "name", e.target.value)}
+                              placeholder="e.g. John Doe"
+                              className="w-full bg-[#f8f8f7] border border-black/5 focus:border-black focus:outline-none rounded px-2.5 py-1.5 text-xs transition-colors"
+                            />
+                          </td>
+                          <td className="px-5 py-2.5">
+                            <input
+                              type="text"
+                              value={c.phone}
+                              onChange={(e) => handleContactChange(index, "phone", e.target.value)}
+                              placeholder="e.g. +919876543210"
+                              className="w-full bg-[#f8f8f7] border border-black/5 focus:border-black focus:outline-none rounded px-2.5 py-1.5 text-xs font-mono transition-colors"
+                            />
+                          </td>
+                          <td className="px-5 py-2.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveContactRow(index)}
+                              className="text-black/40 hover:text-red-500 p-1.5 transition-colors"
+                              title="Delete Row"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {formData.contacts.length === 0 && (
+                        <tr>
+                          <td colSpan={3} className="px-5 py-8 text-center text-[#6B7280]">
+                            No contacts added yet. Use the bulk import below or add a contact row manually.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Bulk Import */}
+              <div className="space-y-3 pt-4 border-t border-black/[0.04]">
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">
+                  Bulk Import Contacts (Name, Phone per line)
+                </label>
+                <div className="flex gap-4 items-end">
+                  <textarea
+                    value={bulkText}
+                    onChange={(e) => setBulkText(e.target.value)}
+                    rows={3}
+                    placeholder={"Casting Director A,+919999999999\n+918888888888"}
+                    className="flex-1 text-xs font-mono bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleBulkImport}
+                    className="bg-black text-white hover:opacity-90 select-none text-xs font-semibold px-4 py-3.5 h-[56px] rounded-lg transition-opacity active:scale-[0.98]"
+                  >
+                    Process Import
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-8 border-t border-black/[0.04] mt-8">
+              <button
+                type="button"
+                onClick={() => setEditingId(null)}
+                className="text-xs font-semibold uppercase tracking-widest border border-black/10 hover:border-black bg-white text-black px-6 py-3.5 rounded-lg active:scale-[0.98] transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex items-center justify-center gap-1.5 text-xs font-semibold uppercase tracking-widest bg-black text-white px-6 py-3.5 rounded-lg hover:opacity-90 transition-colors active:scale-[0.98] duration-120 h-[52px]"
+              >
+                <Save className="w-4 h-4" /> Save List
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center text-center space-y-3 border border-dashed border-black/10 rounded-2xl p-8">
+            <div className="w-12 h-12 rounded-full bg-[#f8f8f7] flex items-center justify-center border border-black/[0.04]">
+              <Database className="w-6 h-6 text-black/30" />
+            </div>
+            <div>
+              <h4 className="font-semibold text-sm">No List Selected</h4>
+              <p className="text-xs text-[#6B7280] max-w-xs mt-1">
+                Select a contact list from the sidebar to view details, or click create icon to add a new reusable list.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

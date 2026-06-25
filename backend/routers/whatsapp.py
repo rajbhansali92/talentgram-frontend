@@ -319,6 +319,8 @@ class SourceParams(BaseModel):
     select_all_filtered: bool = False
     # MANUAL
     contacts: List[ManualContact] = Field(default_factory=list)
+    # SAVED LISTS
+    contact_list_ids: List[str] = Field(default_factory=list)
 
 
 class ResolveIn(BaseModel):
@@ -790,6 +792,32 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
             _add(*_make_recipient(
                 name=mc.name or "", phone=phone, group_name="",
                 source="MANUAL", source_id=None, kind="MANUAL", recipient_id=rid))
+    elif source_type == "SAVED_LISTS":
+        if not params.contact_list_ids:
+            raise HTTPException(400, "contact_list_ids required for SAVED_LISTS source")
+        lists = await db.whatsapp_contact_lists.find(
+            {"id": {"$in": params.contact_list_ids}, "deleted": {"$ne": True}},
+            {"_id": 0, "id": 1, "name": 1, "contacts": 1}
+        ).to_list(1000)
+        for lst in lists:
+            list_id = lst["id"]
+            for c in lst.get("contacts") or []:
+                raw_phone = c.get("phone")
+                phone = _normalize_phone(raw_phone)
+                rid = "saved_list:" + (phone or (raw_phone or "").strip().lower())
+                if rid in seen:
+                    continue
+                if not phone:
+                    seen.add(rid)
+                    unresolvable.append({
+                        "name": c.get("name") or "", "phone": raw_phone or "",
+                        "recipient_id": rid, "source": "SAVED_LISTS",
+                        "reason": "Invalid phone number",
+                    })
+                    continue
+                _add(*_make_recipient(
+                    name=c.get("name") or "", phone=phone, group_name="",
+                    source="SAVED_LISTS", source_id=list_id, kind="SAVED_LIST", recipient_id=rid))
     else:
         raise HTTPException(400, f"Unknown source_type {source_type!r}")
 
@@ -1338,3 +1366,135 @@ async def update_config(
     )
     await _write_audit("config_updated", admin["id"], metadata={"key": key, "value": payload.value})
     return {"key": key, "value": payload.value}
+
+
+# ---------------------------------------------------------------------------
+# ── CONTACT LISTS ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+class ContactIn(BaseModel):
+    name: str = ""
+    phone: str
+
+class ContactListIn(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    contacts: List[ContactIn] = Field(default_factory=list)
+
+
+@router.get("/contact-lists")
+async def list_contact_lists(admin: dict = Depends(current_team_or_admin)):
+    docs = await db.whatsapp_contact_lists.find(
+        {"deleted": {"$ne": True}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(1000)
+    return docs
+
+
+@router.post("/contact-lists")
+async def create_contact_list(payload: ContactListIn, admin: dict = Depends(current_team_or_admin)):
+    if not payload.name.strip():
+        raise HTTPException(400, "Contact list name cannot be empty")
+
+    normalized_contacts = []
+    seen_phones = set()
+    for c in payload.contacts:
+        norm = _normalize_phone(c.phone)
+        if not norm:
+            raise HTTPException(400, f"Invalid phone number format: {c.phone}")
+        if norm in seen_phones:
+            continue
+        seen_phones.add(norm)
+        normalized_contacts.append({
+            "name": c.name.strip(),
+            "phone": norm
+        })
+
+    list_id = _new_id()
+    now = _utcnow()
+    doc = {
+        "id": list_id,
+        "name": payload.name.strip(),
+        "description": (payload.description or "").strip(),
+        "contacts": normalized_contacts,
+        "deleted": False,
+        "created_at": now,
+        "updated_at": now,
+        "created_by": admin.get("email") or "admin"
+    }
+
+    await db.whatsapp_contact_lists.insert_one(doc)
+    await _write_audit("contact_list_created", admin.get("id", "admin"), metadata={"list_id": list_id, "name": payload.name})
+    
+    # Remove _id if it was added
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/contact-lists/{list_id}")
+async def get_contact_list(list_id: str, admin: dict = Depends(current_team_or_admin)):
+    doc = await db.whatsapp_contact_lists.find_one(
+        {"id": list_id, "deleted": {"$ne": True}},
+        {"_id": 0}
+    )
+    if not doc:
+        raise HTTPException(404, "Contact list not found")
+    return doc
+
+
+@router.put("/contact-lists/{list_id}")
+async def update_contact_list(list_id: str, payload: ContactListIn, admin: dict = Depends(current_team_or_admin)):
+    if not payload.name.strip():
+        raise HTTPException(400, "Contact list name cannot be empty")
+
+    doc = await db.whatsapp_contact_lists.find_one(
+        {"id": list_id, "deleted": {"$ne": True}}
+    )
+    if not doc:
+        raise HTTPException(404, "Contact list not found")
+
+    normalized_contacts = []
+    seen_phones = set()
+    for c in payload.contacts:
+        norm = _normalize_phone(c.phone)
+        if not norm:
+            raise HTTPException(400, f"Invalid phone number format: {c.phone}")
+        if norm in seen_phones:
+            continue
+        seen_phones.add(norm)
+        normalized_contacts.append({
+            "name": c.name.strip(),
+            "phone": norm
+        })
+
+    now = _utcnow()
+    update_data = {
+        "name": payload.name.strip(),
+        "description": (payload.description or "").strip(),
+        "contacts": normalized_contacts,
+        "updated_at": now
+    }
+
+    await db.whatsapp_contact_lists.update_one(
+        {"id": list_id},
+        {"$set": update_data}
+    )
+    await _write_audit("contact_list_updated", admin.get("id", "admin"), metadata={"list_id": list_id, "name": payload.name})
+    
+    # Return updated document
+    doc.update(update_data)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.delete("/contact-lists/{list_id}")
+async def delete_contact_list(list_id: str, admin: dict = Depends(current_team_or_admin)):
+    res = await db.whatsapp_contact_lists.update_one(
+        {"id": list_id, "deleted": {"$ne": True}},
+        {"$set": {"deleted": True, "updated_at": _utcnow()}}
+    )
+    if not res.matched_count:
+        raise HTTPException(404, "Contact list not found")
+
+    await _write_audit("contact_list_deleted", admin.get("id", "admin"), metadata={"list_id": list_id})
+    return {"ok": True}

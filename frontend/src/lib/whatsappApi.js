@@ -169,3 +169,24 @@ export async function testInternalNotification() {
   const res = await adminApi.post("/admin/whatsapp/test-internal-notification");
   return res.data;
 }
+
+// --- CONTACT LISTS ---
+export async function getContactLists() {
+  const res = await adminApi.get("/whatsapp/contact-lists");
+  return res.data;
+}
+
+export async function createContactList(payload) {
+  const res = await adminApi.post("/whatsapp/contact-lists", payload);
+  return res.data;
+}
+
+export async function updateContactList(id, payload) {
+  const res = await adminApi.put(`/whatsapp/contact-lists/${id}`, payload);
+  return res.data;
+}
+
+export async function deleteContactList(id) {
+  const res = await adminApi.delete(`/whatsapp/contact-lists/${id}`);
+  return res.data;
+}

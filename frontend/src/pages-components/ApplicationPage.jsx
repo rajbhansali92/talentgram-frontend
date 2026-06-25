@@ -91,6 +91,15 @@ export default function ApplicationPage() {
     const indianRef = useRef();
     const westernRef = useRef();
 
+    // P0-1 Inline validation: per-field error messages + refs for scroll/focus.
+    const [errors, setErrors] = useState({});
+    const locationRef = useRef();
+    const igHandleRef = useRef();
+    const igFollowersRef = useRef();
+    const mediaRef = useRef();
+    const clearError = (key) =>
+        setErrors((prev) => (prev[key] ? { ...prev, [key]: undefined } : prev));
+
     // Inline Portal Gateway states
     const [gatewayEmail, setGatewayEmail] = useState("");
     const [gatewayLoading, setGatewayLoading] = useState(false);
@@ -782,68 +791,62 @@ export default function ApplicationPage() {
     };
 
     const finalize = async () => {
-        // Frontend Dynamic Requirements Validation
+        // P0-1 Validation: collect ALL missing required fields (no early return),
+        // render inline errors using the real field labels, then scroll to + focus
+        // the first invalid field on this screen. No vague "Full Name" toast.
         const prof = requirements.profile_requirements;
         const port = requirements.portfolio_requirements;
+        const next = {};
 
         if (prof.name === "required") {
-            if (!basics.first_name?.trim() || !basics.last_name?.trim()) {
-                toast.error("Full Name is required");
-                return;
-            }
+            // Names are collected (and enforced) on the identity gate — they are
+            // not on this screen. If somehow empty here, message specifically.
+            if (!basics.first_name?.trim()) next.first_name = "First Name is required";
+            else if (!basics.last_name?.trim()) next.last_name = "Last Name is required";
         }
+        if (prof.location === "required" && (!form.location || form.location.length === 0))
+            next.location = "Current Location is required";
+        if (prof.instagram_handle === "required" && !form.instagram_handle?.trim())
+            next.instagram_handle = "Instagram Handle is required";
+        if (prof.instagram_followers === "required" && !form.instagram_followers)
+            next.instagram_followers = "Instagram Followers is required";
 
-        if (prof.location === "required") {
-            if (!form.location || form.location.length === 0) {
-                toast.error("Current Location is required");
+        const missingMedia = [];
+        if (port.portfolio === "required" && media.filter((m) => m.category === "image").length < 1)
+            missingMedia.push("at least 1 Profile / Headshot image");
+        if (port.indian === "required" && media.filter((m) => m.category === "indian").length < 1)
+            missingMedia.push("an Indian Look image");
+        if (port.western === "required" && media.filter((m) => m.category === "western").length < 1)
+            missingMedia.push("a Western Look image");
+        if (port.video === "required" && media.filter((m) => m.category === "intro_video").length < 1)
+            missingMedia.push("an Introduction Video");
+        if (missingMedia.length) next.media = `Please add ${missingMedia.join(", ")}.`;
+
+        setErrors(next);
+
+        if (Object.keys(next).length > 0) {
+            // First/last name are off this screen — surface a specific (not vague)
+            // message at the top via the top-positioned toast.
+            if (next.first_name || next.last_name) {
+                toast.error(next.first_name || next.last_name);
                 return;
             }
-        }
-
-        if (prof.instagram_handle === "required") {
-            if (!form.instagram_handle?.trim()) {
-                toast.error("Instagram Handle is required");
-                return;
+            // On-screen fields: scroll to + focus the first invalid one.
+            const order = [
+                [next.location, locationRef],
+                [next.instagram_handle, igHandleRef],
+                [next.instagram_followers, igFollowersRef],
+                [next.media, mediaRef],
+            ];
+            const firstInvalid = order.find(([msg]) => msg);
+            if (firstInvalid && firstInvalid[1].current) {
+                firstInvalid[1].current.scrollIntoView({ behavior: "smooth", block: "center" });
+                const focusable = firstInvalid[1].current.querySelector(
+                    "input, button, textarea, select, [tabindex]"
+                );
+                if (focusable) setTimeout(() => focusable.focus({ preventScroll: true }), 300);
             }
-        }
-
-        if (prof.instagram_followers === "required") {
-            if (!form.instagram_followers) {
-                toast.error("Instagram Followers is required");
-                return;
-            }
-        }
-
-        if (port.portfolio === "required") {
-            const count = media.filter((m) => m.category === "image").length;
-            if (count < 1) {
-                toast.error("Portfolio Images are required");
-                return;
-            }
-        }
-
-        if (port.indian === "required") {
-            const count = media.filter((m) => m.category === "indian").length;
-            if (count < 1) {
-                toast.error("Indian Look Images are required");
-                return;
-            }
-        }
-
-        if (port.western === "required") {
-            const count = media.filter((m) => m.category === "western").length;
-            if (count < 1) {
-                toast.error("Western Look Images are required");
-                return;
-            }
-        }
-
-        if (port.video === "required") {
-            const count = media.filter((m) => m.category === "intro_video").length;
-            if (count < 1) {
-                toast.error("Introduction Video is required");
-                return;
-            }
+            return;
         }
 
         setSaving(true);
@@ -1216,10 +1219,11 @@ export default function ApplicationPage() {
                                                 testid="apply-last-name"
                                             />
                                             <Row
-                                                label="Phone"
+                                                label="Phone (optional)"
                                                 value={basics.phone}
                                                 onChange={(v) => setBasics({ ...basics, phone: v })}
                                                 testid="apply-phone"
+                                                hint="Include country code, e.g. +91 98765 43210"
                                             />
                                         </div>
                                     )}
@@ -1271,11 +1275,16 @@ export default function ApplicationPage() {
                             }
                         </p>
                         {!isEditMode && (
-                            <p className="text-[#4a4a4a] text-sm leading-relaxed mb-6">
-                                Our team carefully reviews every application. If any additional
-                                information, materials, or next steps are required, a member of
-                                our team will contact you directly.
-                            </p>
+                            <div className="text-left bg-[#faf9f6] border border-[#eaeaea] rounded-xl p-4 mb-6">
+                                <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-2">
+                                    What happens next
+                                </p>
+                                <ul className="text-[#4a4a4a] text-sm leading-relaxed space-y-1.5">
+                                    <li>✓ Your application has been received.</li>
+                                    <li>✓ Our team reviews every application — usually within <strong>3–5 working days</strong>.</li>
+                                    <li>✓ We'll email you either way; if anything else is needed, we'll reach out directly.</li>
+                                </ul>
+                            </div>
                         )}
                         <div className="text-xs text-[#8b8b8b] font-medium mb-6">
                             Thank you for your interest in joining Talentgram.
@@ -1323,6 +1332,7 @@ export default function ApplicationPage() {
                             value={form.dob}
                             onChange={(v) => setForm({ ...form, dob: v })}
                             testid="form-dob"
+                            hint="Format: DD / MM / YYYY"
                         />
                         
                         <div className="flex flex-col justify-end">
@@ -1358,18 +1368,24 @@ export default function ApplicationPage() {
                             </Select>
                         </div>
 
-                        <div>
+                        <div ref={locationRef}>
                             <Label>Current Location(s) *</Label>
                             <div className="mt-2">
                                 <LocationSelector
                                     value={form.location || []}
-                                    onChange={(arr) =>
-                                        setForm({ ...form, location: arr })
-                                    }
+                                    onChange={(arr) => {
+                                        setForm({ ...form, location: arr });
+                                        if (arr && arr.length) clearError("location");
+                                    }}
                                     testid="form-location"
                                     placeholder="Search for a city..."
                                 />
                             </div>
+                            {errors.location && (
+                                <p role="alert" className="text-xs text-[#d03a2a] mt-1.5" data-testid="error-location">
+                                    {errors.location}
+                                </p>
+                            )}
                         </div>
 
                         <div className="md:col-span-2">
@@ -1400,16 +1416,17 @@ export default function ApplicationPage() {
                 {/* Section 3 — Professional */}
                 <Section title="Professional Details" index="02">
                     <div className="grid md:grid-cols-2 gap-6">
-                        <div>
-                            <Label>Instagram Handle</Label>
+                        <div ref={igHandleRef}>
+                            <Label>Instagram Handle{requirements?.profile_requirements?.instagram_handle === "required" ? " *" : " (optional)"}</Label>
                             <input
                                 value={form.instagram_handle}
-                                onChange={(e) =>
+                                onChange={(e) => {
                                     setForm({
                                         ...form,
                                         instagram_handle: e.target.value,
-                                    })
-                                }
+                                    });
+                                    if (e.target.value.trim()) clearError("instagram_handle");
+                                }}
                                 onBlur={() => {
                                     if (form.instagram_handle) {
                                         setForm((prev) => ({
@@ -1420,19 +1437,26 @@ export default function ApplicationPage() {
                                 }}
                                 placeholder="@yourhandle"
                                 data-testid="form-instagram"
-                                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
+                                aria-invalid={!!errors.instagram_handle}
+                                className={`mt-2 w-full bg-white border rounded-lg px-4 h-11 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150 ${errors.instagram_handle ? "border-[#d03a2a]" : "border-[#eaeaea]"}`}
                             />
+                            {errors.instagram_handle && (
+                                <p role="alert" className="text-xs text-[#d03a2a] mt-1.5" data-testid="error-instagram">
+                                    {errors.instagram_handle}
+                                </p>
+                            )}
                         </div>
-                        <div>
-                            <Label>Instagram Followers</Label>
+                        <div ref={igFollowersRef}>
+                            <Label>Instagram Followers{requirements?.profile_requirements?.instagram_followers === "required" ? " *" : " (optional)"}</Label>
                             <Select
                                 value={form.instagram_followers}
-                                onValueChange={(v) =>
-                                    setForm({ ...form, instagram_followers: v })
-                                }
+                                onValueChange={(v) => {
+                                    setForm({ ...form, instagram_followers: v });
+                                    if (v) clearError("instagram_followers");
+                                }}
                             >
                                 <SelectTrigger
-                                    className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] transition-all duration-150"
+                                    className={`mt-2 w-full bg-white border rounded-lg h-11 px-4 text-[15px] text-[#1a1a1a] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] transition-all duration-150 ${errors.instagram_followers ? "border-[#d03a2a]" : "border-[#eaeaea]"}`}
                                     data-testid="form-followers"
                                 >
                                     <SelectValue placeholder="Select range" />
@@ -1453,9 +1477,14 @@ export default function ApplicationPage() {
                                     ))}
                                 </SelectContent>
                             </Select>
+                            {errors.instagram_followers && (
+                                <p role="alert" className="text-xs text-[#d03a2a] mt-1.5" data-testid="error-followers">
+                                    {errors.instagram_followers}
+                                </p>
+                            )}
                         </div>
                         <div>
-                            <Label>Ethnicity</Label>
+                            <Label>Ethnicity (optional)</Label>
                             <Select
                                 value={form.ethnicity}
                                 onValueChange={(v) =>
@@ -1483,7 +1512,7 @@ export default function ApplicationPage() {
                             </Select>
                         </div>
                         <div className="md:col-span-2">
-                            <Label>Skills & Special Abilities</Label>
+                            <Label>Skills & Special Abilities (optional)</Label>
                             <div className="mt-2">
                                 <SkillsSelector
                                     selectedSkills={form.skills || []}
@@ -1492,7 +1521,7 @@ export default function ApplicationPage() {
                             </div>
                         </div>
                         <div className="md:col-span-2">
-                            <Label>Short Bio</Label>
+                            <Label>Short Bio (optional)</Label>
                             <textarea
                                 value={form.bio}
                                 onChange={(e) =>
@@ -1528,7 +1557,13 @@ export default function ApplicationPage() {
                 </Section>
 
                 {/* Section 4 — Media */}
+                <div ref={mediaRef}>
                 <Section title="Media" index="04">
+                    {errors.media && (
+                        <p role="alert" className="text-xs text-[#d03a2a] mb-4" data-testid="error-media">
+                            {errors.media}
+                        </p>
+                    )}
                     <div className="space-y-8">
                         <div>
                             <div className="flex items-center justify-between mb-1">
@@ -1674,6 +1709,7 @@ export default function ApplicationPage() {
                         </div>
                     </div>
                 </Section>
+                </div>
 
                 {/* Safe-area-aware sticky submit footer */}
                 <div data-sticky-footer className="sticky bottom-0 z-20 bg-gradient-to-t from-[#faf9f6] via-[#faf9f6]/95 to-transparent pt-4 pb-safe-offset-6 -mx-4 sm:-mx-6 px-4 sm:px-6">

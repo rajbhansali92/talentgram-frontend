@@ -1,7 +1,7 @@
 import uuid
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from core import db, current_user, _now, require_role
 from .workflow_schemas import (
     TaskIn,
@@ -10,6 +10,7 @@ from .workflow_schemas import (
     ScoutEntryIn,
     ScoutEntryUpdateIn,
 )
+import scout_capture
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
@@ -305,6 +306,15 @@ async def create_scout_entry(payload: ScoutEntryIn, user: dict = Depends(current
             "notes": (payload.notes or "").strip(),
             "assigned_id": payload.assigned_id,
             "status": payload.status,
+            # AI Scout Capture — structured fields (optional)
+            "instagram_username": (payload.instagram_username or "").strip().lstrip("@").lower() or None,
+            "followers_count": payload.followers_count,
+            "category": (payload.category or "").strip() or None,
+            "location": (payload.location or "").strip() or None,
+            "manager_name": (payload.manager_name or "").strip() or None,
+            "manager_phone": (payload.manager_phone or "").strip() or None,
+            "capture_audit_id": payload.capture_audit_id,
+            "source": "ai_capture" if payload.capture_audit_id else "manual",
             "attachments": [],
             "created_at": now,
             "updated_at": now,
@@ -315,6 +325,46 @@ async def create_scout_entry(payload: ScoutEntryIn, user: dict = Depends(current
     except Exception as e:
         logger.error("Error creating scout entry: %s", e)
         raise HTTPException(400, detail=f"Failed to create scout log: {str(e)}")
+
+@router.post("/scouting/ai-capture")
+async def scout_ai_capture(
+    files: List[UploadFile] = File(...),
+    user: dict = Depends(current_user),
+):
+    """AI Scout Capture — local OCR + entity extraction + duplicate detection.
+
+    Accepts one or more screenshots (PNG/JPG/JPEG/WEBP). Runs free, self-hosted
+    EasyOCR + regex/heuristic extraction, normalises the fields, checks for an
+    existing talent or scout match, and writes an audit record. Does NOT create a
+    scout entry — the review modal confirms (and optionally edits) before saving
+    via POST /scouting.
+    """
+    # Upload-limit guards BEFORE reading bytes / starting OCR (cheap rejection).
+    if not files:
+        raise HTTPException(400, "At least one screenshot is required.")
+    if len(files) > scout_capture.MAX_IMAGES:
+        raise HTTPException(400, f"At most {scout_capture.MAX_IMAGES} screenshots per capture.")
+    for f in files:
+        # Starlette populates .size from the multipart part's content-length when
+        # available; reject oversized files before buffering them into memory.
+        if f.size is not None and f.size > scout_capture.MAX_IMAGE_BYTES:
+            raise HTTPException(400, f"{f.filename or 'Screenshot'} exceeds the 10 MB limit.")
+
+    try:
+        payload = []
+        for f in files:
+            data = await f.read()
+            payload.append((f.filename or "screenshot", f.content_type or "", data))
+        result = await scout_capture.run_capture(payload, user_id=user.get("id"))
+        return result
+    except scout_capture.ScoutCaptureError as e:
+        raise HTTPException(e.status_code, detail=e.detail)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error("scout ai-capture failed: %s", e)
+        raise HTTPException(500, detail="AI capture failed unexpectedly")
+
 
 @router.put("/scouting/{sid}")
 async def update_scout_entry(sid: str, payload: ScoutEntryUpdateIn, _: dict = Depends(current_user)):
@@ -336,7 +386,19 @@ async def update_scout_entry(sid: str, payload: ScoutEntryUpdateIn, _: dict = De
             update_data["assigned_id"] = payload.assigned_id
         if payload.status is not None:
             update_data["status"] = payload.status
-            
+        if payload.instagram_username is not None:
+            update_data["instagram_username"] = payload.instagram_username.strip().lstrip("@").lower() or None
+        if payload.followers_count is not None:
+            update_data["followers_count"] = payload.followers_count
+        if payload.category is not None:
+            update_data["category"] = payload.category.strip() or None
+        if payload.location is not None:
+            update_data["location"] = payload.location.strip() or None
+        if payload.manager_name is not None:
+            update_data["manager_name"] = payload.manager_name.strip() or None
+        if payload.manager_phone is not None:
+            update_data["manager_phone"] = payload.manager_phone.strip() or None
+
         if update_data:
             update_data["updated_at"] = _now()
             await db.workflow_scouts.update_one({"id": sid}, {"$set": update_data})

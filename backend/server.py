@@ -31,6 +31,7 @@ from routers import (
     whatsapp,
     workflow,
 )
+import scout_capture
 
 _docs_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/docs"
 _redoc_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/redoc"
@@ -89,8 +90,13 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Dedicated Railway health-check endpoint — no auth, no middleware cost."""
-    return {"status": "ok"}
+    """Dedicated Railway health-check endpoint — no auth, no middleware cost.
+
+    Includes AI Scout Capture OCR readiness so ops can see whether EasyOCR has
+    finished warming. `status` stays "ok" regardless — OCR warmup is best-effort
+    and must not fail the Railway health probe.
+    """
+    return {"status": "ok", "ocr": scout_capture.ocr_readiness()}
 
 
 # Register routers
@@ -465,6 +471,11 @@ async def on_startup():
             await db.workflow_tasks.create_index([("creator_id", 1)])
             await db.workflow_scouts.create_index([("status", 1), ("created_at", -1)])
             await db.workflow_notifications.create_index([("user_id", 1), ("read_at", 1)])
+            # AI Scout Capture — dedup lookups + audit trail
+            await db.workflow_scouts.create_index([("instagram_username", 1)])
+            await db.workflow_scouts.create_index([("phone", 1)])
+            await db.scout_capture_audit.create_index([("created_at", -1)])
+            await db.scout_capture_audit.create_index([("user_id", 1), ("created_at", -1)])
         except Exception as _e:
             logger.warning("workflow indexes: %s", _e)
 
@@ -475,6 +486,14 @@ async def on_startup():
             await whatsapp.ensure_whatsapp_ready()
         except Exception as _e:
             logger.warning("WhatsApp Engine startup init failed (non-fatal): %s", _e)
+
+        # AI Scout Capture — warm EasyOCR in the background so the first user
+        # request doesn't pay model download/load latency. Non-blocking (boot +
+        # Railway health stay fast) and non-fatal (capture still lazy-loads).
+        try:
+            asyncio.create_task(scout_capture.warmup())
+        except Exception as _e:
+            logger.warning("OCR warmup scheduling failed (non-fatal): %s", _e)
 
         if drive_enabled():
             logger.info("Google Drive backup ENABLED — starting retry worker")

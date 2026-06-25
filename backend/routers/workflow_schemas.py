@@ -49,6 +49,14 @@ class ScoutEntryIn(BaseModel):
     notes: Optional[str] = ""
     assigned_id: Optional[str] = None
     status: str = "not_contacted"
+    # AI Scout Capture — structured fields (optional; additive, back-compatible)
+    instagram_username: Optional[str] = None
+    followers_count: Optional[int] = None
+    category: Optional[str] = None
+    location: Optional[str] = None
+    manager_name: Optional[str] = None
+    manager_phone: Optional[str] = None
+    capture_audit_id: Optional[str] = None  # links the row to its extraction audit
 
 class ScoutEntryUpdateIn(BaseModel):
     instagram_link: Optional[str] = None
@@ -57,3 +65,9 @@ class ScoutEntryUpdateIn(BaseModel):
     notes: Optional[str] = None
     assigned_id: Optional[str] = None
     status: Optional[str] = None
+    instagram_username: Optional[str] = None
+    followers_count: Optional[int] = None
+    category: Optional[str] = None
+    location: Optional[str] = None
+    manager_name: Optional[str] = None
+    manager_phone: Optional[str] = None

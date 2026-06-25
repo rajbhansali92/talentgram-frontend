@@ -22,9 +22,11 @@ import {
     DollarSign,
     Briefcase,
     Settings,
+    Sparkles,
     X,
 } from "lucide-react";
 import { toast } from "sonner";
+import ScoutCaptureModal from "./ScoutCaptureModal";
 
 // Predefined Operational Subtask Checklist Templates Library
 const SUBTASK_TEMPLATES = {
@@ -104,6 +106,9 @@ export default function WorkflowPage() {
         notes: "",
         assigned_id: "",
     });
+
+    // AI Scout Capture modal
+    const [showAiCapture, setShowAiCapture] = useState(false);
 
     // Fetch lists
     const fetchTasks = async () => {
@@ -1114,6 +1119,19 @@ export default function WorkflowPage() {
                     {/* Fast entry bar */}
                     <div className="border border-black/[0.06] bg-white rounded-md p-4 space-y-3 shadow-sm">
                         <p className="text-xs font-semibold uppercase tracking-wider text-black/85">Ultra-Fast Scouting Log</p>
+                        <button
+                            type="button"
+                            onClick={() => setShowAiCapture(true)}
+                            className="w-full flex items-center justify-center gap-1.5 border border-black/15 bg-black/[0.02] hover:bg-black/[0.04] text-black/80 py-2 rounded-sm text-[11px] font-semibold uppercase tracking-wider focus:outline-none"
+                        >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            AI Capture
+                        </button>
+                        <div className="flex items-center gap-2 my-0.5">
+                            <span className="h-px flex-1 bg-black/[0.06]" />
+                            <span className="text-[9px] uppercase tracking-wider text-black/30">or log manually</span>
+                            <span className="h-px flex-1 bg-black/[0.06]" />
+                        </div>
                         <form onSubmit={handleCreateScout} className="space-y-2">
                             <div className="space-y-1">
                                 <label className="text-[10px] uppercase font-bold text-black/45">Instagram Profile Link</label>
@@ -1276,6 +1294,16 @@ export default function WorkflowPage() {
                 </div>
 
             </div>
+
+            {showAiCapture && (
+                <ScoutCaptureModal
+                    onClose={() => setShowAiCapture(false)}
+                    onSaved={(scout) => {
+                        if (scout) setScouts((prev) => [scout, ...prev]);
+                    }}
+                    onRefresh={fetchScouts}
+                />
+            )}
         </div>
     );
 }

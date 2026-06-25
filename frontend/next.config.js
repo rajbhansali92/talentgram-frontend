@@ -48,7 +48,11 @@ const securityHeaders = [
       // it must be allow-listed in connect-src or the browser blocks it with a
       // CSP error. Scoped to the exact host — no wildcard, no other directive
       // weakened.
-      "connect-src 'self' https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org",
+      // api.cloudinary.com is the direct browser→Cloudinary signed-upload host
+      // (image /upload/sign path + chunked audition-video transport). It is an
+      // XHR POST, so without it in connect-src the browser blocks every upload
+      // even after the backend returns a valid signature.
+      "connect-src 'self' https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",

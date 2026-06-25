@@ -33,8 +33,13 @@ APP_NAME = os.environ.get("APP_NAME", "talentgram")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
-# Direct Cloudinary Upload feature flag (rollout mechanism)
-DIRECT_UPLOAD_ENABLED = os.environ.get("DIRECT_UPLOAD_ENABLED", "false").lower() == "true"
+# Direct Cloudinary Upload feature flag (rollout mechanism).
+# The frontend upload manager uses signed browser→Cloudinary uploads as its ONLY
+# transport (no proxy fallback), so this must default ON. With the previous
+# "false" default, an unset env var made /upload/sign return 400 "Direct uploads
+# are currently disabled", breaking ALL image + apply-video uploads. Set
+# DIRECT_UPLOAD_ENABLED=false only to deliberately disable uploads.
+DIRECT_UPLOAD_ENABLED = os.environ.get("DIRECT_UPLOAD_ENABLED", "true").lower() == "true"
 
 
 # --------------------------------------------------------------------------
@@ -1444,10 +1449,11 @@ MAX_IMAGES_PER_CATEGORY = 10
 MAX_SUBMISSION_VIDEO_BYTES = 200 * 1024 * 1024
 MAX_SUBMISSION_IMAGE_BYTES = 20 * 1024 * 1024
 
-# Architecture C — direct browser→Cloudinary audition-video upload. Default OFF
-# so production behaviour is unchanged until explicitly enabled. When OFF, the
-# new endpoints still exist but the frontend keeps using the Railway path, and
-# finalize reconciliation is a no-op (no direct-upload assets to reconcile).
+# Architecture C — direct browser→Cloudinary audition-video upload. NOTE: the
+# /video-signature and /video-complete endpoints are NOT gated by this flag, so
+# submission audition videos/takes upload regardless. The flag only controls the
+# finalize reconcile safety-net (reconcile_submission_videos). Default left
+# unchanged ("false") so finalize behavior is not altered by the upload fix.
 DIRECT_VIDEO_UPLOAD = os.environ.get("DIRECT_VIDEO_UPLOAD", "false").strip().lower() in ("1", "true", "yes", "on")
 # Audition video duration ceiling (seconds) — 5 minutes.
 MAX_AUDITION_VIDEO_SECONDS = 300

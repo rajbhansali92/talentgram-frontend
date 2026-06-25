@@ -259,6 +259,20 @@ export default function ApplicationPage() {
                         );
                         console.log("[ApplicationPage] Fetch successful. Hydrating form fields.");
                         setForm((f) => ({ ...f, ...(data.form_data || {}) }));
+                        // Resume also rehydrates `basics` from the persisted
+                        // application. `basics` (gate-only fields) is what
+                        // finalize validates for name; without this, a resume
+                        // that lacks a local `saved.basics` leaves first/last
+                        // name empty and finalize blocks on a field that is not
+                        // visible on the resumed form.
+                        const rfd = data.form_data || {};
+                        setBasics((b) => ({
+                            ...b,
+                            first_name: b.first_name || rfd.first_name || (data.talent_name || "").split(" ")[0] || "",
+                            last_name: b.last_name || rfd.last_name || (data.talent_name || "").split(" ").slice(1).join(" ") || "",
+                            phone: b.phone || data.talent_phone || rfd.phone || "",
+                            alternate_contact_number: b.alternate_contact_number || data.alternate_contact_number || rfd.alternate_contact_number || "",
+                        }));
                         setMedia(data.media || []);
                         if (data.status === "submitted") {
                             setFinalized(true);
@@ -1838,7 +1852,7 @@ function ApplyLookGroup({
                         className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#eaeaea] overflow-hidden group shadow-sm"
                     >
                         <img
-                            src={thumbnailUrl(m)}
+                            src={m.url}
                             alt=""
                             loading="lazy"
                             className="w-full h-full object-cover"

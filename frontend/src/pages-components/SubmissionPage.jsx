@@ -2996,7 +2996,7 @@ function SubmissionPage() {
                                                                 }}
                                                             >
                                                                 <img
-                                                                    src={thumbnailUrl(m)}
+                                                                    src={m.url}
                                                                     alt=""
                                                                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                                                 />
@@ -3303,7 +3303,7 @@ function PremiumPortfolioGroup({
                                     }}
                                 >
                                     <img
-                                        src={thumbnailUrl(m)}
+                                        src={m.url}
                                         alt=""
                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                     />

@@ -1327,8 +1327,7 @@ async def video_signature(
         public_id = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex[:8]}"
 
     # Pinned, string-encoded transformation + eager poster (signed verbatim).
-    transformation = "c_limit,h_720,w_1280/q_auto,vc_auto"
-    eager = "c_fill,h_338,w_600,q_auto/f_jpg"
+    eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
     tags = f"submission_id={sid},project_id={sub.get('project_id')},talent_id={tid},category={category},asset_kind=audition_video"
     import urllib.parse
     safe_label = urllib.parse.quote((payload.label or "").strip())
@@ -1338,8 +1337,6 @@ async def video_signature(
         "timestamp": timestamp,
         "folder": folder,
         "public_id": public_id,
-        "transformation": transformation,
-        "format": "mp4",
         "eager": eager,
         "eager_async": "true",
         "overwrite": "true",
@@ -1372,9 +1369,9 @@ async def video_signature(
         "signature": signature,
         "upload_url": f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/video/upload",
         "params": {
-            "folder": folder, "public_id": public_id, "transformation": transformation,
-            "format": "mp4", "eager": eager, "eager_async": "true", "overwrite": "true",
-            "tags": tags, "context": context,
+            "folder": folder, "public_id": public_id, "eager": eager, 
+            "eager_async": "true", "overwrite": "true", "tags": tags, 
+            "context": context,
         },
         "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
     }

@@ -257,3 +257,45 @@ def test_public_id_length_worst_case():
     assert len(combined_take) <= 255, (
         f"take combined path is {len(combined_take)} chars (max 255): {combined_take}"
     )
+
+
+@patch("routers.submissions.decode_submitter")
+def test_video_signature_asynchronous_transformations(mock_decode):
+    """Verify that video-signature uses eager_async and does not return synchronous transformation or format."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123",
+        "project_id": "pid123",
+        "talent_id": "t123",
+        "talent_name": "Test Talent",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.asset_metadata.update_one = AsyncMock()
+    
+    with patch("cloudinary.utils.api_sign_request") as mock_sign:
+        mock_sign.return_value = "mocked_sig"
+        
+        response = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
+            headers={"Authorization": "Bearer dummy_token"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        params = data["params"]
+        
+        # Verify eager and eager_async parameters are present
+        assert "eager" in params
+        assert "eager_async" in params
+        assert params["eager_async"] == "true"
+        
+        # Verify the 720p scaling and poster transforms are in the eager chain
+        assert "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4" in params["eager"]
+        assert "c_fill,h_338,w_600,q_auto/f_jpg" in params["eager"]
+        
+        # Verify that synchronous transformation and format parameters are absent
+        assert "transformation" not in params
+        assert "format" not in params

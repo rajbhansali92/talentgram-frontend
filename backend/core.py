@@ -882,7 +882,8 @@ def cloudinary_url_for(
 
 def stream_video_url(public_id: Optional[str]) -> Optional[str]:
     """Build a optimized video URL for a video.
-    Uses: q_auto:good, vc_auto, f_auto
+    Matches the eager transformation pre-generated on upload:
+    c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4
     """
     if not public_id:
         return None
@@ -892,9 +893,11 @@ def stream_video_url(public_id: Optional[str]) -> Optional[str]:
         public_id,
         resource_type="video",
         secure=True,
-        quality="auto:good",
-        video_codec="auto",
-        fetch_format="auto"
+        transformation=[
+            {"width": 1280, "height": 720, "crop": "limit"},
+            {"quality": "auto", "video_codec": "auto"},
+            {"fetch_format": "mp4"}
+        ]
     )
     return url
 

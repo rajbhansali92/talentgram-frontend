@@ -15,6 +15,8 @@ import {
   getWaConfig, updateWaConfig,
   getAuditLog,
   resolveTargets, getCrmContactTypes, validateManual,
+  // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
+  testInternalNotification,
 } from "@/lib/whatsappApi";
 import VirtualList from "@/components/VirtualList";
 import ProjectSearchModal from "@/components/ProjectSearchModal";
@@ -1527,6 +1529,25 @@ function WEConfigPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
+  const [testingNotification, setTestingNotification] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
+  const handleTestNotification = async () => {
+    setTestingNotification(true);
+    setTestResult(null);
+    try {
+      const res = await testInternalNotification();
+      setTestResult(res);
+      toast.success("Test notification queued successfully");
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Failed to trigger test notification");
+    } finally {
+      setTestingNotification(false);
+    }
+  };
+
   const fetchConfig = async () => {
     try {
       const data = await getWaConfig();
@@ -1641,6 +1662,42 @@ function WEConfigPanel() {
           </button>
         </div>
       </form>
+
+      {/* TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION */}
+      <div className="border-t border-black/[0.04] pt-6 space-y-4">
+        <div className="space-y-1">
+          <h4 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">WhatsApp Internal Notification Test</h4>
+          <p className="text-xs text-[#6B7280]">
+            Verify backend connection to the queue and the dedicated internal WhatsApp group.
+          </p>
+        </div>
+        <div className="flex flex-col gap-3">
+          <button
+            type="button"
+            onClick={handleTestNotification}
+            disabled={testingNotification}
+            className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold uppercase tracking-widest bg-red-600 hover:bg-red-700 text-white px-6 py-3.5 rounded-lg transition-colors disabled:opacity-50 h-[52px] active:scale-[0.98] duration-120"
+          >
+            {testingNotification ? "Sending Test..." : "Send Internal Notification Test"}
+          </button>
+          {testResult && (
+            <div className="bg-[#f8f8f7] border border-black/5 p-4 rounded-xl space-y-2 text-xs">
+              <p className="font-semibold text-emerald-700">✓ Test notification queued successfully</p>
+              <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-[#6B7280]">
+                <div>
+                  <span className="font-bold text-[#111111]">Batch ID:</span> {testResult.batch_id}
+                </div>
+                <div>
+                  <span className="font-bold text-[#111111]">Job ID:</span> {testResult.job_id}
+                </div>
+                <div className="col-span-2">
+                  <span className="font-bold text-[#111111]">Group:</span> {testResult.group_name}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -44,6 +44,7 @@ from core import (
     current_admin,
     current_team_or_admin,
     db,
+    logger,
     decode_submitter,
     make_access_token,
     make_token,
@@ -1427,6 +1428,131 @@ async def video_complete(
     return {"ok": True, "media": media}
 
 
+async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_type: str, decision: Optional[str] = None):
+    try:
+        project_id = submission.get("project_id")
+        project = await db.projects.find_one({"id": project_id})
+        project_name = "Unknown Project"
+        if project:
+            project_name = project.get("title") or project.get("name") or "Unknown Project"
+
+        form = submission.get("form_data") or {}
+        talent_name = (
+            f"{(form.get('first_name') or '').strip()} "
+            f"{(form.get('last_name') or '').strip()}"
+        ).strip() or submission.get("talent_name") or "A talent"
+        talent_phone = form.get("phone") or submission.get("talent_phone") or "No Phone"
+
+        import urllib.parse
+        quoted_talent_name = urllib.parse.quote(talent_name)
+        review_link = f"https://review.talentgramagency.com/admin/projects/{project_id}/submissions?search={quoted_talent_name}"
+        timestamp = _now()
+
+        if event_type in ("NEW SUBMISSION", "RETEST SUBMITTED"):
+            media_list = submission.get("media") or []
+            has_intro = any(m.get("category") == "intro_video" for m in media_list)
+            intro_video_status = "Yes" if has_intro else "No"
+            
+            portfolio_count = sum(1 for m in media_list if m.get("category") in {"image", "portfolio", "indian", "western"})
+            takes_count = sum(1 for m in media_list if m.get("category") in {"take", "take_1", "take_2", "take_3"})
+            
+            message_body = (
+                f"*{event_type} FINALIZED*\n" if event_type == "NEW SUBMISSION" else f"*{event_type}*\n"
+            )
+            message_body += (
+                f"Project: {project_name}\n"
+                f"Talent: {talent_name} ({talent_phone})\n"
+                f"Assets: Intro Video: {intro_video_status}, Portfolio Images: {portfolio_count}, Audition Takes: {takes_count}\n"
+                f"Review Link: {review_link}\n"
+                f"Timestamp: {timestamp}"
+            )
+        elif event_type == "DECISION CHANGED":
+            decision_str = str(decision).upper() if decision else "UNKNOWN"
+            message_body = (
+                f"*SUBMISSION DECISION CHANGED*\n"
+                f"Project: {project_name}\n"
+                f"Talent: {talent_name} ({talent_phone})\n"
+                f"Decision: {decision_str}\n"
+                f"Review Link: {review_link}\n"
+                f"Timestamp: {timestamp}"
+            )
+        else:
+            message_body = (
+                f"*{event_type}*\n"
+                f"Project: {project_name}\n"
+                f"Talent: {talent_name} ({talent_phone})\n"
+                f"Review Link: {review_link}\n"
+                f"Timestamp: {timestamp}"
+            )
+
+        # Config setting lookup
+        cfg = await db.whatsapp_config.find_one({"key": "internal_notification_group_name"})
+        group_name = cfg.get("value") if (cfg and cfg.get("value")) else "Talentgram Operations"
+
+        batch_id = str(uuid.uuid4())
+        batch_doc = {
+            "id": batch_id,
+            "source_type": "INTERNAL_NOTIFICATION",
+            "source_label": f"Internal Notification for {project_name}",
+            "project_id": project_id,
+            "project_name": project_name,
+            "template_id": "internal_notification",
+            "template_slug": "internal_notification",
+            "variable_data": {},
+            "media_url": None,
+            "is_dry_run": False,
+            "status": "pending",
+            "total_jobs": 1,
+            "sent_count": 0,
+            "failed_count": 0,
+            "unconfirmed_count": 0,
+            "created_by": "system",
+            "created_at": timestamp,
+            "started_at": None,
+            "completed_at": None,
+        }
+
+        job_doc = {
+            "id": str(uuid.uuid4()),
+            "batch_id": batch_id,
+            "template_id": "internal_notification",
+            "template_name": "Internal Notification",
+            "source": "INTERNAL_NOTIFICATION",
+            "source_id": project_id,
+            "recipient_kind": "INTERNAL_GROUP",
+            "recipient_id": "internal_notification_group",
+            "talent_id": None,
+            "talent_name": group_name,
+            "destination_type": "group",
+            "destination": group_name,
+            "message_body": message_body,
+            "media_url": None,
+            "is_dry_run": False,
+            "status": "pending",
+            "attempt_count": 0,
+            "last_attempted_at": None,
+            "sent_at": None,
+            "error_message": None,
+            "worker_picked_at": None,
+            "created_at": timestamp,
+        }
+
+        await db.whatsapp_batches.insert_one(batch_doc)
+        await db.whatsapp_jobs.insert_one(job_doc)
+        logger.info(f"Successfully enqueued internal WhatsApp notification for {event_type}")
+
+    except Exception as e:
+        logger.warning(f"Error in background internal WhatsApp notification task: {e}", exc_info=True)
+
+
+def enqueue_internal_whatsapp_notification(submission: dict, event_type: str, decision: Optional[str] = None):
+    try:
+        import asyncio
+        asyncio.create_task(_enqueue_internal_whatsapp_notification_task(submission, event_type, decision))
+    except Exception as e:
+        logger.warning(f"Failed to schedule internal WhatsApp notification task: {e}", exc_info=True)
+
+
 @router.post("/public/submissions/{sid}/finalize")
 async def submission_finalize(sid: str, authorization: Optional[str] = Header(None)):
     submitter = await decode_submitter(authorization)
@@ -1849,6 +1975,12 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             body=f"{brand} — awaiting your review.",
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
+    finalized_sub_for_notify = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    if finalized_sub_for_notify:
+        enqueue_internal_whatsapp_notification(
+            finalized_sub_for_notify,
+            "RETEST SUBMITTED" if is_retest else "NEW SUBMISSION"
+        )
     await update_talent_submission_metrics(email)
     return {
         "ok": True,
@@ -2232,6 +2364,8 @@ async def set_decision(
             payload={"submission_id": sid, "project_id": pid, "decision": payload.decision},
             actor_id=admin.get("id"),
         )
+        if fresh_sub and payload.decision in {"hold", "approved", "rejected"}:
+            enqueue_internal_whatsapp_notification(fresh_sub, "DECISION CHANGED", decision=payload.decision)
 
     return {"ok": True}
 
@@ -2576,3 +2710,91 @@ async def regenerate_submission_snapshot_endpoint(
     )
     
     return {"ok": True, "snapshot": new_snapshot}
+
+
+# ===========================================================================
+# TEMP TEST TOOL — REMOVE AFTER WHATSAPP VALIDATION
+# ===========================================================================
+@router.post("/admin/whatsapp/test-internal-notification")
+async def test_internal_notification_endpoint(admin: dict = Depends(current_admin)):
+    """Temporary test endpoint to verify WhatsApp operations group notifications."""
+    timestamp = _now()
+    
+    # 1. Read internal notification group configuration exactly like production
+    cfg = await db.whatsapp_config.find_one({"key": "internal_notification_group_name"})
+    group_name = cfg.get("value") if (cfg and cfg.get("value")) else "Talentgram Operations Test"
+
+    # Construct the payload
+    message_body = (
+        "🚨 *TALENTGRAM INTERNAL NOTIFICATION TEST*\n\n"
+        "Environment: Production\n"
+        f"Timestamp: {timestamp}\n\n"
+        "This is a test message generated from the internal notification system.\n\n"
+        "If you are reading this, the following path is working:\n"
+        "Backend\n"
+        "→ WhatsApp Queue\n"
+        "→ Railway Worker\n"
+        "→ WhatsApp Group\n\n"
+        "Test completed successfully."
+    )
+
+    batch_id = str(uuid.uuid4())
+    batch_doc = {
+        "id": batch_id,
+        "source_type": "INTERNAL_NOTIFICATION",
+        "source_label": "Internal Notification Test Message",
+        "project_id": "test-project",
+        "project_name": "Test Project",
+        "template_id": "internal_notification",
+        "template_slug": "internal_notification",
+        "variable_data": {},
+        "media_url": None,
+        "is_dry_run": False,
+        "status": "pending",
+        "total_jobs": 1,
+        "sent_count": 0,
+        "failed_count": 0,
+        "unconfirmed_count": 0,
+        "created_by": "system",
+        "created_at": timestamp,
+        "started_at": None,
+        "completed_at": None,
+    }
+
+    job_id = str(uuid.uuid4())
+    job_doc = {
+        "id": job_id,
+        "batch_id": batch_id,
+        "template_id": "internal_notification",
+        "template_name": "Internal Notification",
+        "source": "INTERNAL_NOTIFICATION",
+        "source_id": "test-project",
+        "recipient_kind": "INTERNAL_GROUP",
+        "recipient_id": "internal_notification_group",
+        "talent_id": None,
+        "talent_name": group_name,
+        "destination_type": "group",
+        "destination": group_name,
+        "message_body": message_body,
+        "media_url": None,
+        "is_dry_run": False,
+        "status": "pending",
+        "attempt_count": 0,
+        "last_attempted_at": None,
+        "sent_at": None,
+        "error_message": None,
+        "worker_picked_at": None,
+        "created_at": timestamp,
+    }
+
+    await db.whatsapp_batches.insert_one(batch_doc)
+    await db.whatsapp_jobs.insert_one(job_doc)
+    logger.info("Successfully queued internal test WhatsApp notification")
+
+    return {
+        "success": True,
+        "batch_id": batch_id,
+        "job_id": job_id,
+        "group_name": group_name,
+    }
+

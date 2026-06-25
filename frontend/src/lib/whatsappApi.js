@@ -163,3 +163,9 @@ export async function getAuditLog(params = {}) {
   const res = await adminApi.get("/whatsapp/audit-log", { params });
   return res.data;
 }
+
+// --- TEMP TEST TOOL — REMOVE AFTER WHATSAPP VALIDATION ---
+export async function testInternalNotification() {
+  const res = await adminApi.post("/admin/whatsapp/test-internal-notification");
+  return res.data;
+}

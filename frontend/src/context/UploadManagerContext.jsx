@@ -55,14 +55,13 @@ export function UploadManagerProvider({ children }) {
 
         // Size & type validation
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(category);
-        // Submission videos use the chunked transport (no single-POST size
-        // ceiling) → allow large audition takes. A null endpoint also resolves
-        // to a submission endpoint via onBeforeUpload (SubmissionPage). The apply
-        // single-POST path keeps the 200 MB cap. Duration is guarded (300s) by
-        // directVideoUpload; this is just a sane upper safety bound.
-        const isChunkedSubmissionVideo =
-            isVideoSlot && (!endpoint || SUBMISSION_VIDEO_ENDPOINT_RE.test(endpoint));
-        const CAP_MB = isVideoSlot ? (isChunkedSubmissionVideo ? 2048 : 200) : 20;
+        // Submission and application videos use the chunked transport (no single-POST size
+        // ceiling) → allow large video files. A null endpoint also resolves
+        // to a submissions endpoint via onBeforeUpload (SubmissionPage). Duration is guarded
+        // (300s) by directVideoUpload; this is just a sane upper safety bound.
+        const isChunkedVideo =
+            isVideoSlot && (!endpoint || CHUNKED_VIDEO_ENDPOINT_RE.test(endpoint));
+        const CAP_MB = isVideoSlot ? (isChunkedVideo ? 2048 : 200) : 20;
 
         if (file) {
             const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();

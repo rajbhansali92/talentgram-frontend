@@ -407,3 +407,60 @@ def test_legacy_app_upload_sign_rejects_video(mock_decode):
     )
     assert response.status_code == 400
     assert "chunked" in response.json()["detail"]
+
+
+@patch("routers.submissions.decode_submitter")
+def test_submission_video_complete_ownership_failure_reproduction(mock_decode):
+    """Verify that video-signature folder prefix matches video-complete folder prefix."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123",
+        "project_id": "pid123",
+        "talent_id": "t123",
+        "talent_name": "Test Talent",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.asset_metadata.update_one = AsyncMock()
+
+    # 1. Get the signature / folder
+    with patch("cloudinary.utils.api_sign_request") as mock_sign:
+        mock_sign.return_value = "mocked_sig"
+        response_sig = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
+            headers={"Authorization": "Bearer dummy_token"}
+        )
+        assert response_sig.status_code == 200
+        data_sig = response_sig.json()
+        folder = data_sig["params"]["folder"]
+        public_id_leaf = data_sig["params"]["public_id"]
+        full_public_id = f"{folder}/{public_id_leaf}"
+
+    # 2. Call video-complete using the full public_id
+    payload = {
+        "public_id": full_public_id,
+        "url": f"https://res.cloudinary.com/dummy/video/upload/v1/{full_public_id}.mp4",
+        "bytes": 5000000,
+        "duration": 10.0
+    }
+
+    with patch("cloudinary.api.resource") as mock_resource:
+        mock_resource.return_value = {
+            "public_id": full_public_id,
+            "bytes": 5000000,
+            "duration": 10.0,
+            "secure_url": f"https://res.cloudinary.com/dummy/video/upload/v1/{full_public_id}.mp4",
+            "url": f"http://res.cloudinary.com/dummy/video/upload/v1/{full_public_id}.mp4",
+            "tags": ["category=take"]
+        }
+        mock_attach = AsyncMock(return_value={"id": "media123", "category": "take"})
+        with patch("routers.submissions.attach_video_media", mock_attach):
+            response_complete = client.post(
+                "/api/public/submissions/sid123/video-complete",
+                json=payload,
+                headers={"Authorization": "Bearer dummy_token"}
+            )
+            # This asserts ownership matching
+            assert response_complete.status_code == 200

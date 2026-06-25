@@ -646,16 +646,17 @@ async def upload_and_track_asset(
         if talent_doc:
             talent_name = talent_doc.get("name") or "unnamed"
 
-    talent_name_slug = _slugify(talent_name)
+    talent_name_slug = _slugify_deterministic(talent_name or "")
+    suffix = f"_{talent_name_slug}" if talent_name_slug else ""
     if project_id and submission_id:
-        folder = f"talentgram/projects/{project_id}/auditions/{talent_id}_{talent_name_slug}/submission_{submission_id}"
+        folder = f"talentgram/projects/{project_id}/auditions/{talent_id}{suffix}/submission_{submission_id}"
     else:
         subfolder = {
             "profile_image": "profile_images",
             "intro_video": "intro_video",
             "portfolio_video": "portfolio_videos",
         }.get(asset_type, f"{asset_type}s")
-        folder = f"talentgram/talents/{talent_id}_{talent_name_slug}/{subfolder}"
+        folder = f"talentgram/talents/{talent_id}{suffix}/{subfolder}"
 
     tags = []
     if project_id:
@@ -909,9 +910,11 @@ def audition_submission_folder(
     `upload_and_track_asset` so the existing structure stays compatible and the
     finalize reconciliation can list assets by this exact prefix.
     """
+    slug = _slugify_deterministic(talent_name or "")
+    suffix = f"_{slug}" if slug else ""
     return (
         f"talentgram/projects/{project_id}/auditions/"
-        f"{talent_id}_{_slugify(talent_name)}/submission_{submission_id}"
+        f"{talent_id}{suffix}/submission_{submission_id}"
     )
 
 
@@ -1194,6 +1197,15 @@ def _resolve_cover_url(doc: dict) -> Optional[str]:
     """
     media_item = resolve_cover_media(doc)
     return media_item["url"] if media_item else None
+
+
+def _slugify_deterministic(title: str) -> str:
+    if not title:
+        return ""
+    safe = "".join(c if c.isalnum() else "-" for c in title.lower()).strip("-")
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    return safe
 
 
 def _slugify(title: str) -> str:

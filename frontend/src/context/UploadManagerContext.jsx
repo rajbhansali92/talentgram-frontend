@@ -10,7 +10,7 @@ import { directVideoUpload } from "../lib/directVideoUpload";
 // Submission audition videos go through the chunked browser→Cloudinary
 // transport (directVideoUpload). Detected by the submission upload endpoint;
 // the apply flow keeps the single-POST path.
-const SUBMISSION_VIDEO_ENDPOINT_RE = /\/public\/submissions\/([^/]+)\/upload\/?$/;
+const CHUNKED_VIDEO_ENDPOINT_RE = /\/public\/(submissions|apply)\/([^/]+)\/upload\/?$/;
 
 
 const UploadManagerContext = createContext(null);
@@ -122,20 +122,22 @@ export function UploadManagerProvider({ children }) {
             [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size, file, options }
         }));
 
-        // ── Chunked transport for submission audition videos ──────────────────
+        // ── Chunked transport for submission and application videos ──────────
         // Reuses directVideoUpload (chunked, resumable, duration-guarded) while
         // driving the SAME activeUploads state machine, so FloatingUploadManager
-        // and the SubmissionPage upload cards/progress bars are unchanged.
-        const subVideoMatch = isVideoSlot && SUBMISSION_VIDEO_ENDPOINT_RE.exec(dynamicEndpoint || "");
-        if (subVideoMatch) {
-            const sid = subVideoMatch[1];
+        // and the upload cards/progress bars are unchanged.
+        const chunkedVideoMatch = isVideoSlot && CHUNKED_VIDEO_ENDPOINT_RE.exec(dynamicEndpoint || "");
+        if (chunkedVideoMatch) {
+            const isApp = chunkedVideoMatch[1] === "apply";
+            const targetId = chunkedVideoMatch[2];
             try {
                 await directVideoUpload({
-                    sid,
+                    sid: targetId,
                     token: dynamicToken,
                     category,
                     label,
                     file,
+                    isApplication: isApp,
                     onProgress: (loaded, total) => {
                         const pct = total ? Math.round((loaded / total) * 100) : 0;
                         setActiveUploads((prev) => {
@@ -152,16 +154,15 @@ export function UploadManagerProvider({ children }) {
                     },
                 });
 
-                // Re-fetch the full submission so onSuccess receives the SAME
-                // shape as the single-POST /complete path (setSubmission(doc)).
+                // Re-fetch the full document so onSuccess receives the updated state
                 if (onSuccess) {
                     try {
                         const headers = dynamicToken ? { Authorization: `Bearer ${dynamicToken}` } : {};
-                        const res = await api.get(`/public/submissions/${sid}`, { headers });
+                        const fetchUrl = isApp ? `/public/apply/${targetId}` : `/public/submissions/${targetId}`;
+                        const res = await api.get(fetchUrl, { headers });
                         onSuccess(res.data);
                     } catch (_) {
-                        // Non-fatal: the asset is attached server-side and finalize
-                        // reconciles; the next state refresh will surface it.
+                        // Non-fatal: the asset is attached server-side
                     }
                 }
 

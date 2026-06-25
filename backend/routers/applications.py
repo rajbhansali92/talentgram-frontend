@@ -14,17 +14,24 @@ Admin:
   POST  /api/applications/{aid}/decision -> approve/reject (approval pushes to master Talents DB)
 """
 import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+import cloudinary
+import cloudinary.api
+import cloudinary.utils
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pymongo.errors import DuplicateKeyError
+
 
 from core import (
     APP_NAME,
     APPLICATION_DECISIONS,
     APPLICATION_UPLOAD_CATEGORIES,
+    CLOUDINARY_CLOUD_NAME,
     MAX_APPLICATION_IMAGES,
+    MAX_AUDITION_VIDEO_SECONDS,
     MAX_IMAGES_PER_CATEGORY,
     MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_VIDEO_BYTES,
@@ -759,6 +766,8 @@ async def sign_application_upload(
     
     if category not in APPLICATION_UPLOAD_CATEGORIES:
         raise HTTPException(400, "Invalid category")
+    if category == "intro_video":
+        raise HTTPException(400, "intro_video must use chunked video-signature endpoint")
         
     app_doc = await db.applications.find_one({"id": aid})
     if not app_doc:
@@ -766,32 +775,15 @@ async def sign_application_upload(
     if app_doc.get("status") == "submitted":
         raise HTTPException(400, "Application already finalized")
 
-    is_video = category == "intro_video"
-    is_image = category in ("image", "indian", "western")
-
-    if is_image:
-        existing = sum(1 for m in app_doc.get("media", []) if m.get("category") == category)
-        if existing >= MAX_IMAGES_PER_CATEGORY:
-            raise HTTPException(400, "Limit reached")
-            
-    if is_video:
-        await db.applications.update_one(
-            {"id": aid}, {"$pull": {"media": {"category": "intro_video"}}}
-        )
+    existing = sum(1 for m in app_doc.get("media", []) if m.get("category") == category)
+    if existing >= MAX_IMAGES_PER_CATEGORY:
+        raise HTTPException(400, "Limit reached")
 
     media_id = str(uuid.uuid4())
     folder = f"{APP_NAME}/applications/{aid}"
     public_id = media_id
-    rt = "video" if is_video else "image"
-
-    eager = None
-    transformation = None
-
-    if is_video:
-        transformation = "w_1280,h_720,c_limit,q_auto,vc_auto"
-        eager = "w_600,h_338,c_fill,q_auto,f_jpg"
-    else:
-        eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
+    rt = "image"
+    eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
 
     import time
     import cloudinary.utils
@@ -804,8 +796,6 @@ async def sign_application_upload(
     }
     if eager:
         params["eager"] = eager
-    if transformation:
-        params["transformation"] = transformation
         
     api_secret = cloudinary.config().api_secret
     signature = cloudinary.utils.api_sign_request(params, api_secret)
@@ -819,7 +809,7 @@ async def sign_application_upload(
         "public_id": public_id,
         "resource_type": rt,
         "eager": eager,
-        "transformation": transformation,
+        "transformation": None,
         "media_id": media_id,
     }
 
@@ -850,39 +840,27 @@ async def complete_application_upload(
         raise HTTPException(400, "Application already finalized")
 
     category = payload.category
-    is_video = category == "intro_video"
-    is_image = category in ("image", "indian", "western")
+    if category == "intro_video":
+        raise HTTPException(400, "intro_video must use chunked video-complete endpoint")
 
-    thumbnail_url = None
-    poster_url = None
-    eager_list = payload.eager or []
-    
-    if is_video:
-        poster_url = next((x.get("secure_url") for x in eager_list if x.get("format") == "jpg"), None)
-        compressed_mp4 = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
-        url = compressed_mp4 or payload.url
-    else:
-        url = payload.url
-        thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
-        
-    if not poster_url and is_video:
-        poster_url = video_poster_url(payload.public_id)
+    url = payload.url
+    thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
 
     media = {
         "id": payload.media_id,
         "category": category,
         "url": url,
         "public_id": payload.public_id,
-        "resource_type": "video" if is_video else "image",
-        "content_type": payload.content_type or ("video/mp4" if is_video else "image/jpeg"),
+        "resource_type": "image",
+        "content_type": payload.content_type or "image/jpeg",
         "original_filename": payload.original_filename,
         "size": payload.bytes,
         "created_at": _now(),
         "scope": "application",
         "application_id": aid,
-        "duration": payload.duration,
-        "thumbnail_url": poster_url if is_video else thumbnail_url,
-        "poster_url": poster_url if is_video else None,
+        "duration": None,
+        "thumbnail_url": thumbnail_url,
+        "poster_url": None,
     }
 
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
@@ -892,6 +870,177 @@ async def complete_application_upload(
     await sync_media_to_global_talent(updated, media)
 
     return updated
+
+
+class AppVideoSignatureIn(BaseModel):
+    category: str
+    label: Optional[str] = None
+    content_type: Optional[str] = None
+    public_id: Optional[str] = None
+
+
+@router.post("/public/apply/{aid}/video-signature")
+async def app_video_signature(
+    aid: str,
+    payload: AppVideoSignatureIn,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Issue a short-lived signed Cloudinary upload for the application intro video slot."""
+    from datetime import datetime, timezone
+    from routers.submissions import _prefill_rate_limit_ok
+    if not _prefill_rate_limit_ok(request):
+        raise HTTPException(429, "Too many requests — please slow down")
+    await _check_app_token(authorization, aid)
+    category = (payload.category or "").strip()
+    if category != "intro_video":
+        raise HTTPException(400, "Invalid application video category")
+    app_doc = await db.applications.find_one({"id": aid})
+    if not app_doc:
+        raise HTTPException(404, "Application not found")
+    if app_doc.get("status") == "submitted":
+        raise HTTPException(400, "Application already finalized")
+
+    folder = f"{APP_NAME}/applications/{aid}"
+    is_resign = bool(payload.public_id)
+
+    if is_resign:
+        if payload.public_id != "intro_video":
+            raise HTTPException(400, "Invalid public_id for this application")
+        public_id = payload.public_id
+    else:
+        # Pre-pull existing intro video to keep it clean
+        await db.applications.update_one(
+            {"id": aid}, {"$pull": {"media": {"category": "intro_video"}}}
+        )
+        public_id = "intro_video"
+
+    eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
+    tags = f"application_id={aid},category=intro_video,asset_kind=application_video"
+    timestamp = int(time.time())
+    params_to_sign = {
+        "timestamp": timestamp,
+        "folder": folder,
+        "public_id": public_id,
+        "eager": eager,
+        "eager_async": "true",
+        "overwrite": "true",
+        "tags": tags,
+    }
+    cfg = cloudinary.config()
+    signature = cloudinary.utils.api_sign_request(params_to_sign, cfg.api_secret)
+
+    try:
+        full_public_id = f"{folder}/{public_id}"
+        await db.asset_metadata.update_one(
+            {"public_id": full_public_id},
+            {"$set": {
+                "public_id": full_public_id,
+                "application_id": aid,
+                "category": category,
+                "asset_type": "intro_video",
+                "resource_type": "video",
+                "upload_status": "pending",
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"app-video-signature: pending asset_metadata write failed {folder}/{public_id}: {e}")
+
+    return {
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "api_key": cfg.api_key,
+        "timestamp": timestamp,
+        "signature": signature,
+        "upload_url": f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/video/upload",
+        "params": {
+            "folder": folder,
+            "public_id": public_id,
+            "eager": eager,
+            "eager_async": "true",
+            "overwrite": "true",
+            "tags": tags,
+        },
+        "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
+    }
+
+
+class AppVideoCompleteIn(BaseModel):
+    public_id: str
+    secure_url: Optional[str] = None
+    url: Optional[str] = None
+    bytes: int
+    duration: Optional[float] = None
+    format: Optional[str] = None
+
+
+@router.post("/public/apply/{aid}/video-complete")
+async def app_video_complete(
+    aid: str,
+    payload: AppVideoCompleteIn,
+    authorization: Optional[str] = Header(None),
+):
+    """Attach the just-uploaded chunked video to the application."""
+    from datetime import datetime, timezone
+    await _check_app_token(authorization, aid)
+    app_doc = await db.applications.find_one({"id": aid})
+    if not app_doc:
+        raise HTTPException(404, "Application not found")
+    if app_doc.get("status") == "submitted":
+        raise HTTPException(400, "Application already finalized")
+
+    folder = f"{APP_NAME}/applications/{aid}"
+    public_id = (payload.public_id or "").strip()
+    if not public_id.startswith(folder + "/"):
+        raise HTTPException(400, "Asset does not belong to this application")
+
+    duration = payload.duration
+    asset: Dict[str, Any] = {
+        "public_id": public_id,
+        "secure_url": payload.secure_url or payload.url,
+        "bytes": payload.bytes,
+        "duration": payload.duration,
+    }
+    try:
+        res = cloudinary.api.resource(public_id, resource_type="video", tags=True)
+        duration = res.get("duration", duration)
+        asset = res
+    except Exception as e:
+        logger.warning(f"app-video-complete: resource fetch failed {public_id}: {e}")
+
+    media = {
+        "id": str(uuid.uuid4()),
+        "category": "intro_video",
+        "url": asset.get("secure_url") or asset.get("url"),
+        "public_id": public_id,
+        "resource_type": "video",
+        "content_type": "video/mp4",
+        "original_filename": None,
+        "size": asset.get("bytes") or 0,
+        "created_at": _now(),
+        "scope": "application",
+        "application_id": aid,
+        "duration": duration,
+        "thumbnail_url": video_poster_url(public_id),
+        "poster_url": video_poster_url(public_id),
+    }
+
+    await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
+    try:
+        await db.asset_metadata.update_one(
+            {"public_id": public_id},
+            {"$set": {"upload_status": "completed", "updated_at": datetime.now(timezone.utc)}},
+        )
+    except Exception as e:
+        logger.warning(f"app-video-complete: asset_metadata update failed {public_id}: {e}")
+
+    updated = await db.applications.find_one({"id": aid}, {"_id": 0})
+    from core import sync_media_to_global_talent
+    await sync_media_to_global_talent(updated, media)
+
+    return {"ok": True, "media": media}
 
 
 @router.delete("/public/apply/{aid}/media/{mid}")

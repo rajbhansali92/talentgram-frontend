@@ -111,7 +111,7 @@ async function uploadChunkWithRetry(uploadUrl, formParams, blob, start, total, u
 }
 
 // Returns the backend /video-complete response: { ok, media }.
-export async function directVideoUpload({ sid, token, category, label, file, onProgress }) {
+export async function directVideoUpload({ sid, token, category, label, file, isApplication, onProgress }) {
     // Client-side duration guard (server re-validates authoritatively).
     const duration = await readVideoDuration(file);
     if (duration != null && duration > MAX_DURATION_SECONDS) {
@@ -122,12 +122,20 @@ export async function directVideoUpload({ sid, token, category, label, file, onP
 
     const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
 
+    const signatureEndpoint = isApplication
+        ? `/public/apply/${sid}/video-signature`
+        : `/public/submissions/${sid}/video-signature`;
+
+    const completeEndpoint = isApplication
+        ? `/public/apply/${sid}/video-complete`
+        : `/public/submissions/${sid}/video-complete`;
+
     // Fetch a signed payload. On the FIRST call public_id is minted server-side;
     // re-sign calls pass that SAME public_id so the chunked upload keeps the same
-    // Cloudinary target (the backend validates it belongs to this submission).
+    // Cloudinary target (the backend validates it belongs to this target).
     const fetchSignature = async (publicId) => {
         const res = await api.post(
-            `/public/submissions/${sid}/video-signature`,
+            signatureEndpoint,
             { category, label: label || null, content_type: file.type || null, public_id: publicId || null },
             { headers: authHeader }
         );
@@ -163,7 +171,7 @@ export async function directVideoUpload({ sid, token, category, label, file, onP
 
     // 3) Notify the backend to attach (finalize reconciliation is the safety net).
     const completeRes = await api.post(
-        `/public/submissions/${sid}/video-complete`,
+        completeEndpoint,
         {
             public_id: lastResponse.public_id || publicId,
             secure_url: lastResponse.secure_url || lastResponse.url || null,

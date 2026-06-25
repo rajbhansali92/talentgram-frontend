@@ -299,3 +299,111 @@ def test_video_signature_asynchronous_transformations(mock_decode):
         # Verify that synchronous transformation and format parameters are absent
         assert "transformation" not in params
         assert "format" not in params
+
+
+@patch("routers.applications.decode_submitter")
+def test_app_video_signature_success(mock_decode):
+    """Verify that app-video-signature endpoint generates signature with eager async and matches schemas."""
+    mock_decode.return_value = {"sid": "aid123", "role": "submitter", "kind": "application"}
+    
+    mock_db.applications.find_one = AsyncMock(return_value={
+        "id": "aid123",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.applications.update_one = AsyncMock()
+    mock_db.asset_metadata.update_one = AsyncMock()
+    
+    with patch("cloudinary.utils.api_sign_request") as mock_sign:
+        mock_sign.return_value = "mocked_sig"
+        
+        response = client.post(
+            "/api/public/apply/aid123/video-signature",
+            json={"category": "intro_video", "content_type": "video/mp4"},
+            headers={"Authorization": "Bearer dummy_token"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        params = data["params"]
+        
+        assert data["signature"] == "mocked_sig"
+        assert params["public_id"] == "intro_video"
+        assert params["folder"] == "talentgram/applications/aid123"
+        assert params["eager_async"] == "true"
+        assert "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4" in params["eager"]
+        assert "transformation" not in params
+        assert "format" not in params
+
+
+@patch("routers.applications.decode_submitter")
+def test_app_video_complete_success(mock_decode):
+    """Verify that completing application video upload attaches it to the database."""
+    mock_decode.return_value = {"sid": "aid123", "role": "submitter", "kind": "application"}
+    
+    mock_db.applications.find_one = AsyncMock(return_value={
+        "id": "aid123",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.applications.update_one = AsyncMock()
+    mock_db.asset_metadata.update_one = AsyncMock()
+    
+    payload = {
+        "public_id": "talentgram/applications/aid123/intro_video",
+        "url": "https://res.cloudinary.com/dummy/video/upload/v1/intro_video.mov",
+        "bytes": 6000000,
+        "duration": 15.0,
+    }
+    
+    with patch("cloudinary.api.resource") as mock_resource:
+        mock_resource.return_value = {
+            "public_id": "talentgram/applications/aid123/intro_video",
+            "bytes": 6000000,
+            "duration": 15.0,
+            "secure_url": "https://res.cloudinary.com/dummy/video/upload/v1/intro_video.mov",
+            "url": "http://res.cloudinary.com/dummy/video/upload/v1/intro_video.mov"
+        }
+        with patch("core.sync_media_to_global_talent") as mock_sync:
+            mock_sync.return_value = AsyncMock()
+            
+            response = client.post(
+                "/api/public/apply/aid123/video-complete",
+                json=payload,
+                headers={"Authorization": "Bearer dummy_token"}
+            )
+            
+            assert response.status_code == 200
+            assert response.json()["ok"] is True
+            assert mock_db.applications.update_one.call_count == 1
+            assert mock_db.asset_metadata.update_one.call_count == 1
+
+
+@patch("routers.applications.decode_submitter")
+def test_legacy_app_upload_sign_rejects_video(mock_decode):
+    """Verify that the legacy sign and complete endpoints reject intro_video."""
+    mock_decode.return_value = {"sid": "aid123", "role": "submitter", "kind": "application"}
+    
+    # 1. Sign endpoint rejects video
+    response = client.post(
+        "/api/public/apply/aid123/upload/sign",
+        json={"category": "intro_video", "filename": "video.mov"},
+        headers={"Authorization": "Bearer dummy_token"}
+    )
+    assert response.status_code == 400
+    assert "chunked" in response.json()["detail"]
+
+    # 2. Complete endpoint rejects video
+    response = client.post(
+        "/api/public/apply/aid123/upload/complete",
+        json={
+            "media_id": "mid123",
+            "category": "intro_video",
+            "public_id": "pub123",
+            "url": "https://res.cloudinary.com/dummy/video/upload/v1/video.mp4",
+            "bytes": 1000
+        },
+        headers={"Authorization": "Bearer dummy_token"}
+    )
+    assert response.status_code == 400
+    assert "chunked" in response.json()["detail"]

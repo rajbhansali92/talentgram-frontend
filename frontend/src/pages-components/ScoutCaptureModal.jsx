@@ -138,34 +138,43 @@ export default function ScoutCaptureModal({ onClose, onSaved, onRefresh }) {
             return;
         }
         setStage("saving");
+        const igUrl =
+            form.instagram_url ||
+            (form.instagram_username
+                ? `https://www.instagram.com/${form.instagram_username}`
+                : "");
+        const followers = parseInt(form.followers_count, 10);
+        const payload = {
+            instagram_link: igUrl,
+            phone: form.phone_number || "",
+            name: form.full_name || "",
+            notes: form.scouting_notes || "",
+            instagram_username: form.instagram_username || null,
+            followers_count: Number.isFinite(followers) ? followers : null,
+            category: form.category || null,
+            location: form.location || null,
+            manager_name: form.manager_name || null,
+            manager_phone: form.manager_phone || null,
+            capture_audit_id: result?.audit_id || null,
+        };
+
+        // Only the network call should be able to trigger the failure toast. A
+        // throw from a success-side callback must NOT report "failed to save".
+        let data;
         try {
-            const igUrl =
-                form.instagram_url ||
-                (form.instagram_username
-                    ? `https://www.instagram.com/${form.instagram_username}`
-                    : "");
-            const followers = parseInt(form.followers_count, 10);
-            const payload = {
-                instagram_link: igUrl,
-                phone: form.phone_number || "",
-                name: form.full_name || "",
-                notes: form.scouting_notes || "",
-                instagram_username: form.instagram_username || null,
-                followers_count: Number.isFinite(followers) ? followers : null,
-                category: form.category || null,
-                location: form.location || null,
-                manager_name: form.manager_name || null,
-                manager_phone: form.manager_phone || null,
-                capture_audit_id: result?.audit_id || null,
-            };
-            const { data } = await adminApi.post("/workflow/scouting", payload);
-            toast.success("Scout logged from AI capture");
-            onSaved?.(data);
-            onClose();
+            ({ data } = await adminApi.post("/workflow/scouting", payload));
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to save scout");
             setStage("review");
+            return;
         }
+        toast.success("Scout logged from AI capture");
+        try {
+            onSaved?.(data);
+        } catch (_) {
+            /* queue refresh is best-effort; the save already succeeded */
+        }
+        onClose();
     };
 
     const openExisting = () => {

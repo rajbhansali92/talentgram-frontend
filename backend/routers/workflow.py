@@ -321,6 +321,10 @@ async def create_scout_entry(payload: ScoutEntryIn, user: dict = Depends(current
         }
         
         await db.workflow_scouts.insert_one(entry_doc)
+        # insert_one mutates entry_doc in place, adding a bson ObjectId under
+        # "_id" which is NOT JSON-serializable — returning it makes FastAPI 500
+        # AFTER the row was already written (the "false failed-to-save" bug).
+        entry_doc.pop("_id", None)
         return _to_dict(entry_doc)
     except Exception as e:
         logger.error("Error creating scout entry: %s", e)

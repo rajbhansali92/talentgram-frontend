@@ -127,7 +127,6 @@ def test_extract_profile_only():
     f = sc.extract_fields_from_text(PROFILE_TEXT)
     assert f["instagram_username"]["value"] == "anjalii_ee"
     assert f["full_name"]["value"] == "Anjali"
-    assert sc.parse_followers(f["followers_count"]["value"]) == 626
     assert f["category"]["value"].lower() == "fashion model"
     # No phone present in a profile -> must NOT be fabricated.
     assert f["phone_number"]["value"] == ""
@@ -138,9 +137,20 @@ def test_extract_dm_only():
     assert sc.normalize_phone(f["phone_number"]["value"]) == "+917895189770"
     # No profile fields hallucinated from a DM.
     assert f["instagram_username"]["value"] == ""
-    assert f["followers_count"]["value"] == ""
-    # Availability note captured.
-    assert "pm" in (f["scouting_notes"]["value"] or "").lower()
+
+
+def test_followers_and_notes_not_extracted():
+    """Issue #1: followers and scouting notes are no longer auto-extracted —
+    those keys must be absent from the lean extraction output."""
+    for txt in (PROFILE_TEXT, DM_TEXT, PROFILE_TEXT + DM_TEXT):
+        f = sc.extract_fields_from_text(txt)
+        assert "followers_count" not in f
+        assert "scouting_notes" not in f
+    # And the lean field set is exactly the 8 expected fields.
+    assert set(sc.EXTRACTION_FIELDS) == {
+        "full_name", "instagram_username", "instagram_url", "phone_number",
+        "manager_name", "manager_phone", "category", "location",
+    }
 
 
 def test_extract_manager_details():
@@ -168,7 +178,6 @@ def test_merge_profile_and_dm():
     assert n["full_name"] == "Anjali"                    # from profile
     assert n["instagram_username"] == "anjalii_ee"       # from profile
     assert n["phone_number"] == "+917895189770"          # from DM
-    assert n["followers_count"] == 626                   # from profile
 
 
 # ---------------------------------------------------------------------------

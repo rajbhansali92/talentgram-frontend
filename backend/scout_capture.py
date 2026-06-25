@@ -52,7 +52,9 @@ _EXT_TO_MEDIA = {
     "webp": "image/webp",
 }
 
-# Canonical extraction fields (the modal + normalize_extraction depend on these).
+# Canonical extraction fields. Deliberately lean (8 fields) for faster OCR and
+# higher accuracy: follower text and scouting notes are NOT auto-extracted —
+# those rows stay blank in the modal and remain manually editable.
 EXTRACTION_FIELDS = [
     "full_name",
     "instagram_username",
@@ -60,10 +62,8 @@ EXTRACTION_FIELDS = [
     "phone_number",
     "manager_name",
     "manager_phone",
-    "followers_count",
     "category",
     "location",
-    "scouting_notes",
 ]
 
 # Phone validation — E.164-ish: optional leading +, 7-15 digits.
@@ -259,7 +259,6 @@ _IG_URL_RE = re.compile(
 )
 # Permissive phone candidate: + and digits with spaces/dashes/parens.
 _PHONE_FINDER = re.compile(r"(\+?\d[\d\s\-()]{6,18}\d)")
-_FOLLOWERS_RE = re.compile(r"([\d][\d.,]*\s*[KMkm]?)\s*follower", re.I)
 # Manager indicators: strong role words anywhere, OR "contact"/"booking" only in
 # label form ("Contact:") so a talent's own "contact me on <number>" in a DM is
 # NOT misread as a manager line.
@@ -296,12 +295,6 @@ _CATEGORY_KEYWORDS = [
     "artist", "dancer", "singer", "musician", "photographer", "blogger",
     "vlogger", "youtuber", "anchor", "host", "stylist", "designer",
 ]
-# Lines that carry useful availability/contact context for scouting notes.
-_NOTE_HINT_RE = re.compile(
-    r"\b(available|availability|dm|call|whatsapp|contact|between|book|"
-    r"\d{1,2}\s*(?:am|pm)|am|pm|free|busy|shoot|collab)\b",
-    re.I,
-)
 
 
 def _lines_from_text(text: str) -> List[Dict[str, Any]]:
@@ -427,23 +420,6 @@ def extract_fields(lines: List[Dict[str, Any]], img_height: Optional[float] = No
     if manager_phone:
         out["manager_phone"] = _field(manager_phone, 85)
 
-    # -- Followers ---------------------------------------------------------
-    fm = _FOLLOWERS_RE.search(joined)
-    if fm and parse_followers(fm.group(1)) is not None:
-        out["followers_count"] = _field(fm.group(1).strip(), 92)
-    else:
-        # Fallback: a K/M number on a line adjacent to the word "followers".
-        for i, line in enumerate(texts):
-            if "follower" in line.lower():
-                for j in (i, i - 1, i + 1):
-                    if 0 <= j < len(texts):
-                        km = re.search(r"([\d][\d.,]*\s*[KMkm]?)", texts[j])
-                        if km and parse_followers(km.group(1)) is not None:
-                            out["followers_count"] = _field(km.group(1).strip(), 70)
-                            break
-            if out["followers_count"]["value"]:
-                break
-
     # -- Location ----------------------------------------------------------
     loc = ""
     em = _LOC_EMOJI_RE.search(joined)
@@ -456,27 +432,11 @@ def extract_fields(lines: List[Dict[str, Any]], img_height: Optional[float] = No
                 out["location"] = _field(city.title(), 80)
                 break
 
-    # -- Category + scouting notes ----------------------------------------
-    category = ""
+    # -- Category ----------------------------------------------------------
     for kw in _CATEGORY_KEYWORDS:
         if kw in lower:
-            category = kw.title()
+            out["category"] = _field(kw.title(), 85)
             break
-    if category:
-        out["category"] = _field(category, 85)
-
-    note_parts: List[str] = []
-    if category:
-        note_parts.append(category)
-    if out["followers_count"]["value"]:
-        note_parts.append(f"{out['followers_count']['value']} followers")
-    for line in texts:
-        if _NOTE_HINT_RE.search(line) and len(line) <= 80:
-            cleaned = line.strip()
-            if cleaned and cleaned not in note_parts:
-                note_parts.append(cleaned)
-    if note_parts:
-        out["scouting_notes"] = _field("\n".join(note_parts[:8]), 80 if category else 55)
 
     # -- Name (top profile area heuristic) --------------------------------
     name_val, name_conf = "", 0
@@ -511,29 +471,15 @@ def extract_fields_from_text(text: str) -> Dict[str, Any]:
 def merge_extractions(per_image: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge per-screenshot extractions into one. For each field, the highest-
     confidence non-empty value wins (so a profile screenshot supplies the name
-    and a DM screenshot supplies the phone). Scouting notes are concatenated."""
+    and a DM screenshot supplies the phone)."""
     merged = {f: _field("", 0) for f in EXTRACTION_FIELDS}
-    note_lines: List[str] = []
-    note_conf = 0
-
     for extraction in per_image:
         for f in EXTRACTION_FIELDS:
             fv = extraction.get(f) or _field("", 0)
-            if f == "scouting_notes":
-                if fv["value"]:
-                    for ln in str(fv["value"]).splitlines():
-                        ln = ln.strip()
-                        if ln and ln not in note_lines:
-                            note_lines.append(ln)
-                    note_conf = max(note_conf, fv["confidence"])
-                continue
             if fv["value"] and fv["confidence"] > merged[f]["confidence"]:
                 merged[f] = fv
             elif fv["value"] and not merged[f]["value"]:
                 merged[f] = fv
-
-    if note_lines:
-        merged["scouting_notes"] = _field("\n".join(note_lines[:10]), note_conf)
     return merged
 
 

@@ -273,18 +273,9 @@ async def test_decision_changed_notification():
     # Let background tasks run
     await asyncio.sleep(0.1)
     
-    # Assert WhatsApp batch and job were enqueued
-    mock_db.whatsapp_batches.insert_one.assert_called_once()
-    mock_db.whatsapp_jobs.insert_one.assert_called_once()
-    
-    # Verify content
-    batch_arg = mock_db.whatsapp_batches.insert_one.call_args[0][0]
-    job_arg = mock_db.whatsapp_jobs.insert_one.call_args[0][0]
-    
-    assert batch_arg["status"] == "pending"
-    assert job_arg["destination"] == "Talentgram Operations Team"
-    assert "*SUBMISSION DECISION CHANGED*" in job_arg["message_body"]
-    assert "Decision: APPROVED" in job_arg["message_body"]
+    # Assert no WhatsApp batch or job was enqueued
+    mock_db.whatsapp_batches.insert_one.assert_not_called()
+    mock_db.whatsapp_jobs.insert_one.assert_not_called()
 
 
 @pytest.mark.asyncio

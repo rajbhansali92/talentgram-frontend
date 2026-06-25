@@ -2364,8 +2364,6 @@ async def set_decision(
             payload={"submission_id": sid, "project_id": pid, "decision": payload.decision},
             actor_id=admin.get("id"),
         )
-        if fresh_sub and payload.decision in {"hold", "approved", "rejected"}:
-            enqueue_internal_whatsapp_notification(fresh_sub, "DECISION CHANGED", decision=payload.decision)
 
     return {"ok": True}
 

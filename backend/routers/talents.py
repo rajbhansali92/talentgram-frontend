@@ -374,7 +374,8 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
     # Track changes for the audit log
     AUTO_UPDATE_FIELDS = {
         "instagram_handle", "instagram_followers", "location", "bio",
-        "skills", "work_links", "interested_in", "languages", "phone"
+        "skills", "work_links", "interested_in", "languages", "phone",
+        "alternate_contact_number"
     }
     REVIEW_FIELDS = {
         "dob", "gender", "height", "ethnicity"

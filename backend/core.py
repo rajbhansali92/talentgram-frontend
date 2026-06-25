@@ -1538,6 +1538,9 @@ class TalentIn(BaseModel):
     name: str
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
+    # Optional backup contact number (no WhatsApp requirement). `phone` remains
+    # the primary WhatsApp-accessible number.
+    alternate_contact_number: Optional[str] = None
     age: Optional[int] = None
     dob: Optional[str] = None
     height: Optional[str] = None
@@ -1754,6 +1757,7 @@ class SubmissionStartIn(BaseModel):
     name: str
     email: EmailStr
     phone: Optional[str] = None
+    alternate_contact_number: Optional[str] = None
     form_data: Optional[Dict[str, Any]] = None
 
 
@@ -1795,6 +1799,7 @@ class ApplicationStartIn(BaseModel):
     last_name: str
     email: EmailStr
     phone: Optional[str] = None
+    alternate_contact_number: Optional[str] = None
     profile_id: Optional[str] = None
 
 
@@ -2563,6 +2568,7 @@ async def remove_synced_media_from_global_talent(submission: dict, source_media_
 AUTO_UPDATE_FIELDS = {
     "instagram_handle", "instagram_followers", "location", "bio",
     "skills", "work_links", "interested_in", "languages", "phone",
+    "alternate_contact_number",
     "cover_media_id", "needs_location_review"
 }
 

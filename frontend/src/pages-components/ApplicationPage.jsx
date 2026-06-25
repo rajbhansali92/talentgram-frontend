@@ -64,6 +64,7 @@ export default function ApplicationPage() {
         last_name: "",
         email: "",
         phone: "",
+        alternate_contact_number: "",
     });
     const [form, setForm] = useState({
         dob: "",
@@ -1219,11 +1220,18 @@ export default function ApplicationPage() {
                                                 testid="apply-last-name"
                                             />
                                             <Row
-                                                label="Phone (optional)"
+                                                label="Phone Number (WhatsApp)"
                                                 value={basics.phone}
                                                 onChange={(v) => setBasics({ ...basics, phone: v })}
                                                 testid="apply-phone"
-                                                hint="Include country code, e.g. +91 98765 43210"
+                                                hint="Please enter the number that is active on WhatsApp. This will be used for casting communication and project updates."
+                                            />
+                                            <Row
+                                                label="Alternate Contact Number (optional)"
+                                                value={basics.alternate_contact_number}
+                                                onChange={(v) => setBasics({ ...basics, alternate_contact_number: v })}
+                                                testid="apply-alt-phone"
+                                                hint="Optional backup contact number."
                                             />
                                         </div>
                                     )}

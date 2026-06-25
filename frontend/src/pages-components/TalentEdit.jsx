@@ -43,6 +43,7 @@ const emptyTalent = {
     name: "",
     email: "",
     phone: "",
+    alternate_contact_number: "",
     age: "",
     dob: "",
     height: "",
@@ -718,12 +719,21 @@ export default function TalentEdit() {
                         disabled={!isEditing}
                     />
                     <Field
-                        label="Phone"
+                        label="Phone (WhatsApp)"
                         type="tel"
                         value={talent.phone}
                         onChange={(v) => updateTalent({ phone: v })}
                         data-testid="talent-phone-input"
                         placeholder="optional"
+                        disabled={!isEditing}
+                    />
+                    <Field
+                        label="Alternate Contact Number"
+                        type="tel"
+                        value={talent.alternate_contact_number}
+                        onChange={(v) => updateTalent({ alternate_contact_number: v })}
+                        data-testid="talent-alt-phone-input"
+                        placeholder={isEditing ? "optional" : "Not Provided"}
                         disabled={!isEditing}
                     />
                     {/* FEATURE 1: WhatsApp Group Name — admin-only (view + edit). */}

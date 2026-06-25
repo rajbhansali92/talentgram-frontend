@@ -124,6 +124,7 @@ function SubmissionPage() {
             last_name: "",
             email: "",
             phone: "",
+            alternate_contact_number: "",
             dob: "",
             age: "",
             overrideAge: false,
@@ -672,6 +673,7 @@ function SubmissionPage() {
             last_name: "",
             email: "",
             phone: "",
+            alternate_contact_number: "",
             dob: "",
             age: "",
             overrideAge: false,
@@ -864,9 +866,11 @@ function SubmissionPage() {
                 name: `${form.first_name} ${form.last_name}`.trim(),
                 email: form.email,
                 phone: form.phone || null,
+                alternate_contact_number: form.alternate_contact_number || null,
                 form_data: {
                     first_name: form.first_name,
                     last_name: form.last_name,
+                    alternate_contact_number: form.alternate_contact_number || "",
                     dob: form.dob || null,
                     age: computedAge != null ? String(computedAge) : "",
                     height: form.height,
@@ -2056,7 +2060,7 @@ function SubmissionPage() {
                                             inputRef={(el) => { fieldRefs.current.last_name = el; }}
                                         />
                                         <PremiumFormField
-                                            label="Phone"
+                                            label="Phone Number (WhatsApp)"
                                             type="tel"
                                             value={form.phone}
                                             onChange={(v) =>
@@ -2064,6 +2068,18 @@ function SubmissionPage() {
                                             }
                                             onBlur={saveForm}
                                             testid="form-phone"
+                                            hint="Please enter the number that is active on WhatsApp. This will be used for casting communication and project updates."
+                                        />
+                                        <PremiumFormField
+                                            label="Alternate Contact Number (optional)"
+                                            type="tel"
+                                            value={form.alternate_contact_number}
+                                            onChange={(v) =>
+                                                setForm({ ...form, alternate_contact_number: v })
+                                            }
+                                            onBlur={saveForm}
+                                            testid="form-alt-phone"
+                                            hint="Optional backup contact number."
                                         />
                                         <PremiumFormField
                                             label="Date of Birth"

@@ -118,3 +118,33 @@ def test_submission_complete_upload(mock_sync, mock_decode):
     assert response.status_code == 200
     assert mock_db.submissions.update_one.call_count == 1
     assert mock_db.asset_metadata.insert_one.call_count == 1
+
+
+@patch("routers.submissions.decode_submitter")
+def test_video_signature_label_encoding(mock_decode):
+    """Verify that video-signature endpoint URL-encodes labels with spaces in context."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123",
+        "project_id": "pid123",
+        "talent_id": "t123",
+        "talent_name": "Test Talent",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.asset_metadata.update_one = AsyncMock()
+    
+    with patch("cloudinary.utils.api_sign_request") as mock_sign:
+        mock_sign.return_value = "mocked_sig"
+        
+        response = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
+            headers={"Authorization": "Bearer dummy_token"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["params"]["context"] == "category=take|label=Take%201"
+

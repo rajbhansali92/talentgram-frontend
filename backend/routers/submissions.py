@@ -1326,7 +1326,9 @@ async def video_signature(
     transformation = "c_limit,h_720,w_1280/q_auto,vc_auto"
     eager = "c_fill,h_338,w_600,q_auto/f_jpg"
     tags = f"submission_id={sid},project_id={sub.get('project_id')},talent_id={tid},category={category},asset_kind=audition_video"
-    context = f"category={category}|label={(payload.label or '').strip()}"
+    import urllib.parse
+    safe_label = urllib.parse.quote((payload.label or "").strip())
+    context = f"category={category}|label={safe_label}"
     timestamp = int(time.time())
     params_to_sign = {
         "timestamp": timestamp,

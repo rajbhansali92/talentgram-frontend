@@ -75,7 +75,13 @@ function uploadChunk(uploadUrl, formParams, blob, start, total, uploadId, onProg
                     resolve({});
                 }
             } else {
-                reject(new Error(`Cloudinary upload failed (${xhr.status})`));
+                let errorBody = "";
+                try { errorBody = xhr.responseText || ""; } catch (_) { /* noop */ }
+                console.error(`[directVideoUpload] Cloudinary upload failed (${xhr.status}):`, errorBody);
+                const err = new Error(`Cloudinary upload failed (${xhr.status}): ${errorBody}`);
+                err.cloudinaryResponse = errorBody;
+                err.httpStatus = xhr.status;
+                reject(err);
             }
         };
         xhr.onerror = () => { clearStall(); reject(new Error("Network error during upload")); };

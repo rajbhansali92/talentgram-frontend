@@ -1304,9 +1304,11 @@ async def video_signature(
 
     is_resign = bool(payload.public_id)
     if is_resign:
-        # Re-sign the SAME in-progress target. Validate it lives inside THIS
-        # submission's folder so a token can never sign an arbitrary public_id.
-        if not payload.public_id.startswith(folder + "/"):
+        # Re-sign the SAME in-progress target. The public_id is a leaf
+        # (e.g. "intro_video" or "take_abcd1234"); validate it matches
+        # the expected format so a token can never sign arbitrary IDs.
+        import re as _re
+        if not _re.fullmatch(r"intro_video|take_[0-9a-f]{8}", payload.public_id):
             raise HTTPException(400, "Invalid public_id for this submission")
         public_id = payload.public_id
     else:
@@ -1319,8 +1321,10 @@ async def video_signature(
             )
             if existing_takes >= MAX_SUBMISSION_TAKES:
                 raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
-        leaf = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex}"
-        public_id = f"{folder}/{leaf}"
+        # Leaf-only public_id — Cloudinary prepends `folder` automatically,
+        # so the final asset path is folder/public_id. Using the full path
+        # here would DOUBLE the folder prefix and exceed the 255-char limit.
+        public_id = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex[:8]}"
 
     # Pinned, string-encoded transformation + eager poster (signed verbatim).
     transformation = "c_limit,h_720,w_1280/q_auto,vc_auto"
@@ -1346,10 +1350,11 @@ async def video_signature(
     signature = cloudinary.utils.api_sign_request(params_to_sign, cfg.api_secret)
 
     try:
+        full_public_id = f"{folder}/{public_id}"
         await db.asset_metadata.update_one(
-            {"public_id": public_id},
+            {"public_id": full_public_id},
             {"$set": {
-                "public_id": public_id, "submission_id": sid, "talent_id": tid,
+                "public_id": full_public_id, "submission_id": sid, "talent_id": tid,
                 "project_id": sub.get("project_id"), "category": category,
                 "asset_type": "intro_video" if category == "intro_video" else "audition_video",
                 "resource_type": "video", "upload_status": "pending",
@@ -1358,7 +1363,7 @@ async def video_signature(
             upsert=True,
         )
     except Exception as e:
-        logger.warning(f"video-signature: pending asset_metadata write failed {public_id}: {e}")
+        logger.warning(f"video-signature: pending asset_metadata write failed {folder}/{public_id}: {e}")
 
     return {
         "cloud_name": CLOUDINARY_CLOUD_NAME,

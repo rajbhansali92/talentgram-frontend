@@ -1321,7 +1321,13 @@ async def update_config(
     payload: ConfigUpdateIn,
     admin: dict = Depends(current_admin),
 ):
-    allowed_keys = {"min_delay_sec", "max_delay_sec", "max_retries", "circuit_breaker_threshold"}
+    allowed_keys = {
+        "min_delay_sec",
+        "max_delay_sec",
+        "max_retries",
+        "circuit_breaker_threshold",
+        "internal_notification_group_name",
+    }
     if key not in allowed_keys:
         raise HTTPException(400, f"Unknown config key '{key}'")
 

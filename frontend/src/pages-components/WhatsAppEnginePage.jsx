@@ -1528,6 +1528,7 @@ function WEConfigPanel() {
   const [config, setConfig] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingGroup, setSavingGroup] = useState(false);
 
   // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
   const [testingNotification, setTestingNotification] = useState(false);
@@ -1571,8 +1572,10 @@ function WEConfigPanel() {
     e.preventDefault();
     setSaving(true);
     try {
+      const safetyConfig = { ...config };
+      delete safetyConfig.internal_notification_group_name;
       await Promise.all(
-        Object.entries(config).map(([key, val]) => updateWaConfig(key, val))
+        Object.entries(safetyConfig).map(([key, val]) => updateWaConfig(key, val))
       );
       toast.success("Configurations updated successfully");
       fetchConfig();
@@ -1580,6 +1583,21 @@ function WEConfigPanel() {
       toast.error("Failed saving safety variables");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveInternalGroup = async (e) => {
+    e.preventDefault();
+    setSavingGroup(true);
+    try {
+      const val = config.internal_notification_group_name || "";
+      await updateWaConfig("internal_notification_group_name", val);
+      toast.success("Internal notification group updated successfully");
+      fetchConfig();
+    } catch (err) {
+      toast.error("Failed saving group name configuration");
+    } finally {
+      setSavingGroup(false);
     }
   };
 
@@ -1662,6 +1680,40 @@ function WEConfigPanel() {
           </button>
         </div>
       </form>
+
+      {/* Internal Notifications Settings */}
+      <div className="border-t border-black/[0.04] pt-6 space-y-6">
+        <div className="space-y-1">
+          <h4 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Internal Notifications</h4>
+          <p className="text-xs text-[#6B7280]">
+            Configure the target WhatsApp group name for system alerts and notifications.
+          </p>
+        </div>
+
+        <form onSubmit={handleSaveInternalGroup} className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Internal Notification Group Name</label>
+            <input
+              type="text"
+              value={config.internal_notification_group_name || ""}
+              onChange={(e) => handleChange("internal_notification_group_name", e.target.value)}
+              className="w-full text-sm bg-[#f8f8f7] border border-black/10 rounded-lg p-3.5 focus:outline-none focus:ring-1 focus:ring-black h-[56px]"
+              placeholder="e.g. Talentgram Operations"
+              required
+            />
+          </div>
+
+          <div className="flex justify-end select-none">
+            <button
+              type="submit"
+              disabled={savingGroup}
+              className="flex items-center justify-center gap-1.5 text-xs font-semibold uppercase tracking-widest bg-black text-white px-6 py-3.5 rounded-lg hover:opacity-90 transition-colors disabled:opacity-50 h-[52px] active:scale-[0.98] duration-120"
+            >
+              {savingGroup ? "Saving..." : "Save Configuration"}
+            </button>
+          </div>
+        </form>
+      </div>
 
       {/* TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION */}
       <div className="border-t border-black/[0.04] pt-6 space-y-4">

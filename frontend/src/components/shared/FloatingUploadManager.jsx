@@ -7,7 +7,7 @@ export default function FloatingUploadManager({ activeUploads = {}, onRetry, onD
 
     if (items.length === 0) return null;
 
-    const activeCount = items.filter(([_, u]) => u.status === "uploading" || u.status === "processing").length;
+    const activeCount = items.filter(([_, u]) => u.status === "compressing" || u.status === "uploading" || u.status === "processing").length;
     const failedCount = items.filter(([_, u]) => u.status === "failed").length;
 
     return (
@@ -55,7 +55,7 @@ export default function FloatingUploadManager({ activeUploads = {}, onRetry, onD
                                     </span>
                                     <div className="flex items-center gap-1">
                                         <span className={`font-mono text-[10px] font-semibold ${u.status === "failed" ? "text-rose-500" : u.status === "completed" ? "text-emerald-600" : "text-[#0c2340]"}`}>
-                                            {u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed"}
+                                            {u.status === "compressing" ? `Compressing ${u.pct}%` : u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed"}
                                         </span>
                                         <button
                                             type="button"
@@ -81,7 +81,7 @@ export default function FloatingUploadManager({ activeUploads = {}, onRetry, onD
                                 ) : (
                                     <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
                                         <div
-                                            className={`h-full bg-[#0c2340] transition-all duration-300 ${u.status === "completed" ? "bg-emerald-500" : u.status === "processing" ? "bg-emerald-400 animate-pulse" : ""}`}
+                                            className={`h-full bg-[#0c2340] transition-all duration-300 ${u.status === "completed" ? "bg-emerald-500" : u.status === "processing" ? "bg-emerald-400 animate-pulse" : u.status === "compressing" ? "bg-blue-500 animate-pulse" : ""}`}
                                             style={{ width: `${u.pct}%` }}
                                         />
                                     </div>

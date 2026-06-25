@@ -61,7 +61,7 @@ export function UploadManagerProvider({ children }) {
         // (300s) by directVideoUpload; this is just a sane upper safety bound.
         const isChunkedVideo =
             isVideoSlot && (!endpoint || CHUNKED_VIDEO_ENDPOINT_RE.test(endpoint));
-        const CAP_MB = isVideoSlot ? (isChunkedVideo ? 2048 : 200) : 20;
+        const CAP_MB = isVideoSlot ? 500 : 20;
 
         if (file) {
             const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
@@ -102,23 +102,69 @@ export function UploadManagerProvider({ children }) {
         }
 
         const slotKey = label ? `${category}:${label}` : category;
+        let fileToUpload = file;
+
+        if (file && isVideoSlot) {
+            setActiveUploads((prev) => ({
+                ...prev,
+                [slotKey]: {
+                    status: "compressing",
+                    pct: 0,
+                    fileName: file.name,
+                    category,
+                    label,
+                    file,
+                    options
+                }
+            }));
+
+            try {
+                const { compressVideoIfNeeded } = await import("../lib/videoCompress");
+                fileToUpload = await compressVideoIfNeeded(file, {
+                    onProgress: (stage, pct) => {
+                        setActiveUploads((prev) => {
+                            if (!prev[slotKey]) return prev;
+                            return {
+                                ...prev,
+                                [slotKey]: {
+                                    ...prev[slotKey],
+                                    pct: pct,
+                                }
+                            };
+                        });
+                    }
+                });
+            } catch (err) {
+                const msg = err.message || "Compression failed";
+                setActiveUploads((prev) => ({
+                    ...prev,
+                    [slotKey]: { ...prev[slotKey], status: "failed", error: msg }
+                }));
+                setRetryQueue((q) => ({
+                    ...q,
+                    [slotKey]: { category, label, failed: true, error: msg, fileName: file.name, fileSize: file.size, file, options }
+                }));
+                toast.error(msg);
+                return;
+            }
+        }
 
         setActiveUploads((prev) => ({
             ...prev,
             [slotKey]: {
                 status: "uploading",
                 pct: 0,
-                fileName: file.name,
+                fileName: fileToUpload.name,
                 category,
                 label,
-                file,
+                file: fileToUpload,
                 options
             }
         }));
 
         setRetryQueue((q) => ({
             ...q,
-            [slotKey]: { category, label, attempt: 0, fileName: file.name, fileSize: file.size, file, options }
+            [slotKey]: { category, label, attempt: 0, fileName: fileToUpload.name, fileSize: fileToUpload.size, file: fileToUpload, options }
         }));
 
         // ── Chunked transport for submission and application videos ──────────
@@ -135,7 +181,7 @@ export function UploadManagerProvider({ children }) {
                     token: dynamicToken,
                     category,
                     label,
-                    file,
+                    file: fileToUpload,
                     isApplication: isApp,
                     onProgress: (loaded, total) => {
                         const pct = total ? Math.round((loaded / total) * 100) : 0;
@@ -209,13 +255,13 @@ export function UploadManagerProvider({ children }) {
                 }
                 const signRes = await api.post(`${dynamicEndpoint}/sign`, {
                     category,
-                    filename: file.name
+                    filename: fileToUpload.name
                 }, { headers });
                 const signData = signRes.data;
 
                 // 2. Build signed upload FormData for Cloudinary
                 const fd = new FormData();
-                fd.append("file", file);
+                fd.append("file", fileToUpload);
                 fd.append("api_key", signData.api_key);
                 fd.append("timestamp", signData.timestamp);
                 fd.append("signature", signData.signature);
@@ -262,8 +308,8 @@ export function UploadManagerProvider({ children }) {
                     url: uploadRes.data.secure_url,
                     bytes: uploadRes.data.bytes,
                     duration: uploadRes.data.duration,
-                    content_type: file.type,
-                    original_filename: file.name,
+                    content_type: fileToUpload.type,
+                    original_filename: fileToUpload.name,
                     eager: uploadRes.data.eager
                 }, { headers });
 

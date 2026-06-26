@@ -55,7 +55,7 @@ export default function FloatingUploadManager({ activeUploads = {}, onRetry, onD
                                     </span>
                                     <div className="flex items-center gap-1">
                                         <span className={`font-mono text-[10px] font-semibold ${u.status === "failed" ? "text-rose-500" : u.status === "completed" ? "text-emerald-600" : "text-[#0c2340]"}`}>
-                                            {u.status === "compressing" ? `Compressing ${u.pct}%` : u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed"}
+                                            {u.statusText || (u.status === "compressing" ? `Compressing ${u.pct}%` : u.status === "uploading" ? `${u.pct}%` : u.status === "processing" ? "Processing" : u.status === "completed" ? "Done" : "Failed")}
                                         </span>
                                         <button
                                             type="button"

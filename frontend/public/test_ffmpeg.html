@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FFmpeg WebAssembly Diagnostics</title>
+    <script src="/ffmpeg/ffmpeg.js"></script>
+</head>
+<body>
+    <h1>FFmpeg WebAssembly Diagnostic Test</h1>
+    <input type="file" id="video-input" />
+    <div id="status">Ready</div>
+    <pre id="output" style="background: #f4f4f4; padding: 10px; border: 1px solid #ccc; max-height: 500px; overflow-y: scroll;"></pre>
+
+    <script>
+        window.telemetryLogs = [];
+        function log(type, ...args) {
+            const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+            const logEntry = `[${type}] ${msg}`;
+            window.telemetryLogs.push(logEntry);
+            console.log(logEntry);
+            document.getElementById('output').textContent += logEntry + '\n';
+        }
+
+        const logMemory = (stage) => {
+            log("MEMORY", `${stage} - used: ${performance.memory?.usedJSHeapSize}, total: ${performance.memory?.totalJSHeapSize}`);
+        };
+
+        // Native replacements for @ffmpeg/util helpers
+        async function fetchFile(file) {
+            if (file instanceof File || file instanceof Blob) {
+                return new Uint8Array(await file.arrayBuffer());
+            }
+            if (typeof file === "string") {
+                const res = await fetch(file);
+                return new Uint8Array(await res.arrayBuffer());
+            }
+            return new Uint8Array();
+        }
+
+        async function toBlobURL(url, mimeType) {
+            log("INFO", `Fetching ${url} as Blob...`);
+            const res = await fetch(url);
+            log("INFO", `Fetched headers for ${url}`);
+            const buf = await res.arrayBuffer();
+            log("INFO", `Read arrayBuffer for ${url} (${buf.byteLength} bytes)`);
+            const blob = new Blob([buf], { type: mimeType });
+            const blobUrl = URL.createObjectURL(blob);
+            log("INFO", `Created ObjectURL for ${url} -> ${blobUrl}`);
+            return blobUrl;
+        }
+
+        function getVideoMetadata(file) {
+            return new Promise((resolve) => {
+                try {
+                    const url = URL.createObjectURL(file);
+                    const video = document.createElement("video");
+                    video.preload = "metadata";
+                    video.muted = true;
+                    video.playsInline = true;
+
+                    video.onloadedmetadata = () => {
+                        const duration = video.duration;
+                        const width = video.videoWidth;
+                        const height = video.videoHeight;
+                        let codec = null;
+                        const type = file.type || "";
+                        const match = type.match(/codecs="([^"]+)"/);
+                        if (match) {
+                            codec = match[1];
+                        }
+                        URL.revokeObjectURL(url);
+                        resolve({
+                            duration: Number.isFinite(duration) ? duration : null,
+                            width: width || null,
+                            height: height || null,
+                            size: file.size,
+                            codec
+                        });
+                    };
+
+                    video.onerror = () => {
+                        URL.revokeObjectURL(url);
+                        resolve({
+                            duration: null,
+                            width: null,
+                            height: null,
+                            size: file.size,
+                            codec: null
+                        });
+                    };
+
+                    video.src = url;
+                } catch (e) {
+                    resolve({
+                        duration: null,
+                        width: null,
+                        height: null,
+                        size: file.size,
+                        codec: null
+                    });
+                }
+            });
+        }
+
+        const { FFmpeg } = FFmpegWASM;
+
+        let _ffmpeg = null;
+        async function getFFmpeg() {
+            if (_ffmpeg) return _ffmpeg;
+            const ffmpeg = new FFmpeg();
+            const base = window.location.origin;
+            log("FFMPEG", "Fetching coreURL...");
+            const coreURL = await toBlobURL(`${base}/ffmpeg/ffmpeg-core.js`, "text/javascript");
+            log("FFMPEG", "Fetched coreURL");
+            
+            log("FFMPEG", "Fetching wasmURL...");
+            const wasmURL = await toBlobURL(`${base}/ffmpeg/ffmpeg-core.wasm`, "application/wasm");
+            log("FFMPEG", "Fetched wasmURL");
+            
+            log("FFMPEG", "Initializing");
+            await ffmpeg.load({ coreURL, wasmURL });
+            log("FFMPEG", "Loaded successfully");
+            _ffmpeg = ffmpeg;
+            return ffmpeg;
+        }
+
+        document.getElementById('video-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            document.getElementById('status').textContent = "Processing...";
+            log("INFO", `Selected file: ${file.name} (${file.size} bytes)`);
+
+            try {
+                // Retrieve and log video characteristics before compression starts
+                try {
+                    const { duration, width, height, size, codec } = await getVideoMetadata(file);
+                    log("VIDEO META", JSON.stringify({
+                        duration,
+                        width,
+                        height,
+                        size,
+                        ...(codec ? { codec } : {})
+                    }));
+                } catch (metaErr) {
+                    log("WARN", "Could not read HTML5 video metadata: " + metaErr.message);
+                }
+
+                const ffmpeg = await getFFmpeg();
+                const ext = (file.name.split(".").pop() || "mp4").toLowerCase().slice(0, 4);
+                const inputName = `in.${ext.match(/^[a-z0-9]+$/) ? ext : "mp4"}`;
+                const outputName = "out.mp4";
+
+                ffmpeg.on("log", ({ message }) => {
+                    log("FFMPEG LOG", message);
+                });
+
+                ffmpeg.on("progress", ({ progress }) => {
+                    log("FFMPEG PROGRESS", progress);
+                });
+
+                log("INFO", "Starting compression pipeline");
+
+                logMemory("before writeFile");
+                log("FFMPEG", `Writing input file {"name":"${file.name}","size":${file.size},"type":"${file.type}"}`);
+                await ffmpeg.writeFile(inputName, await fetchFile(file));
+                log("FFMPEG", "Input file written");
+                logMemory("after writeFile");
+
+                logMemory("before exec");
+                log("FFMPEG", "Starting transcode");
+
+                const result = await ffmpeg.exec([
+                    "-i", inputName,
+                    "-vf", "scale='if(gte(iw,ih),trunc(iw*trunc(min(ih,720)/2)*2/ih/2)*2,trunc(min(iw,720)/2)*2)':'if(gte(iw,ih),trunc(min(ih,720)/2)*2,trunc(ih*trunc(min(iw,720)/2)*2/iw/2)*2)'",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "28",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    "-c:a", "aac",
+                    "-b:a", "96k",
+                    "-ac", "2",
+                    "-y", outputName,
+                ]);
+
+                log("FFMPEG", "Transcode completed");
+                log("FFMPEG EXIT", result);
+                logMemory("after exec");
+
+                if (result !== 0) {
+                    throw new Error(`FFmpeg execution failed with exit code ${result}`);
+                }
+
+                const data = await ffmpeg.readFile(outputName);
+                log("FFMPEG", `Output size ${data.length}`);
+                logMemory("after readFile");
+
+                try {
+                    await ffmpeg.deleteFile(inputName);
+                    await ffmpeg.deleteFile(outputName);
+                } catch {
+                    // ignore
+                }
+
+                document.getElementById('status').textContent = "Success!";
+                log("INFO", "Compression completed successfully!");
+            } catch (err) {
+                document.getElementById('status').textContent = "Failed!";
+                log("FFMPEG ERROR", err.message);
+                log("FFMPEG STACK", err.stack);
+            }
+        });
+    </script>
+</body>
+</html>

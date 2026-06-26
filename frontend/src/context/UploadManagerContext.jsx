@@ -45,6 +45,28 @@ export function UploadManagerProvider({ children }) {
         return () => window.removeEventListener("beforeunload", handler);
     }, [activeUploads]);
 
+    // Background Tab Detection: warn when tab goes background during active video compression
+    useEffect(() => {
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === "hidden") {
+                const hasActiveCompression = Object.values(activeUploads).some(
+                    (u) => u.status === "compressing"
+                );
+                if (hasActiveCompression) {
+                    toast.warning("Keep this page open while video optimization is running.", {
+                        id: "visibility-warning", // prevent duplicate toasts
+                        duration: 8000
+                    });
+                    console.log("[ANALYTICS] Tab went to background during active video compression.");
+                }
+            }
+        };
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        return () => {
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
+        };
+    }, [activeUploads]);
+
     const uploadFile = async (file, category, label, options = {}) => {
         const { endpoint, token, onSuccess, onBeforeUpload } = options;
 
@@ -61,7 +83,7 @@ export function UploadManagerProvider({ children }) {
         // (300s) by directVideoUpload; this is just a sane upper safety bound.
         const isChunkedVideo =
             isVideoSlot && (!endpoint || CHUNKED_VIDEO_ENDPOINT_RE.test(endpoint));
-        const CAP_MB = isVideoSlot ? 500 : 20;
+                const CAP_MB = isVideoSlot ? 1024 : 20;
 
         if (file) {
             const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
@@ -103,13 +125,35 @@ export function UploadManagerProvider({ children }) {
 
         const slotKey = label ? `${category}:${label}` : category;
         let fileToUpload = file;
-
+        let skipCompression = false;
         if (file && isVideoSlot) {
+            try {
+                const { getCompressionProfile, COMPRESS_THRESHOLD } = await import("../lib/videoCompress");
+                const { deviceType } = getCompressionProfile();
+                const isMobileOrTablet = deviceType === "MOBILE" || deviceType === "TABLET";
+                
+                if (file.size <= COMPRESS_THRESHOLD) {
+                    skipCompression = true;
+                } else if (isMobileOrTablet && file.size > 300 * 1024 * 1024) {
+                    skipCompression = true;
+                    toast.info("Large video detected. Uploading directly.");
+                    console.log(`[FFMPEG BYPASS] Mobile video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 300MB. Direct upload activated.`);
+                } else if (!isMobileOrTablet && file.size > 700 * 1024 * 1024) {
+                    skipCompression = true;
+                    console.log(`[FFMPEG BYPASS] Desktop video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 700MB. Direct upload activated.`);
+                }
+            } catch (err) {
+                console.error("Failed to check compression profile:", err);
+            }
+        }
+
+        if (file && isVideoSlot && !skipCompression) {
             setActiveUploads((prev) => ({
                 ...prev,
                 [slotKey]: {
                     status: "compressing",
                     pct: 0,
+                    statusText: "Preparing video...",
                     fileName: file.name,
                     category,
                     label,
@@ -121,31 +165,38 @@ export function UploadManagerProvider({ children }) {
             try {
                 const { compressVideoIfNeeded } = await import("../lib/videoCompress");
                 fileToUpload = await compressVideoIfNeeded(file, {
-                    onProgress: (stage, pct) => {
+                    onProgress: (stage, pct, estTimeRemaining) => {
                         setActiveUploads((prev) => {
                             if (!prev[slotKey]) return prev;
+                            
+                            let stageText = "Optimizing video...";
+                            if (stage === "load") {
+                                stageText = "Preparing video...";
+                            } else if (stage === "compress") {
+                                stageText = estTimeRemaining 
+                                    ? `Optimizing video... (${estTimeRemaining} remaining)`
+                                    : "Optimizing video...";
+                            }
+                            
                             return {
                                 ...prev,
                                 [slotKey]: {
                                     ...prev[slotKey],
                                     pct: pct,
+                                    statusText: stageText
                                 }
                             };
                         });
                     }
                 });
             } catch (err) {
-                const msg = err.message || "Compression failed";
-                setActiveUploads((prev) => ({
-                    ...prev,
-                    [slotKey]: { ...prev[slotKey], status: "failed", error: msg }
-                }));
-                setRetryQueue((q) => ({
-                    ...q,
-                    [slotKey]: { category, label, failed: true, error: msg, fileName: file.name, fileSize: file.size, file, options }
-                }));
-                toast.error(msg);
-                return;
+                console.warn("[FFMPEG FALLBACK WARNING]", err);
+                if (err?.code === "TIMEOUT") {
+                    toast.warning("Video optimization is taking longer than expected. Uploading original video.");
+                } else {
+                    toast.info("Optimizing video unavailable. Uploading original file.");
+                }
+                fileToUpload = file;
             }
         }
 
@@ -154,6 +205,7 @@ export function UploadManagerProvider({ children }) {
             [slotKey]: {
                 status: "uploading",
                 pct: 0,
+                statusText: "Uploading video...",
                 fileName: fileToUpload.name,
                 category,
                 label,
@@ -193,6 +245,7 @@ export function UploadManagerProvider({ children }) {
                                     ...prev[slotKey],
                                     status: pct >= 100 ? "processing" : "uploading",
                                     pct,
+                                    statusText: pct >= 100 ? "Processing complete" : `Uploading video... (${pct}%)`
                                 },
                             };
                         });
@@ -218,7 +271,7 @@ export function UploadManagerProvider({ children }) {
                 });
                 setActiveUploads((prev) => ({
                     ...prev,
-                    [slotKey]: { ...prev[slotKey], status: "completed", pct: 100 },
+                    [slotKey]: { ...prev[slotKey], status: "completed", pct: 100, statusText: "Processing complete" },
                 }));
                 setTimeout(() => {
                     setActiveUploads((prev) => {
@@ -291,7 +344,8 @@ export function UploadManagerProvider({ children }) {
                                     [slotKey]: {
                                         ...prev[slotKey],
                                         status: pct >= 100 ? "processing" : "uploading",
-                                        pct
+                                        pct,
+                                        statusText: pct >= 100 ? "Processing complete" : `Uploading video... (${pct}%)`
                                     }
                                 };
                             });
@@ -326,7 +380,8 @@ export function UploadManagerProvider({ children }) {
                     [slotKey]: {
                         ...prev[slotKey],
                         status: "completed",
-                        pct: 100
+                        pct: 100,
+                        statusText: "Processing complete"
                     }
                 }));
 

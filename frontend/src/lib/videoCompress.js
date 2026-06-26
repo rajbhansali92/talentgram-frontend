@@ -14,9 +14,6 @@ export const MB = 1024 * 1024;
 export const COMPRESS_THRESHOLD = 25 * MB; // anything above → optimise
 export const HARD_MAX = 500 * MB; // refuse beyond this
 
-const FFMPEG_CORE_VERSION = "0.12.6";
-const FFMPEG_CORE_BASE = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/umd`;
-
 let _ffmpeg = null;
 let _loadingPromise = null;
 
@@ -25,9 +22,10 @@ async function getFFmpeg() {
     if (_loadingPromise) return _loadingPromise;
     _loadingPromise = (async () => {
         const ffmpeg = new FFmpeg();
+        const base = typeof window !== "undefined" ? window.location.origin : "";
         const [coreURL, wasmURL] = await Promise.all([
-            toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, "text/javascript"),
-            toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, "application/wasm"),
+            toBlobURL(`${base}/ffmpeg/ffmpeg-core.js`, "text/javascript"),
+            toBlobURL(`${base}/ffmpeg/ffmpeg-core.wasm`, "application/wasm"),
         ]);
         await ffmpeg.load({ coreURL, wasmURL });
         _ffmpeg = ffmpeg;

@@ -38,7 +38,7 @@ const securityHeaders = [
     key: "Content-Security-Policy",
     value: [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com",
+      "script-src 'self' 'unsafe-inline' blob: https://accounts.google.com https://apis.google.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.talentgramagency.com",
@@ -52,7 +52,8 @@ const securityHeaders = [
       // (image /upload/sign path + chunked audition-video transport). It is an
       // XHR POST, so without it in connect-src the browser blocks every upload
       // even after the backend returns a valid signature.
-      "connect-src 'self' https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com",
+      "connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com",
+      "worker-src 'self' blob:",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import cloudinary
 import cloudinary.api
 import cloudinary.utils
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, BackgroundTasks
 from pymongo.errors import DuplicateKeyError
 
 
@@ -905,15 +905,52 @@ async def app_video_signature(
     is_resign = bool(payload.public_id)
 
     if is_resign:
-        if payload.public_id != "intro_video":
-            raise HTTPException(400, "Invalid public_id for this application")
-        public_id = payload.public_id
+        # Support R2 key structures on resign
+        is_r2_key = payload.public_id.startswith("raw-uploads/")
+        if is_r2_key:
+            if not payload.public_id.startswith(f"raw-uploads/applications/{aid}/"):
+                raise HTTPException(400, "Invalid public_id for this application")
+            public_id = payload.public_id
+        else:
+            if payload.public_id != "intro_video":
+                raise HTTPException(400, "Invalid public_id for this application")
+            public_id = payload.public_id
     else:
         # Pre-pull existing intro video to keep it clean
         await db.applications.update_one(
             {"id": aid}, {"$pull": {"media": {"category": "intro_video"}}}
         )
         public_id = "intro_video"
+
+    from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
+    if ENABLE_R2_MEDIA_PIPELINE:
+        r2_key = f"raw-uploads/applications/{aid}/{category}/{public_id}.mp4"
+        upload_url = generate_r2_presigned_url(r2_key, "PUT")
+        try:
+            await db.asset_metadata.update_one(
+                {"public_id": r2_key},
+                {"$set": {
+                    "public_id": r2_key,
+                    "application_id": aid,
+                    "category": category,
+                    "asset_type": "intro_video",
+                    "resource_type": "video",
+                    "upload_status": "pending",
+                    "created_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                }},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.warning(f"app-video-signature R2: pending asset_metadata write failed: {e}")
+        return {
+            "use_r2": True,
+            "upload_url": upload_url,
+            "public_id": r2_key,
+            "folder": folder,
+            "filename": f"{public_id}.mp4",
+            "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
+        }
 
     eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
     tags = f"application_id={aid},category=intro_video,asset_kind=application_video"
@@ -980,10 +1017,12 @@ class AppVideoCompleteIn(BaseModel):
 async def app_video_complete(
     aid: str,
     payload: AppVideoCompleteIn,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(None),
 ):
     """Attach the just-uploaded chunked video to the application."""
     from datetime import datetime, timezone
+    from core import generate_r2_presigned_url, trigger_cloudinary_transcode
     await _check_app_token(authorization, aid)
     app_doc = await db.applications.find_one({"id": aid})
     if not app_doc:
@@ -993,6 +1032,65 @@ async def app_video_complete(
 
     folder = f"{APP_NAME}/applications/{aid}"
     public_id = (payload.public_id or "").strip()
+
+    is_r2 = public_id.startswith("raw-uploads/")
+    if is_r2:
+        if not public_id.startswith(f"raw-uploads/applications/{aid}/"):
+            raise HTTPException(400, "Asset does not belong to this application")
+
+        parts = public_id.split("/")
+        category = parts[3]
+        leaf_pid = parts[4].split(".")[0]
+
+        r2_read_url = generate_r2_presigned_url(public_id, "GET", expiry=86400)
+
+        # Register the media asset in Mongo with processing status
+        media = {
+            "id": str(uuid.uuid4()),
+            "category": "intro_video",
+            "url": None,  # Transcoding in progress
+            "public_id": f"{folder}/{leaf_pid}",
+            "resource_type": "video",
+            "content_type": "video/mp4",
+            "original_filename": None,
+            "size": payload.bytes or 0,
+            "created_at": _now(),
+            "scope": "application",
+            "application_id": aid,
+            "duration": None,
+            "thumbnail_url": None,
+            "poster_url": None,
+            "status": "processing",
+        }
+
+        # Single-slot replacement for intro_video
+        await db.applications.update_one({"id": aid}, {"$pull": {"media": {"category": "intro_video"}}})
+        await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
+
+        # Update metadata state to "processing"
+        try:
+            await db.asset_metadata.update_one(
+                {"public_id": public_id},
+                {"$set": {"upload_status": "processing", "updated_at": datetime.now(timezone.utc)}},
+            )
+        except Exception as e:
+            logger.warning(f"app-video-complete R2: asset_metadata update failed: {e}")
+
+        # Enqueue Cloudinary transcode job in background
+        background_tasks.add_task(
+            trigger_cloudinary_transcode,
+            media_id=media["id"],
+            r2_url=r2_read_url,
+            folder=folder,
+            public_id=leaf_pid,
+            eager_transformation="c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg",
+            scope="application",
+            parent_id=aid,
+            category="intro_video",
+        )
+
+        return {"ok": True, "media": media}
+
     if not public_id.startswith(folder + "/"):
         raise HTTPException(400, "Asset does not belong to this application")
 

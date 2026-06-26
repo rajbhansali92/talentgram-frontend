@@ -149,6 +149,49 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
 
     // 1) Initial signed, server-pinned upload params.
     let sig = await fetchSignature(null);
+
+    if (sig.use_r2) {
+        // Upload directly to R2 pre-signed URL via PUT
+        const lastResponse = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("PUT", sig.upload_url, true);
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable && onProgress) {
+                    onProgress(e.loaded, e.total);
+                }
+            };
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve({
+                        public_id: sig.public_id,
+                        bytes: file.size,
+                    });
+                } else {
+                    reject(new Error(`R2 upload failed (${xhr.status})`));
+                }
+            };
+            xhr.onerror = () => reject(new Error("R2 upload network error"));
+            xhr.onabort = () => reject(new Error("R2 upload aborted"));
+            xhr.send(file);
+        });
+
+        // 3) Notify the backend to attach (finalize reconciliation is the safety net).
+        const completeRes = await api.post(
+            completeEndpoint,
+            {
+                public_id: lastResponse.public_id,
+                secure_url: null,
+                resource_type: "video",
+                bytes: lastResponse.bytes || 0,
+                duration: duration,
+                format: null,
+                label: label || null,
+            },
+            { headers: authHeader }
+        );
+        return completeRes.data;
+    }
+
     let signedAt = Date.now();
     const publicId = sig.publicId; // constant target for all chunks + re-signs
 
@@ -179,6 +222,7 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             bytes: lastResponse.bytes || 0,
             duration: lastResponse.duration != null ? lastResponse.duration : duration,
             format: lastResponse.format || null,
+            label: label || null,
         },
         { headers: authHeader }
     );

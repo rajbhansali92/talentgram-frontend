@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 
 import time
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, BackgroundTasks
 from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 import cloudinary
@@ -1135,6 +1135,7 @@ class VideoCompleteIn(BaseModel):
     bytes: Optional[int] = 0
     duration: Optional[float] = None
     format: Optional[str] = None
+    label: Optional[str] = None
 
 
 async def _resolve_submission_talent(sub: dict):
@@ -1308,9 +1309,15 @@ async def video_signature(
         # (e.g. "intro_video" or "take_abcd1234"); validate it matches
         # the expected format so a token can never sign arbitrary IDs.
         import re as _re
-        if not _re.fullmatch(r"intro_video|take_[0-9a-f]{8}", payload.public_id):
-            raise HTTPException(400, "Invalid public_id for this submission")
-        public_id = payload.public_id
+        is_r2_key = payload.public_id.startswith("raw-uploads/")
+        if is_r2_key:
+            if not payload.public_id.startswith(f"raw-uploads/submissions/{sid}/"):
+                raise HTTPException(400, "Invalid public_id for this submission")
+            public_id = payload.public_id
+        else:
+            if not _re.fullmatch(r"intro_video|take_[0-9a-f]{8}", payload.public_id):
+                raise HTTPException(400, "Invalid public_id for this submission")
+            public_id = payload.public_id
     else:
         # First signature for a new upload: enforce the take limit (a re-sign is
         # a continuation of an existing in-flight upload, not a new take).
@@ -1321,10 +1328,34 @@ async def video_signature(
             )
             if existing_takes >= MAX_SUBMISSION_TAKES:
                 raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
-        # Leaf-only public_id — Cloudinary prepends `folder` automatically,
-        # so the final asset path is folder/public_id. Using the full path
-        # here would DOUBLE the folder prefix and exceed the 255-char limit.
         public_id = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex[:8]}"
+
+    from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
+    if ENABLE_R2_MEDIA_PIPELINE:
+        r2_key = f"raw-uploads/submissions/{sid}/{category}/{public_id}.mp4"
+        upload_url = generate_r2_presigned_url(r2_key, "PUT")
+        try:
+            await db.asset_metadata.update_one(
+                {"public_id": r2_key},
+                {"$set": {
+                    "public_id": r2_key, "submission_id": sid, "talent_id": tid,
+                    "project_id": sub.get("project_id"), "category": category,
+                    "asset_type": "intro_video" if category == "intro_video" else "audition_video",
+                    "resource_type": "video", "upload_status": "pending",
+                    "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+                }},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.warning(f"video-signature R2: pending asset_metadata write failed: {e}")
+        return {
+            "use_r2": True,
+            "upload_url": upload_url,
+            "public_id": r2_key,
+            "folder": folder,
+            "filename": f"{public_id}.mp4",
+            "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
+        }
 
     # Pinned, string-encoded transformation + eager poster (signed verbatim).
     eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
@@ -1381,11 +1412,14 @@ async def video_signature(
 async def video_complete(
     sid: str,
     payload: VideoCompleteIn,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(None),
 ):
     """Optimistic fast-path: attach a just-uploaded direct video. Category and
     folder are validated server-side; finalize reconciliation is the safety net
     if this never fires."""
+    from core import generate_r2_presigned_url, trigger_cloudinary_transcode
+    from datetime import datetime, timezone
     submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
@@ -1395,6 +1429,72 @@ async def video_complete(
     tid, tname = await _resolve_submission_talent(sub)
     folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
     public_id = (payload.public_id or "").strip()
+
+    is_r2 = public_id.startswith("raw-uploads/")
+    if is_r2:
+        if not public_id.startswith(f"raw-uploads/submissions/{sid}/"):
+            raise HTTPException(400, "Asset does not belong to this submission")
+
+        parts = public_id.split("/")
+        category = parts[3]
+        leaf_pid = parts[4].split(".")[0]
+
+        r2_read_url = generate_r2_presigned_url(public_id, "GET", expiry=86400)
+
+        # Register the media asset in Mongo with processing status
+        media = {
+            "id": str(uuid.uuid4()),
+            "category": category,
+            "url": None,  # Transcoding in progress
+            "public_id": f"{folder}/{leaf_pid}",
+            "resource_type": "video",
+            "content_type": "video/mp4",
+            "original_filename": None,
+            "size": payload.bytes or 0,
+            "created_at": _now(),
+            "scope": "submission",
+            "submission_id": sid,
+            "project_id": sub.get("project_id"),
+            "duration": None,
+            "thumbnail_url": None,
+            "poster_url": None,
+            "status": "processing",
+            "source": "direct_upload",
+        }
+        if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
+            media["label"] = (payload.label or "").strip() or "Take"
+
+        # Single-slot replacement for intro_video
+        if category == "intro_video":
+            await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"category": "intro_video"}}})
+
+        await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
+
+        # Update metadata state to "processing"
+        try:
+            await db.asset_metadata.update_one(
+                {"public_id": public_id},
+                {"$set": {"upload_status": "processing", "updated_at": datetime.now(timezone.utc)}},
+            )
+        except Exception as e:
+            logger.warning(f"video-complete R2: asset_metadata update failed: {e}")
+
+        # Enqueue Cloudinary fetch and transcode job in background
+        background_tasks.add_task(
+            trigger_cloudinary_transcode,
+            media_id=media["id"],
+            r2_url=r2_read_url,
+            folder=folder,
+            public_id=leaf_pid,
+            eager_transformation="c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg",
+            scope="submission",
+            parent_id=sid,
+            category=category,
+            label=payload.label if category == "take" else None,
+        )
+
+        return {"ok": True, "media": media}
+
     # Folder scoping — reject assets that don't belong to this submission.
     if not public_id.startswith(folder + "/"):
         raise HTTPException(400, "Asset does not belong to this submission")

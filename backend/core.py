@@ -2710,3 +2710,89 @@ async def merge_talent_profile(existing_talent: dict, incoming_data: dict, sourc
     return existing_talent
 
 
+# --------------------------------------------------------------------------
+# Cloudflare R2 & Media Ingestion Pipeline
+# --------------------------------------------------------------------------
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL", "")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "")
+ENABLE_R2_MEDIA_PIPELINE = os.environ.get("ENABLE_R2_MEDIA_PIPELINE", "false").lower() == "true"
+
+def get_r2_client():
+    import boto3
+    from botocore.config import Config
+    return boto3.client(
+        "s3",
+        endpoint_url=R2_ENDPOINT_URL,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4"),
+    )
+
+def generate_r2_presigned_url(key: str, method: str = "PUT", expiry: int = 3600) -> str:
+    """Generate a pre-signed S3 URL for Cloudflare R2 operations (PUT or GET)."""
+    s3 = get_r2_client()
+    client_method = "put_object" if method.upper() == "PUT" else "get_object"
+    params = {"Bucket": R2_BUCKET_NAME, "Key": key}
+    if method.upper() == "PUT":
+        # Ensure we specify public-read or any R2 specific permissions if needed, 
+        # but standard pre-signed PUT works out of the box.
+        pass
+    return s3.generate_presigned_url(
+        ClientMethod=client_method,
+        Params=params,
+        ExpiresIn=expiry,
+    )
+
+def trigger_cloudinary_transcode(
+    media_id: str,
+    r2_url: str,
+    folder: str,
+    public_id: str,
+    eager_transformation: str,
+    scope: str,
+    parent_id: str,
+    category: str,
+    label: Optional[str] = None,
+):
+    """
+    Background task: Instructs Cloudinary to pull the raw asset from Cloudflare R2
+    and transcode it asynchronously, sending a webhook notification when complete.
+    """
+    import cloudinary.uploader
+    backend_url = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+    webhook_url = f"{backend_url}/public/webhooks/cloudinary" if backend_url else None
+
+    options = {
+        "folder": folder,
+        "public_id": public_id,
+        "resource_type": "video",
+        "overwrite": True,
+    }
+    if eager_transformation:
+        options["eager"] = eager_transformation
+        options["eager_async"] = True
+    if webhook_url:
+        options["notification_url"] = webhook_url
+
+    # Store structural tags so the webhook can identify where to attach the optimized asset
+    tags = [
+        f"media_id={media_id}",
+        f"scope={scope}",
+        f"parent_id={parent_id}",
+        f"category={category}",
+    ]
+    if label:
+        tags.append(f"label={label}")
+    options["tags"] = ",".join(tags)
+
+    try:
+        logger.info(f"Triggering Cloudinary transcode fetch for media_id={media_id} from url={r2_url[:60]}...")
+        res = cloudinary.uploader.upload(r2_url, **options)
+        logger.info(f"Cloudinary upload API returned initial response for media_id={media_id}: {res}")
+    except Exception as e:
+        logger.error(f"Failed to enqueue transcode job in Cloudinary for media_id={media_id}: {e}", exc_info=True)
+
+
+

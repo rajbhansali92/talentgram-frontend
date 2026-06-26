@@ -3725,21 +3725,28 @@ function PremiumUploadSlot({
                         </div>
 
                         {!isVideoCollapsed && (
-                            <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[240px] animate-fadeIn">
-                                <video
-                                    src={media.url}
-                                    poster={posterUrl(media) || thumbnailUrl(media)}
-                                    controls
-                                    playsInline
-                                    preload="metadata"
-                                    className="w-full max-h-[240px] object-contain rounded-2xl"
-                                />
-                                {media.duration && (
-                                    <span className="absolute bottom-3 right-3 bg-black/75 backdrop-blur-sm text-white text-[10px] font-mono font-medium px-2 py-0.5 rounded-full shadow-sm">
-                                        {formatDuration(media.duration)}
-                                    </span>
-                                )}
-                            </div>
+                            media.status === "processing" ? (
+                                <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex flex-col items-center justify-center p-8 min-h-[160px] w-full animate-fadeIn">
+                                    <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin mb-3"></div>
+                                    <p className="text-xs font-mono text-[#eaeaea] animate-pulse">Optimizing video on server...</p>
+                                </div>
+                            ) : (
+                                <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[240px] animate-fadeIn">
+                                    <video
+                                        src={media.url}
+                                        poster={posterUrl(media) || thumbnailUrl(media)}
+                                        controls
+                                        playsInline
+                                        preload="metadata"
+                                        className="w-full max-h-[240px] object-contain rounded-2xl"
+                                    />
+                                    {media.duration && (
+                                        <span className="absolute bottom-3 right-3 bg-black/75 backdrop-blur-sm text-white text-[10px] font-mono font-medium px-2 py-0.5 rounded-full shadow-sm">
+                                            {formatDuration(media.duration)}
+                                        </span>
+                                    )}
+                                </div>
+                            )
                         )}
                         <div className="flex flex-col gap-1.5 px-1">
                             {formatMediaTimestamp(media) && (

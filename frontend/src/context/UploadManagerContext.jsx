@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { api } from "../lib/api";
 import { toast } from "sonner";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
@@ -26,6 +26,7 @@ export function useUploadManager() {
 export function UploadManagerProvider({ children }) {
     const [activeUploads, setActiveUploads] = useState({});
     const [retryQueue, setRetryQueue] = useState({});
+    const inFlightUploads = useRef({});
 
     // Guard against accidental navigation/refresh while an upload is in flight.
     // The in-flight File cannot be re-read after a reload, so warn before the
@@ -83,7 +84,7 @@ export function UploadManagerProvider({ children }) {
         // (300s) by directVideoUpload; this is just a sane upper safety bound.
         const isChunkedVideo =
             isVideoSlot && (!endpoint || CHUNKED_VIDEO_ENDPOINT_RE.test(endpoint));
-                const CAP_MB = isVideoSlot ? 1024 : 20;
+                const CAP_MB = isVideoSlot ? 500 : 20;
 
         if (file) {
             const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
@@ -124,8 +125,16 @@ export function UploadManagerProvider({ children }) {
         }
 
         const slotKey = label ? `${category}:${label}` : category;
+        if (inFlightUploads.current[slotKey]) {
+            console.warn(`[UPLOAD BLOCK] Sync block: upload for ${slotKey} already in progress.`);
+            return;
+        }
+        inFlightUploads.current[slotKey] = true;
+
         let fileToUpload = file;
         let skipCompression = false;
+        let compressedFile = null;
+
         if (file && isVideoSlot) {
             try {
                 const { getCompressionProfile, COMPRESS_THRESHOLD } = await import("../lib/videoCompress");
@@ -163,8 +172,9 @@ export function UploadManagerProvider({ children }) {
             }));
 
             try {
+                console.log("Compression started");
                 const { compressVideoIfNeeded } = await import("../lib/videoCompress");
-                fileToUpload = await compressVideoIfNeeded(file, {
+                compressedFile = await compressVideoIfNeeded(file, {
                     onProgress: (stage, pct, estTimeRemaining) => {
                         setActiveUploads((prev) => {
                             if (!prev[slotKey]) return prev;
@@ -189,6 +199,11 @@ export function UploadManagerProvider({ children }) {
                         });
                     }
                 });
+                console.log("Compression finished");
+                if (compressedFile) {
+                    console.log("Compressed size:", compressedFile.size);
+                    fileToUpload = compressedFile;
+                }
             } catch (err) {
                 console.warn("[FFMPEG FALLBACK WARNING]", err);
                 if (err?.code === "TIMEOUT") {
@@ -198,6 +213,37 @@ export function UploadManagerProvider({ children }) {
                 }
                 fileToUpload = file;
             }
+        }
+
+        console.log("ORIGINAL", file.size);
+        console.log("COMPRESSED", compressedFile?.size);
+        console.log("UPLOADED", fileToUpload?.size);
+        console.log("Upload starting with:", fileToUpload?.size);
+
+        // Validate final file size before upload (must be under 500MB R2 limit)
+        if (fileToUpload && fileToUpload.size > 500 * 1024 * 1024) {
+            const sizeMB = Math.round(fileToUpload.size / (1024 * 1024));
+            console.error(`[SIZE LIMIT EXCEEDED] File size ${sizeMB}MB exceeds 500MB R2 limit.`);
+            toast.error(`File is too large to upload (${sizeMB} MB). Maximum allowed size is 500 MB.`);
+            
+            setActiveUploads((prev) => ({
+                ...prev,
+                [slotKey]: {
+                    status: "failed",
+                    pct: 0,
+                    statusText: "Upload failed: file too large",
+                    fileName: fileToUpload.name,
+                    category,
+                    label,
+                    error: `File size (${sizeMB} MB) exceeds 500 MB limit.`,
+                    file: fileToUpload,
+                    options
+                }
+            }));
+            
+            // Release synchronization lock
+            delete inFlightUploads.current[slotKey];
+            return;
         }
 
         setActiveUploads((prev) => ({
@@ -280,6 +326,7 @@ export function UploadManagerProvider({ children }) {
                         return next;
                     });
                 }, 3000);
+                delete inFlightUploads.current[slotKey]; // release lock on success
                 return;
             } catch (err) {
                 const msg = err?.message || err?.response?.data?.detail || "Upload failed";
@@ -292,6 +339,7 @@ export function UploadManagerProvider({ children }) {
                     [slotKey]: { ...prev[slotKey], status: "failed", error: msg },
                 }));
                 toast.error(`${msg} — tap Retry to try again`);
+                delete inFlightUploads.current[slotKey]; // release lock on failure
                 return;
             }
         }
@@ -396,6 +444,7 @@ export function UploadManagerProvider({ children }) {
                 }, 3000);
 
                 if (attempt > 1) toast.success(`Recovered after ${attempt} attempts`);
+                delete inFlightUploads.current[slotKey]; // release lock on success
                 return;
             } catch (err) {
                 lastErr = err;
@@ -430,6 +479,7 @@ export function UploadManagerProvider({ children }) {
         }));
 
         toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
+        delete inFlightUploads.current[slotKey]; // release lock on failure
     };
 
     const retryUpload = async (slotKey) => {

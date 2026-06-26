@@ -28,6 +28,7 @@ from routers import (
     submissions,
     talents,
     users,
+    webhooks,
     whatsapp,
     workflow,
 )
@@ -118,6 +119,7 @@ app.include_router(workflow.router)
 app.include_router(portal.router)
 app.include_router(cloudinary_admin.router)
 app.include_router(whatsapp.router)
+app.include_router(webhooks.router)
 
 
 # CORS — env-var driven with Vercel preview regex fallback.

@@ -1605,12 +1605,19 @@ export default function ApplicationPage() {
                                 Recommended. Your most recent professional introduction video, without contact info.
                             </p>
                             {intro ? (
-                                <LazyVideoPlayer
-                                    src={intro.url}
-                                    poster={posterUrl(intro)}
-                                    label="Introduction Video"
-                                    className="max-w-lg shadow-sm border border-[#eaeaea]"
-                                />
+                                intro.status === "processing" ? (
+                                    <div className="w-full max-w-lg bg-slate-900 border border-slate-100 rounded-xl py-12 flex flex-col items-center gap-3 text-sm text-[#eaeaea] animate-fadeIn">
+                                        <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin mb-1"></div>
+                                        <p className="text-xs font-mono animate-pulse">Optimizing video on server...</p>
+                                    </div>
+                                ) : (
+                                    <LazyVideoPlayer
+                                        src={intro.url}
+                                        poster={posterUrl(intro)}
+                                        label="Introduction Video"
+                                        className="max-w-lg shadow-sm border border-[#eaeaea]"
+                                    />
+                                )
                             ) : (
                                 <button
                                     onClick={() => videoRef.current?.click()}

@@ -111,7 +111,7 @@ async function uploadChunkWithRetry(uploadUrl, formParams, blob, start, total, u
 }
 
 // Returns the backend /video-complete response: { ok, media }.
-export async function directVideoUpload({ sid, token, category, label, file, isApplication, onProgress }) {
+export async function directVideoUpload({ sid, token, category, label, file, isApplication, onProgress, preFetchedSig }) {
     // Client-side duration guard (server re-validates authoritatively).
     const duration = await readVideoDuration(file);
     if (duration != null && duration > MAX_DURATION_SECONDS) {
@@ -130,9 +130,6 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
         ? `/public/apply/${sid}/video-complete`
         : `/public/submissions/${sid}/video-complete`;
 
-    // Fetch a signed payload. On the FIRST call public_id is minted server-side;
-    // re-sign calls pass that SAME public_id so the chunked upload keeps the same
-    // Cloudinary target (the backend validates it belongs to this target).
     const fetchSignature = async (publicId) => {
         const res = await api.post(
             signatureEndpoint,
@@ -140,7 +137,15 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             { headers: authHeader }
         );
         const d = res.data;
+        if (d.use_r2) {
+            return {
+                use_r2: true,
+                uploadUrl: d.upload_url,
+                publicId: d.public_id,
+            };
+        }
         return {
+            use_r2: false,
             uploadUrl: d.upload_url,
             publicId: d.params.public_id,
             formParams: { ...d.params, api_key: d.api_key, timestamp: String(d.timestamp), signature: d.signature },
@@ -148,13 +153,13 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
     };
 
     // 1) Initial signed, server-pinned upload params.
-    let sig = await fetchSignature(null);
+    let sig = preFetchedSig || await fetchSignature(null);
 
     if (sig.use_r2) {
         // Upload directly to R2 pre-signed URL via PUT
         const lastResponse = await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
-            xhr.open("PUT", sig.upload_url, true);
+            xhr.open("PUT", sig.uploadUrl, true);
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable && onProgress) {
                     onProgress(e.loaded, e.total);
@@ -163,7 +168,7 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     resolve({
-                        public_id: sig.public_id,
+                        public_id: sig.publicId,
                         bytes: file.size,
                     });
                 } else {

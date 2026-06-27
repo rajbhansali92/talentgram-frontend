@@ -134,25 +134,57 @@ export function UploadManagerProvider({ children }) {
         let fileToUpload = file;
         let skipCompression = false;
         let compressedFile = null;
+        let preFetchedSig = null;
 
         if (file && isVideoSlot) {
-            try {
-                const { getCompressionProfile, COMPRESS_THRESHOLD } = await import("../lib/videoCompress");
-                const { deviceType } = getCompressionProfile();
-                const isMobileOrTablet = deviceType === "MOBILE" || deviceType === "TABLET";
-                
-                if (file.size <= COMPRESS_THRESHOLD) {
-                    skipCompression = true;
-                } else if (isMobileOrTablet && file.size > 300 * 1024 * 1024) {
-                    skipCompression = true;
-                    toast.info("Large video detected. Uploading directly.");
-                    console.log(`[FFMPEG BYPASS] Mobile video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 300MB. Direct upload activated.`);
-                } else if (!isMobileOrTablet && file.size > 700 * 1024 * 1024) {
-                    skipCompression = true;
-                    console.log(`[FFMPEG BYPASS] Desktop video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 700MB. Direct upload activated.`);
+            // R2 Ingestion Check: Retrieve signature and determine if R2 is active
+            const chunkedVideoMatch = CHUNKED_VIDEO_ENDPOINT_RE.exec(dynamicEndpoint || "");
+            if (chunkedVideoMatch) {
+                const isApp = chunkedVideoMatch[1] === "apply";
+                const targetId = chunkedVideoMatch[2];
+                const signatureEndpoint = isApp
+                    ? `/public/apply/${targetId}/video-signature`
+                    : `/public/submissions/${targetId}/video-signature`;
+                try {
+                    const headers = dynamicToken ? { Authorization: `Bearer ${dynamicToken}` } : {};
+                    const res = await api.post(
+                        signatureEndpoint,
+                        { category, label: label || null, content_type: file.type || null, public_id: null },
+                        { headers }
+                    );
+                    if (res.data && res.data.use_r2) {
+                        preFetchedSig = {
+                            use_r2: true,
+                            uploadUrl: res.data.upload_url,
+                            publicId: res.data.public_id,
+                        };
+                        skipCompression = true;
+                        console.log("[R2 PIPELINE] R2 is active. Bypassing client-side FFmpeg compression.");
+                    }
+                } catch (err) {
+                    console.warn("[R2 PIPELINE WARNING] Signature pre-fetch failed:", err);
                 }
-            } catch (err) {
-                console.error("Failed to check compression profile:", err);
+            }
+
+            if (!skipCompression) {
+                try {
+                    const { getCompressionProfile, COMPRESS_THRESHOLD } = await import("../lib/videoCompress");
+                    const { deviceType } = getCompressionProfile();
+                    const isMobileOrTablet = deviceType === "MOBILE" || deviceType === "TABLET";
+                    
+                    if (file.size <= COMPRESS_THRESHOLD) {
+                        skipCompression = true;
+                    } else if (isMobileOrTablet && file.size > 300 * 1024 * 1024) {
+                        skipCompression = true;
+                        toast.info("Large video detected. Uploading directly.");
+                        console.log(`[FFMPEG BYPASS] Mobile video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 300MB. Direct upload activated.`);
+                    } else if (!isMobileOrTablet && file.size > 700 * 1024 * 1024) {
+                        skipCompression = true;
+                        console.log(`[FFMPEG BYPASS] Desktop video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 700MB. Direct upload activated.`);
+                    }
+                } catch (err) {
+                    console.error("Failed to check compression profile:", err);
+                }
             }
         }
 
@@ -281,6 +313,7 @@ export function UploadManagerProvider({ children }) {
                     label,
                     file: fileToUpload,
                     isApplication: isApp,
+                    preFetchedSig: preFetchedSig,
                     onProgress: (loaded, total) => {
                         const pct = total ? Math.round((loaded / total) * 100) : 0;
                         setActiveUploads((prev) => {

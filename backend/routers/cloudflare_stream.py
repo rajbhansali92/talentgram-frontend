@@ -65,9 +65,24 @@ async def cloudflare_stream_webhook(
         logger.info(f"[Cloudflare Stream Webhook] Non-Talentgram event or missing metadata: uid={uid}")
         return {"status": "ignored"}
 
-    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "default")
-    playback_url = f"https://customer-{account_id}.cloudflarestream.com/{uid}/manifest/video.m3u8"
-    thumbnail_url = f"https://customer-{account_id}.cloudflarestream.com/{uid}/thumbnails/thumbnail.jpg"
+    # Load Stream customer delivery domain.
+    # CLOUDFLARE_STREAM_CUSTOMER_CODE may be stored as either:
+    #   "customer-qptwlcxjj1182dc8.cloudflarestream.com"
+    #   "https://customer-qptwlcxjj1182dc8.cloudflarestream.com"
+    _raw_customer_code = os.environ.get("CLOUDFLARE_STREAM_CUSTOMER_CODE", "").strip().rstrip("/")
+    if _raw_customer_code:
+        # Strip leading https:// or http:// if present
+        _stream_base = _raw_customer_code.replace("https://", "").replace("http://", "")
+    else:
+        # Defensive fallback: derive from CLOUDFLARE_ACCOUNT_ID (known-wrong but avoids a crash)
+        _account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+        _stream_base = f"customer-{_account_id}.cloudflarestream.com" if _account_id else ""
+        logger.error(
+            "[Cloudflare Stream Webhook] CLOUDFLARE_STREAM_CUSTOMER_CODE is not set. "
+            "Playback URLs will be incorrect. Set this env var in Railway."
+        )
+    playback_url = f"https://{_stream_base}/{uid}/manifest/video.m3u8"
+    thumbnail_url = f"https://{_stream_base}/{uid}/thumbnails/thumbnail.jpg"
 
     # 3. Handle processing outcome
     if state == "ready":

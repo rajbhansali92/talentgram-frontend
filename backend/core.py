@@ -2782,12 +2782,25 @@ def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:
     Checks the media array of a submission or application document.
     For any video category with status == "processing" or no url,
     generates a presigned R2 GET URL on-the-fly and patches the dict.
+
+    Guards:
+    - Skips media already completed via a named provider (stream, cloudinary).
+    - Skips media with status "completed" that already has a URL.
+    Only raw-processing uploads (no URL yet) receive temporary R2 URLs.
     """
     if not doc or "media" not in doc:
         return doc
     parent_id = doc.get("id")
     for m in doc.get("media") or []:
         if m.get("category") in {"take", "intro_video", "take_1", "take_2", "take_3", "portfolio_video"}:
+            # Guard 1: Skip media already backed by a named provider (stream or cloudinary).
+            # These already have their canonical URL written by the webhook / Cloudinary callback.
+            if m.get("provider") in ("stream", "cloudinary") and m.get("url"):
+                continue
+            # Guard 2: Skip any media marked completed that already has a URL, regardless of provider.
+            # Prevents overwriting a valid URL that arrived before the provider field was populated.
+            if m.get("status") == "completed" and m.get("url"):
+                continue
             if m.get("status") == "processing" or not m.get("url"):
                 pub_id = m.get("public_id")
                 if pub_id and "/" in pub_id:
@@ -2805,6 +2818,7 @@ def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:
                     except Exception as e:
                         logger.error(f"Failed to generate presigned R2 URL for key {r2_key}: {e}")
     return doc
+
 
 
 

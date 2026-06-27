@@ -31,8 +31,10 @@ from routers import (
     webhooks,
     whatsapp,
     workflow,
+    cloudflare_stream,
 )
 import scout_capture
+
 
 _docs_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/docs"
 _redoc_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/redoc"
@@ -120,6 +122,8 @@ app.include_router(portal.router)
 app.include_router(cloudinary_admin.router)
 app.include_router(whatsapp.router)
 app.include_router(webhooks.router)
+app.include_router(cloudflare_stream.router)
+
 
 
 # CORS — env-var driven with Vercel preview regex fallback.

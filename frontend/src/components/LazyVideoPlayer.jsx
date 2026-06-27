@@ -100,6 +100,35 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
         };
     }, [isPlaying, slug, mediaId, talentId]);
 
+    useEffect(() => {
+        if (!isPlaying || !videoRef.current || !src) return;
+        
+        let hls = null;
+        if (src.includes(".m3u8")) {
+            if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
+                videoRef.current.src = src;
+            } else {
+                import("hls.js").then(({ default: Hls }) => {
+                    if (videoRef.current && Hls.isSupported()) {
+                        hls = new Hls();
+                        hls.loadSource(src);
+                        hls.attachMedia(videoRef.current);
+                    } else if (videoRef.current) {
+                        videoRef.current.src = src;
+                    }
+                });
+            }
+        } else {
+            videoRef.current.src = src;
+        }
+
+        return () => {
+            if (hls) {
+                hls.destroy();
+            }
+        };
+    }, [isPlaying, src]);
+
     if (!src) return null;
 
     if (isPlaying) {
@@ -107,7 +136,6 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
             <div className={`relative w-full h-full aspect-video rounded-xl overflow-hidden bg-black ${className}`}>
                 <video
                     ref={videoRef}
-                    src={src}
                     controls
                     autoPlay
                     playsInline
@@ -116,6 +144,7 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
             </div>
         );
     }
+
 
     return (
         <div

@@ -2745,58 +2745,36 @@ def generate_r2_presigned_url(key: str, method: str = "PUT", expiry: int = 3600)
         ExpiresIn=expiry,
     )
 
-def trigger_cloudinary_transcode(
+async def trigger_cloudinary_transcode(
     media_id: str,
     r2_url: str,
     folder: str,
     public_id: str,
-    eager_transformation: str,
-    scope: str,
-    parent_id: str,
-    category: str,
-    label: Optional[str] = None,
+    eager_transformation: str = None,
+    scope: str = "submission",
+    parent_id: str = None,
+    category: str = None,
+    label: str = None,
 ):
     """
-    Background task: Instructs Cloudinary to pull the raw asset from Cloudflare R2
-    and transcode it asynchronously, sending a webhook notification when complete.
+    Abstractions wrapper that delegates video processing to the active VideoProvider.
     """
-    import cloudinary.uploader
-    backend_url = os.environ.get("REACT_APP_BACKEND_URL", "").strip().rstrip("/")
-    if not backend_url:
-        r_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("RAILWAY_STATIC_URL")
-        if r_domain:
-            backend_url = f"https://{r_domain}"
-    webhook_url = f"{backend_url}/public/webhooks/cloudinary" if backend_url else None
-
-    options = {
-        "folder": folder,
-        "public_id": public_id,
-        "resource_type": "video",
-        "overwrite": True,
-    }
-    if eager_transformation:
-        options["eager"] = eager_transformation
-        options["eager_async"] = True
-    if webhook_url:
-        options["notification_url"] = webhook_url
-
-    # Store structural tags so the webhook can identify where to attach the optimized asset
-    tags = [
-        f"media_id={media_id}",
-        f"scope={scope}",
-        f"parent_id={parent_id}",
-        f"category={category}",
-    ]
-    if label:
-        tags.append(f"label={label}")
-    options["tags"] = ",".join(tags)
-
-    try:
-        logger.info(f"Triggering Cloudinary transcode fetch for media_id={media_id} from url={r2_url[:60]}...")
-        res = cloudinary.uploader.upload(r2_url, **options)
-        logger.info(f"Cloudinary upload API returned initial response for media_id={media_id}: {res}")
-    except Exception as e:
-        logger.error(f"Failed to enqueue transcode job in Cloudinary for media_id={media_id}: {e}", exc_info=True)
+    from providers import get_video_provider
+    provider = get_video_provider()
+    logger.info(f"[VideoProvider] Delegating transcode to {provider.__class__.__name__} for media_id={media_id}")
+    
+    res = await provider.create_processing_job(
+        parent_id=parent_id,
+        media_id=media_id,
+        category=category,
+        scope=scope,
+        r2_url=r2_url,
+        folder=folder,
+        public_id=public_id,
+        label=label,
+        eager_transformation=eager_transformation
+    )
+    logger.info(f"[VideoProvider] Result: {res}")
 
 
 def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:

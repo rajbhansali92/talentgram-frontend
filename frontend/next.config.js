@@ -52,7 +52,7 @@ const securityHeaders = [
       // (image /upload/sign path + chunked audition-video transport). It is an
       // XHR POST, so without it in connect-src the browser blocks every upload
       // even after the backend returns a valid signature.
-      "connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com",
+      "connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com",
       "worker-src 'self' blob:",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",

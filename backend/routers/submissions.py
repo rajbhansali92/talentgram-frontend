@@ -58,6 +58,7 @@ from core import (
     verify_email_ownership,
     rate_limit_ok,
     client_ip,
+    sign_r2_media_if_needed,
 )
 from drive_backup import (
     drive_enabled,
@@ -2109,7 +2110,7 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
     # for client→talent communication (relay through admin moderation).
     from routers.feedback import list_approved_feedback_for_talent
     sub["client_feedback"] = await list_approved_feedback_for_talent(sid)
-    return sub
+    return sign_r2_media_if_needed(sub)
 
 
 # --------------------------------------------------------------------------
@@ -2137,7 +2138,7 @@ async def get_my_submission_by_token(slug: str, atk: str):
         raise HTTPException(404, "Submission not found or token invalid")
     from routers.feedback import list_approved_feedback_for_talent
     sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
-    return sub
+    return sign_r2_media_if_needed(sub)
 
 
 # --------------------------------------------------------------------------
@@ -2249,10 +2250,12 @@ async def list_submissions(
     }
     cursor = db.submissions.find(query, _SUB_LIST_PROJ).sort("created_at", -1)
     if page is None and limit is None:
-        return await cursor.to_list(5000)
+        items = await cursor.to_list(5000)
+        return [sign_r2_media_if_needed(item) for item in items]
     skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.submissions.count_documents(query)
     items = await cursor.skip(skip).limit(page_size).to_list(page_size)
+    items = [sign_r2_media_if_needed(item) for item in items]
     return _paginated(items, total, p, s)
 
 
@@ -2534,7 +2537,7 @@ async def get_admin_submission(
 
     result = dict(sub)
     result["talent_portfolio_media"] = talent_portfolio_media
-    return result
+    return sign_r2_media_if_needed(result)
 
 
 @router.put("/projects/{pid}/submissions/{sid}")

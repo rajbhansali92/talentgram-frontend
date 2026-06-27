@@ -2761,7 +2761,11 @@ def trigger_cloudinary_transcode(
     and transcode it asynchronously, sending a webhook notification when complete.
     """
     import cloudinary.uploader
-    backend_url = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+    backend_url = os.environ.get("REACT_APP_BACKEND_URL", "").strip().rstrip("/")
+    if not backend_url:
+        r_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("RAILWAY_STATIC_URL")
+        if r_domain:
+            backend_url = f"https://{r_domain}"
     webhook_url = f"{backend_url}/public/webhooks/cloudinary" if backend_url else None
 
     options = {
@@ -2793,6 +2797,37 @@ def trigger_cloudinary_transcode(
         logger.info(f"Cloudinary upload API returned initial response for media_id={media_id}: {res}")
     except Exception as e:
         logger.error(f"Failed to enqueue transcode job in Cloudinary for media_id={media_id}: {e}", exc_info=True)
+
+
+def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:
+    """
+    Checks the media array of a submission or application document.
+    For any video category with status == "processing" or no url,
+    generates a presigned R2 GET URL on-the-fly and patches the dict.
+    """
+    if not doc or "media" not in doc:
+        return doc
+    parent_id = doc.get("id")
+    for m in doc.get("media") or []:
+        if m.get("category") in {"take", "intro_video", "take_1", "take_2", "take_3", "portfolio_video"}:
+            if m.get("status") == "processing" or not m.get("url"):
+                pub_id = m.get("public_id")
+                if pub_id and "/" in pub_id:
+                    leaf_pid = pub_id.split("/")[-1]
+                    category = m.get("category")
+                    if is_application:
+                        r2_key = f"raw-uploads/applications/{parent_id}/{category}/{leaf_pid}.mp4"
+                    else:
+                        r2_key = f"raw-uploads/submissions/{parent_id}/{category}/{leaf_pid}.mp4"
+                    try:
+                        # R2 presigned GET URL valid for 24 hours
+                        presigned_url = generate_r2_presigned_url(r2_key, "GET", expiry=86400)
+                        m["url"] = presigned_url
+                        m["status"] = "completed"
+                    except Exception as e:
+                        logger.error(f"Failed to generate presigned R2 URL for key {r2_key}: {e}")
+    return doc
+
 
 
 

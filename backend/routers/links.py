@@ -44,6 +44,7 @@ from core import (
     decode_viewer,
     enrich_talent,
     make_token,
+    sign_r2_media_if_needed,
 )
 
 router = APIRouter(prefix="/api", tags=["links"])
@@ -437,6 +438,9 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
                 "comment": a["comment"],
                 "updated_at": a.get("updated_at"),
             })
+
+    for sid, subject in subjects.items():
+        subjects[sid] = sign_r2_media_if_needed(subject)
 
     return {
         "link": link,
@@ -834,7 +838,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
             )
     return {
         "link": _public_link_view(link),
-        "talents": talents,
+        "talents": [sign_r2_media_if_needed(t) for t in talents],
         "actions": actions,
         "project_budget": project_budget,
         "project_shoot_dates": project_shoot_dates,
@@ -1314,7 +1318,7 @@ async def get_share_preview(share_id: str):
 
     return {
         "link": _public_link_view(link),
-        "talent": filtered_talent,
+        "talent": sign_r2_media_if_needed(filtered_talent),
         "share_id": share_id,
         "expires_at": share["expires_at"],
     }

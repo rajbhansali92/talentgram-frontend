@@ -58,6 +58,7 @@ from core import (
     verify_email_ownership,
     rate_limit_ok,
     client_ip,
+    sign_r2_media_if_needed,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -569,7 +570,7 @@ async def get_application(aid: str, authorization: Optional[str] = Header(None))
                 # Re-fetch so we return the freshly hydrated document
                 app_doc = await db.applications.find_one({"id": aid}, {"_id": 0}) or app_doc
 
-    return app_doc
+    return sign_r2_media_if_needed(app_doc)
 
 
 @router.put("/public/apply/{aid}")
@@ -1366,11 +1367,11 @@ async def list_applications(
     cursor = db.applications.find(query, {"_id": 0}).sort("created_at", -1)
     if page is None and limit is None:
         items = await cursor.to_list(5000)
-        return [_with_image_url(a) for a in items]
+        return [sign_r2_media_if_needed(_with_image_url(a)) for a in items]
     skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.applications.count_documents(query)
     items = await cursor.skip(skip).limit(page_size).to_list(page_size)
-    return _paginated([_with_image_url(a) for a in items], total, p, s)
+    return _paginated([sign_r2_media_if_needed(_with_image_url(a)) for a in items], total, p, s)
 
 
 @router.get("/applications/stats")
@@ -1409,7 +1410,7 @@ async def get_admin_application(aid: str, admin: dict = Depends(current_team_or_
     app_doc = await db.applications.find_one({"id": aid}, {"_id": 0})
     if not app_doc:
         raise HTTPException(404, "Application not found")
-    return _with_image_url(app_doc)
+    return sign_r2_media_if_needed(_with_image_url(app_doc))
 
 
 def _with_image_url(app_doc: dict) -> dict:

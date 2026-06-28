@@ -865,6 +865,35 @@ async def complete_application_upload(
     }
 
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
+
+    # ITEM 1 — asset_metadata parity with the Project Submission Link. Submission's
+    # image upload/complete writes a "completed" ledger row; apply previously did
+    # not, leaving the storage ledger inconsistent. Mirror the reference shape
+    # (idempotent upsert by public_id). Image storage is unchanged (Cloudinary).
+    talent = await _find_talent_by_email(app_doc.get("talent_email") or "")
+    tid = (talent or {}).get("id") or "unknown_talent"
+    tname = (talent or {}).get("name")
+    try:
+        await db.asset_metadata.update_one(
+            {"public_id": payload.public_id},
+            {"$set": {
+                "id": payload.media_id,
+                "public_id": payload.public_id,
+                "folder": f"{APP_NAME}/applications/{aid}",
+                "resource_type": "image",
+                "asset_type": "profile_image",
+                "talent_id": tid,
+                "talent_name": tname,
+                "application_id": aid,
+                "file_size": payload.bytes,
+                "created_at": _now(),
+                "status": "completed",
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"app-upload-complete: asset_metadata write failed {payload.public_id}: {e}")
+
     updated = await db.applications.find_one({"id": aid}, {"_id": 0})
 
     from core import sync_media_to_global_talent
@@ -1152,10 +1181,15 @@ async def delete_application_media(
         raise HTTPException(404, "Application not found")
     if app_doc.get("status") == "submitted":
         raise HTTPException(400, "Application already finalized")
+    target_media = next((m for m in (app_doc.get("media") or []) if m.get("id") == mid), None)
     await db.applications.update_one({"id": aid}, {"$pull": {"media": {"id": mid}}})
 
     from core import remove_synced_media_from_global_talent
     await remove_synced_media_from_global_talent(app_doc, mid)
+    # Parity sprint: best-effort storage cleanup (mirrors submission delete).
+    if target_media:
+        from core import cleanup_media_storage
+        await cleanup_media_storage(target_media, scope="application", parent_id=aid)
 
     return {"ok": True}
 

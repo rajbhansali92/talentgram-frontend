@@ -1097,6 +1097,7 @@ async def submission_delete_media(
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
+    target_media = next((m for m in (sub.get("media") or []) if m.get("id") == mid), None)
     patch: Dict[str, Any] = {"$pull": {"media": {"id": mid}}}
     if sub.get("status") in ("submitted", "updated"):
         patch["$set"] = {
@@ -1107,6 +1108,11 @@ async def submission_delete_media(
     await db.submissions.update_one({"id": sid}, patch)
     # Phase 3 v37i — keep the global talent profile in sync.
     await remove_synced_media_from_global_talent(sub, mid)
+    # Parity sprint: best-effort delete the backing storage (Stream/R2/Cloudinary)
+    # + tracking row so deletes don't leave orphans. Never fails the user action.
+    if target_media:
+        from core import cleanup_media_storage
+        await cleanup_media_storage(target_media, scope="submission", parent_id=sid)
     return {"ok": True}
 
 

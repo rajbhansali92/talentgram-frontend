@@ -2769,6 +2769,84 @@ def generate_r2_presigned_url(key: str, method: str = "PUT", expiry: int = 3600)
         ExpiresIn=expiry,
     )
 
+
+async def cleanup_media_storage(media: dict, scope: Optional[str] = None, parent_id: Optional[str] = None) -> None:
+    """Best-effort deletion of a single media item's backing storage objects and
+    its tracking row. Shared by submission + application media-delete paths.
+
+    Contract (per parity sprint):
+      - NEVER raises — every external call is individually guarded and logged, so
+        a storage failure can never fail the user's delete action.
+      - Idempotent — missing assets are ignored (Stream/Cloudinary 404, R2 delete
+        is a no-op on absent keys).
+      - Safe — targets are addressed by their own exact identifiers (stream_uid,
+        public_id, and a deterministic per-asset R2 key scoped to this parent),
+        so it cannot touch another talent's assets.
+
+    Deletes: Cloudflare Stream video (by stream_uid), R2 raw upload (derived key),
+    Cloudinary asset (by public_id, images + legacy videos), and asset_metadata
+    rows. Mongo media-array references are removed by the caller's $pull.
+    """
+    if not media:
+        return
+    public_id = media.get("public_id")
+    rtype = media.get("resource_type") or ("video" if media.get("category") in {"intro_video", "take", "take_1", "take_2", "take_3", "video", "portfolio_video"} else "image")
+    category = media.get("category")
+    provider = media.get("provider")
+    stream_uid = media.get("stream_uid")
+    url = media.get("url") or ""
+    scope = scope or media.get("scope")
+    parent_id = parent_id or media.get("submission_id") or media.get("application_id")
+
+    # 1) Cloudflare Stream video — delete by its exact UID.
+    if stream_uid:
+        try:
+            account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+            token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
+            if account_id and token:
+                import httpx
+                async with httpx.AsyncClient(timeout=15.0) as _c:
+                    await _c.delete(
+                        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/stream/{stream_uid}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+        except Exception as e:
+            logger.warning(f"[cleanup] Stream delete failed uid={stream_uid}: {e}")
+
+    # 2) R2 raw upload — only videos go through R2; key is deterministic + scoped.
+    if rtype == "video" and scope and parent_id and public_id:
+        leaf = public_id.split("/")[-1]
+        r2_key = f"raw-uploads/{scope}s/{parent_id}/{category}/{leaf}.mp4"
+        try:
+            get_r2_client().delete_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
+        except Exception as e:
+            logger.warning(f"[cleanup] R2 delete failed key={r2_key}: {e}")
+        try:
+            await db.asset_metadata.delete_many({"public_id": r2_key})
+        except Exception as e:
+            logger.warning(f"[cleanup] asset_metadata(r2) delete failed key={r2_key}: {e}")
+
+    # 3) Cloudinary asset — images, and legacy Cloudinary-hosted videos. Stream
+    #    videos live on cloudflarestream and must NOT be sent to Cloudinary.
+    is_cloudinary = (
+        provider == "cloudinary"
+        or rtype == "image"
+        or "res.cloudinary.com" in url
+    ) and provider != "stream" and "cloudflarestream.com" not in url
+    if public_id and is_cloudinary:
+        try:
+            cloudinary.uploader.destroy(public_id, resource_type=rtype, invalidate=True)
+        except Exception as e:
+            logger.warning(f"[cleanup] Cloudinary destroy failed pid={public_id}: {e}")
+
+    # 4) Tracking row keyed by the media public_id.
+    if public_id:
+        try:
+            await db.asset_metadata.delete_many({"public_id": public_id})
+        except Exception as e:
+            logger.warning(f"[cleanup] asset_metadata delete failed pid={public_id}: {e}")
+
+
 async def trigger_cloudinary_transcode(
     media_id: str,
     r2_url: str,

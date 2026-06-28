@@ -1068,7 +1068,7 @@ function WECampaignLauncher() {
           <div className="w-[340px] flex flex-col gap-2">
             <button
               onClick={handleDryRun}
-              disabled={launching || !selectedProjectId || !selectedTemplateId || recipients.length === 0}
+              disabled={launching || !selectedTemplateId || recipients.length === 0}
               className="text-xs font-semibold uppercase tracking-widest bg-black text-white hover:opacity-90 active:scale-[0.98] duration-120 py-3.5 rounded-lg text-center disabled:opacity-50 transition-all shadow-sm w-full h-[52px] flex items-center justify-center"
             >
               Compile Dry Run Preview

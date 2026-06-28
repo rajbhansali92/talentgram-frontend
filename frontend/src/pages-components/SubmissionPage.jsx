@@ -1177,6 +1177,8 @@ function SubmissionPage() {
     const finalize = async () => {
         // ── Guided validation: run inline before network call ──────────────
         const missing = getMissingRequirements();
+        // TEMP DIAGNOSTIC (submit-audition incident): trace every submit stage.
+        console.log("[SUBMIT] ▶ clicked", { sid: saved?.id, missing: missing.map((m) => m.id) });
         if (missing.length > 0) {
             // Build error map
             const errors = {};
@@ -1239,6 +1241,7 @@ function SubmissionPage() {
         
         // All good — clear any stale errors and proceed
         setValidationErrors({});
+        console.log("[SUBMIT] validation passed; saving + finalizing", { sid: saved?.id, isResubmission });
 
         let currentSaved = saved;
         if (!currentSaved) {
@@ -1250,7 +1253,8 @@ function SubmissionPage() {
         }
         setFinalizing(true);
         try {
-            await axios.post(
+            console.log("[SUBMIT] POST /public/submissions/" + currentSaved.id + "/finalize");
+            const finRes = await axios.post(
                 `/public/submissions/${currentSaved.id}/finalize`,
                 {},
                 {
@@ -1259,6 +1263,7 @@ function SubmissionPage() {
                     }
                 },
             );
+            console.log("[SUBMIT] ✔ finalize HTTP", finRes.status, finRes.data);
             const { data } = await axios.get(
                 `/public/submissions/${currentSaved.id}`,
                 {
@@ -1282,6 +1287,12 @@ function SubmissionPage() {
                 toast.success("Your audition has been received.");
             }
         } catch (err) {
+            console.error("[SUBMIT] ✖ finalize failed", {
+                httpStatus: err?.response?.status,
+                responseBody: err?.response?.data,
+                requestUrl: err?.config?.url,
+                message: err?.message,
+            });
             toast.error(
                 err?.response?.data?.detail || "Please complete all required fields",
             );

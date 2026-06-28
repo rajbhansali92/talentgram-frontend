@@ -82,6 +82,23 @@ function readDraft(slug) {
     }
 }
 
+// Sprint 1 — best-effort, *non-destructive* expansion of Indian budget shorthand
+// (e.g. "1L" → "₹1,00,000", "2.5 Cr" → "₹2,50,00,000"). Returns null unless the
+// WHOLE string is a recognised shorthand, so admin-entered free-text is never
+// rewritten — the original value is always rendered as primary; this is only an
+// optional clarifying hint shown beneath it.
+const expandIndianBudgetShorthand = (raw) => {
+    if (!raw || typeof raw !== "string") return null;
+    const m = raw.trim().match(/^(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(l|lac|lacs|lakh|lakhs|cr|crore|crores)$/i);
+    if (!m) return null;
+    const num = parseFloat(m[1]);
+    if (!isFinite(num)) return null;
+    const unit = m[2].toLowerCase();
+    const multiplier = unit.startsWith("c") ? 1e7 : 1e5; // crore vs lakh
+    const amount = Math.round(num * multiplier);
+    return `₹${amount.toLocaleString("en-IN")}`;
+};
+
 const formatDuration = (sec) => {
     if (!sec) return null;
     const s = Math.round(sec);
@@ -155,6 +172,14 @@ function SubmissionPage() {
     const fieldRefs = useRef({}); // { fieldId: HTMLElement }
 
     const [submission, setSubmission] = useState(null);
+    // Sprint 1 — autosave indicator. "idle" | "saving" | "saved". Driven by the
+    // debounced draft-persistence effect below so it reflects real save activity.
+    const [saveStatus, setSaveStatus] = useState("idle");
+    const draftMountRef = useRef(false);
+    // Sprint 1 — height unit toggle. Display-only: the stored value is ALWAYS the
+    // canonical feet/inches string (e.g. 5'8"). "cm" mode merely relabels the same
+    // options, so backend storage and existing talent data are never touched.
+    const [heightUnit, setHeightUnit] = useState("ft");
     const { activeUploads, retryQueue, uploadFile, retryUpload } = useUploadManager();
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
@@ -437,6 +462,21 @@ function SubmissionPage() {
         [saved],
     );
 
+    // Sprint 1 — parallel cm labels for the height options. Each entry keeps the
+    // canonical feet/inches `value` and only adds a centimetre display label, so
+    // selecting in either unit writes the SAME stored string.
+    const HEIGHT_CM_OPTIONS = useMemo(
+        () =>
+            HEIGHT_OPTIONS.map((h) => {
+                const m = h.match(/(\d+)'(\d+)"/);
+                const ft = m ? parseInt(m[1], 10) : 0;
+                const inch = m ? parseInt(m[2], 10) : 0;
+                const cm = Math.round((ft * 12 + inch) * 2.54);
+                return { value: h, cm };
+            }),
+        [],
+    );
+
     const validateForm = () => {
         // Email-first ordering (Phase 1 v37 fix): the email field is the
         // gate that reveals every other field. Validation MUST surface
@@ -491,14 +531,27 @@ function SubmissionPage() {
 
     // Persist a debounced draft of the form so a refresh / app-switch never
     // loses progress before the talent record is created on the backend.
+    // Also drives the subtle "Saving… / Saved" autosave indicator (Sprint 1).
     useEffect(() => {
+        const first = !draftMountRef.current;
+        if (first) draftMountRef.current = true;
+        else setSaveStatus("saving");
         const t = setTimeout(() => {
             try {
                 localStorage.setItem(LS_DRAFT_KEY(slug), JSON.stringify(form));
             } catch (e) { console.error(e); }
+            if (!first) setSaveStatus("saved");
         }, 1200);
         return () => clearTimeout(t);
     }, [form, slug]);
+
+    // Revert the "Saved" badge back to its resting state after a beat so the
+    // indicator stays subtle rather than permanently announcing itself.
+    useEffect(() => {
+        if (saveStatus !== "saved") return;
+        const t = setTimeout(() => setSaveStatus("idle"), 2500);
+        return () => clearTimeout(t);
+    }, [saveStatus]);
     // Convenience wrapper that returns a boolean (vs the form-handler version).
     async function startSubmissionDirect() {
         const err = validateForm();
@@ -987,6 +1040,36 @@ function SubmissionPage() {
     const indianImages = media.filter((m) => m.category === "indian");
     const westernImages = media.filter((m) => m.category === "western");
     const allImages = [...images, ...indianImages, ...westernImages];
+
+    // Sprint 2 — single source of truth for submission progress, consumed by
+    // BOTH the in-page tracker and the sticky mobile progress bar so the two can
+    // never drift. Same completion rules as Sprint 1; nothing hardcoded.
+    const progressSteps = useMemo(() => {
+        const steps = [
+            {
+                label: "Profile",
+                fullLabel: "Your Profile",
+                completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.height && form.location && form.location.length > 0),
+            },
+            {
+                label: "Questions",
+                fullLabel: "Project Questions",
+                completed: !!(form.availability?.status && (form.availability.status !== "no" || form.availability.note?.trim()) && form.budget?.status && (form.budget.status !== "custom" || form.budget.value?.trim())),
+            },
+            {
+                label: "Uploads",
+                fullLabel: "Uploads (Optional)",
+                completed: media.length > 0,
+            },
+        ];
+        const currentIndex = steps.findIndex((s) => !s.completed);
+        return {
+            steps,
+            currentIndex,
+            allDone: currentIndex === -1,
+            stepNumber: currentIndex === -1 ? steps.length : currentIndex + 1,
+        };
+    }, [form.first_name, form.last_name, form.height, form.location, form.availability, form.budget, media.length]);
 
     const intro = media.find((m) => m.category === "intro_video");
     const takes = media
@@ -1677,7 +1760,7 @@ function SubmissionPage() {
                 </div>
             </header>
 
-            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10">
+            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10 pb-28 sm:pb-10">
                 {/* SECTION 1 — Project Info */}
                 <section className="mb-8 bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-4">Audition Brief</p>
@@ -1733,36 +1816,43 @@ function SubmissionPage() {
                 </section>
 
                 {/* SUBMISSION PROGRESS CHECKLIST */}
-                {emailGateUnlocked && (
+                {emailGateUnlocked && (() => {
+                    // Sprint 2 — now reads the shared `progressSteps` memo so the
+                    // in-page tracker and the sticky mobile bar stay in lockstep.
+                    const { currentIndex, allDone, stepNumber } = progressSteps;
+                    const steps = progressSteps.steps.map((s) => ({ label: s.fullLabel, completed: s.completed }));
+                    return (
                     <section className="mb-10 bg-white rounded-3xl p-6 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-black font-semibold mb-3">Submission Progress</p>
+                        <div className="flex items-center justify-between mb-3 gap-3">
+                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-black font-semibold">Submission Progress</p>
+                            <p className="uppercase tracking-[0.18em] text-[10px] font-mono text-[#333333] font-semibold shrink-0" data-testid="submission-progress-step">
+                                {allDone ? "All steps complete" : `Step ${stepNumber} of ${steps.length}`}
+                            </p>
+                        </div>
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            {[
-                                { 
-                                    label: "Your Profile", 
-                                    completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.height && form.location && form.location.length > 0) 
-                                },
-                                { 
-                                    label: "Project Questions", 
-                                    completed: !!(form.availability?.status && (form.availability.status !== "no" || form.availability.note?.trim()) && form.budget?.status && (form.budget.status !== "custom" || form.budget.value?.trim())) 
-                                },
-                                { 
-                                    label: "Uploads (Optional)", 
-                                    completed: true 
-                                }
-                            ].map((item, idx) => (
-                                <div 
-                                    key={idx} 
+                            {steps.map((item, idx) => {
+                                const state = item.completed ? "completed" : idx === currentIndex ? "current" : "upcoming";
+                                return (
+                                <div
+                                    key={idx}
+                                    data-testid={`submission-progress-step-${idx}`}
+                                    data-state={state}
                                     className={`flex items-center gap-2.5 px-3 py-2.5 rounded-2xl border transition-all duration-300 ${
-                                        item.completed 
-                                            ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-900 font-semibold" 
-                                            : "bg-slate-50/50 border-slate-100 text-black font-semibold"
+                                        state === "completed"
+                                            ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-900 font-semibold"
+                                            : state === "current"
+                                                ? "bg-[#0c2340]/[0.04] border-[#0c2340]/20 text-[#0c2340] font-semibold"
+                                                : "bg-slate-50/50 border-slate-100 text-[#333333] font-semibold"
                                     }`}
                                 >
                                     <span className="shrink-0">
-                                        {item.completed ? (
+                                        {state === "completed" ? (
                                             <div className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-sm">
                                                 <Check className="w-3 h-3 stroke-[3]" />
+                                            </div>
+                                        ) : state === "current" ? (
+                                            <div className="w-5 h-5 rounded-full bg-[#0c2340] flex items-center justify-center shadow-sm">
+                                                <div className="w-1.5 h-1.5 rounded-full bg-white" />
                                             </div>
                                         ) : (
                                             <div className="w-5 h-5 rounded-full border-2 border-[#eaeaea] bg-white" />
@@ -1772,10 +1862,36 @@ function SubmissionPage() {
                                         {item.label}
                                     </span>
                                 </div>
-                            ))}
+                                );
+                            })}
+                        </div>
+                        {/* Sprint 1 — autosave reassurance + live indicator */}
+                        <div className="mt-4 pt-3 border-t border-[#eaeaea]/60 flex items-start justify-between gap-3">
+                            <p className="text-[11px] leading-relaxed text-[#333333] font-mono">
+                                Your progress is automatically saved.<br className="hidden sm:block" />
+                                {" "}You can continue later using the same email.
+                            </p>
+                            <span
+                                data-testid="autosave-indicator"
+                                aria-live="polite"
+                                className="shrink-0 inline-flex items-center gap-1.5 text-[11px] font-mono font-semibold tracking-tight"
+                            >
+                                {saveStatus === "saving" ? (
+                                    <>
+                                        <span className="w-1.5 h-1.5 rounded-full bg-[#0c2340]/50 animate-pulse" />
+                                        <span className="text-[#333333]">Saving…</span>
+                                    </>
+                                ) : saveStatus === "saved" ? (
+                                    <>
+                                        <Check className="w-3 h-3 stroke-[3] text-emerald-500" />
+                                        <span className="text-emerald-700">Saved</span>
+                                    </>
+                                ) : null}
+                            </span>
                         </div>
                     </section>
-                )}
+                    );
+                })()}
 
                 {/* SECTION 2 — TALENT DETAILS FORM */}
                 <section
@@ -2093,7 +2209,7 @@ function SubmissionPage() {
                                             testid="form-dob"
                                             className="[color-scheme:light]"
                                             autoComplete="bday"
-                                            hint="We automatically calculate age from your date of birth."
+                                            hint="Format: DD / MM / YYYY. We automatically calculate age from your date of birth."
                                         />
                                         
                                         {/* Project-specific age override checkbox and input */}
@@ -2169,9 +2285,40 @@ function SubmissionPage() {
                                         </div>
 
                                         <div data-testid="form-height-field">
-                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                Height *
-                                            </span>
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                                                    Height *
+                                                </span>
+                                                {/* Sprint 1 — unit toggle. Stored value is unchanged; only the
+                                                    labels switch between feet/inches and centimetres. */}
+                                                <div
+                                                    role="radiogroup"
+                                                    aria-label="Height unit"
+                                                    data-testid="height-unit-toggle"
+                                                    className="inline-flex items-center rounded-full border border-[#eaeaea] bg-white p-0.5 shrink-0"
+                                                >
+                                                    {[
+                                                        { key: "ft", label: "Feet/Inches" },
+                                                        { key: "cm", label: "Centimeters" },
+                                                    ].map((u) => (
+                                                        <button
+                                                            key={u.key}
+                                                            type="button"
+                                                            role="radio"
+                                                            aria-checked={heightUnit === u.key}
+                                                            onClick={() => setHeightUnit(u.key)}
+                                                            data-testid={`height-unit-${u.key}`}
+                                                            className={`px-3 py-1 rounded-full text-[11px] font-mono font-semibold transition-all duration-200 min-h-[28px] ${
+                                                                heightUnit === u.key
+                                                                    ? "bg-[#0c2340] text-white"
+                                                                    : "text-[#333333] hover:text-[#111111]"
+                                                            }`}
+                                                        >
+                                                            {u.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
                                             <div className="mt-2">
                                                 <Select
                                                     value={form.height || ""}
@@ -2187,14 +2334,17 @@ function SubmissionPage() {
                                                         <SelectValue placeholder="Select height" />
                                                     </SelectTrigger>
                                                     <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
-                                                        {HEIGHT_OPTIONS.map((h) => (
-                                                            <SelectItem
-                                                                key={h}
-                                                                value={h}
-                                                            >
-                                                                {h}
-                                                            </SelectItem>
-                                                        ))}
+                                                        {heightUnit === "cm"
+                                                            ? HEIGHT_CM_OPTIONS.map((h) => (
+                                                                <SelectItem key={h.value} value={h.value}>
+                                                                    {h.cm} cm
+                                                                </SelectItem>
+                                                            ))
+                                                            : HEIGHT_OPTIONS.map((h) => (
+                                                                <SelectItem key={h} value={h}>
+                                                                    {h}
+                                                                </SelectItem>
+                                                            ))}
                                                     </SelectContent>
                                                 </Select>
                                             </div>
@@ -2318,6 +2468,9 @@ function SubmissionPage() {
                                             }}
                                             testid="form-instagram-handle"
                                             placeholder="@yourhandle"
+                                            autoCapitalize="none"
+                                            autoCorrect="off"
+                                            spellCheck={false}
                                             hint="Optional, but helps casting teams review additional work."
                                         />
                                         <div data-testid="form-instagram-followers-field">
@@ -2519,6 +2672,9 @@ function SubmissionPage() {
                                                 <p className="text-[18px] font-semibold text-[#111111] leading-snug">
                                                     {project.commission_percent}
                                                 </p>
+                                                <p className="text-[11px] text-[#333333] mt-1.5 font-mono leading-relaxed">
+                                                    Talentgram's agency fee, deducted from your project payment. The amount you receive is after this commission.
+                                                </p>
                                             </div>
                                         </div>
                                     )}
@@ -2535,22 +2691,37 @@ function SubmissionPage() {
                                                     Project Budget
                                                 </p>
                                                 {project.budget_per_day && (
-                                                    <p className="text-[18px] font-semibold text-[#111111] leading-snug">
-                                                        {project.budget_per_day}
-                                                    </p>
+                                                    <>
+                                                        <p className="text-[18px] font-semibold text-[#111111] leading-snug">
+                                                            {project.budget_per_day}
+                                                        </p>
+                                                        {expandIndianBudgetShorthand(project.budget_per_day) && (
+                                                            <p className="text-[12px] text-[#333333] mt-0.5 font-mono" data-testid="budget-per-day-expanded">
+                                                                {expandIndianBudgetShorthand(project.budget_per_day)}
+                                                            </p>
+                                                        )}
+                                                    </>
                                                 )}
                                                 {Array.isArray(project.talent_budget) && project.talent_budget.length > 0 && (
                                                     <div className={`space-y-3 ${project.budget_per_day ? "border-t border-slate-100 pt-4 mt-4" : ""}`}>
-                                                        {project.talent_budget.map((row, i) => (
+                                                        {project.talent_budget.map((row, i) => {
+                                                            const expanded = expandIndianBudgetShorthand(row.value);
+                                                            return (
                                                             <div
                                                                 key={`${row.label || ""}-${i}`}
                                                                 className="flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-4 text-[15px] leading-relaxed text-[#111111] font-medium"
                                                                 data-testid={`talent-budget-line-${i}`}
                                                             >
                                                                 <span className="text-[#333333] whitespace-pre-wrap">{row.label || "—"}</span>
-                                                                <span className="text-slate-950 font-semibold shrink-0">{row.value || "—"}</span>
+                                                                <span className="text-right shrink-0">
+                                                                    <span className="block text-slate-950 font-semibold">{row.value || "—"}</span>
+                                                                    {expanded && (
+                                                                        <span className="block text-[12px] text-[#333333] font-mono">{expanded}</span>
+                                                                    )}
+                                                                </span>
                                                             </div>
-                                                        ))}
+                                                            );
+                                                        })}
                                                     </div>
                                                 )}
                                             </div>
@@ -2596,27 +2767,32 @@ function SubmissionPage() {
                                                             : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                     }`}
                                                 >
-                                                    Propose Own
+                                                    Propose Different Budget
                                                 </button>
                                             </div>
                                             {form.budget.status === "custom" && (
-                                                <input
-                                                    type="text"
-                                                    value={form.budget.value}
-                                                    onChange={(e) =>
-                                                        setForm({
-                                                            ...form,
-                                                            budget: {
-                                                                ...form.budget,
-                                                                value: e.target.value,
-                                                            },
-                                                        })
-                                                    }
-                                                    onBlur={saveForm}
-                                                    placeholder="Enter your expected budget per day"
-                                                    data-testid="budget-value-input"
-                                                    className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                                />
+                                                <>
+                                                    <input
+                                                        type="text"
+                                                        value={form.budget.value}
+                                                        onChange={(e) =>
+                                                            setForm({
+                                                                ...form,
+                                                                budget: {
+                                                                    ...form.budget,
+                                                                    value: e.target.value,
+                                                                },
+                                                            })
+                                                        }
+                                                        onBlur={saveForm}
+                                                        placeholder="Enter your expected budget per day"
+                                                        data-testid="budget-value-input"
+                                                        className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                    />
+                                                    <p className="text-[11px] text-[#333333] mt-1.5 font-mono leading-relaxed">
+                                                        Proposing a different budget won't affect your consideration for this project.
+                                                    </p>
+                                                </>
                                             )}
                                         </div>
                                     )}
@@ -3214,6 +3390,53 @@ function SubmissionPage() {
                     />
                 </div>
             )}
+
+            {/* Sprint 2 — sticky MOBILE-ONLY progress bar. Hidden ≥sm, respects the
+                bottom safe-area inset, and is slim so it never blocks inputs. Reads
+                the shared `progressSteps` memo, so it always matches the in-page
+                tracker. Suppressed once the submission is finalized. */}
+            {emailGateUnlocked && !finalizing && submission?.status !== "submitted" && (
+                <div
+                    data-testid="sticky-mobile-progress"
+                    className="sm:hidden fixed inset-x-0 bottom-0 z-40 border-t border-[#eaeaea] bg-white/95 backdrop-blur-md shadow-[0_-2px_12px_rgba(15,23,42,0.06)]"
+                    style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+                    role="group"
+                    aria-label="Submission progress"
+                >
+                    <div className="px-4 py-2.5 flex items-center gap-3">
+                        <span className="text-[11px] font-mono font-semibold tracking-tight text-[#0c2340] shrink-0" aria-live="polite">
+                            {progressSteps.allDone ? "All done" : `Step ${progressSteps.stepNumber} of ${progressSteps.steps.length}`}
+                        </span>
+                        <div className="flex-1 flex items-center justify-end gap-3 min-w-0">
+                            {progressSteps.steps.map((s, idx) => {
+                                const state = s.completed ? "completed" : idx === progressSteps.currentIndex ? "current" : "upcoming";
+                                return (
+                                    <span key={s.label} className="inline-flex items-center gap-1 min-w-0" data-state={state} data-testid={`sticky-step-${idx}`}>
+                                        <span className="shrink-0">
+                                            {state === "completed" ? (
+                                                <span className="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center">
+                                                    <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                                </span>
+                                            ) : state === "current" ? (
+                                                <span className="w-4 h-4 rounded-full bg-[#0c2340] flex items-center justify-center">
+                                                    <span className="w-1 h-1 rounded-full bg-white" />
+                                                </span>
+                                            ) : (
+                                                <span className="w-4 h-4 rounded-full border-2 border-[#d4d4d4] bg-white block" />
+                                            )}
+                                        </span>
+                                        <span className={`text-[11px] font-medium tracking-tight truncate ${
+                                            state === "completed" ? "text-emerald-700" : state === "current" ? "text-[#0c2340] font-semibold" : "text-[#999]"
+                                        }`}>
+                                            {s.label}
+                                        </span>
+                                    </span>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -3563,6 +3786,11 @@ function PremiumFormField({
     className = "",
     error,
     inputRef,
+    autoCapitalize,
+    autoCorrect,
+    spellCheck,
+    inputMode: inputModeProp,
+    autoComplete: autoCompleteProp,
 }) {
     const [localValue, setLocalValue] = useState(value || "");
 
@@ -3602,22 +3830,27 @@ function PremiumFormField({
                 max={max}
                 disabled={disabled}
                 inputMode={
-                    type === "email"
+                    inputModeProp ||
+                    (type === "email"
                         ? "email"
                         : type === "tel"
                           ? "tel"
                           : type === "number"
                             ? "numeric"
-                            : undefined
+                            : undefined)
                 }
                 enterKeyHint="next"
                 autoComplete={
-                    type === "email"
+                    autoCompleteProp ||
+                    (type === "email"
                         ? "email"
                         : type === "tel"
                           ? "tel"
-                          : undefined
+                          : undefined)
                 }
+                autoCapitalize={autoCapitalize}
+                autoCorrect={autoCorrect}
+                spellCheck={spellCheck}
                 data-testid={testid}
                 className={`mt-2 w-full bg-white/60 rounded-2xl border focus:ring-4 focus:ring-[#0c2340]/10 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${
                     error

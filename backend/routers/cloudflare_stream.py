@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, HTTPException, Header
 import logging
 import json
 import os
+import re
 import hmac
 import hashlib
 from datetime import datetime, timezone
@@ -99,7 +100,22 @@ async def cloudflare_stream_webhook(
             "media.$.stream_uid": uid,
             "media.$.provider": "stream"
         }
-        
+
+        # P1-C fix: mark the R2 tracking row complete. The R2 ledger row's
+        # public_id is the raw key (raw-uploads/{scope}s/{parent_id}/{category}/…),
+        # so match by that prefix — scope-agnostic and exact. Without this the row
+        # stays "processing" forever after Stream finishes.
+        try:
+            _prefix = f"raw-uploads/{scope}s/{parent_id}/{category}/"
+            await db.asset_metadata.update_many(
+                {"public_id": {"$regex": f"^{re.escape(_prefix)}"},
+                 "upload_status": {"$in": ["pending", "processing"]}},
+                {"$set": {"upload_status": "completed", "stream_uid": uid,
+                          "updated_at": datetime.now(timezone.utc)}},
+            )
+        except Exception as e:
+            logger.warning(f"[Cloudflare Stream Webhook] asset_metadata complete update failed: {e}")
+
         if scope == "submission":
             res = await db.submissions.update_one(
                 {"id": parent_id, "media.id": media_id},
@@ -134,6 +150,18 @@ async def cloudflare_stream_webhook(
             await db.submissions.update_one({"id": parent_id, "media.id": media_id}, {"$set": update_fields})
         elif scope == "application":
             await db.applications.update_one({"id": parent_id, "media.id": media_id}, {"$set": update_fields})
+        # P1-C fix: mirror the failure onto the R2 tracking row so it doesn't sit
+        # in "processing" indefinitely.
+        try:
+            _prefix = f"raw-uploads/{scope}s/{parent_id}/{category}/"
+            await db.asset_metadata.update_many(
+                {"public_id": {"$regex": f"^{re.escape(_prefix)}"},
+                 "upload_status": {"$in": ["pending", "processing"]}},
+                {"$set": {"upload_status": "failed", "error_reason": err_msg,
+                          "updated_at": datetime.now(timezone.utc)}},
+            )
+        except Exception as e:
+            logger.warning(f"[Cloudflare Stream Webhook] asset_metadata fail update failed: {e}")
         logger.warning(f"[Cloudflare Stream Webhook] Video uid={uid} failed processing: {err_msg}")
 
     return {"status": "ok"}

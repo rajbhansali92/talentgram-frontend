@@ -2034,8 +2034,10 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 {"$pull": {"media": {"category": {"$in": list(incoming_categories)}}}}
             )
 
+        # P2-A: skip the per-item cover recompute (O(N²)); recompute once after.
         for m in finalized_sub.get("media") or []:
-            await sync_media_to_global_talent(finalized_sub, m)
+            await sync_media_to_global_talent(finalized_sub, m, skip_cover_cache=True)
+        await update_talent_cover_cache(talent_doc["id"])
 
     # Auto-create pipeline entry on first-time finalize.
     # Ensures every submitted talent automatically appears in the casting

@@ -145,7 +145,12 @@ class CloudflareStreamProvider(VideoProvider):
 
 
 def get_video_provider() -> VideoProvider:
-    provider_name = os.environ.get("VIDEO_PROVIDER", "cloudinary").strip().lower()
+    # Architecture mandate: video → Cloudflare Stream. Default to "stream" so a
+    # missing/unset VIDEO_PROVIDER can never SILENTLY route audition video to
+    # Cloudinary (which violates the storage architecture and fails loudly in logs
+    # if Stream creds are absent, rather than quietly mis-storing video). Set
+    # VIDEO_PROVIDER=cloudinary explicitly only for legacy/opt-out.
+    provider_name = os.environ.get("VIDEO_PROVIDER", "stream").strip().lower()
     if provider_name == "stream":
         return CloudflareStreamProvider()
     return CloudinaryProvider()

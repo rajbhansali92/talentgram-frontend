@@ -10,6 +10,7 @@ import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
 import ThemeToggle from "@/components/ThemeToggle";
+import HlsVideo from "@/components/HlsVideo";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import {
     Select,
@@ -3965,7 +3966,7 @@ function PremiumUploadSlot({
                                 </div>
                             ) : (
                                 <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[240px] animate-fadeIn">
-                                    <video
+                                    <HlsVideo
                                         src={media.url}
                                         poster={posterUrl(media) || thumbnailUrl(media)}
                                         controls
@@ -4187,7 +4188,7 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
             data-testid={`take-row-${index}`}
         >
             <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[220px]">
-                <video
+                <HlsVideo
                     src={media.url}
                     poster={posterUrl(media) || thumbnailUrl(media)}
                     controls

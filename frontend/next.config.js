@@ -41,8 +41,14 @@ const securityHeaders = [
       "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://accounts.google.com https://apis.google.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
-      "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.talentgramagency.com",
-      "media-src 'self' blob: https://res.cloudinary.com",
+      // Cloudflare migration: R2 serves raw video posters/previews while a clip
+      // is still transcoding (presigned GET on *.r2.cloudflarestorage.com), and
+      // Cloudflare Stream serves the final HLS playlist + poster thumbnails on
+      // *.cloudflarestream.com. Both must be allow-listed for img-src (posters)
+      // and media-src (<video> playback) or the browser blocks them with a CSP
+      // violation — see the R2/Stream playback regression.
+      "img-src 'self' data: blob: https://res.cloudinary.com https://lh3.googleusercontent.com https://*.talentgramagency.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com",
+      "media-src 'self' blob: https://res.cloudinary.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com",
       // nominatim.openstreetmap.org powers the city/location autocomplete in
       // LocationSelector (apply, submit, talent edit). It is a fetch() XHR, so
       // it must be allow-listed in connect-src or the browser blocks it with a
@@ -52,7 +58,11 @@ const securityHeaders = [
       // (image /upload/sign path + chunked audition-video transport). It is an
       // XHR POST, so without it in connect-src the browser blocks every upload
       // even after the backend returns a valid signature.
-      "connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com",
+      // *.cloudflarestream.com is required in connect-src because hls.js fetches
+      // the HLS manifest (video.m3u8) and media segments over XHR/fetch when the
+      // browser lacks native HLS (Chrome/Firefox). Without it, Stream playback
+      // fails even though media-src allows the <video> element.
+      "connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com",
       "worker-src 'self' blob:",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",

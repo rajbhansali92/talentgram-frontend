@@ -1661,28 +1661,6 @@ def enqueue_internal_whatsapp_notification(submission: dict, event_type: str, de
 
 @router.post("/public/submissions/{sid}/finalize")
 async def submission_finalize(sid: str, authorization: Optional[str] = Header(None)):
-    # TEMP DIAGNOSTIC (submit-audition incident): the real work lives in
-    # _submission_finalize_impl. This thin wrapper logs a full traceback with the
-    # exact file:line for any UNHANDLED exception, so Railway shows the failing
-    # line instead of a masked 500. Intentional validation HTTPExceptions are
-    # logged at warning and re-raised unchanged. Remove after root cause.
-    import traceback as _tb
-    logger.info(f"[FINALIZE] ▶ start sid={sid}")
-    try:
-        _res = await _submission_finalize_impl(sid, authorization)
-        logger.info(f"[FINALIZE] ✔ success sid={sid}")
-        return _res
-    except HTTPException as _he:
-        logger.warning(
-            f"[FINALIZE] ✖ HTTPException sid={sid} status={_he.status_code} detail={_he.detail!r}"
-        )
-        raise
-    except Exception:
-        logger.error(f"[FINALIZE] ✖ UNHANDLED sid={sid}\n{_tb.format_exc()}")
-        raise
-
-
-async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Header(None)):
     submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
@@ -1836,9 +1814,15 @@ async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Hea
                         raise HTTPException(400, f"Conditional requirement '{video_label}' is missing")
     else:
         # Fallback legacy validation rules
-        for field in ("first_name", "last_name", "height", "location"):
+        for field in ("first_name", "last_name", "height"):
             if not (form.get(field) or "").strip():
                 raise HTTPException(400, f"{field.replace('_',' ').title()} is required")
+        # location may be a structured array (post-2026-06-12 migration) or a
+        # legacy string — guard both shapes. Calling .strip() on a list raised
+        # AttributeError → unhandled 500 on every legacy-validation finalize.
+        loc_val = form.get("location")
+        if not loc_val or (isinstance(loc_val, str) and not loc_val.strip()):
+            raise HTTPException(400, "Location is required")
         avail = form.get("availability") or {}
         if isinstance(avail, str):
             avail = {"status": "yes" if avail else "", "note": avail}
@@ -1891,7 +1875,6 @@ async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Hea
         if pending_assets:
             raise HTTPException(400, "Cloudinary uploads are still in progress. Please wait until uploads are complete.")
 
-    logger.info(f"[FINALIZE] stage=validation+pending OK sid={sid}")
     # First-time finalize vs retest finalize
     is_retest = sub.get("status") in ("submitted", "updated")
     new_status = "updated" if is_retest else "submitted"
@@ -2021,7 +2004,6 @@ async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Hea
     if talent_doc:
         patch["talent_id"] = talent_doc["id"]
 
-    logger.info(f"[FINALIZE] stage=talent-merge OK sid={sid} talent_id={(talent_doc or {}).get('id')}")
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 
     # Sync all uploads retroactively into the talent's global media.
@@ -2054,7 +2036,6 @@ async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Hea
 
         for m in finalized_sub.get("media") or []:
             await sync_media_to_global_talent(finalized_sub, m)
-    logger.info(f"[FINALIZE] stage=media-sync OK sid={sid}")
 
     # Auto-create pipeline entry on first-time finalize.
     # Ensures every submitted talent automatically appears in the casting
@@ -2085,7 +2066,6 @@ async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Hea
                     decision=current_decision,
                 )
 
-    logger.info(f"[FINALIZE] stage=pipeline OK sid={sid}")
     # Fan out an admin notification — first-time finalize vs retest variant.
     project = await db.projects.find_one(
         {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}
@@ -2115,7 +2095,6 @@ async def _submission_finalize_impl(sid: str, authorization: Optional[str] = Hea
             "RETEST SUBMITTED" if is_retest else "NEW SUBMISSION"
         )
     await update_talent_submission_metrics(email)
-    logger.info(f"[FINALIZE] stage=notifications+metrics OK sid={sid}")
     return {
         "ok": True,
         "status": new_status,

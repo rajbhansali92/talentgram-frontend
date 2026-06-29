@@ -90,6 +90,11 @@ const TABS = [
     { key: "not_sure", label: "Unsure", icon: HelpCircle },
 ];
 
+// Essential filters shown by default on desktop; the rest collapse behind "More"
+// to reduce first-impression cognitive load. All tabs remain in TABS and stay
+// fully functional (and the mobile <select> still lists every tab).
+const PRIMARY_TAB_KEYS = ["all", "pending_action", "shortlist", "interested"];
+
 // Helper to parse FastAPI/Pydantic validation errors safely
 function formatErrorMessage(error) {
     const detail = error?.response?.data?.detail;
@@ -352,8 +357,10 @@ export default function ClientView() {
     const [reviewedIds, setReviewedIds] = useState(new Set());
     const [selectedIds, setSelectedIds] = useState(new Set());
     const [activeTab, setActiveTab] = useState("all");
+    const [showMoreTabs, setShowMoreTabs] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [showResumeBanner, setShowResumeBanner] = useState(false);
+    const [showHint, setShowHint] = useState(false);
 
     // ── Stabilization refs ───────────────────────────────────────────────────
     /** Prevents double-submission on rapid taps on the identity gate. */
@@ -546,6 +553,24 @@ export default function ClientView() {
             }
         } catch (e) { console.error(e); }
     }, [data, slug, reviewedIds, viewerActions]);
+
+    // One-time, dismissible orientation hint for first-time clients. Gated by a
+    // per-slug localStorage flag; never shown in share-preview mode. Safari
+    // private-mode safe (storage access wrapped in try/catch).
+    useEffect(() => {
+        if (shareId) return;
+        if (!data || !data.talents || data.talents.length === 0) return;
+        try {
+            if (!localStorage.getItem(`tg_hint_seen_${slug}`)) {
+                setShowHint(true);
+            }
+        } catch (e) { /* storage disabled — skip hint */ }
+    }, [data, slug, shareId]);
+
+    const dismissHint = useCallback(() => {
+        setShowHint(false);
+        try { localStorage.setItem(`tg_hint_seen_${slug}`, "1"); } catch (e) { /* storage disabled */ }
+    }, [slug]);
 
     useEffect(() => {
         const prev = document.title;
@@ -1097,9 +1122,11 @@ export default function ClientView() {
     const subjectAddedAt = data.subject_added_at || {};
     const prevVisitAt = data?.client_state?.prev_visit_at || null;
 
-    const isShortlisted = (id) => viewerActions[id]?.action === "shortlist";
     const isNew = (id) => {
         if (!prevVisitAt) return false;
+        // A talent the client has already seen/reviewed is never "new", regardless
+        // of when it was added relative to the (token-lifetime) visit baseline.
+        if (seenIds.has(id) || reviewedIds.has(id)) return false;
         const t = subjectAddedAt[id];
         if (!t) return false;
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
@@ -1121,7 +1148,7 @@ export default function ClientView() {
                             {link.title}
                         </h1>
                         <p className="text-xs text-[#8A8A8A] mt-1 font-sans">
-                            {viewer.name} &bull; {seenCount} / {totalCount} reviewed
+                            {viewer.name} &bull; {seenCount} / {totalCount} viewed
                         </p>
                     </div>
                     <div className="md:hidden mt-3 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
@@ -1177,6 +1204,27 @@ export default function ClientView() {
                     );
                 })()}
 
+                {showHint && (
+                    <div className="mb-6 animate-fade-in" data-testid="first-time-hint">
+                        <div className="bg-black/[0.02] border border-black/[0.06] rounded-xl px-4 py-3 flex items-start justify-between gap-4">
+                            <div className="flex items-start gap-3 min-w-0">
+                                <Sparkles className="w-4 h-4 text-[var(--tg-navy-primary)] shrink-0 mt-0.5" />
+                                <p className="text-xs md:text-sm text-[#4A4A4A] leading-relaxed">
+                                    Review each talent, choose the ones that fit — your selections are saved automatically.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={dismissHint}
+                                className="flex items-center justify-center w-11 h-11 -m-2 text-[#8A8A8A] hover:text-[#111111] shrink-0"
+                                aria-label="Dismiss hint"
+                                data-testid="first-time-hint-dismiss"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 <div
                     className="mb-5 hidden md:flex items-center gap-5"
@@ -1193,6 +1241,14 @@ export default function ClientView() {
 
                 {(() => {
                     const visibleTabs = TABS;
+                    // Desktop progressive disclosure: primary tabs always shown;
+                    // secondary tabs revealed via "More" (or auto-shown if the
+                    // active tab lives in the secondary group).
+                    const primaryTabs = TABS.filter((t) => PRIMARY_TAB_KEYS.includes(t.key));
+                    const secondaryTabs = TABS.filter((t) => !PRIMARY_TAB_KEYS.includes(t.key));
+                    const activeInSecondary = secondaryTabs.some((t) => t.key === activeTab);
+                    const showSecondary = showMoreTabs || activeInSecondary;
+                    const desktopTabs = showSecondary ? [...primaryTabs, ...secondaryTabs] : primaryTabs;
                     return (
                         <div
                             className="mb-8 md:mb-12 -mx-6 md:mx-0 px-6 md:px-0 border-b border-black/[0.04] pb-6"
@@ -1201,7 +1257,7 @@ export default function ClientView() {
                             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                                 {/* Desktop tab row */}
                                 <div className="hidden md:flex items-center gap-3 overflow-x-auto whitespace-nowrap" style={{ scrollbarWidth: "none" }} data-testid="client-view-tabs">
-                                    {visibleTabs.map((tab) => {
+                                    {desktopTabs.map((tab) => {
                                         const count = buckets[tab.key]?.length || 0;
                                         const active = activeTab === tab.key;
                                         return (
@@ -1226,6 +1282,18 @@ export default function ClientView() {
                                             </button>
                                         );
                                     })}
+                                    {secondaryTabs.length > 0 && !activeInSecondary && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowMoreTabs((v) => !v)}
+                                            data-testid="client-tabs-more-toggle"
+                                            aria-expanded={showSecondary}
+                                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-[11px] tracking-[0.08em] uppercase transition-colors duration-150 border shrink-0 active:scale-[0.97] border-black/[0.06] text-[#5C5C5C] hover:text-[#111111] hover:border-black/15"
+                                        >
+                                            {showMoreTabs ? "Less" : "More"}
+                                            <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-150 ${showMoreTabs ? "rotate-180" : ""}`} />
+                                        </button>
+                                    )}
                                 </div>
 
                                 {/* Mobile dropdown selector */}
@@ -1414,7 +1482,7 @@ export default function ClientView() {
             {selectedIds.size > 0 && (
                 <div 
                     data-testid="bulk-action-bar" 
-                    className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-[var(--tg-navy-primary)] text-white border border-[var(--tg-navy-border)] shadow-2xl rounded-2xl px-6 py-4 flex items-center justify-between gap-6 z-40 animate-fade-in max-w-[90vw] md:max-w-3xl"
+                    className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 bg-[var(--tg-navy-primary)] text-white border border-[var(--tg-navy-border)] shadow-2xl rounded-2xl px-6 py-4 flex items-center justify-between gap-6 z-40 animate-fade-in max-w-[90vw] md:max-w-3xl"
                 >
                     <div className="flex items-center gap-2.5">
                         <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs font-mono font-semibold">
@@ -1429,7 +1497,7 @@ export default function ClientView() {
                         <button
                             onClick={() => setBulkAction(Array.from(selectedIds), "interested")}
                             data-testid="bulk-action-interested"
-                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
                         >
                             <ThumbsUp className="w-3.5 h-3.5" />
                             <span className="hidden sm:inline">Audition Approved</span>
@@ -1438,7 +1506,7 @@ export default function ClientView() {
                         <button
                             onClick={() => setBulkAction(Array.from(selectedIds), "shortlist")}
                             data-testid="bulk-action-shortlist"
-                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
                         >
                             <Star className="w-3.5 h-3.5" />
                             Shortlist
@@ -1446,7 +1514,7 @@ export default function ClientView() {
                         <button
                             onClick={() => setBulkAction(Array.from(selectedIds), "not_for_this")}
                             data-testid="bulk-action-not_for_this"
-                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-rose-950/40 hover:bg-rose-900/60 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-rose-500/20 text-rose-200"
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-rose-950/40 hover:bg-rose-900/60 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-rose-500/20 text-rose-200"
                         >
                             <XCircle className="w-3.5 h-3.5" />
                             <span className="hidden md:inline">Does Not Work</span>
@@ -1455,7 +1523,7 @@ export default function ClientView() {
                         <button
                             onClick={() => setBulkAction(Array.from(selectedIds), "lock")}
                             data-testid="bulk-action-lock"
-                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
                         >
                             <Lock className="w-3.5 h-3.5" />
                             Lock
@@ -1463,7 +1531,7 @@ export default function ClientView() {
                         <button
                             onClick={() => setBulkAction(Array.from(selectedIds), "not_sure")}
                             data-testid="bulk-action-not_sure"
-                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
                         >
                             <HelpCircle className="w-3.5 h-3.5" />
                             Unsure
@@ -1471,7 +1539,7 @@ export default function ClientView() {
                         <button
                             onClick={() => setBulkAction(Array.from(selectedIds), "ask_for_test")}
                             data-testid="bulk-action-ask_for_test"
-                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
                         >
                             <ClipboardCheck className="w-3.5 h-3.5" />
                             Ask for Test
@@ -1482,7 +1550,7 @@ export default function ClientView() {
 
                     <button
                         onClick={() => setSelectedIds(new Set())}
-                        className="p-1.5 hover:bg-white/10 rounded-full transition-colors"
+                        className="flex items-center justify-center w-11 h-11 hover:bg-white/10 rounded-full transition-colors"
                         aria-label="Cancel selection"
                     >
                         <X className="w-4 h-4 text-white/60 hover:text-white" />
@@ -1517,7 +1585,6 @@ function TalentDetail({
     sendingVoice,
     isSharePreview = false,
 }) {
-    console.log("CLIENT VIEW DATA (TalentDetail)", talent);
     const renderCommentsHistory = () => {
         if (!talent.comments || talent.comments.length === 0) return null;
         return (
@@ -2343,7 +2410,7 @@ function TalentDetail({
                                             <button
                                                 onClick={() => onMarkReviewed(talent.id)}
                                                 disabled={isReviewed}
-                                                className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-full text-xs font-medium transition-colors duration-150 ${
+                                                className={`flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] border rounded-full text-xs font-medium transition-colors duration-150 ${
                                                     isReviewed
                                                         ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
                                                         : "border-[#eaeaea] hover:border-black/20 text-[#4A4A4A]"
@@ -2358,7 +2425,7 @@ function TalentDetail({
                                             {visibleActions.map((a) => {
                                                 const active = viewerAction?.action === a.key;
                                                 return (
-                                                    <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}-mobile`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-[#eaeaea] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
+                                                    <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}-mobile`} className={`flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-[#eaeaea] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
                                                         <a.icon className={`w-3.5 h-3.5 ${active ? "opacity-90" : "opacity-40"}`} />
                                                         {a.label}
                                                     </button>
@@ -2373,7 +2440,7 @@ function TalentDetail({
                                             <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
                                         </div>
                                         <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
-                                        <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                        <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 inline-flex items-center min-h-[44px] text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
                                         {renderCommentsHistory()}
                                     </div>
 
@@ -2490,7 +2557,7 @@ function TalentDetail({
                                         <button
                                             onClick={() => onMarkReviewed(talent.id)}
                                             disabled={isReviewed}
-                                            className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-full text-xs font-medium transition-colors duration-150 ${
+                                            className={`flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] border rounded-full text-xs font-medium transition-colors duration-150 ${
                                                 isReviewed
                                                     ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
                                                     : "border-[#eaeaea] hover:border-black/20 text-[#4A4A4A]"
@@ -2505,7 +2572,7 @@ function TalentDetail({
                                         {visibleActions.map((a) => {
                                             const active = viewerAction?.action === a.key;
                                             return (
-                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-[#eaeaea] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
+                                                <button key={a.key} onClick={() => setAction(talent.id, active ? null : a.key)} data-testid={`action-${a.key}-${talent.id}`} className={`flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] border rounded-lg text-xs font-medium tracking-wide transition-all duration-150 ${active ? "border-black text-black bg-black/[0.04] font-semibold" : "border-[#eaeaea] hover:border-black/20 text-black/60 hover:text-black bg-transparent"}`}>
                                                     <a.icon className={`w-3.5 h-3.5 ${active ? "opacity-90" : "opacity-40"}`} />
                                                     {a.label}
                                                 </button>
@@ -2519,7 +2586,7 @@ function TalentDetail({
                                             <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
                                         </div>
                                         <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
-                                        <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                        <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 inline-flex items-center min-h-[44px] text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
                                         {renderCommentsHistory()}
                                     </div>
 
@@ -2628,17 +2695,24 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
     return (
         <div className="relative group/card">
             {/* Absolute Checkbox overlay positioned at top-right or top-left, let's put it at top-left to avoid seen badge overlapping */}
-            <div className="absolute top-3 right-3 z-30">
-                <input
-                    type="checkbox"
-                    checked={selected}
-                    onChange={(e) => {
-                        e.stopPropagation();
-                        onSelect(talent.id, e.target.checked);
-                    }}
-                    data-testid={`select-checkbox-${talent.id}`}
-                    className="w-4.5 h-4.5 rounded border-black/20 text-[var(--tg-navy-primary)] focus:ring-[var(--tg-navy-primary)] cursor-pointer accent-[var(--tg-navy-primary)] scale-110 shadow-sm"
-                />
+            <div className="absolute top-1 right-1 z-30">
+                {/* 44px hit area (label) wraps a ~20px visual box for reliable touch selection */}
+                <label
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={`Select ${privatizeName(talent.name)}`}
+                    className="flex items-center justify-center w-11 h-11 cursor-pointer"
+                >
+                    <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) => {
+                            e.stopPropagation();
+                            onSelect(talent.id, e.target.checked);
+                        }}
+                        data-testid={`select-checkbox-${talent.id}`}
+                        className="w-5 h-5 rounded border-black/20 text-[var(--tg-navy-primary)] focus:ring-[var(--tg-navy-primary)] cursor-pointer accent-[var(--tg-navy-primary)] shadow-sm"
+                    />
+                </label>
             </div>
             <button
                 ref={ref}
@@ -2701,17 +2775,16 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                             {ACTIONS.find((a) => a.key === action)?.label}
                         </span>
                     )}
+                    {seen && (
+                        <span
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-white/95 border border-black/[0.06] text-[#8A8A8A] text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
+                            data-testid={`badge-seen-${talent.id}`}
+                        >
+                            <Eye className="w-3 h-3" />
+                            Viewed
+                        </span>
+                    )}
                 </div>
-
-                {seen && (
-                    <span
-                        className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-1 bg-white/95 border border-black/[0.06] text-[#8A8A8A] text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"
-                        data-testid={`badge-seen-${talent.id}`}
-                    >
-                        <Eye className="w-3 h-3" />
-                        Seen
-                    </span>
-                )}
             </div>
             </button>
         </div>

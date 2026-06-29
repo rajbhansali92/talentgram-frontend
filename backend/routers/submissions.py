@@ -1053,11 +1053,6 @@ async def submission_complete_upload(
             body=f"{brand} — back to pending review.",
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
-        # Internal WhatsApp: notify ONCE on the submitted→updated transition.
-        # Subsequent edits in the same session see status already "updated" and
-        # do not re-notify (dedup), so re-uploading many files sends one alert.
-        if sub.get("status") == "submitted":
-            enqueue_internal_whatsapp_notification(updated, "SUBMISSION UPDATED")
 
     return updated
 
@@ -1236,11 +1231,6 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
             set_patch["decision"] = "pending"
         push["$set"] = set_patch
     await db.submissions.update_one({"id": sid}, push)
-    # Internal WhatsApp: notify ONCE on the submitted→updated transition (an
-    # audition take / intro re-upload to an already-submitted submission). Dedup
-    # via prior status, shared with the image path so a mixed edit alerts once.
-    if fresh and fresh.get("status") == "submitted":
-        enqueue_internal_whatsapp_notification(sub, "SUBMISSION UPDATED")
     try:
         await db.asset_metadata.update_one(
             {"public_id": public_id},
@@ -2102,19 +2092,17 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             body=f"{brand} — awaiting your review.",
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
-    # First-time finalize → NEW SUBMISSION. Resubmissions/updates are notified at
-    # the submitted→updated transition in the media-complete handlers (so an edit
-    # that re-uploads media without re-finalizing still notifies), deduplicated to
-    # one per transition. Firing here for retest too would double-notify.
+    # Internal WhatsApp fires ONLY here — at finalize, the single business event
+    # that means the talent has *completed* a submission (first-time) or a
+    # *completed* resubmission (is_retest, triggered by pressing "Update
+    # Submission"). Media-upload handlers are NOT used: they run when a file
+    # uploads, before the talent commits, so they'd alert on an incomplete edit.
+    # finalize is called exactly once per commit → exactly one notification.
     if finalized_sub_for_notify := await db.submissions.find_one({"id": sid}, {"_id": 0}):
-        if not is_retest:
-            enqueue_internal_whatsapp_notification(finalized_sub_for_notify, "NEW SUBMISSION")
-        elif sub.get("status") == "submitted":
-            # Re-finalize of a still-"submitted" submission (no intervening media
-            # re-upload, which would have already fired the UPDATED alert at the
-            # submitted→updated transition). The == "submitted" guard dedups so a
-            # re-upload-then-finalize never double-notifies.
-            enqueue_internal_whatsapp_notification(finalized_sub_for_notify, "SUBMISSION UPDATED")
+        enqueue_internal_whatsapp_notification(
+            finalized_sub_for_notify,
+            "SUBMISSION UPDATED" if is_retest else "NEW SUBMISSION",
+        )
     await update_talent_submission_metrics(email)
     return {
         "ok": True,

@@ -276,6 +276,19 @@ function getSessionId() {
 
 function getVideoDownloadUrl(url) {
     if (!url) return url;
+    // Cloudflare Stream: the stored URL is an HLS manifest (.../<uid>/manifest/video.m3u8),
+    // which is not a downloadable file. Map it to the MP4 download URL. (MP4 downloads
+    // must be enabled server-side; if not, this URL 404s and the caller surfaces an error.)
+    if (url.includes("cloudflarestream.com")) {
+        if (url.includes("/manifest/")) {
+            return `${url.split("/manifest/")[0]}/downloads/default.mp4`;
+        }
+        return url;
+    }
+    // Non-Cloudinary (e.g. R2 signed object URLs) are already downloadable — return as-is.
+    if (!url.includes("res.cloudinary.com") && !url.includes("/upload/")) {
+        return url;
+    }
     let cleanUrl = url;
     if (cleanUrl.includes("/upload/")) {
         const parts = cleanUrl.split("/upload/");
@@ -1672,6 +1685,10 @@ function TalentDetail({
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
     const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
+    // C3: in-flight guards prevent duplicate downloads from rapid taps.
+    const downloadPackageInFlightRef = useRef(false);
+    const downloadingRef = useRef(new Set());
+    const [downloadingIds, setDownloadingIds] = useState(() => new Set());
 
     const handleCopyForm = () => {
         try {
@@ -1764,6 +1781,8 @@ function TalentDetail({
     };
 
     const handleDownloadPackage = async () => {
+        if (downloadPackageInFlightRef.current) return; // C3: block duplicate clicks
+        downloadPackageInFlightRef.current = true;
         setIsDownloadingPackage(true);
         try {
             const token = getViewerToken(slug);
@@ -1772,34 +1791,41 @@ function TalentDetail({
                 {
                     params: token ? { token } : {},
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
-                    responseType: "blob"
+                    responseType: "blob",
+                    timeout: 120000, // C5: 2-minute ceiling for server-side ZIP assembly
                 }
             );
-            
+
             const blob = new Blob([response.data], { type: "application/zip" });
             const url = window.URL.createObjectURL(blob);
             const linkElement = document.createElement("a");
             linkElement.href = url;
-            
+
             const cleanName = (talent.name || "Talent").trim().replace(/\./g, "").replace(/\s+/g, "_");
             linkElement.setAttribute("download", `${cleanName}_Package.zip`);
             document.body.appendChild(linkElement);
             linkElement.click();
             linkElement.remove();
-            window.URL.revokeObjectURL(url);
+            // Delay revoke so the browser can start the download (esp. iOS Safari).
+            setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+            toast.success("Talent folder downloaded");
         } catch (err) {
             console.error("Error downloading package:", err);
-            if (err.response && err.response.data instanceof Blob) {
-                const reader = new FileReader();
-                reader.onload = function() {
-                    alert(`Failed to download talent folder. Response: ${reader.result}`);
-                };
-                reader.readAsText(err.response.data);
-            } else {
-                const msg = err.response?.data?.detail || err.message || err;
-                alert(`Failed to download talent folder. Error: ${JSON.stringify(msg)}`);
+            // C4: friendly, non-technical feedback via the app's toast system.
+            let message = "Couldn't prepare the talent folder. Please try again in a moment.";
+            if (err.code === "ECONNABORTED") {
+                message = "The download timed out. Please check your connection and try again.";
+            } else if (err.response?.data instanceof Blob) {
+                try {
+                    const detail = JSON.parse(await err.response.data.text())?.detail;
+                    if (typeof detail === "string" && detail.length < 200) message = detail;
+                } catch (_) { /* keep the generic message */ }
+            } else if (typeof err.response?.data?.detail === "string") {
+                message = err.response.data.detail;
             }
+            toast.error(message);
         } finally {
+            downloadPackageInFlightRef.current = false;
             setIsDownloadingPackage(false);
         }
     };
@@ -1983,50 +2009,76 @@ function TalentDetail({
 
 
     const download = useCallback(async (m) => {
-        await logDownload(talent.id, m.id);
-        const rawUrl = IMAGE_URL(m);
-        const isVideo = m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take");
-        const url = isVideo ? getVideoDownloadUrl(rawUrl) : rawUrl;
-        
-        const ext = isVideo ? "mp4" : (url.split(".").pop().split("?")[0] || "");
-        let baseName = m.original_filename || `${privatizeName(talent.name)}_${m.category || "media"}`;
-        if (baseName.includes(".")) {
-            baseName = baseName.replace(/\.[^/.]+$/, "");
-        }
-        const filename = `${baseName}.${ext}`;
-        
+        if (!m || !m.id) return;
+        if (downloadingRef.current.has(m.id)) return; // C3: block duplicate clicks per media
+        downloadingRef.current.add(m.id);
+        setDownloadingIds((prev) => new Set(prev).add(m.id));
         try {
-            // First try fetching the file directly to download via blob (respecting custom filename)
-            const response = await fetch(url, { mode: "cors" });
-            if (!response.ok) throw new Error("Network response was not ok");
-            const blob = await response.blob();
-            const blobUrl = URL.createObjectURL(blob);
-            
-            const a = document.createElement("a");
-            a.href = blobUrl;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            
-            // Clean up the object URL
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
-        } catch (err) {
-            console.warn("CORS fetch failed, falling back to Cloudinary fl_attachment download:", err);
-            // Fallback: Rewrite Cloudinary URL to force attachment headers
-            let downloadUrl = url;
-            if (url.includes("/upload/")) {
-                const cleanName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");
-                const flag = cleanName ? `fl_attachment:${cleanName}` : "fl_attachment";
-                downloadUrl = url.replace("/upload/", `/upload/${flag}/`);
+            await logDownload(talent.id, m.id);
+            const rawUrl = IMAGE_URL(m);
+            const isVideo = m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take");
+            const url = isVideo ? getVideoDownloadUrl(rawUrl) : rawUrl;
+            if (!url) {
+                toast.error("This file isn't available to download.");
+                return;
             }
-            
-            const a = document.createElement("a");
-            a.href = downloadUrl;
-            a.target = "_blank";
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
+
+            const ext = isVideo ? "mp4" : (url.split(".").pop().split("?")[0] || "");
+            let baseName = m.original_filename || `${privatizeName(talent.name)}_${m.category || "media"}`;
+            if (baseName.includes(".")) {
+                baseName = baseName.replace(/\.[^/.]+$/, "");
+            }
+            const filename = `${baseName}.${ext}`;
+
+            try {
+                // Primary: fetch to a blob so the custom filename is honored.
+                // C5: abort if the fetch stalls.
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 60000);
+                let response;
+                try {
+                    response = await fetch(url, { mode: "cors", signal: controller.signal });
+                } finally {
+                    clearTimeout(timer);
+                }
+                if (!response.ok) throw new Error("Network response was not ok");
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+
+                const a = document.createElement("a");
+                a.href = blobUrl;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+            } catch (err) {
+                console.warn("Direct download failed, falling back:", err);
+                // Fallback: force attachment headers for Cloudinary; else open in a new tab.
+                let downloadUrl = url;
+                if (url.includes("/upload/")) {
+                    const cleanName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");
+                    const flag = cleanName ? `fl_attachment:${cleanName}` : "fl_attachment";
+                    downloadUrl = url.replace("/upload/", `/upload/${flag}/`);
+                }
+                const a = document.createElement("a");
+                a.href = downloadUrl;
+                a.target = "_blank";
+                a.rel = "noopener";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            }
+        } catch (err) {
+            console.error("Download error:", err);
+            toast.error("Couldn't download this file. Please try again.");
+        } finally {
+            downloadingRef.current.delete(m.id);
+            setDownloadingIds((prev) => {
+                const n = new Set(prev);
+                n.delete(m.id);
+                return n;
+            });
         }
     }, [logDownload, talent.id, talent.name]);
 
@@ -2293,10 +2345,11 @@ function TalentDetail({
                                                     {vis.download && (
                                                         <button
                                                             onClick={() => download(t)}
-                                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10"
+                                                            disabled={downloadingIds.has(t.id)}
+                                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10 disabled:opacity-50 disabled:cursor-not-allowed"
                                                             data-testid={`download-take-btn-${i}`}
                                                         >
-                                                            <Download className="w-4 h-4 text-black" />
+                                                            {downloadingIds.has(t.id) ? <Loader2 className="w-4 h-4 text-black animate-spin" /> : <Download className="w-4 h-4 text-black" />}
                                                         </button>
                                                     )}
                                                 </div>
@@ -2322,10 +2375,11 @@ function TalentDetail({
                                          {vis.download && (
                                              <button
                                                  onClick={() => download(intro)}
-                                                 className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10"
+                                                 disabled={downloadingIds.has(intro.id)}
+                                                 className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10 disabled:opacity-50 disabled:cursor-not-allowed"
                                                  data-testid="download-intro-btn"
                                              >
-                                                 <Download className="w-4 h-4 text-black" />
+                                                 {downloadingIds.has(intro.id) ? <Loader2 className="w-4 h-4 text-black animate-spin" /> : <Download className="w-4 h-4 text-black" />}
                                              </button>
                                          )}
                                      </div>
@@ -2367,10 +2421,11 @@ function TalentDetail({
                                     {vis.download && (
                                         <button
                                             onClick={() => download(images[idx])}
-                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm"
+                                            disabled={downloadingIds.has(images[idx]?.id)}
+                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                                             data-testid="detail-download-btn"
                                         >
-                                            <Download className="w-4 h-4" />
+                                            {downloadingIds.has(images[idx]?.id) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                                         </button>
                                     )}
                                 </div>

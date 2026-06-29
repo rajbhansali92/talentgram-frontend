@@ -14,6 +14,11 @@ export function generateViewport() {
     width: "device-width",
     initialScale: 1,
     viewportFit: "cover",
+    // Android Chrome / Samsung Internet: resize the layout viewport (and dvh)
+    // to the space NOT covered by the on-screen keyboard. Without this the
+    // default (resizes-visual) leaves the 100dvh shell full-height behind the
+    // IME, exposing the grey keyboard backdrop at the bottom. Ignored by iOS.
+    interactiveWidget: "resizes-content",
   };
 }
 

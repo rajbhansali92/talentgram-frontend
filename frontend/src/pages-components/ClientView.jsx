@@ -2795,6 +2795,41 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                 )}
 
                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-white via-white/90 to-transparent p-4">
+                    {/* Mobile-only (<md): compact badges sit in the bottom gradient above
+                        the name — never over the face. Desktop/tablet use the top-left stack. */}
+                    {(isNew || isShortlisted || (action && action !== "shortlist") || seen) && (
+                        <div className="flex md:hidden flex-wrap items-center gap-1 mb-1.5">
+                            {isNew && (
+                                <span
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-[var(--tg-navy-primary)] text-white text-[9px] tracking-[0.06em] uppercase rounded-full shadow-sm"
+                                    data-testid={`badge-new-mobile-${talent.id}`}
+                                >
+                                    <Sparkles className="w-2.5 h-2.5" /> New
+                                </span>
+                            )}
+                            {isShortlisted && (
+                                <span
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-[var(--tg-navy-primary)] text-white text-[9px] tracking-[0.06em] uppercase rounded-full shadow-sm"
+                                    data-testid={`badge-shortlisted-mobile-${talent.id}`}
+                                >
+                                    <Heart className="w-2.5 h-2.5 fill-current" /> Shortlisted
+                                </span>
+                            )}
+                            {action && action !== "shortlist" && (
+                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-white/95 text-[#111111] text-[9px] tracking-[0.06em] uppercase rounded-full border border-black/[0.06] shadow-sm">
+                                    {ACTIONS.find((a) => a.key === action)?.label}
+                                </span>
+                            )}
+                            {seen && (
+                                <span
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-white/95 border border-black/[0.06] text-[#8A8A8A] text-[9px] tracking-[0.06em] uppercase rounded-full shadow-sm"
+                                    data-testid={`badge-seen-mobile-${talent.id}`}
+                                >
+                                    <Eye className="w-2.5 h-2.5" /> Viewed
+                                </span>
+                            )}
+                        </div>
+                    )}
                     <div
                         className="font-display text-lg md:text-xl tracking-wide text-[#111111]"
                         data-testid={`client-card-name-${talent.id}`}
@@ -2806,7 +2841,9 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                     </div>
                 </div>
 
-                <div className="absolute top-2 left-2 flex flex-col gap-1.5 items-start">
+                {/* Desktop/tablet (md+): unchanged top-left badge stack. Hidden on mobile,
+                    where badges move into the bottom gradient so the face stays clear. */}
+                <div className="absolute top-2 left-2 hidden md:flex md:flex-col gap-1.5 items-start">
                     {isNew && (
                         <span
                             className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--tg-navy-primary)] text-white text-[10px] tracking-[0.08em] uppercase rounded-full shadow-sm"

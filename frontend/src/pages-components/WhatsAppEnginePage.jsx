@@ -22,6 +22,32 @@ import {
 import VirtualList from "@/components/VirtualList";
 import ProjectSearchModal from "@/components/ProjectSearchModal";
 
+// ── Template variable catalog (mirrors backend GET /whatsapp/variables) ──────
+// Powers the editor's click-to-insert "Available Variables" panel (Part 5) and
+// tells the launcher which placeholders are auto-resolved so they're hidden from
+// "Inject Custom Variables" (Part 2). Keep in sync with whatsapp.py VARIABLE_CATALOG.
+const WA_VARIABLE_CATALOG = [
+  { category: "Talent", variables: ["first_name", "full_name", "talent_name", "phone", "instagram"] },
+  { category: "Project", variables: ["project_name", "shoot_dates", "budget", "location", "submission_link"] },
+  { category: "Sender", variables: ["sender_name", "sender_email"] },
+  { category: "System", variables: ["current_date", "current_time"] },
+];
+// Resolved automatically regardless of source (recipient name/phone, sender, date).
+const WA_AUTO_ALWAYS = new Set([
+  "talent_name", "full_name", "first_name", "phone",
+  "sender_name", "sender_email", "current_date", "current_time",
+]);
+// Resolved automatically only when the source is Project Pipeline.
+const WA_AUTO_PROJECT = new Set(["project_name", "shoot_dates", "budget", "submission_link"]);
+
+// True when a placeholder is auto-resolved for the given source (so the launcher
+// should NOT prompt the admin to type it).
+function waIsAutoResolved(key, sourceType) {
+  if (WA_AUTO_ALWAYS.has(key)) return true;
+  if (sourceType === "PROJECT" && WA_AUTO_PROJECT.has(key)) return true;
+  return false;
+}
+
 export default function WhatsAppEnginePage() {
   const [activeTab, setActiveTab] = useState("campaigns"); // campaigns | templates | analytics | settings
   const [campaignSubTab, setCampaignSubTab] = useState("launch"); // launch | history
@@ -923,12 +949,15 @@ function WECampaignLauncher() {
               )}
             </div>
 
-            {/* Variable Form Placeholders */}
-            {selectedTemplate && Object.keys(variables).length > 0 && (
+            {/* Variable Form Placeholders — only those NOT auto-resolved for
+                the current source (Part 2). Auto-resolved vars (project fields
+                for a Project source, sender, date, recipient name) are filled in
+                by the backend, so the admin is never asked to type them. */}
+            {selectedTemplate && Object.keys(variables).filter(k => !waIsAutoResolved(k, sourceType)).length > 0 && (
               <div className="space-y-4 bg-[#f8f8f7] p-5 rounded-2xl border border-black/5">
                 <h4 className="text-xs font-bold uppercase tracking-widest text-[#6B7280] pb-2 border-b border-black/[0.04]">Inject Custom Variables</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {Object.keys(variables).map(vKey => (
+                  {Object.keys(variables).filter(k => !waIsAutoResolved(k, sourceType)).map(vKey => (
                     <div key={vKey} className="space-y-1">
                       <label className="text-[10px] font-bold uppercase tracking-wider text-[#6B7280]">{vKey}</label>
                       <input
@@ -1451,6 +1480,26 @@ function WETemplateManager() {
     setFormData({ ...formData, body_text: text, variables: vars });
   };
 
+  // Part 5 — insert {{key}} at the cursor (or replace the selection) in the body
+  // textarea, then re-extract variables and restore focus/caret.
+  const bodyRef = useRef(null);
+  const insertVariable = (key) => {
+    const token = `{{${key}}}`;
+    const el = bodyRef.current;
+    const body = formData.body_text || "";
+    const start = el ? el.selectionStart : body.length;
+    const end = el ? el.selectionEnd : body.length;
+    const next = body.slice(0, start) + token + body.slice(end);
+    handleBodyTextChange(next);
+    // Restore caret just after the inserted token on the next paint.
+    requestAnimationFrame(() => {
+      if (!el) return;
+      el.focus();
+      const pos = start + token.length;
+      try { el.setSelectionRange(pos, pos); } catch (_) {}
+    });
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
     try {
@@ -1604,6 +1653,7 @@ function WETemplateManager() {
                 <span className="text-[10px] text-[#6B7280] font-mono normal-case">Wrap placeholders in double curly braces: {"{{var}}"}</span>
               </label>
               <textarea
+                ref={bodyRef}
                 value={formData.body_text}
                 onChange={(e) => handleBodyTextChange(e.target.value)}
                 rows="8"
@@ -1611,6 +1661,31 @@ function WETemplateManager() {
                 className="w-full text-xs font-mono bg-[#f8f8f7] border border-black/10 rounded-lg p-3 focus:outline-none focus:ring-1 focus:ring-black leading-relaxed"
                 required
               />
+            </div>
+
+            {/* Part 5 — Available Variables: click to insert at the cursor. */}
+            <div className="space-y-2.5">
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Available Variables</label>
+              <div className="space-y-3 bg-[#f8f8f7] p-4 rounded-2xl border border-black/5">
+                {WA_VARIABLE_CATALOG.map(group => (
+                  <div key={group.category} className="space-y-1.5">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-[#6B7280]/70">{group.category}</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {group.variables.map(v => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => insertVariable(v)}
+                          title={`Insert {{${v}}}`}
+                          className="text-xs font-mono bg-white px-2.5 py-1 rounded-full border border-black/10 text-black/70 font-semibold hover:bg-black hover:text-white transition-colors active:scale-95 duration-100"
+                        >
+                          {`{{${v}}}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {formData.variables.length > 0 && (

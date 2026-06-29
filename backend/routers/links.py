@@ -1327,6 +1327,11 @@ async def get_share_preview(share_id: str):
 def _get_video_download_url(url: str) -> str:
     if not url:
         return url
+    # Only rewrite Cloudinary delivery URLs (legacy video assets). Non-Cloudinary
+    # URLs — Cloudflare Stream HLS manifests and R2 signed object URLs — must NOT
+    # be ".mp4"-mangled here; Stream MP4 URLs are resolved via _enable_and_get_stream_mp4.
+    if "res.cloudinary.com" not in url and "/upload/" not in url:
+        return url
     clean_url = url
     if "/upload/" in clean_url:
         parts = clean_url.split("/upload/")
@@ -1354,6 +1359,81 @@ def _get_video_download_url(url: str) -> str:
     else:
         clean_url = f"{main_path}.mp4{query}"
     return clean_url
+
+def _extract_stream_uid(url: Optional[str]) -> Optional[str]:
+    """Pull the Cloudflare Stream video UID out of a delivery URL like
+    https://customer-xxx.cloudflarestream.com/<uid>/manifest/video.m3u8 ."""
+    if not url or "cloudflarestream.com" not in url:
+        return None
+    try:
+        return url.split("cloudflarestream.com/", 1)[1].split("/", 1)[0] or None
+    except Exception:
+        return None
+
+
+async def _enable_and_get_stream_mp4(client, uid: str) -> Optional[str]:
+    """Enable (idempotent) and return a directly-downloadable MP4 URL for a
+    Cloudflare Stream video. Returns None if creds are missing, the UID is
+    unknown, or the MP4 is not ready within the polling budget — callers treat
+    None as a failed asset (the ZIP integrity check then fails loudly)."""
+    import os
+    import asyncio
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    api_token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
+    if not (account_id and api_token and uid):
+        logger.error("[stream-download] Missing Cloudflare creds or UID; cannot enable MP4 download")
+        return None
+    endpoint = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/stream/{uid}/downloads"
+    headers = {"Authorization": f"Bearer {api_token}"}
+    try:
+        resp = await client.post(endpoint, headers=headers, timeout=30.0)
+        for _ in range(15):  # ~30s budget for MP4 generation
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            default = (((data or {}).get("result") or {}).get("default")) or {}
+            status = default.get("status")
+            dl_url = default.get("url")
+            if status == "ready" and dl_url:
+                return dl_url
+            if status == "error":
+                logger.error(f"[stream-download] uid={uid} reported error state")
+                return None
+            await asyncio.sleep(2)
+            resp = await client.get(endpoint, headers=headers, timeout=30.0)
+        logger.warning(f"[stream-download] uid={uid} MP4 not ready after polling budget")
+        return None
+    except Exception as e:
+        logger.error(f"[stream-download] uid={uid} failed: {e}")
+        return None
+
+
+async def _resolve_video_download_url(client, raw_media: Optional[dict], filtered_url: Optional[str]) -> Optional[str]:
+    """Provider-aware download URL for a video asset.
+    - Cloudflare Stream: enable + return MP4 download URL (from stream_uid/manifest).
+    - Cloudinary (legacy): existing f_mp4 rewrite.
+    - R2 / direct: the signed object URL is already downloadable — return as-is.
+    """
+    raw_media = raw_media or {}
+    provider = raw_media.get("provider")
+    stream_uid = raw_media.get("stream_uid")
+    raw_url = raw_media.get("url") or ""
+    is_stream = (
+        provider == "stream"
+        or bool(stream_uid)
+        or "cloudflarestream.com" in raw_url
+        or "cloudflarestream.com" in (filtered_url or "")
+    )
+    if is_stream:
+        uid = stream_uid or _extract_stream_uid(raw_url) or _extract_stream_uid(filtered_url)
+        return await _enable_and_get_stream_mp4(client, uid) if uid else None
+    src = raw_url or filtered_url or ""
+    if "res.cloudinary.com" in src or "/upload/" in src:
+        return _get_video_download_url(src)
+    # R2 / direct object URL — already an MP4 and directly fetchable.
+    return src or None
+
 
 def _safe_text(s: str, max_len: int = 50) -> str:
     if not s:
@@ -1617,32 +1697,43 @@ async def download_talent_zip(
         # Do not expose internal traceback to the client
         raise HTTPException(status_code=500, detail="Unable to generate Talent Folder. Please try again or contact Talentgram support.")
 
-    zip_items = []
-    
-    # Pack intro videos (mp4 format)
+    # Build the ordered work list. Videos carry the media object so their real
+    # (provider-aware) download URL can be resolved at fetch time.
+    import os
     intros = [m for m in media_list if m.get("category") == "video"]
+    takes = [m for m in media_list if m.get("category") == "take"]
+    images = [m for m in media_list if m.get("category") in ("portfolio", "indian", "western")]
+
+    work_items = []
     for i, m in enumerate(intros):
         fn = "Introduction.mp4" if len(intros) == 1 else f"Introduction_{i+1}.mp4"
-        zip_items.append({"filename": fn, "url": _get_video_download_url(m["url"])})
-
-    # Pack audition takes (mp4 format)
-    takes = [m for m in media_list if m.get("category") == "take"]
+        work_items.append({"filename": fn, "media": m, "kind": "video"})
     for i, m in enumerate(takes):
-        fn = f"Take_{i+1}.mp4"
-        zip_items.append({"filename": fn, "url": _get_video_download_url(m["url"])})
-
-    # Pack portfolio images
-    import os
-    images = [m for m in media_list if m.get("category") in ("portfolio", "indian", "western")]
+        work_items.append({"filename": f"Take_{i+1}.mp4", "media": m, "kind": "video"})
     for i, m in enumerate(images):
         _, ext = os.path.splitext(m["url"].split("?")[0])
-        if not ext or ext.lower() not in (".jpg", ".jpeg", ".png"):
+        if not ext or ext.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
             ext = ".jpg"
-        fn = f"Portfolio_{i+1}{ext}"
-        zip_items.append({"filename": fn, "url": m["url"]})
+        work_items.append({"filename": f"Portfolio_{i+1}{ext}", "media": m, "kind": "image"})
+
+    # Recover raw media (provider / stream_uid / original url) by id — the
+    # client-shaped media URL can hide the real provider for Stream videos.
+    raw_media_by_id = {}
+    if target_sub:
+        for rm in (target_sub.get("media") or []):
+            raw_media_by_id[rm.get("id")] = rm
+    else:
+        _raw_t = await db.talents.find_one({"id": talent_id}, {"_id": 0, "media": 1})
+        for rm in ((_raw_t or {}).get("media") or []):
+            raw_media_by_id[rm.get("id")] = rm
+
+    expected_media = len(work_items)
+    failed_media = []
 
     buffer = io.BytesIO()
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    # C5: bounded timeouts so a slow/stuck asset can never hang the worker.
+    zip_timeout = httpx.Timeout(60.0, connect=10.0)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=zip_timeout) as client:
         try:
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 # Add dynamic PDF details first
@@ -1653,103 +1744,64 @@ async def download_talent_zip(
                     pdf_filename = f"{project_doc.get('title')} - Talent Form.pdf"
                 elif link.get("title"):
                     pdf_filename = f"{link.get('title')} - Talent Form.pdf"
-                
-                # Sanitize filename
                 pdf_filename = "".join(c for c in pdf_filename if c.isalnum() or c in (" ", "-", "_", ".")).strip()
-
                 zf.writestr(pdf_filename, pdf_bytes)
 
-                # Intro video download
-                try:
-                    for item in zip_items:
-                        if "Introduction" not in item["filename"]:
+                for item in work_items:
+                    m = item["media"]
+                    filename = item["filename"]
+                    try:
+                        if item["kind"] == "video":
+                            raw = raw_media_by_id.get(m.get("id"), m)
+                            dl_url = await _resolve_video_download_url(client, raw, m.get("url"))
+                        else:
+                            dl_url = m.get("url")
+                        if not dl_url:
+                            logger.warning(f"No download URL resolved for {filename}")
+                            failed_media.append(filename)
                             continue
-                        filename = item["filename"]
-                        url = item["url"]
-                        logger.info(f"Downloading file: {filename} from {url}")
-                        async with client.stream("GET", url) as response:
-                            logger.info(f"Intro Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
+                        async with client.stream("GET", dl_url) as response:
                             if response.status_code == 200:
                                 with zf.open(filename, "w") as dest:
                                     async for chunk in response.aiter_bytes(chunk_size=65536):
                                         dest.write(chunk)
                             else:
-                                logger.warning(f"Intro download returned status {response.status_code} for {url}")
-                    logger.info("INTRO VIDEO DOWNLOADED")
-                except Exception as e:
-                    logger.exception("FAILED AT INTRO VIDEO DOWNLOAD")
-                    raise
-
-                # Audition videos download
-                try:
-                    for item in zip_items:
-                        if "Take_" not in item["filename"]:
-                            continue
-                        filename = item["filename"]
-                        url = item["url"]
-                        logger.info(f"Downloading file: {filename} from {url}")
-                        async with client.stream("GET", url) as response:
-                            logger.info(f"Audition Take Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                            if response.status_code == 200:
-                                with zf.open(filename, "w") as dest:
-                                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                                        dest.write(chunk)
-                            else:
-                                logger.warning(f"Audition Take download returned status {response.status_code} for {url}")
-                    logger.info("AUDITION VIDEOS DOWNLOADED")
-                except Exception as e:
-                    logger.exception("FAILED AT AUDITION VIDEOS DOWNLOAD")
-                    raise
-
-                # Portfolio images download
-                try:
-                    for item in zip_items:
-                        if "Portfolio_" not in item["filename"]:
-                            continue
-                        filename = item["filename"]
-                        url = item["url"]
-                        logger.info(f"Downloading file: {filename} from {url}")
-                        async with client.stream("GET", url) as response:
-                            logger.info(f"Portfolio Image Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
-                            if response.status_code == 200:
-                                with zf.open(filename, "w") as dest:
-                                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                                        dest.write(chunk)
-                            else:
-                                logger.warning(f"Portfolio Image download returned status {response.status_code} for {url}")
-                    logger.info("PORTFOLIO IMAGES DOWNLOADED")
-                except Exception as e:
-                    logger.exception("FAILED AT PORTFOLIO IMAGES DOWNLOAD")
-                    raise
+                                logger.warning(f"Download returned status {response.status_code} for {filename}")
+                                failed_media.append(filename)
+                    except Exception:
+                        logger.exception(f"Error packaging {filename}")
+                        failed_media.append(filename)
 
             logger.info("ZIP CREATED")
-        except Exception as e:
+        except Exception:
             logger.exception("FAILED AT ZIP CREATION")
-            raise HTTPException(status_code=500, detail=f"FAILED AT ZIP CREATION: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to generate the talent folder. Please try again or contact Talentgram support.",
+            )
 
     # Seek to end to find the final size, then seek to beginning for streaming
     buffer.seek(0, io.SEEK_END)
     zip_size = buffer.tell()
     buffer.seek(0)
-
-    # Read the filenames and metadata contained inside the ZIP to log them
     with zipfile.ZipFile(buffer, "r") as zf_read:
         infolist = zf_read.infolist()
-        namelist = zf_read.namelist()
     buffer.seek(0)
 
-    logger.info(f"ZIP SIZE = {zip_size} bytes")
-    logger.info(f"FILE COUNT = {len(infolist)}")
-    for info in infolist:
-        logger.info(f"FILE NAME = {info.filename}, FILE SIZE = {info.file_size} bytes")
+    logger.info(f"ZIP SIZE={zip_size} bytes; FILES={len(infolist)}; expected_media={expected_media}; failed={len(failed_media)}")
 
-    # Verify if zip size < 10 KB or no media was added (only PDF details)
-    has_media = any(info.filename != "Talent_Details.pdf" for info in infolist)
-    if zip_size < 10240 or not has_media:
-        logger.error(f"ZIP integrity check failed. Size: {zip_size} bytes, Files: {namelist}")
+    # C2: fail loudly if any required media could not be retrieved, rather than
+    # silently shipping a folder missing photos/video. (Internal file lists are
+    # NOT exposed to the client.)
+    if failed_media:
         raise HTTPException(
-            status_code=500,
-            detail=f"ZIP integrity check failed. Final archive is corrupt or empty (Size: {zip_size} bytes, Files: {namelist})"
+            status_code=502,
+            detail="Some media could not be retrieved for this folder. Please try again in a moment.",
+        )
+    if expected_media > 0 and len(infolist) <= 1:
+        raise HTTPException(
+            status_code=502,
+            detail="The talent folder could not be assembled. Please try again or contact Talentgram support.",
         )
 
     # Stream the finalized buffer
@@ -1872,53 +1924,66 @@ async def download_campaign_bundle_zip(
     if not zip_items:
         raise HTTPException(404, "No downloadable media for this campaign")
 
+    expected_media = len(zip_items)
+    failed_media = []
+
     buffer = io.BytesIO()
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    bundle_timeout = httpx.Timeout(60.0, connect=10.0)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=bundle_timeout) as client:
         try:
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 for item in zip_items:
                     filename = item["filename"]
                     url = item["url"]
                     try:
-                        logger.info(f"Downloading file: {filename} from {url}")
+                        # Provider-aware: Cloudflare Stream URLs must be resolved to
+                        # an MP4 download URL; Cloudinary/R2 URLs are used as-is.
+                        if url and "cloudflarestream.com" in url:
+                            url = await _resolve_video_download_url(client, {}, url)
+                        if not url:
+                            failed_media.append(filename)
+                            continue
                         async with client.stream("GET", url) as response:
-                            logger.info(f"Response status: {response.status_code}, content_length: {response.headers.get('content-length')}")
                             if response.status_code == 200:
                                 with zf.open(filename, "w") as dest:
                                     async for chunk in response.aiter_bytes(chunk_size=65536):
                                         dest.write(chunk)
                             else:
-                                logger.warning(f"Download returned status {response.status_code} for {url}")
-                    except Exception as e:
-                        logger.exception(f"Error zipping {filename} from {url}")
-                        raise
-            
+                                logger.warning(f"Download returned status {response.status_code} for {filename}")
+                                failed_media.append(filename)
+                    except Exception:
+                        logger.exception(f"Error zipping {filename}")
+                        failed_media.append(filename)
+
             logger.info("ZIP CREATED")
-        except Exception as e:
+        except Exception:
             logger.exception("FAILED AT ZIP CREATION")
-            raise HTTPException(status_code=500, detail=f"FAILED AT ZIP CREATION: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to generate the campaign bundle. Please try again or contact Talentgram support.",
+            )
 
     # Seek to end to find the final size, then seek to beginning for streaming
     buffer.seek(0, io.SEEK_END)
     zip_size = buffer.tell()
     buffer.seek(0)
 
-    # Read the filenames and metadata contained inside the ZIP to log them
     with zipfile.ZipFile(buffer, "r") as zf_read:
         infolist = zf_read.infolist()
-        namelist = zf_read.namelist()
     buffer.seek(0)
 
-    logger.info(f"ZIP SIZE = {zip_size} bytes")
-    logger.info(f"FILE COUNT = {len(infolist)}")
-    for info in infolist:
-        logger.info(f"FILE NAME = {info.filename}, FILE SIZE = {info.file_size} bytes")
+    logger.info(f"BUNDLE ZIP SIZE={zip_size} bytes; FILES={len(infolist)}; expected_media={expected_media}; failed={len(failed_media)}")
 
-    if zip_size < 10240 or len(infolist) == 0:
-        logger.error(f"ZIP integrity check failed. Size: {zip_size} bytes, Files: {namelist}")
+    # C2: fail loudly if any media could not be retrieved.
+    if failed_media:
         raise HTTPException(
-            status_code=500,
-            detail=f"ZIP integrity check failed. Final archive is corrupt or empty (Size: {zip_size} bytes, Files: {namelist})"
+            status_code=502,
+            detail="Some media could not be retrieved for this bundle. Please try again in a moment.",
+        )
+    if expected_media > 0 and len(infolist) == 0:
+        raise HTTPException(
+            status_code=502,
+            detail="The campaign bundle could not be assembled. Please try again or contact Talentgram support.",
         )
 
     # Stream the finalized buffer

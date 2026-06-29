@@ -1053,7 +1053,12 @@ async def submission_complete_upload(
             body=f"{brand} — back to pending review.",
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
-        
+        # Internal WhatsApp: notify ONCE on the submitted→updated transition.
+        # Subsequent edits in the same session see status already "updated" and
+        # do not re-notify (dedup), so re-uploading many files sends one alert.
+        if sub.get("status") == "submitted":
+            enqueue_internal_whatsapp_notification(updated, "SUBMISSION UPDATED")
+
     return updated
 
 
@@ -1231,6 +1236,11 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
             set_patch["decision"] = "pending"
         push["$set"] = set_patch
     await db.submissions.update_one({"id": sid}, push)
+    # Internal WhatsApp: notify ONCE on the submitted→updated transition (an
+    # audition take / intro re-upload to an already-submitted submission). Dedup
+    # via prior status, shared with the image path so a mixed edit alerts once.
+    if fresh and fresh.get("status") == "submitted":
+        enqueue_internal_whatsapp_notification(sub, "SUBMISSION UPDATED")
     try:
         await db.asset_metadata.update_one(
             {"public_id": public_id},
@@ -1546,7 +1556,10 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
         project = await db.projects.find_one({"id": project_id})
         project_name = "Unknown Project"
         if project:
-            project_name = project.get("title") or project.get("name") or "Unknown Project"
+            # Projects store the display name in `brand_name` (the field used
+            # everywhere else). `title`/`name` don't exist on the document, so the
+            # old lookup always fell through to "Unknown Project".
+            project_name = project.get("brand_name") or project.get("title") or project.get("name") or "Unknown Project"
 
         form = submission.get("form_data") or {}
         talent_name = (
@@ -1560,25 +1573,18 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
         review_link = f"https://review.talentgramagency.com/admin/projects/{project_id}/submissions?search={quoted_talent_name}"
         timestamp = _now()
 
-        if event_type in ("NEW SUBMISSION", "RETEST SUBMITTED"):
-            media_list = submission.get("media") or []
-            has_intro = any(m.get("category") == "intro_video" for m in media_list)
-            intro_video_status = "Yes" if has_intro else "No"
-            
-            portfolio_count = sum(1 for m in media_list if m.get("category") in {"image", "portfolio", "indian", "western"})
-            takes_count = sum(1 for m in media_list if m.get("category") in {"take", "take_1", "take_2", "take_3"})
-            
+        # Clean, scannable notifications — no asset counts / internal details.
+        if event_type == "SUBMISSION UPDATED":
             message_body = (
-                f"*{event_type} FINALIZED*\n" if event_type == "NEW SUBMISSION" else f"*{event_type}*\n"
-            )
-            message_body += (
-                f"Project: {project_name}\n"
-                f"Talent: {talent_name} ({talent_phone})\n"
-                f"Assets: Intro Video: {intro_video_status}, Portfolio Images: {portfolio_count}, Audition Takes: {takes_count}\n"
-                f"Review Link: {review_link}\n"
-                f"Timestamp: {timestamp}"
+                f"🔄 *SUBMISSION UPDATED*\n\n"
+                f"Talent:\n{talent_name}\n\n"
+                f"Project:\n{project_name}\n\n"
+                f"Review:\n{review_link}\n\n"
+                f"Updated:\n{timestamp}"
             )
         elif event_type == "DECISION CHANGED":
+            # Preserved unchanged (no active trigger — decision changes are
+            # intentionally silent — kept to avoid altering unrelated behavior).
             decision_str = str(decision).upper() if decision else "UNKNOWN"
             message_body = (
                 f"*SUBMISSION DECISION CHANGED*\n"
@@ -1588,13 +1594,13 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
                 f"Review Link: {review_link}\n"
                 f"Timestamp: {timestamp}"
             )
-        else:
+        else:  # NEW SUBMISSION (default)
             message_body = (
-                f"*{event_type}*\n"
-                f"Project: {project_name}\n"
-                f"Talent: {talent_name} ({talent_phone})\n"
-                f"Review Link: {review_link}\n"
-                f"Timestamp: {timestamp}"
+                f"🆕 *NEW SUBMISSION RECEIVED*\n\n"
+                f"Talent:\n{talent_name}\n\n"
+                f"Project:\n{project_name}\n\n"
+                f"Review:\n{review_link}\n\n"
+                f"Submitted:\n{timestamp}"
             )
 
         # Config setting lookup
@@ -2096,12 +2102,19 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             body=f"{brand} — awaiting your review.",
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
-    finalized_sub_for_notify = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    if finalized_sub_for_notify:
-        enqueue_internal_whatsapp_notification(
-            finalized_sub_for_notify,
-            "RETEST SUBMITTED" if is_retest else "NEW SUBMISSION"
-        )
+    # First-time finalize → NEW SUBMISSION. Resubmissions/updates are notified at
+    # the submitted→updated transition in the media-complete handlers (so an edit
+    # that re-uploads media without re-finalizing still notifies), deduplicated to
+    # one per transition. Firing here for retest too would double-notify.
+    if finalized_sub_for_notify := await db.submissions.find_one({"id": sid}, {"_id": 0}):
+        if not is_retest:
+            enqueue_internal_whatsapp_notification(finalized_sub_for_notify, "NEW SUBMISSION")
+        elif sub.get("status") == "submitted":
+            # Re-finalize of a still-"submitted" submission (no intervening media
+            # re-upload, which would have already fired the UPDATED alert at the
+            # submitted→updated transition). The == "submitted" guard dedups so a
+            # re-upload-then-finalize never double-notifies.
+            enqueue_internal_whatsapp_notification(finalized_sub_for_notify, "SUBMISSION UPDATED")
     await update_talent_submission_metrics(email)
     return {
         "ok": True,

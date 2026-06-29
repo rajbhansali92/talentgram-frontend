@@ -149,12 +149,14 @@ async def test_new_submission_notification():
     assert job_arg["status"] == "pending"
     assert job_arg["destination"] == "Talentgram Operations Team"
     assert job_arg["destination_type"] == "group"
-    assert "*NEW SUBMISSION FINALIZED*" in job_arg["message_body"]
-    assert "Super Cool Brand Shoot" in job_arg["message_body"]
+    assert "NEW SUBMISSION RECEIVED" in job_arg["message_body"]
+    # Project name comes from brand_name (the real project field), not title.
+    assert "Super Cool Brand" in job_arg["message_body"]
+    # Clean format — no asset counts / internal details (Part 3).
+    assert "Audition Takes" not in job_arg["message_body"]
+    assert "Portfolio Images" not in job_arg["message_body"]
+    assert "Assets" not in job_arg["message_body"]
     assert "Test Talent" in job_arg["message_body"]
-    assert "Intro Video: Yes" in job_arg["message_body"]
-    assert "Portfolio Images: 1" in job_arg["message_body"]
-    assert "Audition Takes: 1" in job_arg["message_body"]
 
 
 @pytest.mark.asyncio
@@ -222,7 +224,7 @@ async def test_retest_submission_notification():
     
     assert batch_arg["status"] == "pending"
     assert job_arg["destination"] == "Talentgram Operations" # fallback
-    assert "*RETEST SUBMITTED*" in job_arg["message_body"]
+    assert "SUBMISSION UPDATED" in job_arg["message_body"]
 
 
 @pytest.mark.asyncio

@@ -641,18 +641,16 @@ export default function ApplicationPage() {
             toast.error("Please complete the email step first");
             return;
         }
-        // After the gate is unlocked, first/last name are required so we
-        // can create an application document. If the gate was unlocked
-        // through "Use this" on the prefill card, basics.first_name /
-        // last_name are already populated from the saved profile; the
-        // user just clicks Continue.
-        if (!first_name.trim()) {
-            toast.error("First name is required");
-            return;
-        }
-        if (!last_name.trim()) {
-            toast.error("Last name is required");
-            return;
+        // After the gate is unlocked, name validation is performed based on the onboarding config.
+        if (requirements?.profile_requirements?.name === "required") {
+            if (!first_name.trim()) {
+                toast.error("First name is required");
+                return;
+            }
+            if (!last_name.trim()) {
+                toast.error("Last name is required");
+                return;
+            }
         }
         setSaving(true);
         try {
@@ -1222,13 +1220,13 @@ export default function ApplicationPage() {
                                     {emailGateUnlocked && (
                                         <div className="space-y-5" data-testid="apply-identity-rest">
                                             <Row
-                                                label="First Name *"
+                                                label={`First Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
                                                 value={basics.first_name}
                                                 onChange={(v) => setBasics({ ...basics, first_name: v })}
                                                 testid="apply-first-name"
                                             />
                                             <Row
-                                                label="Last Name *"
+                                                label={`Last Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
                                                 value={basics.last_name}
                                                 onChange={(v) => setBasics({ ...basics, last_name: v })}
                                                 testid="apply-last-name"
@@ -1391,7 +1389,7 @@ export default function ApplicationPage() {
                         </div>
 
                         <div ref={locationRef}>
-                            <Label>Current Location(s) *</Label>
+                            <Label>Current Location(s){requirements?.profile_requirements?.location === "required" ? " *" : ""}</Label>
                             <div className="mt-2">
                                 <LocationSelector
                                     value={form.location || []}
@@ -1411,7 +1409,7 @@ export default function ApplicationPage() {
                         </div>
 
                         <div className="md:col-span-2">
-                            <Label>Gender *</Label>
+                            <Label>Gender{requirements?.profile_requirements?.gender === "required" ? " *" : ""}</Label>
                             <div className="mt-3 flex flex-wrap gap-2">
                                 {GENDER_OPTIONS.map((g) => (
                                     <button
@@ -1439,7 +1437,7 @@ export default function ApplicationPage() {
                 <Section title="Professional Details" index="02">
                     <div className="grid md:grid-cols-2 gap-6">
                         <div ref={igHandleRef}>
-                            <Label>Instagram Handle{requirements?.profile_requirements?.instagram_handle === "required" ? " *" : " (optional)"}</Label>
+                            <Label>Instagram Handle{requirements?.profile_requirements?.instagram_handle === "required" ? " *" : ""}</Label>
                             <input
                                 value={form.instagram_handle}
                                 onChange={(e) => {
@@ -1469,7 +1467,7 @@ export default function ApplicationPage() {
                             )}
                         </div>
                         <div ref={igFollowersRef}>
-                            <Label>Instagram Followers{requirements?.profile_requirements?.instagram_followers === "required" ? " *" : " (optional)"}</Label>
+                            <Label>Instagram Followers{requirements?.profile_requirements?.instagram_followers === "required" ? " *" : ""}</Label>
                             <Select
                                 value={form.instagram_followers}
                                 onValueChange={(v) => {
@@ -1590,7 +1588,7 @@ export default function ApplicationPage() {
                         <div>
                             <div className="flex items-center justify-between mb-1">
                                 <p className="text-sm text-[#1a1a1a] font-medium">
-                                    Introduction Video
+                                    Introduction Video{requirements?.portfolio_requirements?.video === "required" ? " *" : ""}
                                 </p>
                                 {intro && (
                                     <button
@@ -1646,7 +1644,7 @@ export default function ApplicationPage() {
 
                         {/* Phase 2 Looks */}
                         <ApplyLookGroup
-                            label="Indian Look"
+                            label={`Indian Look${requirements?.portfolio_requirements?.indian === "required" ? " *" : ""}`}
                             hint="Saree, lehenga, sherwani, or traditional/Indian-look references."
                             items={indianImages}
                             category="indian"
@@ -1659,7 +1657,7 @@ export default function ApplicationPage() {
                             testidPrefix="indian"
                         />
                         <ApplyLookGroup
-                            label="Western Look"
+                            label={`Western Look${requirements?.portfolio_requirements?.western === "required" ? " *" : ""}`}
                             hint="Casual, formal or western-styled references."
                             items={westernImages}
                             category="western"
@@ -1675,7 +1673,7 @@ export default function ApplicationPage() {
                         <div>
                             <div className="flex items-center justify-between mb-1">
                                 <p className="text-sm text-[#1a1a1a] font-medium">
-                                    Profile / Headshot Image * <span className="text-[#8b8b8b] text-xs ml-1">({images.length}/{MAX_IMAGES_PER_CATEGORY})</span>
+                                    Profile / Headshot Image{requirements?.portfolio_requirements?.portfolio === "required" ? " *" : ""} <span className="text-[#8b8b8b] text-xs ml-1">({images.length}/{MAX_IMAGES_PER_CATEGORY})</span>
                                 </p>
                                 {images.length < MAX_IMAGES_PER_CATEGORY && (
                                     <button

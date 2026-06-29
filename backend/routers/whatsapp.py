@@ -421,6 +421,52 @@ async def delete_template(template_id: str, admin: dict = Depends(current_admin)
     await db.whatsapp_templates.delete_one({"id": template_id})
 
 
+# Catalog powering the editor's "Available Variables" panel (Part 5). Each entry
+# is click-to-insert. `auto_resolved` tells the editor which of these are filled
+# in automatically so they can be hidden from the "Inject Custom Variables" panel
+# (Part 2). Anything NOT listed in auto_resolved (e.g. instagram, location) stays
+# a manual input across every source.
+VARIABLE_CATALOG = [
+    {"category": "Talent", "variables": [
+        {"key": "first_name", "label": "First name"},
+        {"key": "full_name", "label": "Full name"},
+        {"key": "talent_name", "label": "Full name (legacy alias)"},
+        {"key": "phone", "label": "Phone"},
+        {"key": "instagram", "label": "Instagram"},
+    ]},
+    {"category": "Project", "variables": [
+        {"key": "project_name", "label": "Project name"},
+        {"key": "shoot_dates", "label": "Shoot dates"},
+        {"key": "budget", "label": "Budget"},
+        {"key": "location", "label": "Location"},
+        {"key": "submission_link", "label": "Submission link"},
+    ]},
+    {"category": "Sender", "variables": [
+        {"key": "sender_name", "label": "Sender name"},
+        {"key": "sender_email", "label": "Sender email"},
+    ]},
+    {"category": "System", "variables": [
+        {"key": "current_date", "label": "Current date"},
+        {"key": "current_time", "label": "Current time"},
+    ]},
+]
+
+
+@router.get("/variables")
+async def list_variables(admin: dict = Depends(current_team_or_admin)):
+    """Variable catalog for the template editor + the set the backend resolves
+    automatically (so the UI knows which to hide from Inject Custom Variables)."""
+    return {
+        "catalog": VARIABLE_CATALOG,
+        "auto_resolved": {
+            # Always auto-resolved regardless of source.
+            "always": AUTO_RECIPIENT_VARS + AUTO_SENDER_VARS + AUTO_SYSTEM_VARS,
+            # Additionally auto-resolved only when the source is Project Pipeline.
+            "project_source": AUTO_PROJECT_VARS,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # ── PROJECT / PIPELINE HELPERS ─────────────────────────────────────────────
 # ---------------------------------------------------------------------------
@@ -644,13 +690,83 @@ def _log_routing_decision(name: str, phone: str, group: str, dest_type: str, des
     )
 
 
-def _render_message(template_body: str, variable_data: Dict[str, str], talent_name: str) -> str:
-    """Substitute template variables. Always injects talent_name."""
-    data = {**variable_data, "talent_name": talent_name}
+def _render_message(template_body: str, data: Dict[str, Any]) -> str:
+    """Substitute {{key}} placeholders from `data`.
+
+    Unknown placeholders are intentionally left untouched (back-compat — existing
+    templates with manually-filled variables behave exactly as before). `None`
+    values render as an empty string so an unset auto-variable doesn't leak a raw
+    placeholder into the message.
+    """
     result = template_body
     for key, value in data.items():
-        result = result.replace("{{" + key + "}}", value)
+        result = result.replace("{{" + key + "}}", "" if value is None else str(value))
     return result
+
+
+def _first_name(full_name: Optional[str]) -> str:
+    """First word of a stored name. 'Sahal Mansuri' -> 'Sahal'."""
+    parts = (full_name or "").strip().split()
+    return parts[0] if parts else ""
+
+
+def _recipient_variables(name: str, phone: str) -> Dict[str, str]:
+    """Per-recipient placeholders. `talent_name` is kept as the canonical alias
+    every existing template relies on; `full_name` is the new equivalent."""
+    name = name or ""
+    return {
+        "talent_name": name,          # back-compat — do not remove
+        "full_name": name,            # alias of talent_name (Part 3)
+        "first_name": _first_name(name),
+        "phone": phone or "",
+    }
+
+
+def _sender_variables(admin: Dict[str, Any]) -> Dict[str, str]:
+    """Sender placeholders — the authenticated admin running the campaign."""
+    return {
+        "sender_name": (admin.get("name") or "").strip(),
+        "sender_email": (admin.get("email") or "").strip(),
+    }
+
+
+def _system_variables() -> Dict[str, str]:
+    """Date/time placeholders, rendered in a human-friendly format."""
+    now = datetime.now(timezone.utc)
+    return {
+        "current_date": now.strftime("%d %b %Y"),
+        "current_time": now.strftime("%I:%M %p").lstrip("0"),
+    }
+
+
+def _project_variables(project: Dict[str, Any]) -> Dict[str, str]:
+    """Auto-resolved project placeholders (Part 2). Derived from the project
+    document so the admin never types them for a Project Pipeline campaign."""
+    slug = (project.get("slug") or "").strip()
+    budget = (project.get("budget_per_day") or "").strip()
+    if not budget:
+        # Fall back to the structured talent-facing budget list, if present.
+        entries = project.get("talent_budget") or []
+        budget = ", ".join(
+            (e.get("value") or "").strip()
+            for e in entries
+            if isinstance(e, dict) and (e.get("value") or "").strip()
+        )
+    return {
+        "project_name": (project.get("brand_name") or "").strip(),
+        "shoot_dates": (project.get("shoot_dates") or "").strip(),
+        "budget": budget,
+        "submission_link": f"https://submit.talentgramagency.com/submit/{slug}" if slug else "",
+    }
+
+
+# Variables the backend resolves automatically — the editor hides these from the
+# "Inject Custom Variables" panel so the admin is only asked for what cannot be
+# derived. Exposed via GET /whatsapp/variables for the frontend.
+AUTO_RECIPIENT_VARS = ["talent_name", "full_name", "first_name", "phone"]
+AUTO_SENDER_VARS = ["sender_name", "sender_email"]
+AUTO_SYSTEM_VARS = ["current_date", "current_time"]
+AUTO_PROJECT_VARS = ["project_name", "shoot_dates", "budget", "submission_link"]
 
 
 # ===========================================================================
@@ -1004,20 +1120,32 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
 
     # Human-readable source label for campaign history (Feature 7).
     source_label = ""
+    # Resolved variable context shared by every recipient in this batch.
+    # Precedence (lowest → highest): manual values typed by the admin, then
+    # auto-resolved project vars (only for a Project source — Part 2), then
+    # sender (Part 4) and system vars. Per-recipient vars are layered in the loop.
+    base_vars: Dict[str, str] = {
+        k: v for k, v in (payload.variable_data or {}).items() if v is not None
+    }
     if source_type == "PROJECT" and params.project_id:
-        proj = await db.projects.find_one({"id": params.project_id}, {"_id": 0, "brand_name": 1})
-        source_label = (proj or {}).get("brand_name", "") if proj else ""
+        proj = await db.projects.find_one({"id": params.project_id}, {"_id": 0})
+        if proj:
+            source_label = proj.get("brand_name", "") or ""
+            base_vars.update(_project_variables(proj))
     elif source_type == "CRM":
         source_label = params.contact_type or "All CRM contacts"
     elif source_type == "MANUAL":
         source_label = f"{len(rec_list)} manual contact(s)"
+    base_vars.update(_sender_variables(admin))
+    base_vars.update(_system_variables())
 
     job_status = "dry_run_preview" if payload.is_dry_run else "pending"
     now = _utcnow()
     batch_id = _new_id()
     jobs = []
     for rec in rec_list:
-        message_body = _render_message(template["body_text"], payload.variable_data, rec["name"])
+        rec_vars = {**base_vars, **_recipient_variables(rec["name"], rec.get("phone", ""))}
+        message_body = _render_message(template["body_text"], rec_vars)
         logger.info("whatsapp: COMPILED MESSAGE recipient=%r (len=%d): %r",
                     rec["name"], len(message_body), message_body)
         jobs.append({

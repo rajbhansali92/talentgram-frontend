@@ -115,5 +115,76 @@ def main():
     print("\nALL SLICE-1 RESOLUTION ENGINE TESTS PASSED")
 
 
+def test_variable_resolution():
+    """Template Engine variable resolution (first_name, sender, project auto,
+    system) + backward compatibility of {{talent_name}} / {{full_name}}."""
+
+    # first_name = first word; handles empty / multi-word.
+    assert wa._first_name("Sahal Mansuri") == "Sahal"
+    assert wa._first_name("Sahal") == "Sahal"
+    assert wa._first_name("  Riyaan League  ") == "Riyaan"
+    assert wa._first_name("") == "" and wa._first_name(None) == ""
+
+    # Per-recipient vars: talent_name (legacy) + full_name (alias) + first_name + phone.
+    rv = wa._recipient_variables("Sahal Mansuri", "+919004706699")
+    assert rv["talent_name"] == "Sahal Mansuri"
+    assert rv["full_name"] == "Sahal Mansuri"
+    assert rv["first_name"] == "Sahal"
+    assert rv["phone"] == "+919004706699"
+
+    # Sender vars from the authenticated admin.
+    sv = wa._sender_variables({"name": "Raj", "email": "raj@talentgram.com"})
+    assert sv["sender_name"] == "Raj" and sv["sender_email"] == "raj@talentgram.com"
+
+    # Project auto-resolution: brand_name/shoot_dates/budget/submission_link.
+    pv = wa._project_variables({
+        "brand_name": "Maruti MSIL Strong Hybrid",
+        "shoot_dates": "12-14 July",
+        "budget_per_day": "Rs 15,000",
+        "slug": "maruti-msil",
+    })
+    assert pv["project_name"] == "Maruti MSIL Strong Hybrid"
+    assert pv["shoot_dates"] == "12-14 July"
+    assert pv["budget"] == "Rs 15,000"
+    assert pv["submission_link"] == "https://submit.talentgramagency.com/submit/maruti-msil"
+
+    # Budget falls back to the structured talent_budget list when no budget_per_day.
+    pv2 = wa._project_variables({
+        "brand_name": "X", "slug": "x",
+        "talent_budget": [{"label": "Lead", "value": "Rs 20,000"}, {"label": "Extra", "value": ""}],
+    })
+    assert pv2["budget"] == "Rs 20,000"
+
+    # Backward compatibility: an existing template using {{talent_name}} still
+    # renders, and a missing var is left untouched (not blanked unexpectedly).
+    legacy_tpl = "Hi {{talent_name}} for *{{project_name}}*! {{unknown_var}}"
+    data = {**wa._project_variables({"brand_name": "Acme", "slug": "acme"}),
+            **wa._recipient_variables("Sahal Mansuri", "")}
+    out = wa._render_message(legacy_tpl, data)
+    assert "Hi Sahal Mansuri for" in out
+    assert "*Acme*" in out
+    assert "{{unknown_var}}" in out  # unknown placeholders preserved
+
+    # New placeholders render together; None -> "".
+    tpl = "Hey {{first_name}}, dates {{shoot_dates}}. Thanks, {{sender_name}}"
+    full = {
+        **wa._recipient_variables("Sahal Mansuri", ""),
+        **wa._project_variables({"brand_name": "Acme", "slug": "acme", "shoot_dates": None}),
+        **wa._sender_variables({"name": "Raj", "email": "r@t.com"}),
+        **wa._system_variables(),
+    }
+    rendered = wa._render_message(tpl, full)
+    assert rendered.startswith("Hey Sahal, dates .")  # None shoot_dates -> ""
+    assert "Thanks, Raj" in rendered
+
+    # System vars are always present and non-empty.
+    sysv = wa._system_variables()
+    assert sysv["current_date"] and sysv["current_time"]
+
+    print("7. variable resolution + backward-compat OK")
+    print("\nALL TEMPLATE-ENGINE VARIABLE TESTS PASSED")
+
+
 if __name__ == "__main__":
     main()
+    test_variable_resolution()

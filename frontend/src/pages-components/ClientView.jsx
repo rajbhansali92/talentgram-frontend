@@ -1829,9 +1829,13 @@ function TalentDetail({
                 sessionId: getSessionId(),
             });
             if (res?.method === "native_file_share") {
-                toast.success(`Sharing ${res.count} item${res.count === 1 ? "" : "s"}…`);
+                toast.success(`Sharing ${res.count} file${res.count === 1 ? "" : "s"} — choose WhatsApp…`);
             } else if (res?.method === "whatsapp_link_share") {
-                toast.success("Opening WhatsApp…");
+                toast.success(
+                    res.via === "native_sheet"
+                        ? "Sharing secure links — choose WhatsApp…"
+                        : "Opening WhatsApp with secure links…",
+                );
             }
             if (res && !res.aborted) exitShareMode();
         } catch (e) {
@@ -2390,7 +2394,7 @@ function TalentDetail({
                 <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-auto min-h-0 pb-10">
+                    <div className={`w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-auto min-h-0 ${shareMode ? "pb-32" : "pb-10"}`}>
                         {/* Mobile Download Talent Folder Button */}
                         {vis.download && (
                             <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04]">
@@ -2945,10 +2949,13 @@ function TalentDetail({
                     </div>
                 </div>
 
-                {/* Sticky multi-select share bar */}
+                {/* Sticky multi-select share bar — fixed to the viewport so the
+                    overlay's overflow-hidden + 100dvh can't clip it below the
+                    fold on mobile (Android). */}
                 {shareMode && (
                     <div
-                        className="shrink-0 border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex items-center justify-between gap-3 shadow-[0_-4px_20px_rgba(0,0,0,0.05)]"
+                        className="fixed bottom-0 left-0 right-0 z-[60] border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex items-center justify-between gap-3 shadow-[0_-4px_20px_rgba(0,0,0,0.10)]"
+                        style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
                         data-testid="share-action-bar"
                     >
                         <div className="flex items-center gap-2 min-w-0">

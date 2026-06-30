@@ -144,6 +144,13 @@ export default function LinkResults() {
     const events = data?.events || [];
     const actionHistory = data?.action_history || [];
 
+    const summaryByTalent = {};
+    if (data?.summary) {
+        data.summary.forEach((s) => {
+            summaryByTalent[s.talent_id] = s;
+        });
+    }
+
     // Helper to get talent name safely
     const getTalentName = (tid) => {
         if (tid === "all" || tid === "campaign") return "Entire Project";

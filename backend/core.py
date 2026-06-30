@@ -1529,6 +1529,9 @@ CLIENT_ALLOWED_FIELDS = {
     "ethnicity",
     "languages",
     "special_abilities",
+    # Privacy-safe boolean only (no media/URLs/filenames/counts). Drives client
+    # "Ask for Test" visibility correctly even when takes are hidden by visibility.
+    "has_audition_takes",
 }
 
 
@@ -2008,12 +2011,21 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
                 cover_mid = m["id"]
                 break
 
+    # Single source of truth for "Ask for Test" eligibility. Computed from the
+    # RAW media (before visibility filtering) so it's correct even when
+    # visibility.takes hides the takes from the client. Exposes ONLY a boolean —
+    # no media, URLs, filenames, or counts.
+    has_audition_takes = any(
+        (m.get("category") or "").startswith("take") for m in (talent.get("media") or [])
+    )
+
     out: Dict[str, Any] = {
         "id": talent["id"],
         "name": talent.get("name"),
         "media": filtered_media,
         "cover_media_id": cover_mid,
         "image_url": _resolve_cover_url({"media": filtered_media, "cover_media_id": cover_mid}) or None,
+        "has_audition_takes": has_audition_takes,
     }
     if v.get("age") and talent.get("age") is not None:
         out["age"] = talent["age"]

@@ -92,19 +92,14 @@ const SHORT_ACTION_META = {
 
 /**
  * SINGLE SOURCE OF TRUTH for "Ask for Test" visibility.
- * A talent who has already submitted audition takes (category "take" or the
- * legacy "take_1/2/3") cannot be asked for a test again. Used everywhere the
- * action can be chosen (detail buttons, tabs/filter, bulk) so visibility stays
- * consistent. Does NOT affect history/analytics — existing ask_for_test actions
- * still render via their decision badge / Review History.
+ * Uses the backend-computed `has_audition_takes` boolean (derived from raw
+ * submission media before visibility filtering) so the rule is correct even when
+ * `visibility.takes` hides the takes from the client. A talent who has already
+ * submitted audition takes cannot be asked for a test again. Used everywhere the
+ * action can be chosen (detail buttons, tabs/filter, bulk). Does NOT affect
+ * history/analytics — existing ask_for_test decisions still render normally.
  */
-function hasAuditionTakes(talent) {
-    return (talent?.media || []).some((m) => {
-        const c = m?.category;
-        return typeof c === "string" && c.startsWith("take");
-    });
-}
-const canAskForTest = (talent) => !hasAuditionTakes(talent);
+const canAskForTest = (talent) => !talent?.has_audition_takes;
 
 const TABS = [
     { key: "all", label: "All Submissions", icon: Layers },

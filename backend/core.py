@@ -1942,8 +1942,27 @@ def _public_media(m: dict) -> dict:
     resource_type = m.get("resource_type")
     url = m.get("url")
     is_video = resource_type == "video" or m.get("category") == "video" or (m.get("content_type") or "").startswith("video/")
-    
-    if is_video and m.get("public_id"):
+
+    # Provider-aware video URL. Cloudflare Stream (HLS .m3u8) and R2 assets keep
+    # their stored delivery URL as-is. Only legacy Cloudinary-hosted videos get the
+    # optimized Cloudinary delivery transform via stream_video_url(public_id).
+    # (Previously this rewrote EVERY video with a public_id to a Cloudinary URL,
+    # which replaced the Stream m3u8 with a non-existent Cloudinary .mp4 → client
+    # playback failed with "No video with supported format".)
+    _provider = m.get("provider")
+    _url = url or ""
+    # Broad Stream detection — resilient to legacy / partially-migrated records
+    # where `provider` may be unset but other Stream signals are present.
+    _is_stream = (
+        _provider == "stream"
+        or bool(m.get("stream_uid"))
+        or "cloudflarestream.com" in _url
+        or _url.endswith(".m3u8")
+    )
+    _is_cloudinary_video = _provider == "cloudinary" or "res.cloudinary.com" in _url
+    # Only rewrite genuine Cloudinary videos, and never a Stream record. R2 and
+    # anything non-Cloudinary keep their stored URL untouched.
+    if is_video and m.get("public_id") and _is_cloudinary_video and not _is_stream:
         url = stream_video_url(m["public_id"]) or url
 
     out = {

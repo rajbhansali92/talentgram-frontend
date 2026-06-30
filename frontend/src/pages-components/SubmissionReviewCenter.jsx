@@ -59,17 +59,35 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
     useEffect(() => {
         setIsPlaying(false);
         const video = videoRef.current;
-        return () => {
+        if (!video || !src) return;
+
+        // Provider-aware source: Cloudflare Stream serves HLS (.m3u8), which only
+        // Safari plays natively. Use hls.js elsewhere (mirrors LazyVideoPlayer).
+        let hls = null;
+        let cancelled = false;
+        const cleanup = () => {
+            if (hls) { try { hls.destroy(); } catch (e) { /* ignore */ } }
             if (video) {
-                try {
-                    video.pause();
-                    video.removeAttribute("src");
-                    video.load();
-                } catch (e) {
-                    // ignore
-                }
+                try { video.pause(); video.removeAttribute("src"); video.load(); } catch (e) { /* ignore */ }
             }
         };
+
+        if (src.includes(".m3u8") && !video.canPlayType("application/vnd.apple.mpegurl")) {
+            import("hls.js").then(({ default: Hls }) => {
+                if (cancelled || !videoRef.current) return;
+                if (Hls.isSupported()) {
+                    hls = new Hls();
+                    hls.loadSource(src);
+                    hls.attachMedia(videoRef.current);
+                } else {
+                    videoRef.current.src = src;
+                }
+            });
+        } else {
+            video.src = src; // native MP4, or HLS on Safari
+        }
+
+        return () => { cancelled = true; cleanup(); };
     }, [src]);
 
     const togglePlay = () => {
@@ -88,7 +106,6 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
         <div className="relative border border-neutral-200 bg-black rounded-lg overflow-hidden aspect-video group shadow-sm">
             <video
                 ref={videoRef}
-                src={src}
                 poster={poster}
                 preload="none"
                 className="w-full h-full object-cover cursor-pointer"

@@ -78,6 +78,18 @@ const ACTIONS = [
     { key: "ask_for_test", label: "Ask for Test", icon: ClipboardCheck },
 ];
 
+// Compact labels + icons for the mobile card status badge — keeps cards premium
+// (e.g. "Does Not Work For This Project" → "Not for this"). Desktop cards keep
+// the full ACTIONS labels.
+const SHORT_ACTION_META = {
+    interested: { label: "Approved", icon: ThumbsUp },
+    not_for_this: { label: "Not for this", icon: XCircle },
+    shortlist: { label: "Shortlisted", icon: Star },
+    lock: { label: "Locked", icon: Lock },
+    not_sure: { label: "Unsure", icon: HelpCircle },
+    ask_for_test: { label: "Test", icon: ClipboardCheck },
+};
+
 const TABS = [
     { key: "all", label: "All Submissions", icon: Layers },
     { key: "pending_action", label: "Pending Action", icon: Clock },
@@ -1337,44 +1349,49 @@ export default function ClientView() {
                                     </div>
                                 </div>
 
-                                <div className="flex items-center gap-2 flex-wrap text-xs">
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            const visibleIds = filteredTalents.map(t => t.id);
-                                            setSelectedIds(new Set(visibleIds));
-                                            toast.success(`Selected all ${visibleIds.length} visible talent(s)`);
-                                        }}
-                                        data-testid="select-all-visible"
-                                        className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
-                                    >
-                                        Select All Visible
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            const allIds = talents.map(t => t.id);
-                                            setSelectedIds(new Set(allIds));
-                                            toast.success(`Selected all ${allIds.length} filtered talent(s)`);
-                                        }}
-                                        data-testid="select-all-filtered"
-                                        className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
-                                    >
-                                        Select All Filtered
-                                    </button>
-                                    {selectedIds.size > 0 && (
+                                {/* Bulk Select — labelled and separated from the filters above
+                                    so it doesn't read as another filter control. */}
+                                <div className="flex flex-col gap-1.5">
+                                    <span className="md:hidden text-[10px] tracking-[0.08em] uppercase text-[#8A8A8A] font-semibold">Bulk Select</span>
+                                    <div className="flex items-center gap-2 flex-wrap text-xs">
                                         <button
                                             type="button"
                                             onClick={() => {
-                                                setSelectedIds(new Set());
-                                                toast.success("Selection cleared");
+                                                const visibleIds = filteredTalents.map(t => t.id);
+                                                setSelectedIds(new Set(visibleIds));
+                                                toast.success(`Selected ${visibleIds.length} shown talent(s)`);
                                             }}
-                                            data-testid="clear-selection"
-                                            className="px-3 py-1.5 text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors font-semibold"
+                                            data-testid="select-all-visible"
+                                            className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
                                         >
-                                            Clear Selection
+                                            Select shown ({filteredTalents.length})
                                         </button>
-                                    )}
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const allIds = talents.map(t => t.id);
+                                                setSelectedIds(new Set(allIds));
+                                                toast.success(`Selected all ${allIds.length} talent(s)`);
+                                            }}
+                                            data-testid="select-all-filtered"
+                                            className="px-3 py-1.5 border border-black/10 hover:border-black/25 text-[#4A4A4A] hover:text-[#111111] rounded-md transition-colors font-medium bg-white"
+                                        >
+                                            Select all ({talents.length})
+                                        </button>
+                                        {selectedIds.size > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedIds(new Set());
+                                                    toast.success("Selection cleared");
+                                                }}
+                                                data-testid="clear-selection"
+                                                className="px-3 py-1.5 text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors font-semibold"
+                                            >
+                                                Clear Selection
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
 
@@ -1491,83 +1508,99 @@ export default function ClientView() {
                 />
             )}
 
-            {/* Floating Bulk Action Bar */}
+            {/* Bulk Actions bar — mobile: full-width, 3-col action grid (no clipping).
+                Desktop: centered horizontal row (unchanged). */}
             {selectedIds.size > 0 && (
-                <div 
-                    data-testid="bulk-action-bar" 
-                    className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 bg-[var(--tg-navy-primary)] text-white border border-[var(--tg-navy-border)] shadow-2xl rounded-2xl px-6 py-4 flex items-center justify-between gap-6 z-40 animate-fade-in max-w-[90vw] md:max-w-3xl"
+                <div
+                    data-testid="bulk-action-bar"
+                    className="fixed z-40 animate-fade-in bg-[var(--tg-navy-primary)] text-white border border-[var(--tg-navy-border)] shadow-2xl rounded-2xl
+                               left-2 right-2 bottom-[calc(1rem+env(safe-area-inset-bottom))] px-4 py-3
+                               md:left-1/2 md:right-auto md:-translate-x-1/2 md:bottom-[calc(1.5rem+env(safe-area-inset-bottom))] md:px-6 md:py-4 md:max-w-3xl"
                 >
-                    <div className="flex items-center gap-2.5">
-                        <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs font-mono font-semibold">
-                            {selectedIds.size}
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-6">
+                        {/* Header: count + label; cancel inline on mobile */}
+                        <div className="flex items-center justify-between md:justify-start gap-2.5 shrink-0">
+                            <div className="flex items-center gap-2.5">
+                                <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs font-mono font-semibold">
+                                    {selectedIds.size}
+                                </div>
+                                <span className="text-sm font-medium tracking-wide">Bulk actions</span>
+                            </div>
+                            <button
+                                onClick={() => setSelectedIds(new Set())}
+                                className="md:hidden flex items-center justify-center w-9 h-9 -mr-1 hover:bg-white/10 rounded-full transition-colors"
+                                aria-label="Cancel selection"
+                            >
+                                <X className="w-4 h-4 text-white/70" />
+                            </button>
                         </div>
-                        <span className="text-sm font-medium tracking-wide">Selected</span>
+
+                        <div className="hidden md:block h-6 w-px bg-white/10" />
+
+                        <div className="grid grid-cols-3 gap-2 md:flex md:flex-wrap md:items-center">
+                            <button
+                                onClick={() => setBulkAction(Array.from(selectedIds), "interested")}
+                                data-testid="bulk-action-interested"
+                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            >
+                                <ThumbsUp className="w-3.5 h-3.5 shrink-0" />
+                                <span className="hidden md:inline">Audition Approved</span>
+                                <span className="md:hidden">Approve</span>
+                            </button>
+                            <button
+                                onClick={() => setBulkAction(Array.from(selectedIds), "shortlist")}
+                                data-testid="bulk-action-shortlist"
+                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            >
+                                <Star className="w-3.5 h-3.5 shrink-0" />
+                                Shortlist
+                            </button>
+                            <button
+                                onClick={() => setBulkAction(Array.from(selectedIds), "not_for_this")}
+                                data-testid="bulk-action-not_for_this"
+                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-rose-950/40 hover:bg-rose-900/60 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-rose-500/20 text-rose-200"
+                            >
+                                <XCircle className="w-3.5 h-3.5 shrink-0" />
+                                <span className="hidden md:inline">Does Not Work</span>
+                                <span className="md:hidden">Reject</span>
+                            </button>
+                            <button
+                                onClick={() => setBulkAction(Array.from(selectedIds), "lock")}
+                                data-testid="bulk-action-lock"
+                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            >
+                                <Lock className="w-3.5 h-3.5 shrink-0" />
+                                Lock
+                            </button>
+                            <button
+                                onClick={() => setBulkAction(Array.from(selectedIds), "not_sure")}
+                                data-testid="bulk-action-not_sure"
+                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            >
+                                <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+                                Unsure
+                            </button>
+                            <button
+                                onClick={() => setBulkAction(Array.from(selectedIds), "ask_for_test")}
+                                data-testid="bulk-action-ask_for_test"
+                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                            >
+                                <ClipboardCheck className="w-3.5 h-3.5 shrink-0" />
+                                <span className="hidden md:inline">Ask for Test</span>
+                                <span className="md:hidden">Test</span>
+                            </button>
+                        </div>
+
+                        <div className="hidden md:block h-6 w-px bg-white/10" />
+
+                        <button
+                            onClick={() => setSelectedIds(new Set())}
+                            className="hidden md:flex items-center justify-center w-11 h-11 hover:bg-white/10 rounded-full transition-colors shrink-0"
+                            aria-label="Cancel selection"
+                        >
+                            <X className="w-4 h-4 text-white/60 hover:text-white" />
+                        </button>
                     </div>
-
-                    <div className="h-6 w-px bg-white/10" />
-
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button
-                            onClick={() => setBulkAction(Array.from(selectedIds), "interested")}
-                            data-testid="bulk-action-interested"
-                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
-                        >
-                            <ThumbsUp className="w-3.5 h-3.5" />
-                            <span className="hidden sm:inline">Audition Approved</span>
-                            <span className="sm:hidden">Approve</span>
-                        </button>
-                        <button
-                            onClick={() => setBulkAction(Array.from(selectedIds), "shortlist")}
-                            data-testid="bulk-action-shortlist"
-                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
-                        >
-                            <Star className="w-3.5 h-3.5" />
-                            Shortlist
-                        </button>
-                        <button
-                            onClick={() => setBulkAction(Array.from(selectedIds), "not_for_this")}
-                            data-testid="bulk-action-not_for_this"
-                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-rose-950/40 hover:bg-rose-900/60 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-rose-500/20 text-rose-200"
-                        >
-                            <XCircle className="w-3.5 h-3.5" />
-                            <span className="hidden md:inline">Does Not Work</span>
-                            <span className="md:hidden">Reject</span>
-                        </button>
-                        <button
-                            onClick={() => setBulkAction(Array.from(selectedIds), "lock")}
-                            data-testid="bulk-action-lock"
-                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
-                        >
-                            <Lock className="w-3.5 h-3.5" />
-                            Lock
-                        </button>
-                        <button
-                            onClick={() => setBulkAction(Array.from(selectedIds), "not_sure")}
-                            data-testid="bulk-action-not_sure"
-                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
-                        >
-                            <HelpCircle className="w-3.5 h-3.5" />
-                            Unsure
-                        </button>
-                        <button
-                            onClick={() => setBulkAction(Array.from(selectedIds), "ask_for_test")}
-                            data-testid="bulk-action-ask_for_test"
-                            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
-                        >
-                            <ClipboardCheck className="w-3.5 h-3.5" />
-                            Ask for Test
-                        </button>
-                    </div>
-
-                    <div className="h-6 w-px bg-white/10" />
-
-                    <button
-                        onClick={() => setSelectedIds(new Set())}
-                        className="flex items-center justify-center w-11 h-11 hover:bg-white/10 rounded-full transition-colors"
-                        aria-label="Cancel selection"
-                    >
-                        <X className="w-4 h-4 text-white/60 hover:text-white" />
-                    </button>
                 </div>
             )}
         </div>
@@ -1683,7 +1716,7 @@ function TalentDetail({
     const [idx, setIdx] = useState(0);
     const overlayRef = useRef(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
+    const [isDetailsExpanded, setIsDetailsExpanded] = useState(true);
     const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
     // C3: in-flight guards prevent duplicate downloads from rapid taps.
     const downloadPackageInFlightRef = useRef(false);
@@ -1898,7 +1931,7 @@ function TalentDetail({
 
     useEffect(() => {
         setIdx(0);
-        setIsDetailsExpanded(false);
+        setIsDetailsExpanded(true); // Issue 2: details expanded by default on every talent open
         trackedMediaRefs.current.clear();
     }, [talent.id]);
 
@@ -2008,13 +2041,10 @@ function TalentDetail({
     }, [goNextTalent, goPrevTalent]);
 
 
-    const download = useCallback(async (m) => {
+    const download = useCallback((m) => {
         if (!m || !m.id) return;
-        if (downloadingRef.current.has(m.id)) return; // C3: block duplicate clicks per media
-        downloadingRef.current.add(m.id);
-        setDownloadingIds((prev) => new Set(prev).add(m.id));
+        if (downloadingRef.current.has(m.id)) return; // guard rapid double-taps
         try {
-            await logDownload(talent.id, m.id);
             const rawUrl = IMAGE_URL(m);
             const isVideo = m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take");
             const url = isVideo ? getVideoDownloadUrl(rawUrl) : rawUrl;
@@ -2023,63 +2053,52 @@ function TalentDetail({
                 return;
             }
 
-            const ext = isVideo ? "mp4" : (url.split(".").pop().split("?")[0] || "");
             let baseName = m.original_filename || `${privatizeName(talent.name)}_${m.category || "media"}`;
             if (baseName.includes(".")) {
                 baseName = baseName.replace(/\.[^/.]+$/, "");
             }
-            const filename = `${baseName}.${ext}`;
 
-            try {
-                // Primary: fetch to a blob so the custom filename is honored.
-                // C5: abort if the fetch stalls.
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 60000);
-                let response;
-                try {
-                    response = await fetch(url, { mode: "cors", signal: controller.signal });
-                } finally {
-                    clearTimeout(timer);
-                }
-                if (!response.ok) throw new Error("Network response was not ok");
-                const blob = await response.blob();
-                const blobUrl = URL.createObjectURL(blob);
-
-                const a = document.createElement("a");
-                a.href = blobUrl;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-            } catch (err) {
-                console.warn("Direct download failed, falling back:", err);
-                // Fallback: force attachment headers for Cloudinary; else open in a new tab.
-                let downloadUrl = url;
-                if (url.includes("/upload/")) {
-                    const cleanName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");
-                    const flag = cleanName ? `fl_attachment:${cleanName}` : "fl_attachment";
-                    downloadUrl = url.replace("/upload/", `/upload/${flag}/`);
-                }
-                const a = document.createElement("a");
-                a.href = downloadUrl;
-                a.target = "_blank";
-                a.rel = "noopener";
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
+            // Build a directly-downloadable URL. For Cloudinary, use fl_attachment so
+            // the server returns Content-Disposition: attachment (sets the filename
+            // too). This is reliable and REPEATABLE on iOS Safari/Chrome because the
+            // anchor click stays inside the user gesture — no fetch()/blob() (which
+            // breaks the gesture and fails on the 2nd download in Safari).
+            let downloadUrl = url;
+            if (url.includes("/upload/")) {
+                const cleanName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");
+                const flag = cleanName ? `fl_attachment:${cleanName}` : "fl_attachment";
+                downloadUrl = url.replace("/upload/", `/upload/${flag}/`);
             }
+
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = baseName; // honored same-origin / Cloudinary; ignored cross-origin (server name used)
+            a.rel = "noopener";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+
+            // Fire-and-forget analytics — must NOT precede/await the click (would
+            // break the Safari user-gesture and block the download).
+            logDownload(talent.id, m.id);
         } catch (err) {
             console.error("Download error:", err);
             toast.error("Couldn't download this file. Please try again.");
-        } finally {
+            return;
+        }
+
+        // Brief visual guard (native download runs in the browser's download
+        // manager; there's no async completion to await).
+        downloadingRef.current.add(m.id);
+        setDownloadingIds((prev) => new Set(prev).add(m.id));
+        setTimeout(() => {
             downloadingRef.current.delete(m.id);
             setDownloadingIds((prev) => {
                 const n = new Set(prev);
                 n.delete(m.id);
                 return n;
             });
-        }
+        }, 1500);
     }, [logDownload, talent.id, talent.name]);
 
     return (
@@ -2088,7 +2107,7 @@ function TalentDetail({
             className={`fixed inset-0 z-50 bg-white overflow-hidden transition-opacity duration-300 ease-out ${isModalOpen ? "opacity-100" : "opacity-0"}`}
             data-testid="talent-detail-overlay"
         >
-            <div className={`h-screen flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
+            <div className={`h-[100dvh] flex flex-col transition-transform duration-300 ease-out ${isModalOpen ? "scale-100" : "scale-95"}`}>
 
                 {/* Unified Top Sticky Header (Desktop & Mobile) */}
                 <div className="sticky top-0 z-50 bg-white border-b border-[#eaeaea] px-4 md:px-6 py-3 md:py-4 flex flex-wrap items-center justify-between shrink-0 shadow-sm">
@@ -2299,8 +2318,8 @@ function TalentDetail({
 
                                     {vis.work_links && (talent.work_links || []).length > 0 && (
                                         <div>
-                                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
-                                            <WorkLinksDisplay links={talent.work_links} />
+                                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work Links</p>
+                                            <WorkLinksDisplay links={talent.work_links} variant="list" />
                                         </div>
                                     )}
                                 </div>
@@ -2600,8 +2619,8 @@ function TalentDetail({
 
                             {vis.work_links && (talent.work_links || []).length > 0 && (
                                 <div className="mb-8">
-                                    <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work</p>
-                                    <WorkLinksDisplay links={talent.work_links} />
+                                    <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work Links</p>
+                                    <WorkLinksDisplay links={talent.work_links} variant="list" />
                                 </div>
                             )}
 
@@ -2815,11 +2834,16 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
                                     <Heart className="w-2.5 h-2.5 fill-current" /> Shortlisted
                                 </span>
                             )}
-                            {action && action !== "shortlist" && (
-                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-white/95 text-[#111111] text-[9px] tracking-[0.06em] uppercase rounded-full border border-black/[0.06] shadow-sm">
-                                    {ACTIONS.find((a) => a.key === action)?.label}
-                                </span>
-                            )}
+                            {action && action !== "shortlist" && (() => {
+                                const meta = SHORT_ACTION_META[action];
+                                const ShortIcon = meta?.icon;
+                                return (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-white/95 text-[#111111] text-[9px] tracking-[0.06em] uppercase rounded-full border border-black/[0.06] shadow-sm">
+                                        {ShortIcon && <ShortIcon className="w-2.5 h-2.5" />}
+                                        {meta?.label || ACTIONS.find((a) => a.key === action)?.label}
+                                    </span>
+                                );
+                            })()}
                             {seen && (
                                 <span
                                     className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-white/95 border border-black/[0.06] text-[#8A8A8A] text-[9px] tracking-[0.06em] uppercase rounded-full shadow-sm"

@@ -71,8 +71,47 @@ export function getLinkMeta(url) {
  * @param {string}    [className]    Extra wrapper class
  * @param {Function}  [renderExtra]  Optional: (url, index) => ReactNode injected after the Open button (e.g. delete button)
  */
-export default function WorkLinksDisplay({ links, className = "", renderExtra }) {
+export default function WorkLinksDisplay({ links, className = "", renderExtra, variant = "cards" }) {
     if (!links || links.length === 0) return null;
+
+    // Compact single-container grouped list (used by the client review panel).
+    // One bordered container with divided rows — no stacked cards.
+    if (variant === "list") {
+        return (
+            <div
+                className={`rounded-xl border border-black/[0.06] divide-y divide-black/[0.05] overflow-hidden bg-white ${className}`}
+                data-testid="work-links-display"
+            >
+                {links.map((stored, i) => {
+                    const { label, url } = parseStoredWorkLink(stored);
+                    const meta = getLinkMeta(url);
+                    if (!url) return null;
+                    return (
+                        <div key={i} className="flex items-center gap-3 px-3 py-2.5" data-testid={`work-link-${i}`}>
+                            <div className={`w-7 h-7 rounded-lg flex items-center justify-center border text-sm shrink-0 ${meta.color}`}>
+                                {meta.icon}
+                            </div>
+                            <a href={url} target="_blank" rel="noopener noreferrer" className="min-w-0 flex-1 no-underline">
+                                <p className="text-xs font-semibold text-neutral-800 truncate leading-snug">{label || meta.platform}</p>
+                                <p className="text-[10px] text-neutral-400 truncate leading-snug" title={url}>{meta.domain}</p>
+                            </a>
+                            <div className="flex items-center gap-1 shrink-0">
+                                <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[10px] font-semibold bg-white border border-black/[0.08] hover:border-black/30 text-black px-2.5 py-1.5 rounded-lg transition-colors select-none"
+                                >
+                                    Open
+                                </a>
+                                {renderExtra && renderExtra(url, i)}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    }
 
     return (
         <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${className}`} data-testid="work-links-display">

@@ -332,14 +332,12 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
     async def _fetch_viewers():
         return await db.link_views.find(
             {"link_id": lid}, {"_id": 0}
-        ).sort("created_at", -1).to_list(5000)
+        ).sort("created_at", -1).to_list(50000)
 
     async def _fetch_actions_raw():
-        # Cap raw actions returned in response to 500 most-recent rows.
-        # Frontend uses this only for comments display, not aggregate counts.
         return await db.link_actions.find(
             {"link_id": lid}, {"_id": 0}
-        ).sort("updated_at", -1).to_list(500)
+        ).sort("updated_at", -1).to_list(50000)
 
     async def _fetch_summary_agg():
         # Compute per-talent counts entirely in MongoDB using $group.
@@ -362,19 +360,25 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
     async def _fetch_downloads():
         return await db.link_downloads.find(
             {"link_id": lid}, {"_id": 0}
-        ).sort("created_at", -1).to_list(1000)
+        ).sort("created_at", -1).to_list(50000)
 
     async def _fetch_events():
         return await db.link_events.find(
             {"link_id": lid}, {"_id": 0}
-        ).sort("created_at", -1).to_list(1000)
+        ).sort("created_at", -1).to_list(50000)
 
-    viewers, actions_raw, agg_by_tid, downloads, events = await asyncio.gather(
+    async def _fetch_action_history():
+        return await db.link_action_history.find(
+            {"link_id": lid}, {"_id": 0}
+        ).sort("created_at", -1).to_list(50000)
+
+    viewers, actions_raw, agg_by_tid, downloads, events, action_history = await asyncio.gather(
         _fetch_viewers(),
         _fetch_actions_raw(),
         _fetch_summary_agg(),
         _fetch_downloads(),
         _fetch_events(),
+        _fetch_action_history(),
     )
 
     subjects: Dict[str, Dict[str, Any]] = {}
@@ -448,6 +452,7 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
         "actions": actions_raw,
         "downloads": downloads,
         "events": events,
+        "action_history": action_history,
         "summary": list(summary.values()),
         "subjects": subjects,
         "view_count": len(viewers),
@@ -475,6 +480,7 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
         "viewer_name": payload.name,
         "device": payload.device or "Unknown",
         "browser": payload.browser or "Unknown",
+        "session_id": payload.session_id,
         "created_at": now,
     })
     # Rotate visit timestamps so "what's new since last time" can be computed.
@@ -931,6 +937,7 @@ async def record_action(
         "comment": payload.comment if payload.comment is not None else (existing.get("comment") if existing else None),
         "comments": comments,
         "role": viewer.get("role") or "viewer",
+        "session_id": payload.session_id,
         "updated_at": _now(),
     }
     if not existing:
@@ -938,12 +945,26 @@ async def record_action(
         doc["created_at"] = _now()
         doc["voice_notes"] = []
     await db.link_actions.update_one(filt, {"$set": doc}, upsert=True)
+
+    # Log action history record
+    await db.link_action_history.insert_one({
+        "id": str(uuid.uuid4()),
+        "link_id": link["id"],
+        "slug": slug,
+        "talent_id": payload.talent_id,
+        "viewer_name": viewer["name"],
+        "viewer_email": viewer["email"],
+        "action": payload.action,
+        "session_id": payload.session_id,
+        "created_at": _now(),
+    })
     return {"ok": True}
 
 
 class BulkActionIn(BaseModel):
     talent_ids: List[str]
     action: Optional[str] = None  # shortlist | interested | not_for_this | lock | not_sure | null
+    session_id: Optional[str] = None
 
 
 @router.post("/public/links/{slug}/bulk-action")
@@ -982,6 +1003,7 @@ async def record_bulk_action(
                     "$set": {
                         "viewer_name": viewer["name"],
                         "action": payload.action,
+                        "session_id": payload.session_id,
                         "updated_at": now,
                     },
                     "$setOnInsert": {
@@ -995,6 +1017,23 @@ async def record_bulk_action(
 
     if bulk_ops:
         await db.link_actions.bulk_write(bulk_ops)
+        
+        # Log action history records
+        history_docs = [
+            {
+                "id": str(uuid.uuid4()),
+                "link_id": link["id"],
+                "slug": slug,
+                "talent_id": tid,
+                "viewer_name": viewer["name"],
+                "viewer_email": viewer["email"],
+                "action": payload.action,
+                "session_id": payload.session_id,
+                "created_at": now,
+            }
+            for tid in talent_ids
+        ]
+        await db.link_action_history.insert_many(history_docs)
 
     # Also make sure we update reviewed/seen status for these talents in client state
     await db.client_states.update_one(
@@ -1036,6 +1075,7 @@ async def log_download(
         "viewer_name": viewer["name"],
         "talent_id": payload.talent_id,
         "media_id": payload.media_id,
+        "session_id": payload.session_id,
         "created_at": _now(),
     })
     return {"ok": True}
@@ -1605,6 +1645,7 @@ async def download_talent_zip(
     talent_id: str,
     authorization: Optional[str] = Header(None),
     token: Optional[str] = None,
+    session_id: Optional[str] = None,
 ):
     t = token
     if not t and authorization and authorization.lower().startswith("bearer "):
@@ -1843,6 +1884,7 @@ async def download_talent_zip(
             "viewer_name": viewer.get("name"),
             "talent_id": talent_id,
             "media_id": "zip:talent_folder",
+            "session_id": session_id,
             "created_at": _now(),
         })
     except Exception as ex:
@@ -1862,6 +1904,7 @@ async def download_campaign_bundle_zip(
     slug: str,
     authorization: Optional[str] = Header(None),
     token: Optional[str] = None,
+    session_id: Optional[str] = None,
 ):
     t = token
     if not t and authorization and authorization.lower().startswith("bearer "):
@@ -2025,6 +2068,7 @@ async def download_campaign_bundle_zip(
             "viewer_name": viewer.get("name"),
             "talent_id": "all",
             "media_id": "zip:campaign_bundle",
+            "session_id": session_id,
             "created_at": _now(),
         })
     except Exception as ex:

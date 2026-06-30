@@ -1704,6 +1704,7 @@ class IdentifyIn(BaseModel):
     email: EmailStr
     browser: Optional[str] = None
     device: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class SeenIn(BaseModel):
@@ -1726,11 +1727,13 @@ class ActionIn(BaseModel):
     talent_id: str
     action: Optional[str] = None  # shortlist | interested | not_for_this | not_sure | null
     comment: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class DownloadIn(BaseModel):
     talent_id: str
     media_id: str
+    session_id: Optional[str] = None
 
 
 def default_submission_requirements() -> Dict[str, Any]:

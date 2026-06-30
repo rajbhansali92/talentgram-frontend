@@ -673,7 +673,8 @@ export default function ClientView() {
                     name: activeName,
                     email: activeEmail,
                     browser,
-                    device
+                    device,
+                    session_id: getSessionId(),
                 },
             );
             if (response.data.token) {
@@ -718,7 +719,7 @@ export default function ClientView() {
         try {
             await axios.post(
                 `${API}/public/links/${slug}/action`,
-                { talent_id: talentId, action },
+                { talent_id: talentId, action, session_id: getSessionId() },
                 {
                     headers: {
                         Authorization: `Bearer ${getViewerToken(slug)}`,
@@ -761,7 +762,7 @@ export default function ClientView() {
         try {
             await axios.post(
                 `${API}/public/links/${slug}/bulk-action`,
-                { talent_ids: talentIds, action },
+                { talent_ids: talentIds, action, session_id: getSessionId() },
                 {
                     headers: {
                         Authorization: `Bearer ${getViewerToken(slug)}`,
@@ -845,7 +846,7 @@ export default function ClientView() {
         try {
             await axios.post(
                 `${API}/public/links/${slug}/download-log`,
-                { talent_id: talentId, media_id: mediaId },
+                { talent_id: talentId, media_id: mediaId, session_id: getSessionId() },
                 {
                     headers: {
                         Authorization: `Bearer ${getViewerToken(slug)}`,
@@ -1866,7 +1867,7 @@ function TalentDetail({
             const response = await axios.get(
                 `${API}/public/links/${slug}/download/talent/${talent.id}`,
                 {
-                    params: token ? { token } : {},
+                    params: token ? { token, session_id: getSessionId() } : { session_id: getSessionId() },
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
                     responseType: "blob",
                     timeout: 120000, // C5: 2-minute ceiling for server-side ZIP assembly

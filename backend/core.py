@@ -472,7 +472,11 @@ def cloudinary_upload(
         b"ftypisom": "video/mp4",
         b"ftypMSNV": "video/mp4",
         b"ftypavc1": "video/mp4",
-        b"%PDF": "application/pdf"
+        b"%PDF": "application/pdf",
+        b"\x1a\x45\xdf\xa3": "video/webm",
+        b"OggS": "audio/ogg",
+        b"ID3": "audio/mpeg",
+        b"\xff\xfb": "audio/mpeg",
     }
 
     detected_mime = None
@@ -481,9 +485,13 @@ def cloudinary_upload(
             detected_mime = mime
             break
 
-    # WebP check extension: WebP files contain RIFF header and WEBP signature bytes at offset 8
-    if data.startswith(b"RIFF") and b"WEBP" in data[8:15]:
-        detected_mime = "image/webp"
+    # WebP / WAV check extension: WebP files contain RIFF header and WEBP/WAVE signature bytes at offset 8
+    if data.startswith(b"RIFF"):
+        if b"WEBP" in data[8:15]:
+            detected_mime = "image/webp"
+        elif b"WAVE" in data[8:15]:
+            detected_mime = "audio/wav"
+
 
     # MP4/HEIC/HEIF/MOV check extension: files carrying ftyp signature starting at index 4
     if not detected_mime and b"ftyp" in data[4:12]:

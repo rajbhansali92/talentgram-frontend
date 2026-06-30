@@ -89,3 +89,15 @@ def test_file_signature_validation(mock_upload):
     assert isinstance(res, HTTPException)
     assert res.status_code == 400
     assert "Invalid file signature" in res.detail
+
+    # 9. WebM signature accepted
+    webm_data = b"\x1a\x45\xdf\xa3\x01\x02\x03"
+    mock_upload.return_value["resource_type"] = "video"
+    res = run_upload(webm_data, "video/webm")
+    assert not isinstance(res, HTTPException), f"WebM upload failed: {res}"
+
+    # 10. Ogg signature accepted
+    ogg_data = b"OggS\x01\x02\x03"
+    res = run_upload(ogg_data, "audio/ogg")
+    assert not isinstance(res, HTTPException), f"Ogg upload failed: {res}"
+

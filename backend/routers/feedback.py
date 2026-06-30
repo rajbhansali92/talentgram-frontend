@@ -219,7 +219,7 @@ async def create_voice_feedback(
         data,
         folder=folder,
         public_id=feedback_id,
-        resource_type="video",  # Cloudinary stores audio under the video resource type
+        resource_type="auto",  # Use auto-detection to prevent Cloudinary errors on short audio/WebM
         content_type=ct or "application/octet-stream",
     )
     doc = await _persist_feedback(

@@ -143,6 +143,9 @@ export default function LinkResults() {
     const actions = data?.actions || [];
     const events = data?.events || [];
     const actionHistory = data?.action_history || [];
+    // WhatsApp share analytics (separate from downloads): created | dispatched | opened.
+    const shares = data?.shares || [];
+    const shareDispatches = shares.filter((s) => s.event === "dispatched");
 
     const summaryByTalent = {};
     if (data?.summary) {
@@ -180,6 +183,16 @@ export default function LinkResults() {
         }
         return d.media_id || "Media File";
     };
+
+    // Describe a WhatsApp share dispatch (it carries an inline media[] list).
+    const getShareItemsDesc = (s) => {
+        const names = (s.media || []).map((m) => m.name).filter(Boolean);
+        if (names.length === 0) return `${s.file_count || 0} item(s)`;
+        if (names.length <= 2) return names.join(", ");
+        return `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
+    };
+    const shareMethodLabel = (method) =>
+        method === "native_file_share" ? "Files" : "Secure links";
 
     // Calculate viewer sessions
     const viewerSessions = useMemo(() => {
@@ -384,6 +397,16 @@ export default function LinkResults() {
         vDownloads.forEach(d => {
             timeline.push({ type: "download", time: new Date(d.created_at), actionText: "Downloaded", detail: `${getDownloadItemDesc(d)} (${getTalentName(d.talent_id)})` });
         });
+        shareDispatches
+            .filter(s => s.viewer_email === activeViewerEmail)
+            .forEach(s => {
+                timeline.push({
+                    type: "share",
+                    time: new Date(s.created_at),
+                    actionText: "Shared via WhatsApp",
+                    detail: `${getShareItemsDesc(s)} (${getTalentName(s.talent_id)}) · ${shareMethodLabel(s.share_method)} · ${s.file_count || (s.media || []).length} file(s)`,
+                });
+            });
         vActions.forEach(a => {
             const meta = ACTION_META[a.action] || { label: a.action || "Cleared Action" };
             timeline.push({ type: "action", time: new Date(a.created_at), actionText: "Action", detail: `Marked ${meta.label} for ${getTalentName(a.talent_id)}` });
@@ -397,9 +420,10 @@ export default function LinkResults() {
             sessionsCount: vSessions.length,
             profilesViewedCount: viewedProfiles.size,
             downloadsCount: vDownloads.length,
+            sharesCount: shareDispatches.filter(s => s.viewer_email === activeViewerEmail).length,
             timeline,
         };
-    }, [activeViewerEmail, events, downloads, actionHistory, viewerSessions]);
+    }, [activeViewerEmail, events, downloads, shareDispatches, actionHistory, viewerSessions]);
 
     // Drill down talent data
     const talentDrillDownData = useMemo(() => {
@@ -493,6 +517,22 @@ export default function LinkResults() {
             ].map(x => `"${x}"`).join(sep) + "\n";
         });
 
+        // 3b. WhatsApp Shares (separate from downloads)
+        content += "\nWhatsApp Shares Log\n";
+        content += ["Viewer", "Email", "Talent", "Media", "Method", "Files", "Date", "Time"].join(sep) + "\n";
+        shareDispatches.forEach(s => {
+            content += [
+                s.viewer_name,
+                s.viewer_email,
+                getTalentName(s.talent_id),
+                getShareItemsDesc(s),
+                shareMethodLabel(s.share_method),
+                s.file_count || (s.media || []).length,
+                formatDate(s.created_at),
+                formatTime(s.created_at)
+            ].map(x => `"${x}"`).join(sep) + "\n";
+        });
+
         // 4. Actions
         content += "\nTalent Actions History\n";
         content += ["Viewer", "Email", "Talent", "Action", "Date", "Time"].join(sep) + "\n";
@@ -564,6 +604,7 @@ export default function LinkResults() {
     };
 
     const totalDownloads = downloads.length;
+    const totalShares = shareDispatches.length;
     const analytics = data?.link?.analytics || {};
     const trackingViews = analytics.total_views !== undefined ? analytics.total_views : (data?.view_count || data?.link?.view_count || 0);
     const trackingUniq = analytics.unique_views !== undefined ? (analytics.unique_views.length || 0) : (data?.unique_viewers || data?.link?.unique_viewers || 0);
@@ -676,6 +717,7 @@ export default function LinkResults() {
                                 { label: "Video Watched", value: `${watchMinutes} min` },
                                 { label: "Total Actions", value: actions.filter((a) => a.action).length },
                                 { label: "Downloads", value: totalDownloads },
+                                { label: "WhatsApp Shares", value: totalShares },
                             ].map((s) => (
                                 <div
                                     key={s.label}
@@ -1054,7 +1096,7 @@ export default function LinkResults() {
                             <p className="text-xs text-slate-500 font-mono">{viewerDrillDownData.email}</p>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-4 text-center">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
                             <div className="bg-slate-50 border border-slate-100 rounded-xl p-4">
                                 <div className="text-xl font-bold text-slate-800">{viewerDrillDownData.sessionsCount}</div>
                                 <div className="text-[9px] uppercase tracking-wider text-slate-400 mt-1 font-semibold">Sessions</div>
@@ -1066,6 +1108,10 @@ export default function LinkResults() {
                             <div className="bg-slate-50 border border-slate-100 rounded-xl p-4">
                                 <div className="text-xl font-bold text-slate-800">{viewerDrillDownData.downloadsCount}</div>
                                 <div className="text-[9px] uppercase tracking-wider text-slate-400 mt-1 font-semibold">Downloads</div>
+                            </div>
+                            <div className="bg-slate-50 border border-slate-100 rounded-xl p-4">
+                                <div className="text-xl font-bold text-slate-800">{viewerDrillDownData.sharesCount}</div>
+                                <div className="text-[9px] uppercase tracking-wider text-slate-400 mt-1 font-semibold">WA Shares</div>
                             </div>
                         </div>
 

@@ -567,6 +567,87 @@ async def mark_reviewed(
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Shared client-facing presentation model for project budget + shoot dates.
+# Used by BOTH the main review view and the share-preview endpoint so the two
+# surfaces can never drift (single source of truth for these sections).
+# ---------------------------------------------------------------------------
+def build_project_budget(link: dict, projects: List[dict], budget_visible: bool) -> List[Dict[str, Any]]:
+    """Build the client-facing project_budget list from one or more project docs.
+    `projects` may contain None entries (skipped). An admin client_budget_override
+    on the link wins and collapses to a single link-level entry."""
+    if not budget_visible:
+        return []
+    override = (link or {}).get("client_budget_override")
+    if override:
+        return [{
+            "project_id": None,
+            "brand_name": link.get("brand_name") or link.get("title"),
+            "lines": override,
+        }]
+    out: List[Dict[str, Any]] = []
+    for proj in projects:
+        if not proj:
+            continue
+        lines = proj.get("client_budget") or []
+        if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
+            out.append({
+                "project_id": proj.get("id"),
+                "brand_name": proj.get("brand_name"),
+                "lines": lines,
+                "talent_budget": proj.get("talent_budget") or [],
+                "budget_per_day": proj.get("budget_per_day"),
+            })
+    return out
+
+
+def build_project_shoot_dates(projects: List[dict], avail_visible: bool) -> List[Dict[str, Any]]:
+    """Build the client-facing project_shoot_dates list from one or more project docs."""
+    if not avail_visible:
+        return []
+    out: List[Dict[str, Any]] = []
+    for proj in projects:
+        if not proj:
+            continue
+        sd = (proj.get("shoot_dates") or "").strip()
+        if sd:
+            out.append({
+                "project_id": proj.get("id"),
+                "brand_name": proj.get("brand_name"),
+                "shoot_dates": sd,
+            })
+    return out
+
+
+def submission_client_visibility(sub: Optional[dict]) -> Dict[str, bool]:
+    """Per-submission client visibility map fed to _filter_talent_for_client.
+
+    SINGLE SOURCE OF TRUTH for submission-gated field visibility across every
+    client-facing surface (Client Review, Share Portfolio, Download Folder/PDF).
+    To expose a new submission field to clients, add its key here once.
+    """
+    s_fv = (sub or {}).get("field_visibility") or {}
+    return {
+        "portfolio": True,       # always show client-visible media attached to the submission
+        "intro_video": True,
+        "takes": True,
+        "age": s_fv.get("age", True),
+        "height": s_fv.get("height", True),
+        "gender": s_fv.get("gender", True),
+        "location": s_fv.get("location", True),
+        "ethnicity": s_fv.get("ethnicity", True),
+        "instagram": s_fv.get("instagram_handle", True),
+        "instagram_followers": s_fv.get("instagram_followers", True),
+        "languages": s_fv.get("languages", True),
+        "skills": s_fv.get("skills", True),
+        "special_abilities": s_fv.get("special_abilities", True),
+        "availability": s_fv.get("availability", True),
+        "budget": s_fv.get("budget", True),
+        "work_links": s_fv.get("work_links", True),
+        "download": True,
+    }
+
+
 @router.get("/public/links/{slug}")
 async def get_public_link(slug: str, authorization: Optional[str] = Header(None)):
     viewer = decode_viewer(authorization)
@@ -673,27 +754,8 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         s_project = project_meta_by_id.get(s.get("project_id") or "")
         shape = _submission_to_client_shape(s, project=s_project)
         
-        # Build the strict submission_review_settings from submission's own field_visibility
-        s_fv = s.get("field_visibility") or {}
-        sub_review_vis = {
-            "portfolio": True,  # Always show media attached to submission if client-visible
-            "intro_video": True,
-            "takes": True,
-            "age": s_fv.get("age", True),
-            "height": s_fv.get("height", True),
-            "gender": s_fv.get("gender", True),
-            "location": s_fv.get("location", True),
-            "ethnicity": s_fv.get("ethnicity", True),
-            "instagram": s_fv.get("instagram_handle", True),
-            "instagram_followers": s_fv.get("instagram_followers", True),
-            "languages": s_fv.get("languages", True),
-            "skills": s_fv.get("skills", True),
-            "special_abilities": s_fv.get("special_abilities", True),
-            "availability": s_fv.get("availability", True),
-            "budget": s_fv.get("budget", True),
-            "work_links": s_fv.get("work_links", True),
-            "download": True, # Allow download if enabled generally
-        }
+        # Strict per-submission visibility — shared single source of truth.
+        sub_review_vis = submission_client_visibility(s)
         talents.append(_filter_talent_for_client(shape, sub_review_vis))
 
     # Client-facing project budget (gated strictly by project/submission settings)
@@ -705,41 +767,10 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         # However, we can check if any submission has budget visibility enabled in field_visibility.
         any_budget_visible = any((s.get("field_visibility") or {}).get("budget", True) for s in raw_subs)
         any_avail_visible = any((s.get("field_visibility") or {}).get("availability", True) for s in raw_subs)
-        
-        if any_budget_visible:
-            override = link.get("client_budget_override")
-            if override:
-                project_budget = [{
-                    "project_id": None,
-                    "brand_name": link.get("brand_name") or link.get("title"),
-                    "lines": override,
-                }]
-            else:
-                for pid in seen_pids:
-                    proj = project_meta_by_id.get(pid)
-                    if not proj:
-                        continue
-                    lines = proj.get("client_budget") or []
-                    if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
-                        project_budget.append({
-                            "project_id": pid,
-                            "brand_name": proj.get("brand_name"),
-                            "lines": lines,
-                            "talent_budget": proj.get("talent_budget") or [],
-                            "budget_per_day": proj.get("budget_per_day"),
-                        })
-        if any_avail_visible:
-            for pid in seen_pids:
-                proj = project_meta_by_id.get(pid)
-                if not proj:
-                    continue
-                sd = (proj.get("shoot_dates") or "").strip()
-                if sd:
-                    project_shoot_dates.append({
-                        "project_id": pid,
-                        "brand_name": proj.get("brand_name"),
-                        "shoot_dates": sd,
-                    })
+        # Shared presentation model — same builders the share-preview endpoint uses.
+        seen_projects = [project_meta_by_id.get(pid) for pid in seen_pids]
+        project_budget = build_project_budget(link, seen_projects, any_budget_visible)
+        project_shoot_dates = build_project_shoot_dates(seen_projects, any_avail_visible)
 
     actions = await db.link_actions.find({
         "link_id": link["id"],
@@ -1288,26 +1319,7 @@ async def get_share_preview(share_id: str):
         eff_vis = {**visibility, **per_t} if per_t else visibility
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        s_fv = (target_sub or {}).get("field_visibility") or {}
-        sub_review_vis = {
-            "portfolio": True,
-            "intro_video": True,
-            "takes": True,
-            "age": s_fv.get("age", True),
-            "height": s_fv.get("height", True),
-            "gender": s_fv.get("gender", True),
-            "location": s_fv.get("location", True),
-            "ethnicity": s_fv.get("ethnicity", True),
-            "instagram": s_fv.get("instagram_handle", True),
-            "instagram_followers": s_fv.get("instagram_followers", True),
-            "languages": s_fv.get("languages", True),
-            "skills": s_fv.get("skills", True),
-            "special_abilities": s_fv.get("special_abilities", True),
-            "availability": s_fv.get("availability", True),
-            "budget": s_fv.get("budget", True),
-            "work_links": s_fv.get("work_links", True),
-            "download": True,
-        }
+        sub_review_vis = submission_client_visibility(target_sub)
         filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
 
     if media_id:
@@ -1335,25 +1347,10 @@ async def get_share_preview(share_id: str):
             {"id": pid},
             {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1, "talent_budget": 1, "budget_per_day": 1},
         )
-        if proj:
-            if budget_visible:
-                override = link.get("client_budget_override")
-                if override:
-                    project_budget = [{"project_id": None, "brand_name": link.get("brand_name") or link.get("title"), "lines": override}]
-                else:
-                    lines = proj.get("client_budget") or []
-                    if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
-                        project_budget.append({
-                            "project_id": pid,
-                            "brand_name": proj.get("brand_name"),
-                            "lines": lines,
-                            "talent_budget": proj.get("talent_budget") or [],
-                            "budget_per_day": proj.get("budget_per_day"),
-                        })
-            if avail_visible:
-                sd = (proj.get("shoot_dates") or "").strip()
-                if sd:
-                    project_shoot_dates.append({"project_id": pid, "brand_name": proj.get("brand_name"), "shoot_dates": sd})
+        # Shared presentation model — identical builders to the main review view.
+        projects = [proj] if proj else []
+        project_budget = build_project_budget(link, projects, budget_visible)
+        project_shoot_dates = build_project_shoot_dates(projects, avail_visible)
 
     return {
         "link": _public_link_view(link),
@@ -1672,26 +1669,7 @@ async def download_talent_zip(
         eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        s_fv = (target_sub or {}).get("field_visibility") or {}
-        sub_review_vis = {
-            "portfolio": True,
-            "intro_video": True,
-            "takes": True,
-            "age": s_fv.get("age", True),
-            "height": s_fv.get("height", True),
-            "gender": s_fv.get("gender", True),
-            "location": s_fv.get("location", True),
-            "ethnicity": s_fv.get("ethnicity", True),
-            "instagram": s_fv.get("instagram_handle", True),
-            "instagram_followers": s_fv.get("instagram_followers", True),
-            "languages": s_fv.get("languages", True),
-            "skills": s_fv.get("skills", True),
-            "special_abilities": s_fv.get("special_abilities", True),
-            "availability": s_fv.get("availability", True),
-            "budget": s_fv.get("budget", True),
-            "work_links": s_fv.get("work_links", True),
-            "download": True,
-        }
+        sub_review_vis = submission_client_visibility(target_sub)
         filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
 
     media_list = filtered_talent.get("media", [])

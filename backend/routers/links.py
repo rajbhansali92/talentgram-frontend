@@ -1202,9 +1202,11 @@ async def create_share_link(
         raise HTTPException(404, "Talent not found in this link")
 
     share_id = str(uuid.uuid4())
-    now_dt = datetime.now(timezone.utc)
-    expires_dt = now_dt + timedelta(hours=48)
-    
+
+    # Issue 2: the share link inherits the parent review link's lifecycle — there
+    # is no independent expiry. Validity is enforced at view time via
+    # _require_active_link(link). `expires_at` is kept (null) for schema
+    # compatibility but is no longer a second source of truth.
     share_doc = {
         "id": share_id,
         "link_id": link["id"],
@@ -1212,13 +1214,13 @@ async def create_share_link(
         "talent_id": talent_id,
         "media_id": payload.media_id,
         "created_at": _now(),
-        "expires_at": expires_dt.isoformat(),
+        "expires_at": None,
     }
     await db.link_shares.insert_one(share_doc)
-    
+
     return {
         "share_id": share_id,
-        "expires_at": share_doc["expires_at"],
+        "expires_at": None,
     }
 
 
@@ -1227,15 +1229,13 @@ async def get_share_preview(share_id: str):
     share = await db.link_shares.find_one({"id": share_id}, {"_id": 0})
     if not share:
         raise HTTPException(404, "Share not found")
-        
-    now_iso = _now()
-    if share.get("expires_at") and share["expires_at"] < now_iso:
-        raise HTTPException(410, "This preview link has expired")
 
     slug = share["slug"]
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Associated link not found")
+    # Issue 2: single source of truth — the share is valid iff the parent review
+    # link is active. If the link is disabled/expired, the share expires too.
     _require_active_link(link)
 
     talent_id = share["talent_id"]
@@ -1316,11 +1316,52 @@ async def get_share_preview(share_id: str):
             raise HTTPException(404, "Shared media is not available")
         filtered_talent["media"] = filtered_media
 
+    # Issue 1 parity: include project budget + shoot dates exactly like the main
+    # client-review view so the share renders Agreed Budget / shoot dates instead
+    # of an empty Budget/Availability section.
+    project_budget: List[Dict[str, Any]] = []
+    project_shoot_dates: List[Dict[str, Any]] = []
+    if is_sub:
+        s_fv = (target_sub or {}).get("field_visibility") or {}
+        budget_visible = s_fv.get("budget", True)
+        avail_visible = s_fv.get("availability", True)
+    else:
+        budget_visible = visibility.get("budget", False)
+        avail_visible = visibility.get("availability", True)
+    pid = (target_sub or {}).get("project_id") if is_sub else talent_doc.get("project_id")
+    pid = pid or link.get("auto_project_id")
+    if pid and (budget_visible or avail_visible):
+        proj = await db.projects.find_one(
+            {"id": pid},
+            {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1, "talent_budget": 1, "budget_per_day": 1},
+        )
+        if proj:
+            if budget_visible:
+                override = link.get("client_budget_override")
+                if override:
+                    project_budget = [{"project_id": None, "brand_name": link.get("brand_name") or link.get("title"), "lines": override}]
+                else:
+                    lines = proj.get("client_budget") or []
+                    if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
+                        project_budget.append({
+                            "project_id": pid,
+                            "brand_name": proj.get("brand_name"),
+                            "lines": lines,
+                            "talent_budget": proj.get("talent_budget") or [],
+                            "budget_per_day": proj.get("budget_per_day"),
+                        })
+            if avail_visible:
+                sd = (proj.get("shoot_dates") or "").strip()
+                if sd:
+                    project_shoot_dates.append({"project_id": pid, "brand_name": proj.get("brand_name"), "shoot_dates": sd})
+
     return {
         "link": _public_link_view(link),
         "talent": sign_r2_media_if_needed(filtered_talent),
+        "project_budget": project_budget,
+        "project_shoot_dates": project_shoot_dates,
         "share_id": share_id,
-        "expires_at": share["expires_at"],
+        "expires_at": None,
     }
 
 

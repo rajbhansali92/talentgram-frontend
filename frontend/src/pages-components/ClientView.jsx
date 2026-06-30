@@ -396,6 +396,8 @@ export default function ClientView() {
     const trackedReviewedRef = useRef(new Set());
     /** Prevents stale state updates when loadData resolves after navigation away. */
     const loadDataMountedRef = useRef(true);
+    /** Prevents duplicate comment posts if Save is tapped twice. */
+    const commentSavingRef = useRef(new Set());
 
     // Depend specifically on data?.actions — not the whole data object — so this memo
     // does not recompute when unrelated fields (seen_ids, etc.) are updated.
@@ -450,8 +452,8 @@ export default function ClientView() {
                     link: data.link,
                     talents: [data.talent],
                     actions: [],
-                    project_budget: [],
-                    project_shoot_dates: [],
+                    project_budget: data.project_budget || [],
+                    project_shoot_dates: data.project_shoot_dates || [],
                     viewer: { email: "share@talentgram", name: "Shared Preview" },
                 });
             } catch (e) {
@@ -524,6 +526,18 @@ export default function ClientView() {
         loadDataMountedRef.current = true;
         return () => { loadDataMountedRef.current = false; };
     }, []);
+
+    // Keep the open detail view in sync with the latest data so a saved comment
+    // or voice note appears immediately (optimistic update + loadData refetch)
+    // without needing a page refresh. Same-id object → no remount; only updates
+    // when the underlying talent object actually changed (e.g. comments/voice).
+    useEffect(() => {
+        setActiveTalent((prev) => {
+            if (!prev) return prev;
+            const fresh = (data?.talents || []).find((t) => t.id === prev.id);
+            return fresh && fresh !== prev ? fresh : prev;
+        });
+    }, [data]);
 
     const markReviewed = useCallback(
         async (talentId) => {
@@ -756,6 +770,8 @@ export default function ClientView() {
     const saveComment = useCallback(async (talentId) => {
         const text = commentDrafts[talentId];
         if (text === undefined || !text.trim()) return;
+        if (commentSavingRef.current.has(talentId)) return; // guard double-tap race
+        commentSavingRef.current.add(talentId);
         const existing = viewerActions[talentId];
         updateLocalAction(talentId, existing?.action || null, text);
         markReviewed(talentId);
@@ -809,6 +825,8 @@ export default function ClientView() {
             updateLocalAction(talentId, existing?.action, existing?.comment);
             toast.error("Failed to save");
             loadData();
+        } finally {
+            commentSavingRef.current.delete(talentId);
         }
     }, [commentDrafts, viewerActions, slug, updateLocalAction, markReviewed, data, loadData]);
 
@@ -986,8 +1004,8 @@ export default function ClientView() {
                     talents={[activeTalent]}
                     link={data?.link || {}}
                     slug={slug}
-                    projectBudget={[]}
-                    projectShootDates={[]}
+                    projectBudget={data?.project_budget || []}
+                    projectShootDates={data?.project_shoot_dates || []}
                     viewerAction={null}
                     viewerActions={{}}
                     reviewedIds={new Set()}
@@ -2683,7 +2701,7 @@ function TalentDetail({
                                         Shared Audition Showcase
                                     </span>
                                     <p className="text-xs text-[#333333] max-w-xs leading-relaxed">
-                                        This portfolio link was shared securely via WhatsApp and will expire in 48 hours.
+                                        This portfolio link was shared securely and stays active for as long as the review link is live.
                                     </p>
                                 </div>
                             )}

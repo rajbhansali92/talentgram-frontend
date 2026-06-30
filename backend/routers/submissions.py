@@ -1477,10 +1477,6 @@ async def video_complete(
 
         await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
 
-        logger.info("[VPIPE] UPLOAD_COMPLETE category=%s submission_id=%s media_id=%s provider=%s public_id=%s url=%s thumbnail_url=%s status=%s",
-                    category, sid, media.get("id"), media.get("provider"), media.get("public_id"),
-                    media.get("url"), media.get("thumbnail_url"), media.get("status"))
-
         # Update metadata state to "processing"
         try:
             await db.asset_metadata.update_one(
@@ -2268,16 +2264,9 @@ async def list_submissions(
         "field_visibility": 0, # internal toggle map — not rendered in list
     }
     cursor = db.submissions.find(query, _SUB_LIST_PROJ).sort("created_at", -1)
-    def _vpipe_admin(items):  # [VPIPE] ADMIN API response — video media only
-        for it in items:
-            for m in (it.get("media") or []):
-                if (m.get("category") or "").startswith(("take", "intro_video", "video")) or m.get("resource_type") == "video":
-                    logger.info("[VPIPE] ADMIN_API sub=%s category=%s provider=%s stream_uid=%s url=%s",
-                                it.get("id"), m.get("category"), m.get("provider"), m.get("stream_uid"), m.get("url"))
-        return items
     if page is None and limit is None:
         items = await cursor.to_list(5000)
-        return _vpipe_admin([sign_r2_media_if_needed(item) for item in items])
+        return [sign_r2_media_if_needed(item) for item in items]
     skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.submissions.count_documents(query)
     items = await cursor.skip(skip).limit(page_size).to_list(page_size)

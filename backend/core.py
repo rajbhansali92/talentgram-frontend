@@ -1942,14 +1942,9 @@ def _public_media(m: dict) -> dict:
     resource_type = m.get("resource_type")
     url = m.get("url")
     is_video = resource_type == "video" or m.get("category") == "video" or (m.get("content_type") or "").startswith("video/")
-
-    _vpipe_in = url  # [VPIPE]
+    
     if is_video and m.get("public_id"):
         url = stream_video_url(m["public_id"]) or url
-    if is_video:
-        logger.info("[VPIPE] _public_media category=%s public_id=%s provider=%s stream_uid=%s IN_url=%s OUT_url=%s changed=%s",
-                    m.get("category"), m.get("public_id"), m.get("provider"), m.get("stream_uid"),
-                    _vpipe_in, url, _vpipe_in != url)
 
     out = {
         "id": m.get("id"),

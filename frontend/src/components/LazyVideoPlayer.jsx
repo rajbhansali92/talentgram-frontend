@@ -102,15 +102,7 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
 
     useEffect(() => {
         if (!isPlaying || !videoRef.current || !src) return;
-
-        // [VPIPE] Frontend — received src + chosen playback path + browser request URL
-        console.log("[VPIPE] LazyVideoPlayer", {
-            label, mediaId, talentId,
-            received_src: src,
-            src_host: (() => { try { return new URL(src).host; } catch { return "?"; } })(),
-            path: src.includes(".m3u8") ? "hls(.m3u8)" : "native",
-        });
-
+        
         let hls = null;
         if (src.includes(".m3u8")) {
             if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {

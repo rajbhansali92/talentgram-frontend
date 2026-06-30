@@ -100,10 +100,6 @@ async def cloudflare_stream_webhook(
             "media.$.stream_uid": uid,
             "media.$.provider": "stream"
         }
-        logger.info("[VPIPE] WEBHOOK category=%s scope=%s parent=%s media_id=%s state=%s uid=%s customer_code_env=%s playback_url=%s thumbnail_url=%s db_write=%s",
-                    category, scope, parent_id, media_id, state, uid,
-                    "SET" if os.environ.get("CLOUDFLARE_STREAM_CUSTOMER_CODE") else "UNSET",
-                    playback_url, thumbnail_url, json.dumps(update_fields))
 
         # P1-C fix: mark the R2 tracking row complete. The R2 ledger row's
         # public_id is the raw key (raw-uploads/{scope}s/{parent_id}/{category}/…),

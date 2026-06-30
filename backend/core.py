@@ -513,8 +513,14 @@ def cloudinary_upload(
         raise HTTPException(status_code=400, detail="Invalid file signature: file type not allowed.")
 
     # Validate that MIME header matches the detected signature
-    if ct and not ct.startswith(detected_mime.split('/')[0]):
+    clean_ct = ct.split(';')[0].strip() if ct else ""
+    detected_sub = detected_mime.split('/')[-1]
+    ct_sub = clean_ct.split('/')[-1]
+    is_container_match = (detected_sub == ct_sub) or (detected_sub in ("mp4", "quicktime") and ct_sub in ("mp4", "m4a", "quicktime", "mov"))
+    
+    if ct and not clean_ct.startswith(detected_mime.split('/')[0]) and not is_container_match:
         raise HTTPException(status_code=400, detail="MIME type header does not match detected file signature.")
+
     
     is_pdf = ct == "application/pdf" or ct.startswith("application/pdf")
     if is_pdf and resource_type == "auto":

@@ -131,7 +131,7 @@ function linksToText(links) {
 function Field({ label, value, onChange, type = "text", ...rest }) {
     return (
         <label className="block">
-            <span className="text-[11px] text-black/45 tracking-widest uppercase">
+            <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                 {label}
             </span>
             <input
@@ -750,7 +750,7 @@ export default function TalentEdit() {
                     )}
 
                     <label className="block" data-testid="field-dob">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Date of Birth
                         </span>
                         <DobInput
@@ -766,7 +766,7 @@ export default function TalentEdit() {
                         </p>
                     </label>
                     <div data-testid="field-age-auto">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Age (auto)
                         </span>
                         <div className="mt-2 border-b border-[#eaeaea] py-2.5 text-sm flex items-center justify-between">
@@ -776,7 +776,7 @@ export default function TalentEdit() {
                             >
                                 {computedAge ?? "—"}
                             </span>
-                            <span className="text-[10px] text-black/40">
+                            <span className="text-[10px] text-neutral-500 font-medium">
                                 {talent.dob
                                     ? "auto-computed"
                                     : "set DOB to auto-calc"}
@@ -785,7 +785,7 @@ export default function TalentEdit() {
                     </div>
 
                     <div data-testid="field-gender">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Gender
                         </span>
                         <div className="mt-2 grid grid-cols-2 gap-2">
@@ -816,7 +816,7 @@ export default function TalentEdit() {
                     </div>
 
                     <div data-testid="field-height">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Height
                         </span>
                         <div className="mt-2">
@@ -848,7 +848,7 @@ export default function TalentEdit() {
                     </div>
 
                     <div className="md:col-span-1">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase block mb-2">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase block mb-2">
                             Location(s)
                         </span>
                         <LocationSelector
@@ -859,7 +859,7 @@ export default function TalentEdit() {
                         />
                     </div>
                     <div data-testid="field-ethnicity">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Ethnicity
                         </span>
                         <div className="mt-2">
@@ -902,7 +902,7 @@ export default function TalentEdit() {
                         disabled={!isEditing}
                     />
                     <div data-testid="field-followers">
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Instagram Followers
                         </span>
                         <div className="mt-2">
@@ -968,10 +968,10 @@ export default function TalentEdit() {
                     />
                 </div>
                 <div className="mt-6">
-                    <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                    <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                         Work Links
                     </span>
-                    <p className="text-[10px] text-black/35 mt-0.5 mb-2">
+                    <p className="text-[10px] text-neutral-500 font-medium mt-0.5 mb-2">
                         One per line. Formats: &ldquo;Label - URL&rdquo;, &ldquo;Label: URL&rdquo;, or bare URL.
                     </p>
                     {isEditing && (
@@ -996,7 +996,7 @@ export default function TalentEdit() {
                                     className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
                                         (talent.work_links || []).length > 0
                                             ? "text-emerald-700 bg-emerald-50 border-emerald-100"
-                                            : "text-neutral-400 bg-neutral-50 border-neutral-100"
+                                            : "text-neutral-500 bg-neutral-50 border-neutral-100"
                                     }`}
                                 >
                                     Detected Links: {(talent.work_links || []).length}
@@ -1029,10 +1029,10 @@ export default function TalentEdit() {
                 </div>
                 {/* ── Interested In ────────────────────────────────────── */}
                 <div className="mt-8 pt-6 border-t border-black/[0.06]">
-                    <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                    <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                         Interested In
                     </span>
-                    <p className="text-xs text-black/40 mt-1 mb-4">
+                    <p className="text-xs text-neutral-500 font-medium mt-1 mb-4">
                         Public: talent-selected work categories (visible to casting team).
                     </p>
                     <div className="flex flex-wrap gap-2" data-testid="edit-interested-in">
@@ -1074,12 +1074,12 @@ export default function TalentEdit() {
                 {/* ── Internal Tags ─────────────────────────────────────── */}
                 <div className="mt-8 pt-6 border-t border-black/[0.06]">
                     <div className="flex items-center gap-2 mb-1">
-                        <Tag className="w-3.5 h-3.5 text-black/40" strokeWidth={1.5} />
-                        <span className="text-[11px] text-black/45 tracking-widest uppercase">
+                        <Tag className="w-3.5 h-3.5 text-neutral-500" strokeWidth={1.5} />
+                        <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
                             Internal Tags
                         </span>
                     </div>
-                    <p className="text-xs text-black/40 mb-4">
+                    <p className="text-xs text-neutral-500 font-medium mb-4">
                         Private casting labels. Only visible to the team.
                     </p>
 

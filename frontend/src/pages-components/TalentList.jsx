@@ -34,14 +34,31 @@ function Initials({ name }) {
         .slice(0, 2)
         .map((w) => w[0].toUpperCase())
         .join("");
+
+    const getGradientClass = (str) => {
+        if (!str) return "from-slate-50 to-slate-100 text-slate-400";
+        const sum = str.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        const gradients = [
+            "from-[#f8fafc] via-[#f1f5f9] to-[#e2e8f0] text-slate-600 border-slate-200/40",
+            "from-[#f0fdfa] via-[#f0fdfa] to-[#ccfbf1] text-teal-800 border-teal-200/30",
+            "from-[#faf5ff] via-[#f3e8ff] to-[#e9d5ff] text-purple-800 border-purple-200/30",
+            "from-[#eff6ff] via-[#dbeafe] to-[#bfdbfe] text-blue-800 border-blue-200/30",
+            "from-[#fff5f5] via-[#fed7d7] to-[#feb2b2] text-red-800 border-red-200/30",
+        ];
+        return gradients[sum % gradients.length];
+    };
+
+    const gradientClass = getGradientClass(letters);
+
     return (
-        <div className="w-full h-full flex items-center justify-center bg-black/[0.04]">
+        <div className={`w-full h-full flex flex-col items-center justify-center bg-gradient-to-b ${gradientClass} border-b transition-all duration-300 relative overflow-hidden`}>
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.2)_0%,transparent_75%)] pointer-events-none" />
             {letters ? (
-                <span className="text-2xl font-medium text-black/25 select-none tracking-wide">
+                <span className="text-[28px] font-bold tracking-tight select-none font-display drop-shadow-[0_1px_1px_rgba(0,0,0,0.03)]">
                     {letters}
                 </span>
             ) : (
-                <User className="w-8 h-8 text-black/20" strokeWidth={1} />
+                <User className="w-10 h-10 opacity-40" strokeWidth={1.5} />
             )}
         </div>
     );
@@ -132,7 +149,7 @@ const TalentCard = React.memo(function TalentCard({
                 <div className="font-semibold text-[13.5px] leading-snug tracking-tight text-neutral-800 truncate">
                     {t.name || "—"}
                 </div>
-                <div className="text-[11px] text-neutral-400 mt-0.5 truncate">
+                <div className="text-[11px] text-neutral-500 mt-0.5 truncate">
                     {[formatTalentLocation(t.location), t.category].filter(Boolean).join(" · ") || "\u00a0"}
                 </div>
                 {/* Compact tag pills — max 2 visible + overflow badge */}
@@ -475,6 +492,25 @@ export default function TalentList() {
     const [totalItems, setTotalItems] = useState(0);
     const canBulkDelete = isAdmin();
 
+    const searchInputRef = useRef(null);
+
+    // Keyboard shortcut to focus search input
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            const isTyping = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+            if (
+                ((e.metaKey || e.ctrlKey) && e.key?.toLowerCase() === "k") ||
+                (e.key === "/" && !isTyping)
+            ) {
+                e.preventDefault();
+                searchInputRef.current?.focus();
+                searchInputRef.current?.select();
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, []);
+
     // Inline tagging state
     const [tagPopoverTalent, setTagPopoverTalent] = useState(null);
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
@@ -671,7 +707,7 @@ export default function TalentList() {
                         Talents
                     </h1>
                     {!loading && totalItems > 0 && (
-                        <p className="text-[11px] text-black/35 mt-2 tracking-wide uppercase">
+                        <p className="text-[11px] text-neutral-500 mt-2 tracking-wide uppercase font-semibold">
                             {totalItems} talent{totalItems !== 1 ? "s" : ""}
                             {totalPages > 1 && ` · Page ${page} of ${totalPages}`}
                             {totalAssets > 0 && ` · ${totalAssets} assets on page`}
@@ -693,6 +729,7 @@ export default function TalentList() {
                 <div className="relative max-w-md w-full">
                     <Search className="absolute left-0 top-3 w-4 h-4 text-black/30 pointer-events-none" />
                     <input
+                        ref={searchInputRef}
                         type="text"
                         value={q}
                         onChange={(e) => setQ(e.target.value)}
@@ -700,8 +737,12 @@ export default function TalentList() {
                         data-testid="talent-search-input"
                         autoComplete="off"
                         spellCheck={false}
-                        className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 text-sm text-black/85 placeholder:text-black/28 transition-colors duration-150"
+                        className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-3 pl-7 pr-12 text-sm text-black/85 placeholder:text-black/28 transition-colors duration-150"
                     />
+                    <div className="absolute right-0 top-3 flex items-center gap-0.5 pointer-events-none select-none px-1.5 py-0.5 rounded bg-black/[0.04] border border-black/[0.06] text-[9px] font-medium text-black/40 tracking-wide">
+                        <span>⌘</span>
+                        <span>K</span>
+                    </div>
                 </div>
                 {/* View Toggle Buttons */}
                 <div className="flex items-center bg-black/[0.03] border border-black/[0.06] rounded-lg p-0.5 shrink-0 self-start sm:self-auto" data-testid="view-toggle">

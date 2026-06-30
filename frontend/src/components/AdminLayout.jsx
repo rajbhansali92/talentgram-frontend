@@ -182,7 +182,7 @@ const NavItem = React.memo(({ to, label, icon: Icon, end, isCollapsed, onClick }
   const collapsedClasses = isCollapsed ? "justify-center w-12 mx-auto px-0 py-3" : "px-4 py-2.5 w-full";
   
   // Refined active state with subtle depth (ISSUE 7 FIX)
-  const activeClasses = "bg-black text-white shadow-sm border border-white/10";
+  const activeClasses = "bg-[#1E1E20] text-white shadow-sm border border-white/10";
   const inactiveClasses = "text-black/50 hover:text-black hover:bg-black/[0.03]";
 
   return (

@@ -1126,6 +1126,12 @@ async def update_talent_cover_cache(tid: str) -> None:
         mid = media_item.get("id")
         url = media_item.get("url")
         pid = media_item.get("public_id")
+        # Extract full public_id from url if it was stored without folder prefixes
+        if pid and "/" not in pid and url and "/upload/" in url:
+            parts = url.split("/upload/")[-1].split("/")
+            if parts[0].startswith("v") and parts[0][1:].isdigit():
+                parts = parts[1:]
+            pid = "/".join(parts).rsplit(".", 1)[0]
         rt = media_item.get("resource_type") or "image"
         thumb_url = media_url(pid, preset="roster", resource_type=rt) if pid else url
 

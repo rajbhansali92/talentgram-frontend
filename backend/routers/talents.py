@@ -150,6 +150,12 @@ def _enrich_list(doc: dict) -> dict:
     cover_thumb = doc.get("cover_thumbnail_url")
     if not cover_thumb and media_item:
         pid = media_item.get("public_id")
+        url = media_item.get("url")
+        if pid and "/" not in pid and url and "/upload/" in url:
+            parts = url.split("/upload/")[-1].split("/")
+            if parts[0].startswith("v") and parts[0][1:].isdigit():
+                parts = parts[1:]
+            pid = "/".join(parts).rsplit(".", 1)[0]
         if pid:
             rt = media_item.get("resource_type") or "image"
             cover_thumb = media_url(pid, preset="roster", resource_type=rt)

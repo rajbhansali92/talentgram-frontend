@@ -19,6 +19,9 @@ export function generateViewport() {
     // default (resizes-visual) leaves the 100dvh shell full-height behind the
     // IME, exposing the grey keyboard backdrop at the bottom. Ignored by iOS.
     interactiveWidget: "resizes-content",
+    // White system browser UI so the bottom nav / status areas blend with the
+    // white app background instead of reading as a grey strip on Android.
+    themeColor: "#ffffff",
   };
 }
 

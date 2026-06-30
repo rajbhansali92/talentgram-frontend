@@ -567,6 +567,58 @@ async def mark_reviewed(
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Shared client-facing presentation model for project budget + shoot dates.
+# Used by BOTH the main review view and the share-preview endpoint so the two
+# surfaces can never drift (single source of truth for these sections).
+# ---------------------------------------------------------------------------
+def build_project_budget(link: dict, projects: List[dict], budget_visible: bool) -> List[Dict[str, Any]]:
+    """Build the client-facing project_budget list from one or more project docs.
+    `projects` may contain None entries (skipped). An admin client_budget_override
+    on the link wins and collapses to a single link-level entry."""
+    if not budget_visible:
+        return []
+    override = (link or {}).get("client_budget_override")
+    if override:
+        return [{
+            "project_id": None,
+            "brand_name": link.get("brand_name") or link.get("title"),
+            "lines": override,
+        }]
+    out: List[Dict[str, Any]] = []
+    for proj in projects:
+        if not proj:
+            continue
+        lines = proj.get("client_budget") or []
+        if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
+            out.append({
+                "project_id": proj.get("id"),
+                "brand_name": proj.get("brand_name"),
+                "lines": lines,
+                "talent_budget": proj.get("talent_budget") or [],
+                "budget_per_day": proj.get("budget_per_day"),
+            })
+    return out
+
+
+def build_project_shoot_dates(projects: List[dict], avail_visible: bool) -> List[Dict[str, Any]]:
+    """Build the client-facing project_shoot_dates list from one or more project docs."""
+    if not avail_visible:
+        return []
+    out: List[Dict[str, Any]] = []
+    for proj in projects:
+        if not proj:
+            continue
+        sd = (proj.get("shoot_dates") or "").strip()
+        if sd:
+            out.append({
+                "project_id": proj.get("id"),
+                "brand_name": proj.get("brand_name"),
+                "shoot_dates": sd,
+            })
+    return out
+
+
 @router.get("/public/links/{slug}")
 async def get_public_link(slug: str, authorization: Optional[str] = Header(None)):
     viewer = decode_viewer(authorization)
@@ -705,41 +757,10 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         # However, we can check if any submission has budget visibility enabled in field_visibility.
         any_budget_visible = any((s.get("field_visibility") or {}).get("budget", True) for s in raw_subs)
         any_avail_visible = any((s.get("field_visibility") or {}).get("availability", True) for s in raw_subs)
-        
-        if any_budget_visible:
-            override = link.get("client_budget_override")
-            if override:
-                project_budget = [{
-                    "project_id": None,
-                    "brand_name": link.get("brand_name") or link.get("title"),
-                    "lines": override,
-                }]
-            else:
-                for pid in seen_pids:
-                    proj = project_meta_by_id.get(pid)
-                    if not proj:
-                        continue
-                    lines = proj.get("client_budget") or []
-                    if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
-                        project_budget.append({
-                            "project_id": pid,
-                            "brand_name": proj.get("brand_name"),
-                            "lines": lines,
-                            "talent_budget": proj.get("talent_budget") or [],
-                            "budget_per_day": proj.get("budget_per_day"),
-                        })
-        if any_avail_visible:
-            for pid in seen_pids:
-                proj = project_meta_by_id.get(pid)
-                if not proj:
-                    continue
-                sd = (proj.get("shoot_dates") or "").strip()
-                if sd:
-                    project_shoot_dates.append({
-                        "project_id": pid,
-                        "brand_name": proj.get("brand_name"),
-                        "shoot_dates": sd,
-                    })
+        # Shared presentation model — same builders the share-preview endpoint uses.
+        seen_projects = [project_meta_by_id.get(pid) for pid in seen_pids]
+        project_budget = build_project_budget(link, seen_projects, any_budget_visible)
+        project_shoot_dates = build_project_shoot_dates(seen_projects, any_avail_visible)
 
     actions = await db.link_actions.find({
         "link_id": link["id"],
@@ -1335,25 +1356,10 @@ async def get_share_preview(share_id: str):
             {"id": pid},
             {"_id": 0, "id": 1, "brand_name": 1, "client_budget": 1, "shoot_dates": 1, "talent_budget": 1, "budget_per_day": 1},
         )
-        if proj:
-            if budget_visible:
-                override = link.get("client_budget_override")
-                if override:
-                    project_budget = [{"project_id": None, "brand_name": link.get("brand_name") or link.get("title"), "lines": override}]
-                else:
-                    lines = proj.get("client_budget") or []
-                    if lines or proj.get("talent_budget") or proj.get("budget_per_day"):
-                        project_budget.append({
-                            "project_id": pid,
-                            "brand_name": proj.get("brand_name"),
-                            "lines": lines,
-                            "talent_budget": proj.get("talent_budget") or [],
-                            "budget_per_day": proj.get("budget_per_day"),
-                        })
-            if avail_visible:
-                sd = (proj.get("shoot_dates") or "").strip()
-                if sd:
-                    project_shoot_dates.append({"project_id": pid, "brand_name": proj.get("brand_name"), "shoot_dates": sd})
+        # Shared presentation model — identical builders to the main review view.
+        projects = [proj] if proj else []
+        project_budget = build_project_budget(link, projects, budget_visible)
+        project_shoot_dates = build_project_shoot_dates(projects, avail_visible)
 
     return {
         "link": _public_link_view(link),

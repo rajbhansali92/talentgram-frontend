@@ -90,6 +90,22 @@ const SHORT_ACTION_META = {
     ask_for_test: { label: "Test", icon: ClipboardCheck },
 };
 
+/**
+ * SINGLE SOURCE OF TRUTH for "Ask for Test" visibility.
+ * A talent who has already submitted audition takes (category "take" or the
+ * legacy "take_1/2/3") cannot be asked for a test again. Used everywhere the
+ * action can be chosen (detail buttons, tabs/filter, bulk) so visibility stays
+ * consistent. Does NOT affect history/analytics — existing ask_for_test actions
+ * still render via their decision badge / Review History.
+ */
+function hasAuditionTakes(talent) {
+    return (talent?.media || []).some((m) => {
+        const c = m?.category;
+        return typeof c === "string" && c.startsWith("take");
+    });
+}
+const canAskForTest = (talent) => !hasAuditionTakes(talent);
+
 const TABS = [
     { key: "all", label: "All Submissions", icon: Layers },
     { key: "pending_action", label: "Pending Action", icon: Clock },
@@ -1283,12 +1299,19 @@ export default function ClientView() {
                 </div>
 
                 {(() => {
-                    const visibleTabs = TABS;
+                    // Hide the Ask-for-Test tab/filter unless it's still relevant:
+                    // some talent can be asked (no takes yet) OR some talent already
+                    // carries an ask_for_test decision (history must stay reachable).
+                    const askForTestRelevant =
+                        (buckets.ask_for_test?.length || 0) > 0 || talents.some(canAskForTest);
+                    const visibleTabs = askForTestRelevant
+                        ? TABS
+                        : TABS.filter((t) => t.key !== "ask_for_test");
                     // Desktop progressive disclosure: primary tabs always shown;
                     // secondary tabs revealed via "More" (or auto-shown if the
                     // active tab lives in the secondary group).
-                    const primaryTabs = TABS.filter((t) => PRIMARY_TAB_KEYS.includes(t.key));
-                    const secondaryTabs = TABS.filter((t) => !PRIMARY_TAB_KEYS.includes(t.key));
+                    const primaryTabs = visibleTabs.filter((t) => PRIMARY_TAB_KEYS.includes(t.key));
+                    const secondaryTabs = visibleTabs.filter((t) => !PRIMARY_TAB_KEYS.includes(t.key));
                     const activeInSecondary = secondaryTabs.some((t) => t.key === activeTab);
                     const showSecondary = showMoreTabs || activeInSecondary;
                     const desktopTabs = showSecondary ? [...primaryTabs, ...secondaryTabs] : primaryTabs;
@@ -1598,15 +1621,20 @@ export default function ClientView() {
                                 <HelpCircle className="w-3.5 h-3.5 shrink-0" />
                                 Unsure
                             </button>
-                            <button
-                                onClick={() => setBulkAction(Array.from(selectedIds), "ask_for_test")}
-                                data-testid="bulk-action-ask_for_test"
-                                className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
-                            >
-                                <ClipboardCheck className="w-3.5 h-3.5 shrink-0" />
-                                <span className="hidden md:inline">Ask for Test</span>
-                                <span className="md:hidden">Test</span>
-                            </button>
+                            {/* Bulk Ask for Test only when every selected talent qualifies
+                                (none has audition takes) — prevents asking a test of talent
+                                who already submitted one. */}
+                            {Array.from(selectedIds).every((id) => canAskForTest(talents.find((x) => x.id === id) || {})) && (
+                                <button
+                                    onClick={() => setBulkAction(Array.from(selectedIds), "ask_for_test")}
+                                    data-testid="bulk-action-ask_for_test"
+                                    className="inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-2 min-h-[44px] bg-white/5 hover:bg-white/10 rounded-lg text-[11px] md:text-xs font-semibold tracking-wide transition-colors active:scale-95 border border-white/5"
+                                >
+                                    <ClipboardCheck className="w-3.5 h-3.5 shrink-0" />
+                                    <span className="hidden md:inline">Ask for Test</span>
+                                    <span className="md:hidden">Test</span>
+                                </button>
+                            )}
                         </div>
 
                         <div className="hidden md:block h-6 w-px bg-white/10" />
@@ -1717,7 +1745,11 @@ function TalentDetail({
     };
     const vis = link.visibility || {};
     const project = link || {};
-    const visibleActions = ACTIONS;
+    // Hide "Ask for Test" once the talent has audition takes — but keep it visible
+    // if it's their current decision so an existing selection stays deselectable.
+    const visibleActions = ACTIONS.filter(
+        (a) => a.key !== "ask_for_test" || canAskForTest(talent) || viewerAction?.action === "ask_for_test",
+    );
     const mediaAll = useMemo(() => talent.media || [], [talent.media]);
     const portfolioOn = vis.portfolio !== false;
     const indianOn = portfolioOn && (vis.indian_images ?? true);

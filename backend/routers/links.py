@@ -867,9 +867,16 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
             subject_added_at[sid] = (
                 s.get("decided_at") or s.get("submitted_at") or s.get("created_at") or link.get("created_at")
             )
+    _vpipe_talents = [sign_r2_media_if_needed(t) for t in talents]
+    for _t in _vpipe_talents:  # [VPIPE] CLIENT API response — video media only
+        for _m in (_t.get("media") or []):
+            if (_m.get("category") or "").startswith(("take", "video")) or _m.get("resource_type") == "video":
+                logger.info("[VPIPE] CLIENT_API talent=%s category=%s provider=%s url_host=%s url=%s",
+                            _t.get("id"), _m.get("category"), _m.get("provider"),
+                            (_m.get("url") or "").split("/")[2] if "//" in (_m.get("url") or "") else "", _m.get("url"))
     return {
         "link": _public_link_view(link),
-        "talents": [sign_r2_media_if_needed(t) for t in talents],
+        "talents": _vpipe_talents,
         "actions": actions,
         "project_budget": project_budget,
         "project_shoot_dates": project_shoot_dates,

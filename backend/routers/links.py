@@ -19,6 +19,16 @@ class LinkShareIn(BaseModel):
     talent_id: str
     media_id: Optional[str] = None
 
+
+class ShareLogIn(BaseModel):
+    """Analytics for a WhatsApp share dispatch action (additive, separate from
+    downloads). Recipient is intentionally NOT tracked."""
+    talent_id: str
+    share_method: str  # "native_file_share" | "whatsapp_link_share"
+    file_count: int = 1
+    media: List[Dict[str, Any]] = []  # [{id, type, name, share_id?}]
+    session_id: Optional[str] = None
+
 from core import (
     ActionIn,
     BulkDeleteIn,
@@ -372,13 +382,20 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
             {"link_id": lid}, {"_id": 0}
         ).sort("created_at", -1).to_list(50000)
 
-    viewers, actions_raw, agg_by_tid, downloads, events, action_history = await asyncio.gather(
+    async def _fetch_shares():
+        # Separate WhatsApp-share analytics (created / dispatched / opened).
+        return await db.link_share_events.find(
+            {"link_id": lid}, {"_id": 0}
+        ).sort("created_at", -1).to_list(50000)
+
+    viewers, actions_raw, agg_by_tid, downloads, events, action_history, shares = await asyncio.gather(
         _fetch_viewers(),
         _fetch_actions_raw(),
         _fetch_summary_agg(),
         _fetch_downloads(),
         _fetch_events(),
         _fetch_action_history(),
+        _fetch_shares(),
     )
 
     subjects: Dict[str, Dict[str, Any]] = {}
@@ -452,6 +469,7 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
         "actions": actions_raw,
         "downloads": downloads,
         "events": events,
+        "shares": shares,
         "action_history": action_history,
         "summary": list(summary.values()),
         "subjects": subjects,
@@ -1272,6 +1290,28 @@ async def create_share_link(
     if not is_valid:
         raise HTTPException(404, "Talent not found in this link")
 
+    viewer_email = viewer.get("email")
+    viewer_name = viewer.get("name")
+
+    # Reuse an existing secure share link for the same viewer + talent + media
+    # instead of minting duplicates (per product requirement). Validity still
+    # flows from the parent review link, so reuse is always safe.
+    existing = await db.link_shares.find_one(
+        {
+            "slug": slug,
+            "talent_id": talent_id,
+            "media_id": payload.media_id,
+            "viewer_email": viewer_email,
+        },
+        {"_id": 0},
+    )
+    if existing:
+        return {
+            "share_id": existing["id"],
+            "expires_at": existing.get("expires_at"),
+            "reused": True,
+        }
+
     share_id = str(uuid.uuid4())
 
     # Issue 2: the share link inherits the parent review link's lifecycle — there
@@ -1284,15 +1324,72 @@ async def create_share_link(
         "slug": slug,
         "talent_id": talent_id,
         "media_id": payload.media_id,
+        "viewer_email": viewer_email,
+        "viewer_name": viewer_name,
         "created_at": _now(),
         "expires_at": None,
     }
     await db.link_shares.insert_one(share_doc)
 
+    # Separate share analytics — "share created" event (fire-and-forget shape;
+    # never touches the existing download/view analytics).
+    try:
+        await db.link_share_events.insert_one({
+            "id": str(uuid.uuid4()),
+            "event": "created",
+            "link_id": link["id"],
+            "slug": slug,
+            "share_id": share_id,
+            "talent_id": talent_id,
+            "media_id": payload.media_id,
+            "viewer_email": viewer_email,
+            "viewer_name": viewer_name,
+            "created_at": _now(),
+        })
+    except Exception as e:  # analytics must never break sharing
+        logger.warning("share_created analytics insert failed: %s", e)
+
     return {
         "share_id": share_id,
         "expires_at": None,
+        "reused": False,
     }
+
+
+@router.post("/public/links/{slug}/share-log")
+async def log_share(
+    slug: str,
+    payload: ShareLogIn,
+    authorization: Optional[str] = Header(None),
+):
+    """Records a WhatsApp share *dispatch* (the moment the viewer sent media via
+    WhatsApp). Separate from downloads — a share is never counted as a download.
+    Recipient is intentionally not captured."""
+    viewer = decode_viewer(authorization)
+    if not viewer or viewer.get("slug") != slug:
+        raise HTTPException(401, "Identity required")
+    link = await db.links.find_one({"slug": slug}, {"_id": 0})
+    if not link:
+        raise HTTPException(404, "Link not found")
+    _require_active_link(link)
+    try:
+        await db.link_share_events.insert_one({
+            "id": str(uuid.uuid4()),
+            "event": "dispatched",
+            "link_id": link["id"],
+            "slug": slug,
+            "talent_id": payload.talent_id,
+            "media": payload.media,
+            "share_method": payload.share_method,
+            "file_count": payload.file_count,
+            "viewer_email": viewer.get("email"),
+            "viewer_name": viewer.get("name"),
+            "session_id": payload.session_id,
+            "created_at": _now(),
+        })
+    except Exception as e:
+        logger.warning("share dispatch analytics insert failed: %s", e)
+    return {"ok": True}
 
 
 @router.get("/public/shares/{share_id}")
@@ -1308,6 +1405,21 @@ async def get_share_preview(share_id: str):
     # Issue 2: single source of truth — the share is valid iff the parent review
     # link is active. If the link is disabled/expired, the share expires too.
     _require_active_link(link)
+
+    # "Share opened" analytics — recipient identity is intentionally NOT tracked.
+    try:
+        await db.link_share_events.insert_one({
+            "id": str(uuid.uuid4()),
+            "event": "opened",
+            "link_id": link["id"],
+            "slug": slug,
+            "share_id": share_id,
+            "talent_id": share.get("talent_id"),
+            "media_id": share.get("media_id"),
+            "created_at": _now(),
+        })
+    except Exception as e:
+        logger.warning("share_opened analytics insert failed: %s", e)
 
     talent_id = share["talent_id"]
     media_id = share.get("media_id")

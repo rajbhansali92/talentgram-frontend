@@ -36,7 +36,10 @@ import {
     Lock,
     ClipboardCheck,
     Copy,
+    Send,
+    CheckSquare,
 } from "lucide-react";
+import { shareMediaViaWhatsApp } from "@/lib/mediaShare";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
 // parseStoredWorkLink and WorkLinksDisplay are imported from @/components/WorkLinksDisplay.
@@ -1768,6 +1771,88 @@ function TalentDetail({
     const downloadingRef = useRef(new Set());
     const [downloadingIds, setDownloadingIds] = useState(() => new Set());
 
+    // ── WhatsApp share (additive — never affects downloads) ──────────────────
+    const [sharing, setSharing] = useState(false);
+    const [shareMode, setShareMode] = useState(false);
+    const [shareSel, setShareSel] = useState(() => new Set());
+
+    // Ordered, visibility-aware list of every shareable media item.
+    const shareableMedia = useMemo(() => {
+        const out = [];
+        if (vis.intro_video && intro) out.push({ m: intro, label: "Introduction", type: "video" });
+        if (vis.takes !== false) {
+            takes.forEach((t, i) => out.push({ m: t, label: t.label || `Audition Take ${i + 1}`, type: "video" }));
+        }
+        images.forEach((m, i) => out.push({ m, label: `Portfolio Image ${i + 1}`, type: "image" }));
+        return out;
+    }, [intro, takes, images, vis.intro_video, vis.takes]);
+
+    const shareLabelById = useMemo(
+        () => Object.fromEntries(shareableMedia.map((s) => [s.m.id, s.label])),
+        [shareableMedia],
+    );
+
+    const toggleShareSel = useCallback((id) => {
+        setShareSel((prev) => {
+            const n = new Set(prev);
+            if (n.has(id)) n.delete(id); else n.add(id);
+            return n;
+        });
+    }, []);
+
+    const exitShareMode = useCallback(() => {
+        setShareMode(false);
+        setShareSel(new Set());
+    }, []);
+
+    // entries: [{ m, label, type }]
+    const runShare = useCallback(async (entries) => {
+        if (sharing || !entries || entries.length === 0) return;
+        setSharing(true);
+        try {
+            const items = entries.map(({ m, label, type }) => {
+                const rawUrl = IMAGE_URL(m);
+                const fileUrl = type === "video" ? getVideoDownloadUrl(rawUrl) : rawUrl;
+                const filename = m.original_filename || `${privatizeName(talent.name)} - ${label}`;
+                return { id: m.id, name: label, type, fileUrl, filename };
+            });
+            const res = await shareMediaViaWhatsApp({
+                slug,
+                talentId: talent.id,
+                talentName: privatizeName(talent.name),
+                items,
+                // INTENTIONAL: the Download permission also governs whether the
+                // ORIGINAL file may leave Talentgram. When downloads are off we
+                // share secure links only (mobile + desktop) — never raw files —
+                // so sharing can't bypass the restriction. See lib/mediaShare.js.
+                allowFiles: !!vis.download,
+                sessionId: getSessionId(),
+            });
+            if (res?.method === "native_file_share") {
+                toast.success(`Sharing ${res.count} item${res.count === 1 ? "" : "s"}…`);
+            } else if (res?.method === "whatsapp_link_share") {
+                toast.success("Opening WhatsApp…");
+            }
+            if (res && !res.aborted) exitShareMode();
+        } catch (e) {
+            console.error("share failed", e);
+            toast.error("Couldn't share this media. Please try again.");
+        } finally {
+            setSharing(false);
+        }
+    }, [sharing, slug, talent.id, talent.name, vis.download, exitShareMode]);
+
+    const shareOne = useCallback((m) => {
+        const label = shareLabelById[m.id] || "Media";
+        const type = (m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take")) ? "video" : "image";
+        runShare([{ m, label, type }]);
+    }, [runShare, shareLabelById]);
+
+    const shareSelected = useCallback(() => {
+        const entries = shareableMedia.filter((s) => shareSel.has(s.m.id));
+        runShare(entries);
+    }, [shareableMedia, shareSel, runShare]);
+
     const handleCopyForm = () => {
         try {
             const lines = [];
@@ -2155,6 +2240,47 @@ function TalentDetail({
         }, 1500);
     }, [logDownload, talent.id, talent.name]);
 
+    // Selection checkbox overlaid on a media tile while in multi-share mode.
+    const SelectCheck = ({ id }) =>
+        shareMode ? (
+            <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleShareSel(id); }}
+                aria-label={shareSel.has(id) ? "Deselect media" : "Select media"}
+                data-testid={`share-select-${id}`}
+                className={`absolute top-3 left-3 z-20 w-7 h-7 rounded-md border flex items-center justify-center transition-all duration-150 shadow-sm ${
+                    shareSel.has(id)
+                        ? "bg-[#111111] border-[#111111] text-white"
+                        : "bg-white/90 border-black/25 text-transparent"
+                }`}
+            >
+                <Check className="w-4 h-4" strokeWidth={3} />
+            </button>
+        ) : null;
+
+    // When the link's Download permission is off, sharing falls back to secure
+    // links on every device (see lib/mediaShare.js). Surface that so a viewer
+    // who sees files in one project and links in another isn't confused.
+    const downloadsDisabled = !vis.download;
+    const shareHelpText =
+        "Downloads are disabled for this link. Media will be shared as secure Talentgram links instead of files.";
+
+    // Per-item "Send via WhatsApp" button (mirrors the Download affordance).
+    const SendBtn = ({ m, testid }) =>
+        !isSharePreview && !shareMode ? (
+            <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); e.preventDefault(); shareOne(m); }}
+                disabled={sharing}
+                title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
+                aria-label="Send via WhatsApp"
+                data-testid={testid}
+                className="w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+                <Send className="w-4 h-4 text-emerald-600" />
+            </button>
+        ) : null;
+
     return (
         <div
             ref={overlayRef}
@@ -2380,6 +2506,38 @@ function TalentDetail({
                             )}
                         </div>
                         <div className="p-4 md:p-8">
+                            {/* Multi-select share toggle — additive, never blocks downloads */}
+                            {!isSharePreview && shareableMedia.length > 0 && (
+                                <div className="flex items-center justify-between mb-6">
+                                    <p className="text-[11px] text-[#8A8A8A] font-mono tracking-[0.08em] pr-3">
+                                        {downloadsDisabled
+                                            ? shareHelpText
+                                            : shareMode
+                                            ? "Select media to send together via WhatsApp"
+                                            : " "}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={() => (shareMode ? exitShareMode() : setShareMode(true))}
+                                        data-testid="share-select-toggle"
+                                        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-full text-[11px] font-semibold transition-colors duration-150 min-h-[40px] ${
+                                            shareMode
+                                                ? "bg-slate-100 text-[#4A4A4A] hover:bg-slate-200"
+                                                : "border border-[#eaeaea] text-[#111111] hover:border-[#d4d4d4] hover:bg-slate-50"
+                                        }`}
+                                    >
+                                        {shareMode ? (
+                                            <>
+                                                <X className="w-3.5 h-3.5" /> Cancel
+                                            </>
+                                        ) : (
+                                            <>
+                                                <CheckSquare className="w-3.5 h-3.5 text-emerald-600" /> Select &amp; Send
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            )}
                             {vis.takes !== false && takes.length > 0 && (
                                 <div className="mb-10">
                                     <p className="eyebrow tracking-[0.12em] mb-4 text-[#4A4A4A]">Audition Takes</p>
@@ -2415,16 +2573,20 @@ function TalentDetail({
                                                         slug={slug}
                                                         talentId={talent.id}
                                                     />
-                                                    {vis.download && (
-                                                        <button
-                                                            onClick={() => download(t)}
-                                                            disabled={downloadingIds.has(t.id)}
-                                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10 disabled:opacity-50 disabled:cursor-not-allowed"
-                                                            data-testid={`download-take-btn-${i}`}
-                                                        >
-                                                            {downloadingIds.has(t.id) ? <Loader2 className="w-4 h-4 text-black animate-spin" /> : <Download className="w-4 h-4 text-black" />}
-                                                        </button>
-                                                    )}
+                                                    <SelectCheck id={t.id} />
+                                                    <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                                        <SendBtn m={t} testid={`send-take-btn-${i}`} />
+                                                        {vis.download && (
+                                                            <button
+                                                                onClick={() => download(t)}
+                                                                disabled={downloadingIds.has(t.id)}
+                                                                className="w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                data-testid={`download-take-btn-${i}`}
+                                                            >
+                                                                {downloadingIds.has(t.id) ? <Loader2 className="w-4 h-4 text-black animate-spin" /> : <Download className="w-4 h-4 text-black" />}
+                                                            </button>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
                                         ))}
@@ -2445,16 +2607,20 @@ function TalentDetail({
                                              slug={slug}
                                              talentId={talent.id}
                                          />
-                                         {vis.download && (
-                                             <button
-                                                 onClick={() => download(intro)}
-                                                 disabled={downloadingIds.has(intro.id)}
-                                                 className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm z-10 disabled:opacity-50 disabled:cursor-not-allowed"
-                                                 data-testid="download-intro-btn"
-                                             >
-                                                 {downloadingIds.has(intro.id) ? <Loader2 className="w-4 h-4 text-black animate-spin" /> : <Download className="w-4 h-4 text-black" />}
-                                             </button>
-                                         )}
+                                         <SelectCheck id={intro.id} />
+                                         <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                             <SendBtn m={intro} testid="send-intro-btn" />
+                                             {vis.download && (
+                                                 <button
+                                                     onClick={() => download(intro)}
+                                                     disabled={downloadingIds.has(intro.id)}
+                                                     className="w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                                     data-testid="download-intro-btn"
+                                                 >
+                                                     {downloadingIds.has(intro.id) ? <Loader2 className="w-4 h-4 text-black animate-spin" /> : <Download className="w-4 h-4 text-black" />}
+                                                 </button>
+                                             )}
+                                         </div>
                                      </div>
                                  </div>
                              )}
@@ -2491,16 +2657,20 @@ function TalentDetail({
                                             </div>
                                         </>
                                     )}
-                                    {vis.download && (
-                                        <button
-                                            onClick={() => download(images[idx])}
-                                            disabled={downloadingIds.has(images[idx]?.id)}
-                                            className="absolute top-3 right-3 w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                                            data-testid="detail-download-btn"
-                                        >
-                                            {downloadingIds.has(images[idx]?.id) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                                        </button>
-                                    )}
+                                    {images[idx] && <SelectCheck id={images[idx].id} />}
+                                    <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                        <SendBtn m={images[idx]} testid="send-portfolio-btn" />
+                                        {vis.download && (
+                                            <button
+                                                onClick={() => download(images[idx])}
+                                                disabled={downloadingIds.has(images[idx]?.id)}
+                                                className="w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                                data-testid="detail-download-btn"
+                                            >
+                                                {downloadingIds.has(images[idx]?.id) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             ) : (
                                 <div className="aspect-[3/4] md:max-h-[78vh] bg-white rounded-xl flex items-center justify-center text-[#8A8A8A] shadow-sm">
@@ -2511,20 +2681,38 @@ function TalentDetail({
                             {images.length > 1 && (
                                 <div className="mt-7 flex gap-3 overflow-x-auto pb-3" data-stop-swipe="1">
                                     {images.map((m, i) => (
-                                        <button
-                                            key={m.id}
-                                            onClick={() => {
-                                                setIdx(i);
-                                                trackMediaView(m.id);
-                                            }}
-                                            className={`shrink-0 w-20 h-28 border-2 ${i === idx ? "border-[var(--tg-navy-primary)]" : "border-black/[0.04]"} rounded-xl overflow-hidden transition-colors duration-150`}
-                                        >
-                                            <img
-                                                src={thumbnailUrl(m)}
-                                                alt=""
-                                                className="w-full h-full object-cover"
-                                            />
-                                        </button>
+                                        <div key={m.id} className="relative shrink-0">
+                                            <button
+                                                onClick={() => {
+                                                    if (shareMode) { toggleShareSel(m.id); return; }
+                                                    setIdx(i);
+                                                    trackMediaView(m.id);
+                                                }}
+                                                data-testid={`portfolio-thumb-${i}`}
+                                                className={`shrink-0 w-20 h-28 border-2 ${
+                                                    shareMode && shareSel.has(m.id)
+                                                        ? "border-emerald-500"
+                                                        : i === idx
+                                                        ? "border-[var(--tg-navy-primary)]"
+                                                        : "border-black/[0.04]"
+                                                } rounded-xl overflow-hidden transition-colors duration-150`}
+                                            >
+                                                <img
+                                                    src={thumbnailUrl(m)}
+                                                    alt=""
+                                                    className="w-full h-full object-cover"
+                                                />
+                                            </button>
+                                            {shareMode && (
+                                                <span className={`absolute top-1 left-1 w-5 h-5 rounded border flex items-center justify-center pointer-events-none ${
+                                                    shareSel.has(m.id)
+                                                        ? "bg-[#111111] border-[#111111] text-white"
+                                                        : "bg-white/90 border-black/25 text-transparent"
+                                                }`}>
+                                                    <Check className="w-3 h-3" strokeWidth={3} />
+                                                </span>
+                                            )}
+                                        </div>
                                     ))}
                                 </div>
                             )}
@@ -2756,6 +2944,47 @@ function TalentDetail({
                         </div>
                     </div>
                 </div>
+
+                {/* Sticky multi-select share bar */}
+                {shareMode && (
+                    <div
+                        className="shrink-0 border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex items-center justify-between gap-3 shadow-[0_-4px_20px_rgba(0,0,0,0.05)]"
+                        data-testid="share-action-bar"
+                    >
+                        <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-sm font-semibold text-[#111111] shrink-0">
+                                {shareSel.size} selected
+                            </span>
+                            <span className="text-[11px] text-[#8A8A8A] truncate">
+                                {downloadsDisabled
+                                    ? "Shared as secure Talentgram links (downloads disabled)"
+                                    : shareSel.size === 0
+                                    ? "Pick media to send together"
+                                    : "Shared together in one WhatsApp message"}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                type="button"
+                                onClick={exitShareMode}
+                                className="px-3 py-2 rounded-full text-xs font-medium text-[#4A4A4A] hover:bg-slate-100 transition-colors min-h-[40px]"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={shareSelected}
+                                disabled={shareSel.size === 0 || sharing}
+                                title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
+                                data-testid="share-send-selected-btn"
+                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                                Send via WhatsApp{shareSel.size > 0 ? ` (${shareSel.size})` : ""}
+                            </button>
+                        </div>
+                    </div>
+                )}
 
         </div>
     );

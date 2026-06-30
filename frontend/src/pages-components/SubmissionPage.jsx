@@ -9,6 +9,7 @@ import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
+import DobInput from "@/components/DobInput";
 import ThemeToggle from "@/components/ThemeToggle";
 import HlsVideo from "@/components/HlsVideo";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
@@ -3820,6 +3821,22 @@ function PremiumFormField({
             <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono">
                 {label}
             </span>
+            {type === "date" ? (
+                <DobInput
+                    inputRef={inputRef}
+                    value={value || ""}
+                    onChange={onChange}
+                    onBlur={onBlur}
+                    max={max}
+                    disabled={disabled}
+                    testid={testid}
+                    className={`mt-2 w-full bg-white/60 rounded-2xl border focus:ring-4 focus:ring-[#0c2340]/10 outline-none py-3 px-4 text-[16px] md:text-[15px] text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)] disabled:text-[#333333] ${
+                        error
+                            ? "border-rose-400 focus:border-rose-400 focus:ring-rose-400/10 bg-rose-50/30"
+                            : "border-[#eaeaea] focus:border-[#0c2340]/40 bg-white/60"
+                    } ${className}`}
+                />
+            ) : (
             <input
                 ref={inputRef}
                 type={type}
@@ -3859,6 +3876,7 @@ function PremiumFormField({
                         : "border-[#eaeaea] focus:border-[#0c2340]/40 bg-white/60"
                 } ${className}`}
             />
+            )}
             {error && (
                 <span className="block text-[11px] text-rose-500 mt-1.5 font-mono animate-in fade-in duration-150">
                     ⚠ {error}

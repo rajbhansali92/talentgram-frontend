@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
+import { isoToDisplay } from "@/lib/dob";
 
 // ---------------------------------------------------------------------------
 // Work-links helpers (shared with ApplicationPage)
@@ -254,10 +255,10 @@ export default function PortalProfile() {
                                     <input
                                         type="text"
                                         name="dob"
-                                        value={profile.dob || ""}
+                                        value={isoToDisplay(profile.dob) || ""}
                                         readOnly
                                         title="This field is managed by Talentgram and can't be edited here."
-                                        placeholder="YYYY-MM-DD"
+                                        placeholder="DD/MM/YYYY"
                                         style={{ fontSize: "16px" }}
                                         className="px-3 py-2 bg-black/[0.03] border border-black/10 rounded-lg text-black/55 cursor-not-allowed focus:outline-none transition duration-150 h-[44px]"
                                     />

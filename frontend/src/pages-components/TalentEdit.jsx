@@ -36,6 +36,7 @@ import WorkLinksDisplay from "@/components/WorkLinksDisplay";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
+import DobInput from "@/components/DobInput";
 
 
 
@@ -752,15 +753,17 @@ export default function TalentEdit() {
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">
                             Date of Birth
                         </span>
-                        <input
-                            type="date"
+                        <DobInput
                             value={talent.dob || ""}
-                            onChange={(e) => updateTalent({ dob: e.target.value })}
+                            onChange={(iso) => updateTalent({ dob: iso })}
                             max={new Date().toISOString().split("T")[0]}
-                            data-testid="dob-input"
+                            testid="dob-input"
                             disabled={!isEditing}
                             className="mt-2 w-full bg-transparent border-b border-[#eaeaea] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 disabled:opacity-70"
                         />
+                        <p className="mt-1 text-[10px] text-neutral-500 font-mono">
+                            Format: DD / MM / YYYY
+                        </p>
                     </label>
                     <div data-testid="field-age-auto">
                         <span className="text-[11px] text-black/45 tracking-widest uppercase">

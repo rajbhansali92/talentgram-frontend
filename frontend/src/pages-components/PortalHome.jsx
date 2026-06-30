@@ -216,8 +216,6 @@ export default function PortalHome() {
 }
 
 function ProjectCard({ project, theme }) {
-    const navigate = useNavigate();
-
     const getStatusDetails = () => {
         if (theme === "shortlisted") {
             return { color: "bg-amber-500", text: "Shortlisted" };
@@ -245,10 +243,6 @@ function ProjectCard({ project, theme }) {
           })
         : "N/A";
 
-    const handleOpenProject = () => {
-        navigate(`/submit/${project.project_slug}`);
-    };
-
     return (
         <div className="bg-white border border-black/5 hover:border-black/15 hover:shadow-[0_4px_20px_rgba(0,0,0,0.02)] transition-all duration-200 rounded-xl p-5 flex flex-col justify-between gap-4">
             <div className="flex flex-col gap-1.5">
@@ -267,13 +261,13 @@ function ProjectCard({ project, theme }) {
                 </div>
             </div>
 
-            <button
-                onClick={handleOpenProject}
+            <a
+                href={`/submit/${project.project_slug}`}
                 className="w-full inline-flex items-center justify-center gap-1 bg-[#fafafa] border border-black/10 hover:bg-black hover:text-white hover:border-black py-2.5 px-4 rounded-lg text-xs font-medium transition-all duration-150"
             >
                 Open Project Submission
                 <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+            </a>
         </div>
     );
 }

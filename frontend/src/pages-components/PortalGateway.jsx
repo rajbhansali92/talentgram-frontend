@@ -4,6 +4,7 @@ import { ArrowRight, Sparkles, MapPin, User, Mail, ChevronRight } from "lucide-r
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
+import { isoToDisplay } from "@/lib/dob";
 
 export default function PortalGateway() {
     const { slug } = useParams();
@@ -208,7 +209,7 @@ export default function PortalGateway() {
                                 )}
                                 {recognitionState.dob && (
                                     <span className="bg-black/5 px-2.5 py-1 rounded-full">
-                                        DOB: {recognitionState.dob}
+                                        DOB: {isoToDisplay(recognitionState.dob) || recognitionState.dob}
                                     </span>
                                 )}
                                 {recognitionState.interested_in && recognitionState.interested_in.map((cat, index) => (

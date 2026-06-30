@@ -9,6 +9,7 @@ import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUt
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
+import DobInput from "@/components/DobInput";
 import {
     Select,
     SelectContent,
@@ -1795,17 +1796,30 @@ function Label({ children }) {
 }
 
 function Row({ label, value, onChange, onBlur, type = "text", testid, hint }) {
+    const inputClass =
+        "mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150";
     return (
         <div>
             <Label>{label}</Label>
-            <input
-                type={type}
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                onBlur={onBlur}
-                data-testid={testid}
-                className="mt-2 w-full bg-white border border-[#eaeaea] rounded-lg px-4 h-11 text-[16px] md:text-[15px] text-[#1a1a1a] placeholder:text-[#b0aea6] focus:ring-1 focus:ring-[#b0aea6] focus:border-[#d4d4d4] outline-none transition-all duration-150"
-            />
+            {type === "date" ? (
+                <DobInput
+                    value={value}
+                    onChange={onChange}
+                    onBlur={onBlur}
+                    max={new Date().toISOString().split("T")[0]}
+                    testid={testid}
+                    className={inputClass}
+                />
+            ) : (
+                <input
+                    type={type}
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    onBlur={onBlur}
+                    data-testid={testid}
+                    className={inputClass}
+                />
+            )}
             {hint && (
                 <p className="text-[10px] text-[#8b8b8b] font-mono mt-1.5">
                     {hint}

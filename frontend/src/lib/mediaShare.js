@@ -169,6 +169,10 @@ export async function shareMediaViaWhatsApp({
         }
     }
 
+    // Reason native file sharing was abandoned (only set when we actually tried
+    // and failed) — surfaced on-screen so the cause is visible without devtools.
+    let fileFallbackReason = null;
+
     // ── 1 & 2: native FILE share (attach the real media) ─────────────────────
     if (willTryFiles) {
         try {
@@ -206,6 +210,7 @@ export async function shareMediaViaWhatsApp({
                 return { method: "native_file_share", count: 1 };
             }
             // Files fetched but the browser won't share them as attachments.
+            fileFallbackReason = "browser can't share these files";
             shareLog("files not shareable → link fallback", {
                 count: files.length,
                 canShareAll: canShareFiles(files),
@@ -217,6 +222,10 @@ export async function shareMediaViaWhatsApp({
             }
             // TypeError "Failed to fetch" here almost always means the media
             // host (Cloudinary/R2) didn't return CORS headers for the fetch.
+            fileFallbackReason =
+                e?.name === "TypeError"
+                    ? `couldn't fetch file (likely storage CORS): ${e?.message || ""}`.trim()
+                    : `${e?.name || "error"}${e?.message ? ": " + e.message : ""}`;
             shareLog("native file share FAILED → link fallback", {
                 name: e?.name,
                 message: e?.message,
@@ -248,7 +257,7 @@ export async function shareMediaViaWhatsApp({
                 shareLog("path → link share via native sheet");
                 await navigator.share({ title: `${talentName} — Talentgram`, text });
                 await logDispatch(slug, talentId, "whatsapp_link_share", items.length, mediaMeta, sessionId);
-                return { method: "whatsapp_link_share", via: "native_sheet", count: items.length };
+                return { method: "whatsapp_link_share", via: "native_sheet", count: items.length, fileFallbackReason };
             } catch (e) {
                 if (e && e.name === "AbortError") {
                     shareLog("user cancelled link sheet");
@@ -267,7 +276,7 @@ export async function shareMediaViaWhatsApp({
             window.open(waUrl, "_blank", "noopener,noreferrer");
         }
         await logDispatch(slug, talentId, "whatsapp_link_share", items.length, mediaMeta, sessionId);
-        return { method: "whatsapp_link_share", via: "wa_me", count: items.length };
+        return { method: "whatsapp_link_share", via: "wa_me", count: items.length, fileFallbackReason };
     } catch (e) {
         if (linkWin) {
             try { linkWin.close(); } catch { /* ignore */ }

@@ -1836,6 +1836,13 @@ function TalentDetail({
                         ? "Sharing secure links — choose WhatsApp…"
                         : "Opening WhatsApp with secure links…",
                 );
+                // On-device diagnostics: if we tried to attach files but had to
+                // fall back, show why (no devtools needed).
+                if (res.fileFallbackReason) {
+                    toast(`Couldn't attach files — ${res.fileFallbackReason}. Sent secure links instead.`, {
+                        duration: 7000,
+                    });
+                }
             }
             if (res && !res.aborted) exitShareMode();
         } catch (e) {

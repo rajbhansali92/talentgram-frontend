@@ -544,10 +544,11 @@ def cloudinary_upload(
     )
 
     if is_video:
-        # If we do NOT want to keep the original (e.g. keep_original is False) AND video > 300MB,
-        # we apply an INCOMING transformation to make Cloudinary write the 720p H.264 MP4 derivative AS the original asset.
-        # This completely discards the heavy original file immediately on upload, saving massive long-term storage costs.
-        if not keep_original and len(data) > 300_000_000:
+        is_audio = clean_ct.startswith("audio/") or (detected_mime and detected_mime.startswith("audio/"))
+        if is_audio:
+            # Skip eager video transformations (like resizing or poster frames) for audio files
+            pass
+        elif not keep_original and len(data) > 300_000_000:
             upload_kwargs["transformation"] = [
                 {"width": 1280, "height": 720, "crop": "limit"},
                 {"quality": "auto", "video_codec": "auto"},

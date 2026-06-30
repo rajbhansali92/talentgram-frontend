@@ -1993,6 +1993,15 @@ function TalentDetail({
     // momentary keyboard dead-zone after each Shortlist/Reject press).
     useEffect(() => {
         const handleKeyDown = (e) => {
+            // Never hijack keystrokes while the user is typing in a form field.
+            // Disables ALL shortcuts (review letters, arrow navigation, Escape) so
+            // the comment box behaves like a normal text editor — no cursor jumps,
+            // no focus loss from talent navigation, no accidental decision changes.
+            const el = e.target;
+            const tag = el && el.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el && el.isContentEditable)) {
+                return;
+            }
             if (e.key === "Escape" && onClose) {
                 onClose();
                 return;

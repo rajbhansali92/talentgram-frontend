@@ -442,8 +442,11 @@ async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
     projects = await cursor_projects.to_list(length=1000)
 
     result = []
+    found_project_ids = set()
+
     for proj in projects:
         pid = proj["id"]
+        found_project_ids.add(pid)
         size_info = sizes_dict.get(pid, {"total_size": 0, "asset_count": 0})
         
         pipeline_subs = [
@@ -453,14 +456,49 @@ async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
         cursor_subs = db.asset_metadata.aggregate(pipeline_subs)
         subs = await cursor_subs.to_list(length=1000)
         
+        name = proj.get("name")
+        if not name or not name.strip():
+            name = "Untitled Project"
+            
         result.append({
             "project_id": pid,
-            "name": proj.get("name") or "Unnamed Campaign",
+            "name": name,
             "status": proj.get("status") or "active",
             "total_auditions": len(subs),
             "total_storage": size_info["total_size"],
             "last_activity": proj.get("created_at")
         })
+
+    # Include deleted projects that still have storage files
+    for pid, size_info in sizes_dict.items():
+        if pid not in found_project_ids:
+            pipeline_subs = [
+                {"$match": {"project_id": pid}},
+                {"$group": {"_id": "$submission_id"}}
+            ]
+            cursor_subs = db.asset_metadata.aggregate(pipeline_subs)
+            subs = await cursor_subs.to_list(length=1000)
+            
+            # Retrieve latest activity from asset metadata as fallback
+            last_activity = None
+            try:
+                latest_asset = await db.asset_metadata.find_one(
+                    {"project_id": pid},
+                    sort=[("created_at", -1)]
+                )
+                if latest_asset:
+                    last_activity = latest_asset.get("created_at")
+            except Exception:
+                pass
+
+            result.append({
+                "project_id": pid,
+                "name": f"Deleted Project",
+                "status": "deleted",
+                "total_auditions": len(subs),
+                "total_storage": size_info["total_size"],
+                "last_activity": last_activity
+            })
 
     return result
 

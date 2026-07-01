@@ -495,11 +495,21 @@ export default function StorageDashboard() {
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {projects.map((proj) => (
                 <tr key={proj.project_id} className="hover:bg-slate-50/50 transition-colors">
-                  <td className="px-6 py-4 font-medium text-slate-950">{proj.name}</td>
+                  <td className="px-6 py-4">
+                    <div className={`font-semibold ${proj.status === "deleted" ? "text-red-600" : "text-slate-900"}`}>{proj.name}</div>
+                    <div className="text-[10px] text-slate-400 font-mono mt-0.5 select-all">Project ID: {proj.project_id}</div>
+                    {proj.last_activity && (
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Created: {new Date(proj.last_activity).toLocaleDateString("en-GB", {day: 'numeric', month: 'short', year: 'numeric'})}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-6 py-4">
                     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                       proj.status === "archived" 
                         ? "bg-amber-50 text-amber-700 border border-amber-200/50" 
+                        : proj.status === "deleted"
+                        ? "bg-red-550/10 text-red-700 border border-red-200/50"
                         : proj.status === "purged"
                         ? "bg-red-50 text-red-700 border border-red-200/50"
                         : "bg-emerald-50 text-emerald-700 border border-emerald-200/50"
@@ -530,7 +540,7 @@ export default function StorageDashboard() {
                         Restore
                       </button>
                     ) : null}
-
+ 
                     {proj.status !== "purged" && (
                       <>
                         <button 
@@ -538,7 +548,7 @@ export default function StorageDashboard() {
                             type: "auditions",
                             id: proj.project_id,
                             data: proj,
-                            title: "Delete Audition Videos",
+                            title: "Delete Audition Videos?",
                             description: `Are you sure you want to delete all audition videos for project ${proj.name}? This will permanently remove all takes from Cloudflare R2 and Cloudinary, and clear the references from the submission documents.`,
                             action: () => handleDeleteAuditions(proj.project_id)
                           })}
@@ -547,13 +557,13 @@ export default function StorageDashboard() {
                           <FileVideo className="w-3.5 h-3.5" />
                           Delete Videos
                         </button>
-
+ 
                         <button 
                           onClick={() => setConfirmDialog({
                             type: "voicenotes",
                             id: proj.project_id,
                             data: proj,
-                            title: "Delete Voice Notes",
+                            title: "Delete Voice Notes?",
                             description: `Are you sure you want to delete all voice-note feedback for project ${proj.name}? This will permanently delete the audio files from Cloudinary and remove feedback records from the database.`,
                             action: () => handleDeleteVoiceNotes(proj.project_id)
                           })}
@@ -562,20 +572,20 @@ export default function StorageDashboard() {
                           <Volume2 className="w-3.5 h-3.5" />
                           Delete Voice Notes
                         </button>
-
+ 
                         <button 
                           onClick={() => setConfirmDialog({
                             type: "purge",
                             id: proj.project_id,
                             data: proj,
-                            title: "Purge Project Folder & Assets",
-                            description: `Are you sure you want to permanently purge all assets for project ${proj.name}? This deletes all audition videos, voice notes, and admin uploads, and marks the project status as purged. Talent master assets will not be affected.`,
+                            title: "Delete Project Assets?",
+                            description: `Are you sure you want to delete all assets for project ${proj.name}? This permanently deletes all project-specific media. Talent master assets will not be affected.`,
                             action: () => handleDeleteProject(proj.project_id)
                           })}
                           className="h-9 px-2.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded inline-flex items-center gap-1 transition-colors"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                          Purge All
+                          Delete Project Assets
                         </button>
                       </>
                     )}
@@ -606,6 +616,30 @@ export default function StorageDashboard() {
             <p className="text-sm text-slate-600 leading-relaxed">
               {confirmDialog.description}
             </p>
+
+            {(confirmDialog.type === "purge" || confirmDialog.type === "auditions" || confirmDialog.type === "voicenotes") && (
+              <div className="border-t border-b border-slate-100 py-3 my-2 space-y-3">
+                <div className="space-y-1.5">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-red-500 block">Permanently Deletes:</span>
+                  <ul className="text-xs text-slate-600 space-y-1 list-disc pl-4 font-semibold">
+                    {(confirmDialog.type === "purge" || confirmDialog.type === "auditions") && <li>Audition Videos</li>}
+                    {(confirmDialog.type === "purge" || confirmDialog.type === "voicenotes") && <li>Voice Notes</li>}
+                    {confirmDialog.type === "purge" && <li>Admin Uploaded Media</li>}
+                  </ul>
+                </div>
+                <div className="space-y-1.5">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-emerald-600 block font-semibold">Does NOT Delete:</span>
+                  <ul className="text-xs text-slate-600 space-y-1 list-none pl-0 font-medium">
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Talent Profiles</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Introduction Videos</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Portfolio Images</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Indian Look Images</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Western Look Images</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Global Talent Records</li>
+                  </ul>
+                </div>
+              </div>
+            )}
             
             <div className="bg-red-50/50 border border-red-100 rounded-xl p-3 text-xs text-red-700 space-y-1">
               <p className="flex items-center gap-1.5">

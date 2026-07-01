@@ -10,39 +10,56 @@ import {
   Image as ImageIcon,
   CheckCircle,
   AlertTriangle,
-  FolderOpen
+  FolderOpen,
+  Volume2,
+  HardDrive,
+  Activity,
+  Check,
+  RotateCcw,
+  Sparkles,
+  Info
 } from "lucide-react";
 import { adminApi } from "@/lib/api";
 
 export default function StorageDashboard() {
   const [analytics, setAnalytics] = useState(null);
   const [projects, setProjects] = useState([]);
+  const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [confirmDialog, setConfirmDialog] = useState(null); // { type, id, data }
-
-  // NOTE: use the shared `adminApi` instance (baseURL = `${BACKEND_URL}/api`)
-  // exactly like every other admin page. Its request interceptor attaches the
-  // admin JWT from `tg_admin_token` and its response interceptor handles 401s.
-  // The previous hand-rolled header read `getAdmin()?.token`, but the admin
-  // *profile* object carries no token (the token lives in `tg_admin_token`),
-  // so it always sent an empty Bearer and the cloudinary endpoints 401'd.
+  const [confirmDialog, setConfirmDialog] = useState(null); // { type, id, data, title, description, action }
+  const [actionLoading, setActionLoading] = useState(false);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [resAnal, resProj] = await Promise.all([
+      const [resAnal, resProj, resHealth] = await Promise.all([
         adminApi.get(`/admin/cloudinary/analytics`),
-        adminApi.get(`/admin/cloudinary/projects`)
+        adminApi.get(`/admin/cloudinary/projects`),
+        adminApi.get(`/admin/cloudinary/health`)
       ]);
       setAnalytics(resAnal.data);
       setProjects(resProj.data);
+      setHealth(resHealth.data);
       setError(null);
     } catch (err) {
       console.error("Failed to load storage dashboard metrics:", err);
-      setError("Unable to retrieve Cloudinary storage metrics. Verify that you are signed in as an administrator.");
+      setError("Unable to retrieve storage console metrics. Verify that you are signed in as an administrator.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchHealth = async () => {
+    setHealthLoading(true);
+    try {
+      const res = await adminApi.get(`/admin/cloudinary/health`);
+      setHealth(res.data);
+    } catch (err) {
+      console.error("Failed to reload storage health metrics:", err);
+    } finally {
+      setHealthLoading(false);
     }
   };
 
@@ -68,18 +85,60 @@ export default function StorageDashboard() {
     }
   };
 
+  const handleDeleteAuditions = async (projectId) => {
+    setActionLoading(true);
+    try {
+      await adminApi.delete(`/admin/cloudinary/projects/${projectId}/auditions`);
+      setConfirmDialog(null);
+      fetchData();
+    } catch (err) {
+      alert("Failed to delete project audition videos");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteVoiceNotes = async (projectId) => {
+    setActionLoading(true);
+    try {
+      await adminApi.delete(`/admin/cloudinary/projects/${projectId}/voice-notes`);
+      setConfirmDialog(null);
+      fetchData();
+    } catch (err) {
+      alert("Failed to delete project voice notes");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleDeleteProject = async (projectId) => {
+    setActionLoading(true);
     try {
       await adminApi.delete(`/admin/cloudinary/projects/${projectId}`);
       setConfirmDialog(null);
       fetchData();
     } catch (err) {
-      alert("Failed to delete project");
+      alert("Failed to purge project folder");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleOneClickCleanup = async () => {
+    setHealthLoading(true);
+    try {
+      const res = await adminApi.post(`/admin/cloudinary/health/cleanup`);
+      alert(`Cleanup completed! Cleaned ${res.data.cleaned_orphaned} orphaned files, ${res.data.cleaned_broken} broken references, and ${res.data.cleaned_unused} unused files.`);
+      fetchData();
+    } catch (err) {
+      alert("Failed to run storage cleanup");
+    } finally {
+      setHealthLoading(false);
     }
   };
 
   const formatBytes = (bytes, decimals = 2) => {
-    if (!bytes) return "0 Bytes";
+    if (bytes === 0 || !bytes) return "0 Bytes";
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
@@ -114,7 +173,7 @@ export default function StorageDashboard() {
         <p className="text-sm text-slate-500">{error}</p>
         <button 
           onClick={fetchData} 
-          className="mt-2 h-11 px-4 text-xs font-semibold bg-primary text-white rounded-md inline-flex items-center gap-2"
+          className="mt-2 h-11 px-4 text-xs font-semibold bg-slate-900 text-white rounded-md inline-flex items-center gap-2"
         >
           <RefreshCw className="w-3.5 h-3.5" />
           Try Again
@@ -129,81 +188,231 @@ export default function StorageDashboard() {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900 font-display flex items-center gap-2">
-            <Cloud className="w-6 h-6 text-slate-700" />
-            Cloudinary Storage Management
+            <HardDrive className="w-6 h-6 text-slate-800" />
+            Storage & Asset Management Console
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Production storage cost controls, project lifetimes, and asset lifecycle tracking.
+            Authoritative interface for monitoring cloud storage usage, health, and project asset lifecycles.
           </p>
         </div>
         <button 
           onClick={fetchData} 
           disabled={loading}
-          className="h-11 px-4 text-xs font-semibold bg-white border border-slate-200 rounded-md inline-flex items-center gap-2 hover:bg-slate-50 transition-colors"
+          className="h-11 px-4 text-xs font-semibold bg-white border border-slate-200 rounded-md inline-flex items-center gap-2 hover:bg-slate-50 transition-colors shadow-sm"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           Refresh Metrics
         </button>
       </div>
 
-      {/* STORAGE STATS CARDS */}
+      {/* OVERALL STORAGE STATS CARDS */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-lg border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[120px]">
+        <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[130px]">
           <div>
-            <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Total Cloudinary Storage</span>
-            <div className="text-2xl font-semibold mt-2 text-slate-900 font-display">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Aggregated Storage</span>
+            <div className="text-3xl font-bold mt-2 text-slate-900 font-display">
               {formatBytes(analytics?.total_storage)}
             </div>
+            <p className="text-xs text-slate-500 mt-1">Cloudinary + Cloudflare R2 combined</p>
           </div>
-          <div className="absolute right-4 bottom-4 p-2 bg-slate-50 rounded-full">
-            <Database className="w-5 h-5 text-slate-400" />
+          <div className="absolute right-4 bottom-4 p-2.5 bg-slate-50 rounded-full">
+            <Database className="w-5 h-5 text-slate-500" />
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-lg border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[120px]">
+        <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[130px]">
           <div>
-            <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Permanent Assets Storage</span>
-            <div className="text-2xl font-semibold mt-2 text-slate-900 font-display">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Permanent Assets</span>
+            <div className="text-3xl font-bold mt-2 text-slate-950 font-display">
               {formatBytes(analytics?.permanent_storage)}
             </div>
+            <p className="text-xs text-slate-500 mt-1">Master Talent Profiles & Portfolios</p>
           </div>
-          <div className="absolute right-4 bottom-4 p-2 bg-slate-50 rounded-full">
-            <CheckCircle className="w-5 h-5 text-emerald-500" />
+          <div className="absolute right-4 bottom-4 p-2.5 bg-emerald-50 rounded-full">
+            <CheckCircle className="w-5 h-5 text-emerald-600" />
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-lg border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[120px]">
+        <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[130px]">
           <div>
-            <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Temporary Auditions Storage</span>
-            <div className="text-2xl font-semibold mt-2 text-slate-900 font-display">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Temporary Auditions</span>
+            <div className="text-3xl font-bold mt-2 text-slate-950 font-display">
               {formatBytes(analytics?.temporary_storage)}
             </div>
+            <p className="text-xs text-slate-500 mt-1">Auditions, voice notes & admin uploads</p>
           </div>
-          <div className="absolute right-4 bottom-4 p-2 bg-slate-50 rounded-full">
-            <TrendingUp className="w-5 h-5 text-blue-500" />
+          <div className="absolute right-4 bottom-4 p-2.5 bg-indigo-50 rounded-full">
+            <TrendingUp className="w-5 h-5 text-indigo-600" />
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-lg border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[120px]">
+        <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm relative overflow-hidden flex flex-col justify-between min-h-[130px]">
           <div>
-            <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Archived Projects Storage</span>
-            <div className="text-2xl font-semibold mt-2 text-slate-900 font-display">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Archived Projects</span>
+            <div className="text-3xl font-bold mt-2 text-slate-950 font-display">
               {formatBytes(analytics?.archived_storage)}
             </div>
+            <p className="text-xs text-slate-500 mt-1">Campaigns marked for archive</p>
           </div>
-          <div className="absolute right-4 bottom-4 p-2 bg-slate-50 rounded-full">
-            <Archive className="w-5 h-5 text-amber-500" />
+          <div className="absolute right-4 bottom-4 p-2.5 bg-amber-50 rounded-full">
+            <Archive className="w-5 h-5 text-amber-600" />
           </div>
         </div>
       </div>
 
-      {/* ANALYSIS SUB-SECTIONS */}
+      {/* PROVIDER BREAKDOWNS */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {analytics?.providers && Object.entries(analytics.providers).map(([key, provider]) => {
+          const quota = provider.quota || 1;
+          const percentage = Math.min(100, Math.round((provider.used_bytes / quota) * 100));
+          return (
+            <div key={key} className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm space-y-4">
+              <div className="flex justify-between items-center">
+                <h3 className="text-base font-bold text-slate-900 font-display flex items-center gap-2">
+                  <Cloud className="w-4 h-4 text-slate-500" />
+                  {provider.name}
+                </h3>
+                <span className="text-xs font-mono font-bold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded">
+                  {provider.object_count} objects
+                </span>
+              </div>
+              <div className="space-y-2">
+                <div className="flex justify-between text-xs font-mono text-slate-500">
+                  <span>Used: {formatBytes(provider.used_bytes)}</span>
+                  <span>Limit: {formatBytes(quota)}</span>
+                </div>
+                <div className="w-full bg-slate-100 rounded-full h-2">
+                  <div 
+                    className={`h-2 rounded-full transition-all duration-500 ${
+                      percentage > 85 ? "bg-red-500" : percentage > 60 ? "bg-amber-500" : "bg-slate-900"
+                    }`}
+                    style={{ width: `${percentage}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-slate-400">
+                  <span>Remaining: {formatBytes(provider.remaining_capacity)}</span>
+                  <span>{percentage}% utilized</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-100 text-xs">
+                <div>
+                  <span className="text-slate-400 block">Bandwidth (Month)</span>
+                  <span className="font-semibold text-slate-800">{formatBytes(provider.bandwidth_used)}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">API Call Usage</span>
+                  <span className="font-semibold text-slate-800">{provider.api_usage || "N/A"}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* STORAGE HEALTH & CLEANUP */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-6">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 font-display flex items-center gap-2">
+              <Activity className="w-5 h-5 text-slate-700" />
+              Automated Storage Health Monitoring
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Scans for discrepancies between database references and physical file storage systems in real-time.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchHealth}
+              disabled={healthLoading}
+              className="h-10 px-3 text-xs bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-md inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${healthLoading ? "animate-spin" : ""}`} />
+              Re-Scan
+            </button>
+            <button
+              onClick={handleOneClickCleanup}
+              disabled={healthLoading || !health || (health.orphaned_count === 0 && health.broken_count === 0 && health.unused_count === 0)}
+              className="h-10 px-4 text-xs font-semibold bg-slate-950 text-white rounded-md inline-flex items-center gap-2 hover:bg-slate-800 disabled:opacity-40"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              One-Click Repair & Cleanup
+            </button>
+          </div>
+        </div>
+
+        {health && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="bg-slate-50 border border-slate-200/50 p-4 rounded-xl text-center space-y-1">
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400">Orphaned Files</span>
+              <div className={`text-2xl font-bold ${health.orphaned_count > 0 ? "text-amber-600" : "text-slate-800"}`}>
+                {health.orphaned_count}
+              </div>
+              <p className="text-[10px] text-slate-500">Files without DB records</p>
+            </div>
+            <div className="bg-slate-50 border border-slate-200/50 p-4 rounded-xl text-center space-y-1">
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400">Broken References</span>
+              <div className={`text-2xl font-bold ${health.broken_count > 0 ? "text-red-600" : "text-slate-800"}`}>
+                {health.broken_count}
+              </div>
+              <p className="text-[10px] text-slate-500">DB links pointing to missing files</p>
+            </div>
+            <div className="bg-slate-50 border border-slate-200/50 p-4 rounded-xl text-center space-y-1">
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400">Duplicate Media</span>
+              <div className={`text-2xl font-bold ${health.duplicate_count > 0 ? "text-indigo-600" : "text-slate-800"}`}>
+                {health.duplicate_count}
+              </div>
+              <p className="text-[10px] text-slate-500">Same asset linked multiple times</p>
+            </div>
+            <div className="bg-slate-50 border border-slate-200/50 p-4 rounded-xl text-center space-y-1">
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400">Unused Uploads</span>
+              <div className={`text-2xl font-bold ${health.unused_count > 0 ? "text-amber-600" : "text-slate-800"}`}>
+                {health.unused_count}
+              </div>
+              <p className="text-[10px] text-slate-500">Failed files & deleted projects</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* CATEGORIES BREAKDOWN & STATS */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
+        <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+          <Database className="w-4 h-4 text-slate-500" />
+          Storage Metrics by Asset Category
+        </h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {analytics?.categories && Object.entries(analytics.categories).map(([key, cat]) => (
+            <div key={key} className="p-4 border border-slate-100 rounded-xl hover:bg-slate-50/50 transition-colors flex items-center gap-3">
+              <div className="p-2 bg-slate-50 border border-slate-200/50 rounded-lg">
+                {key.includes("video") ? (
+                  <FileVideo className="w-5 h-5 text-slate-600" />
+                ) : key.includes("image") ? (
+                  <ImageIcon className="w-5 h-5 text-slate-600" />
+                ) : key.includes("voice") ? (
+                  <Volume2 className="w-5 h-5 text-slate-600" />
+                ) : (
+                  <FolderOpen className="w-5 h-5 text-slate-600" />
+                )}
+              </div>
+              <div>
+                <span className="text-xs text-slate-500 block font-medium">{cat.label}</span>
+                <span className="text-sm font-bold text-slate-800 font-mono block">
+                  {formatBytes(cat.size)}
+                </span>
+                <span className="text-[10px] text-slate-400">{cat.count} files</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* TOP CONSUMERS SUMMARY */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* TOP STORAGE CONSUMING PROJECTS */}
-        <div className="bg-white rounded-lg border border-slate-200/80 shadow-sm p-6 space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
           <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider flex items-center gap-2">
             <FolderOpen className="w-4 h-4 text-slate-400" />
-            Top Projects by Storage
+            Top Campaigns by Storage
           </h3>
           <div className="divide-y divide-slate-100">
             {analytics?.top_projects?.map((item) => (
@@ -222,8 +431,7 @@ export default function StorageDashboard() {
           </div>
         </div>
 
-        {/* TOP STORAGE CONSUMING TALENTS */}
-        <div className="bg-white rounded-lg border border-slate-200/80 shadow-sm p-6 space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
           <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider flex items-center gap-2">
             <TrendingUp className="w-4 h-4 text-slate-400" />
             Top Talents by Storage
@@ -245,11 +453,10 @@ export default function StorageDashboard() {
           </div>
         </div>
 
-        {/* METRICS & AVERAGES */}
-        <div className="bg-white rounded-lg border border-slate-200/80 shadow-sm p-6 space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
           <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider flex items-center gap-2">
             <FileVideo className="w-4 h-4 text-slate-400" />
-            Audition Video Metrics
+            Audition Metrics
           </h3>
           <div className="space-y-4 pt-2">
             <div className="flex justify-between items-center">
@@ -269,9 +476,9 @@ export default function StorageDashboard() {
       </div>
 
       {/* DETAILED PROJECT STORAGE TABLE */}
-      <div className="bg-white rounded-lg border border-slate-200/80 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
         <div className="px-6 py-5 border-b border-slate-100 flex justify-between items-center">
-          <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider">Projects Storage & Lifecycles</h3>
+          <h3 className="text-sm font-semibold text-slate-900 uppercase tracking-wider">Project Storage & Lifecycles</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -288,9 +495,9 @@ export default function StorageDashboard() {
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {projects.map((proj) => (
                 <tr key={proj.project_id} className="hover:bg-slate-50/50 transition-colors">
-                  <td className="px-6 py-4 font-medium text-slate-900">{proj.name}</td>
+                  <td className="px-6 py-4 font-medium text-slate-950">{proj.name}</td>
                   <td className="px-6 py-4">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium uppercase tracking-wider ${
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                       proj.status === "archived" 
                         ? "bg-amber-50 text-amber-700 border border-amber-200/50" 
                         : proj.status === "purged"
@@ -309,7 +516,7 @@ export default function StorageDashboard() {
                     {proj.status === "active" ? (
                       <button 
                         onClick={() => handleArchive(proj.project_id)}
-                        className="h-10 px-3 text-xs bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded inline-flex items-center gap-1.5 text-slate-600 transition-colors"
+                        className="h-9 px-2.5 text-xs bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded inline-flex items-center gap-1 text-slate-600 transition-colors"
                       >
                         <Archive className="w-3.5 h-3.5" />
                         Archive
@@ -317,21 +524,60 @@ export default function StorageDashboard() {
                     ) : proj.status === "archived" ? (
                       <button 
                         onClick={() => handleRestore(proj.project_id)}
-                        className="h-10 px-3 text-xs bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded inline-flex items-center gap-1.5 text-slate-600 transition-colors"
+                        className="h-9 px-2.5 text-xs bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded inline-flex items-center gap-1 text-slate-600 transition-colors"
                       >
-                        <RefreshCw className="w-3.5 h-3.5" />
+                        <RotateCcw className="w-3.5 h-3.5" />
                         Restore
                       </button>
                     ) : null}
 
                     {proj.status !== "purged" && (
-                      <button 
-                        onClick={() => setConfirmDialog({ type: "project", id: proj.project_id, data: proj })}
-                        className="h-10 px-3 text-xs bg-red-50/50 border border-red-100 hover:bg-red-50 hover:text-red-700 rounded inline-flex items-center gap-1.5 text-red-600 transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        Purge Folder
-                      </button>
+                      <>
+                        <button 
+                          onClick={() => setConfirmDialog({
+                            type: "auditions",
+                            id: proj.project_id,
+                            data: proj,
+                            title: "Delete Audition Videos",
+                            description: `Are you sure you want to delete all audition videos for project ${proj.name}? This will permanently remove all takes from Cloudflare R2 and Cloudinary, and clear the references from the submission documents.`,
+                            action: () => handleDeleteAuditions(proj.project_id)
+                          })}
+                          className="h-9 px-2.5 text-xs bg-red-50/50 border border-red-100 hover:bg-red-50 hover:text-red-700 rounded inline-flex items-center gap-1 text-red-600 transition-colors"
+                        >
+                          <FileVideo className="w-3.5 h-3.5" />
+                          Delete Videos
+                        </button>
+
+                        <button 
+                          onClick={() => setConfirmDialog({
+                            type: "voicenotes",
+                            id: proj.project_id,
+                            data: proj,
+                            title: "Delete Voice Notes",
+                            description: `Are you sure you want to delete all voice-note feedback for project ${proj.name}? This will permanently delete the audio files from Cloudinary and remove feedback records from the database.`,
+                            action: () => handleDeleteVoiceNotes(proj.project_id)
+                          })}
+                          className="h-9 px-2.5 text-xs bg-red-50/50 border border-red-100 hover:bg-red-50 hover:text-red-700 rounded inline-flex items-center gap-1 text-red-600 transition-colors"
+                        >
+                          <Volume2 className="w-3.5 h-3.5" />
+                          Delete Voice Notes
+                        </button>
+
+                        <button 
+                          onClick={() => setConfirmDialog({
+                            type: "purge",
+                            id: proj.project_id,
+                            data: proj,
+                            title: "Purge Project Folder & Assets",
+                            description: `Are you sure you want to permanently purge all assets for project ${proj.name}? This deletes all audition videos, voice notes, and admin uploads, and marks the project status as purged. Talent master assets will not be affected.`,
+                            action: () => handleDeleteProject(proj.project_id)
+                          })}
+                          className="h-9 px-2.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded inline-flex items-center gap-1 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Purge All
+                        </button>
+                      </>
                     )}
                   </td>
                 </tr>
@@ -348,39 +594,45 @@ export default function StorageDashboard() {
         </div>
       </div>
 
-      {/* CONFIRM DELETE DIALOG OVERLAY */}
+      {/* CONFIRMATION OVERLAY MODAL */}
       {confirmDialog && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
-          <div className="bg-white rounded-lg border border-slate-200/80 shadow-2xl max-w-md w-full p-6 space-y-4">
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-2xl max-w-md w-full p-6 space-y-4">
             <div className="flex items-center gap-3 text-red-600">
               <AlertTriangle className="w-6 h-6 shrink-0" />
-              <h3 className="text-lg font-semibold text-slate-950 font-display">Permanent Deletion Warning</h3>
+              <h3 className="text-lg font-bold text-slate-950 font-display">{confirmDialog.title}</h3>
             </div>
             
-            <p className="text-sm text-slate-600">
-              Are you sure you want to permanently delete project <strong>{confirmDialog.data.name}</strong>?
+            <p className="text-sm text-slate-600 leading-relaxed">
+              {confirmDialog.description}
             </p>
-            <div className="bg-red-50/50 border border-red-100 rounded p-3 text-xs text-red-700 space-y-1">
-              <p>• This will permanently nuke the entire Cloudinary project folder:</p>
-              <p className="font-mono bg-red-50 p-1.5 rounded select-all break-all text-[11px] mt-1.5">
-                projects/{confirmDialog.id}/
+            
+            <div className="bg-red-50/50 border border-red-100 rounded-xl p-3 text-xs text-red-700 space-y-1">
+              <p className="flex items-center gap-1.5">
+                <Info className="w-3.5 h-3.5" />
+                This action is permanent and cannot be undone.
               </p>
-              <p className="mt-2 font-medium">This action cannot be undone.</p>
             </div>
 
             <div className="flex justify-end gap-3 pt-2">
               <button 
                 onClick={() => setConfirmDialog(null)}
+                disabled={actionLoading}
                 className="h-11 px-4 text-xs font-semibold bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-md"
               >
                 Cancel
               </button>
               <button 
-                onClick={() => handleDeleteProject(confirmDialog.id)}
-                className="h-11 px-4 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-md flex items-center gap-2"
+                onClick={confirmDialog.action}
+                disabled={actionLoading}
+                className="h-11 px-4 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-md flex items-center gap-2 disabled:opacity-40"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                Confirm Deletion
+                {actionLoading ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                Confirm Action
               </button>
             </div>
           </div>

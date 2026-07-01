@@ -1,48 +1,180 @@
 import logging
 import re
+import os
+import uuid
+import httpx
+import asyncio
+import boto3
 from datetime import datetime, timezone
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi.concurrency import run_in_threadpool
 import cloudinary.api
-from core import current_team_or_admin, require_role, db, log_storage_action, cloudinary_destroy
+import cloudinary.uploader
+from core import current_team_or_admin, require_role, db, log_storage_action, cloudinary_destroy, cleanup_media_storage, get_r2_client, R2_BUCKET_NAME, _now, remove_synced_media_from_global_talent
 
 router = APIRouter(prefix="/api/admin/cloudinary", tags=["cloudinary-admin"])
 logger = logging.getLogger(__name__)
 
+# Quotas and defaults (in bytes)
+CLOUDINARY_QUOTA_DEFAULT = 25 * 1024 * 1024 * 1024  # 25 GB
+R2_QUOTA_DEFAULT = 100 * 1024 * 1024 * 1024         # 100 GB
+
+def fetch_cloudinary_usage_sync() -> Dict[str, Any]:
+    try:
+        return cloudinary.api.usage()
+    except Exception as e:
+        logger.warning(f"Failed to fetch Cloudinary usage: {e}")
+        return {}
+
+def fetch_r2_objects_sync() -> tuple:
+    s3 = get_r2_client()
+    total_size = 0
+    object_count = 0
+    try:
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=R2_BUCKET_NAME):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    total_size += obj['Size']
+                    object_count += 1
+    except Exception as e:
+        logger.warning(f"Error listing R2 objects in health check: {e}")
+    return total_size, object_count
+
+def list_r2_physical_objects_sync() -> List[Dict[str, Any]]:
+    s3 = get_r2_client()
+    objects = []
+    try:
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=R2_BUCKET_NAME):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    objects.append({
+                        "key": obj['Key'],
+                        "size": obj['Size'],
+                        "last_modified": obj['LastModified']
+                    })
+    except Exception as e:
+        logger.warning(f"Error in list_r2_physical_objects_sync: {e}")
+    return objects
+
+def list_cloudinary_physical_resources_sync() -> List[Dict[str, Any]]:
+    resources = []
+    try:
+        # Fetch both images and videos
+        for rtype in ["image", "video", "raw"]:
+            next_cursor = None
+            while True:
+                res = cloudinary.api.resources(
+                    resource_type=rtype,
+                    max_results=500,
+                    next_cursor=next_cursor
+                )
+                for item in res.get("resources", []):
+                    resources.append({
+                        "public_id": item["public_id"],
+                        "size": item.get("bytes") or 0,
+                        "resource_type": rtype,
+                        "url": item.get("secure_url") or item.get("url")
+                    })
+                next_cursor = res.get("next_cursor")
+                if not next_cursor:
+                    break
+    except Exception as e:
+        logger.warning(f"Error in list_cloudinary_physical_resources_sync: {e}")
+    return resources
 
 @router.get("/analytics")
 async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
-    """Compute aggregates over tracked assets metadata."""
-    # Compute total, permanent vs temporary ratio, type distribution
+    """Compute aggregates over tracked assets metadata across Cloudinary and R2."""
+    
+    # 1. Cloudinary Usage
+    cld_live = await run_in_threadpool(fetch_cloudinary_usage_sync)
+    cld_storage = cld_live.get("storage", {})
+    cld_objects = cld_live.get("objects", {})
+    cld_bandwidth = cld_live.get("credits", {})  # fallback, Cloudinary credits
+    
+    cld_used = cld_storage.get("usage") or 0
+    cld_quota = cld_storage.get("limit") or CLOUDINARY_QUOTA_DEFAULT
+    cld_count = cld_objects.get("usage") or 0
+    
+    # 2. Cloudflare R2 Usage
+    r2_used, r2_count = await run_in_threadpool(fetch_r2_objects_sync)
+    r2_quota = R2_QUOTA_DEFAULT
+    
+    # 3. Combined Metrics
+    total_used = cld_used + r2_used
+    total_quota = cld_quota + r2_quota
+    total_objects = cld_count + r2_count
+    
+    # Category Breakdowns from asset_metadata + fallback feedback count
     pipeline = [
         {
             "$group": {
-                "_id": "$asset_type",
+                "_id": {
+                    "asset_type": "$asset_type",
+                    "category": "$category"
+                },
                 "total_size": {"$sum": "$file_size"},
                 "count": {"$sum": 1}
             }
         }
     ]
     cursor = db.asset_metadata.aggregate(pipeline)
-    by_type = await cursor.to_list(length=100)
-
-    total_storage = 0
-    permanent_storage = 0
-    temporary_storage = 0
-    by_type_dict = {}
-
-    for item in by_type:
-        t = item["_id"]
-        sz = item["total_size"]
-        by_type_dict[t] = {
-            "size": sz,
-            "count": item["count"]
-        }
-        total_storage += sz
-        if t in {"profile_image", "intro_video", "portfolio_video"}:
-            permanent_storage += sz
+    by_category_raw = await cursor.to_list(length=500)
+    
+    # Organize categories
+    categories = {
+        "audition_videos": {"size": 0, "count": 0, "label": "Audition Videos"},
+        "intro_videos": {"size": 0, "count": 0, "label": "Introduction Videos"},
+        "portfolio_images": {"size": 0, "count": 0, "label": "Portfolio (General) Images"},
+        "indian_look_images": {"size": 0, "count": 0, "label": "Indian Look Images"},
+        "western_look_images": {"size": 0, "count": 0, "label": "Western Look Images"},
+        "voice_notes": {"size": 0, "count": 0, "label": "Voice Notes"},
+        "admin_uploads": {"size": 0, "count": 0, "label": "Admin Uploads"},
+    }
+    
+    for item in by_category_raw:
+        grp = item["_id"] or {}
+        atype = grp.get("asset_type")
+        cat = grp.get("category")
+        size = item["total_size"] or 0
+        count = item["count"] or 0
+        
+        if atype == "audition_video" or cat in ("take", "take_1", "take_2", "take_3"):
+            categories["audition_videos"]["size"] += size
+            categories["audition_videos"]["count"] += count
+        elif atype == "intro_video" or cat == "intro_video":
+            categories["intro_videos"]["size"] += size
+            categories["intro_videos"]["count"] += count
+        elif cat == "indian":
+            categories["indian_look_images"]["size"] += size
+            categories["indian_look_images"]["count"] += count
+        elif cat == "western":
+            categories["western_look_images"]["size"] += size
+            categories["western_look_images"]["count"] += count
+        elif cat in ("image", "portfolio") or (atype == "profile_image" and cat not in ("indian", "western")):
+            categories["portfolio_images"]["size"] += size
+            categories["portfolio_images"]["count"] += count
+        elif atype == "voice_note" or cat == "voice":
+            categories["voice_notes"]["size"] += size
+            categories["voice_notes"]["count"] += count
+        elif atype == "admin_upload" or cat == "admin":
+            categories["admin_uploads"]["size"] += size
+            categories["admin_uploads"]["count"] += count
         else:
-            temporary_storage += sz
+            # default fallback to general portfolio
+            categories["portfolio_images"]["size"] += size
+            categories["portfolio_images"]["count"] += count
+
+    # Add legacy voice notes from feedback collection if not already captured
+    voice_feedback_count = await db.feedback.count_documents({"type": "voice"})
+    if categories["voice_notes"]["count"] < voice_feedback_count:
+        diff_count = voice_feedback_count - categories["voice_notes"]["count"]
+        # estimate 500KB per legacy audio
+        categories["voice_notes"]["size"] += diff_count * 500 * 1024
+        categories["voice_notes"]["count"] += diff_count
 
     # Archived project storage
     pipeline_archived = [
@@ -62,7 +194,6 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
     cursor_projects = db.asset_metadata.aggregate(pipeline_projects)
     top_projects = await cursor_projects.to_list(length=5)
     
-    # Enrich top projects with names
     enriched_top_projects = []
     for tp in top_projects:
         pid = tp["_id"]
@@ -86,7 +217,6 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
     cursor_talents = db.asset_metadata.aggregate(pipeline_talents)
     top_talents = await cursor_talents.to_list(length=5)
     
-    # Enrich top talents with names
     enriched_top_talents = []
     for tt in top_talents:
         tid = tt["_id"]
@@ -98,28 +228,39 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
             "size": tt["total_size"]
         })
 
-    # Average storage per audition
-    pipeline_auditions = [
-        {"$match": {"asset_type": "audition_video"}},
-        {"$group": {"_id": None, "avg_size": {"$avg": "$file_size"}, "count": {"$sum": 1}}}
-    ]
-    cursor_auditions = db.asset_metadata.aggregate(pipeline_auditions)
-    auditions_stats = await cursor_auditions.to_list(length=1)
-    avg_audition_size = auditions_stats[0]["avg_size"] if auditions_stats else 0
-    total_auditions = auditions_stats[0]["count"] if auditions_stats else 0
-
     return {
-        "total_storage": total_storage,
-        "permanent_storage": permanent_storage,
-        "temporary_storage": temporary_storage,
+        "total_storage": total_used,
+        "total_quota": total_quota,
+        "total_object_count": total_objects,
+        "providers": {
+            "cloudinary": {
+                "name": "Cloudinary",
+                "used_bytes": cld_used,
+                "quota": cld_quota,
+                "remaining_capacity": max(0, cld_quota - cld_used),
+                "object_count": cld_count,
+                "bandwidth_used": cld_live.get("bandwidth", {}).get("usage") or 0,
+                "api_usage": cld_live.get("requests", {}).get("usage") or 0
+            },
+            "cloudflare_r2": {
+                "name": "Cloudflare R2",
+                "used_bytes": r2_used,
+                "quota": r2_quota,
+                "remaining_capacity": max(0, r2_quota - r2_used),
+                "object_count": r2_count,
+                "bandwidth_used": 0,  # R2 doesn't easily expose this via S3 API
+                "api_usage": 0
+            }
+        },
+        "categories": categories,
+        "permanent_storage": categories["intro_videos"]["size"] + categories["portfolio_images"]["size"] + categories["indian_look_images"]["size"] + categories["western_look_images"]["size"],
+        "temporary_storage": categories["audition_videos"]["size"] + categories["voice_notes"]["size"] + categories["admin_uploads"]["size"],
         "archived_storage": archived_storage,
-        "storage_by_asset_type": by_type_dict,
         "top_projects": enriched_top_projects,
         "top_talents": enriched_top_talents,
-        "average_audition_size": avg_audition_size,
-        "total_auditions": total_auditions
+        "average_audition_size": categories["audition_videos"]["size"] / max(1, categories["audition_videos"]["count"]),
+        "total_auditions": categories["audition_videos"]["count"]
     }
-
 
 @router.get("/projects")
 async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
@@ -145,7 +286,6 @@ async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
         pid = proj["id"]
         size_info = sizes_dict.get(pid, {"total_size": 0, "asset_count": 0})
         
-        # Calculate total auditions by counting unique submission IDs
         pipeline_subs = [
             {"$match": {"project_id": pid}},
             {"$group": {"_id": "$submission_id"}}
@@ -164,88 +304,359 @@ async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
 
     return result
 
-
 @router.post("/projects/{project_id}/archive")
 async def archive_project(project_id: str, admin: dict = Depends(require_role("admin"))):
     """Update project status to archived first in database, then synchronize."""
-    # 1. Update database status
     await db.projects.update_one({"id": project_id}, {"$set": {"status": "archived"}})
     await db.asset_metadata.update_many({"project_id": project_id}, {"$set": {"project_status": "archived"}})
-    
-    # 2. Update audit log
-    await log_storage_action(
-        user_id=admin.get("id"),
-        action_type="ARCHIVE",
-        project_id=project_id
-    )
+    await log_storage_action(user_id=admin.get("id"), action_type="ARCHIVE", project_id=project_id)
     return {"status": "success", "message": "Project archived successfully"}
-
 
 @router.post("/projects/{project_id}/restore")
 async def restore_project(project_id: str, admin: dict = Depends(require_role("admin"))):
     """Update project status to active first in database, then synchronize."""
-    # 1. Update database status
     await db.projects.update_one({"id": project_id}, {"$set": {"status": "active"}})
     await db.asset_metadata.update_many({"project_id": project_id}, {"$set": {"project_status": "active"}})
-    
-    # 2. Update audit log
-    await log_storage_action(
-        user_id=admin.get("id"),
-        action_type="RESTORE",
-        project_id=project_id
-    )
+    await log_storage_action(user_id=admin.get("id"), action_type="RESTORE", project_id=project_id)
     return {"status": "success", "message": "Project restored successfully"}
 
+@router.delete("/projects/{project_id}/auditions")
+async def delete_project_audition_videos(project_id: str, admin: dict = Depends(require_role("admin"))):
+    """Delete all audition videos for a project (remove objects from R2/Cloudinary and database references)."""
+    # 1. Fetch all submissions for the project
+    submissions = await db.submissions.find({"project_id": project_id}).to_list(length=10000)
+    deleted_count = 0
+    for sub in submissions:
+        # Find takes / audition videos
+        audition_media = [m for m in sub.get("media", []) if m.get("category") in ("take", "take_1", "take_2", "take_3")]
+        for am in audition_media:
+            await cleanup_media_storage(am, scope="submission", parent_id=sub["id"])
+            deleted_count += 1
+        # Pull from submission media array
+        await db.submissions.update_one(
+            {"id": sub["id"]},
+            {"$pull": {"media": {"category": {"$in": ["take", "take_1", "take_2", "take_3"]}}}}
+        )
+    # Remove from asset_metadata
+    await db.asset_metadata.delete_many({
+        "project_id": project_id,
+        "asset_type": "audition_video"
+    })
+    await log_storage_action(user_id=admin.get("id"), action_type="DELETE_AUDITIONS", project_id=project_id)
+    return {"status": "success", "message": f"Successfully deleted {deleted_count} audition videos for project {project_id}."}
+
+@router.delete("/projects/{project_id}/voice-notes")
+async def delete_project_voice_notes(project_id: str, admin: dict = Depends(require_role("admin"))):
+    """Delete all voice-note feedback for a project (remove stored recordings and associated database records)."""
+    # 1. Fetch voice notes feedback
+    feedbacks = await db.feedback.find({"project_id": project_id, "type": "voice"}).to_list(length=10000)
+    deleted_count = 0
+    for fb in feedbacks:
+        # Create media wrapper for cleanup
+        media_wrapper = {
+            "public_id": fb.get("content_url").split("/")[-1].split(".")[0] if fb.get("content_url") else fb.get("id"),
+            "url": fb.get("content_url"),
+            "resource_type": "video",
+            "category": "voice",
+            "provider": "cloudinary"
+        }
+        await cleanup_media_storage(media_wrapper, scope="feedback", parent_id=fb.get("submission_id"))
+        deleted_count += 1
+    # 2. Delete feedback records from DB
+    await db.feedback.delete_many({"project_id": project_id, "type": "voice"})
+    # 3. Delete from asset_metadata
+    await db.asset_metadata.delete_many({
+        "project_id": project_id,
+        "asset_type": "voice_note"
+    })
+    await log_storage_action(user_id=admin.get("id"), action_type="DELETE_VOICE_NOTES", project_id=project_id)
+    return {"status": "success", "message": f"Successfully deleted {deleted_count} voice notes for project {project_id}."}
 
 @router.delete("/projects/{project_id}")
 async def delete_project_assets(project_id: str, admin: dict = Depends(require_role("admin"))):
-    """Removes the entire project folder and all sub-audition assets."""
-    # Database First: Delete records
-    assets = await db.asset_metadata.find({"project_id": project_id}).to_list(length=10000)
+    """Removes the entire project folder and all sub-audition assets and voice notes, updating project status to purged."""
+    # 1. Delete audition videos and voice notes
+    await delete_project_audition_videos(project_id, admin)
+    await delete_project_voice_notes(project_id, admin)
     
-    # Update project status to purged
+    # 2. Delete admin uploads for this project
+    admin_assets = await db.asset_metadata.find({"project_id": project_id, "asset_type": "admin_upload"}).to_list(length=1000)
+    for aa in admin_assets:
+        await cleanup_media_storage(aa, scope="submission", parent_id=aa.get("submission_id"))
+        
+    await db.asset_metadata.delete_many({"project_id": project_id, "asset_type": "admin_upload"})
+    
+    # 3. Pull admin added media from submission docs
+    await db.submissions.update_many(
+        {"project_id": project_id},
+        {"$pull": {"media": {"scope": "admin_added"}}}
+    )
+    
+    # 4. Set project to purged
     await db.projects.update_one({"id": project_id}, {"$set": {"status": "purged"}})
-    await db.asset_metadata.delete_many({"project_id": project_id})
-    
-    # 2. Synchronize to Cloudinary (Bulk Delete)
-    # Cloudinary folder operations
-    try:
-        folder_prefix = f"talentgram/projects/{project_id}/"
-        cloudinary.api.delete_resources_by_prefix(folder_prefix)
-        # Attempt to delete the subfolders as well
-        cloudinary.api.delete_folder(f"talentgram/projects/{project_id}")
-    except Exception as e:
-        logger.warning(f"Failed to fully delete Cloudinary project folder {project_id}: {e}")
+    await log_storage_action(user_id=admin.get("id"), action_type="DELETE", project_id=project_id)
+    return {"status": "success", "message": f"Project {project_id} assets purged successfully."}
 
-    # 3. Write audit log
+@router.get("/health")
+async def get_storage_health(admin: dict = Depends(require_role("admin"))):
+    """Scan and identify orphaned assets, broken references, duplicate media, and unused files."""
+    
+    # 1. Fetch physical items from providers
+    r2_physical = await run_in_threadpool(list_r2_physical_objects_sync)
+    cld_physical = await run_in_threadpool(list_cloudinary_physical_resources_sync)
+    
+    # Build maps/sets of physical assets
+    r2_phys_keys = {item["key"] for item in r2_physical}
+    cld_phys_ids = {item["public_id"] for item in cld_physical}
+    
+    # 2. Fetch DB entities
+    metadata_list = await db.asset_metadata.find({}).to_list(length=100000)
+    submissions = await db.submissions.find({}).to_list(length=10000)
+    talents = await db.talents.find({}).to_list(length=10000)
+    feedbacks = await db.feedback.find({}).to_list(length=10000)
+    
+    # Gather database referenced keys/public_ids
+    db_referenced_ids = set()
+    db_metadata_ids = set()
+    
+    for doc in metadata_list:
+        pid = doc.get("public_id")
+        if pid:
+            db_metadata_ids.add(pid)
+            db_referenced_ids.add(pid)
+            
+    for sub in submissions:
+        for m in sub.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                db_referenced_ids.add(pid)
+                
+    for tal in talents:
+        for m in tal.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                db_referenced_ids.add(pid)
+                
+    for fb in feedbacks:
+        if fb.get("content_url"):
+            # try to extract public_id
+            leaf = fb.get("content_url").split("/")[-1].split(".")[0]
+            db_referenced_ids.add(leaf)
+
+    # 3. Compute Health Issues
+    orphaned_assets = []
+    broken_references = []
+    duplicate_media = {}
+    unused_files = []
+    
+    # A. Orphaned Assets: physically present but no DB reference
+    for item in r2_physical:
+        key = item["key"]
+        # check if key or base name is referenced
+        leaf = key.split("/")[-1].split(".")[0]
+        if key not in db_referenced_ids and leaf not in db_referenced_ids:
+            orphaned_assets.append({
+                "provider": "Cloudflare R2",
+                "key": key,
+                "size": item["size"],
+                "type": "video"
+            })
+            
+    for item in cld_physical:
+        pid = item["public_id"]
+        if pid not in db_referenced_ids:
+            orphaned_assets.append({
+                "provider": "Cloudinary",
+                "key": pid,
+                "size": item["size"],
+                "type": item["resource_type"]
+            })
+            
+    # B. Broken References: DB references whose physical files are missing
+    for doc in metadata_list:
+        pid = doc.get("public_id")
+        is_r2_key = pid.startswith("raw-uploads/")
+        
+        if is_r2_key:
+            if pid not in r2_phys_keys:
+                broken_references.append({
+                    "id": doc.get("id"),
+                    "public_id": pid,
+                    "provider": "Cloudflare R2",
+                    "asset_type": doc.get("asset_type"),
+                    "size": doc.get("file_size") or 0
+                })
+        else:
+            if pid not in cld_phys_ids:
+                broken_references.append({
+                    "id": doc.get("id"),
+                    "public_id": pid,
+                    "provider": "Cloudinary",
+                    "asset_type": doc.get("asset_type"),
+                    "size": doc.get("file_size") or 0
+                })
+                
+    # C. Duplicate Media: same public_id/url referenced multiple times
+    public_id_counts = {}
+    for sub in submissions:
+        for m in sub.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                public_id_counts[pid] = public_id_counts.get(pid, 0) + 1
+    for tal in talents:
+        for m in tal.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                public_id_counts[pid] = public_id_counts.get(pid, 0) + 1
+                
+    for pid, count in public_id_counts.items():
+        if count > 1:
+            duplicate_media[pid] = count
+            
+    # D. Unused Files: in metadata table but marked failed or from deleted projects
+    for doc in metadata_list:
+        if doc.get("status") == "failed" or doc.get("upload_status") == "failed":
+            unused_files.append({
+                "id": doc.get("id"),
+                "public_id": doc.get("public_id"),
+                "reason": "Failed Upload"
+            })
+        elif doc.get("project_status") == "purged":
+            unused_files.append({
+                "id": doc.get("id"),
+                "public_id": doc.get("public_id"),
+                "reason": "Purged Project Asset"
+            })
+
+    return {
+        "status": "healthy" if not (orphaned_assets or broken_references or duplicate_media or unused_files) else "action_required",
+        "orphaned_count": len(orphaned_assets),
+        "broken_count": len(broken_references),
+        "duplicate_count": len(duplicate_media),
+        "unused_count": len(unused_files),
+        "orphaned_assets": orphaned_assets[:100],
+        "broken_references": broken_references[:100],
+        "duplicate_media": [{"public_id": k, "references": v} for k, v in list(duplicate_media.items())[:100]],
+        "unused_files": unused_files[:100]
+    }
+
+@router.post("/health/cleanup")
+async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
+    """One-click repair and cleanup action for storage health violations."""
+    
+    # 1. Fetch physical items
+    r2_physical = await run_in_threadpool(list_r2_physical_objects_sync)
+    cld_physical = await run_in_threadpool(list_cloudinary_physical_resources_sync)
+    
+    r2_phys_keys = {item["key"] for item in r2_physical}
+    cld_phys_ids = {item["public_id"] for item in cld_physical}
+    
+    # 2. Fetch DB entities
+    metadata_list = await db.asset_metadata.find({}).to_list(length=100000)
+    submissions = await db.submissions.find({}).to_list(length=10000)
+    talents = await db.talents.find({}).to_list(length=10000)
+    feedbacks = await db.feedback.find({}).to_list(length=10000)
+    
+    db_referenced_ids = set()
+    for doc in metadata_list:
+        pid = doc.get("public_id")
+        if pid:
+            db_referenced_ids.add(pid)
+    for sub in submissions:
+        for m in sub.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                db_referenced_ids.add(pid)
+    for tal in talents:
+        for m in tal.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                db_referenced_ids.add(pid)
+    for fb in feedbacks:
+        if fb.get("content_url"):
+            leaf = fb.get("content_url").split("/")[-1].split(".")[0]
+            db_referenced_ids.add(leaf)
+
+    cleaned_orphaned = 0
+    cleaned_broken = 0
+    cleaned_unused = 0
+
+    # A. Delete Orphaned physical files
+    for item in r2_physical:
+        key = item["key"]
+        leaf = key.split("/")[-1].split(".")[0]
+        if key not in db_referenced_ids and leaf not in db_referenced_ids:
+            try:
+                get_r2_client().delete_object(Bucket=R2_BUCKET_NAME, Key=key)
+                cleaned_orphaned += 1
+            except Exception as e:
+                logger.warning(f"Health Cleanup: failed to delete R2 orphaned key {key}: {e}")
+                
+    for item in cld_physical:
+        pid = item["public_id"]
+        if pid not in db_referenced_ids:
+            try:
+                cloudinary.uploader.destroy(pid, resource_type=item["resource_type"], invalidate=True)
+                cleaned_orphaned += 1
+            except Exception as e:
+                logger.warning(f"Health Cleanup: failed to destroy Cloudinary resource {pid}: {e}")
+
+    # B. Remove Broken References from database
+    for doc in metadata_list:
+        pid = doc.get("public_id")
+        is_r2_key = pid.startswith("raw-uploads/")
+        is_broken = False
+        
+        if is_r2_key:
+            if pid not in r2_phys_keys:
+                is_broken = True
+        else:
+            if pid not in cld_phys_ids:
+                is_broken = True
+                
+        if is_broken:
+            await db.asset_metadata.delete_one({"id": doc.get("id")})
+            await db.submissions.update_many({}, {"$pull": {"media": {"public_id": pid}}})
+            await db.talents.update_many({}, {"$pull": {"media": {"public_id": pid}}})
+            cleaned_broken += 1
+
+    # C. Delete Unused / Failed files
+    for doc in metadata_list:
+        if doc.get("status") == "failed" or doc.get("upload_status") == "failed" or doc.get("project_status") == "purged":
+            pid = doc.get("public_id")
+            wrapper = {
+                "public_id": pid,
+                "resource_type": doc.get("resource_type") or "video",
+                "category": doc.get("category"),
+                "provider": "r2" if pid.startswith("raw-uploads/") else "cloudinary"
+            }
+            await cleanup_media_storage(wrapper, scope="submission", parent_id=doc.get("submission_id"))
+            cleaned_unused += 1
+
     await log_storage_action(
         user_id=admin.get("id"),
-        action_type="DELETE",
-        project_id=project_id
+        action_type="HEALTH_CLEANUP",
+        details=f"Cleaned {cleaned_orphaned} orphaned files, {cleaned_broken} broken references, {cleaned_unused} unused files."
     )
-    return {"status": "success", "message": f"Project {project_id} deleted successfully"}
 
+    return {
+        "status": "success",
+        "cleaned_orphaned": cleaned_orphaned,
+        "cleaned_broken": cleaned_broken,
+        "cleaned_unused": cleaned_unused
+    }
 
 @router.delete("/talents/{talent_id}")
 async def delete_talent_assets(talent_id: str, talent_name: str, admin: dict = Depends(require_role("admin"))):
-    """Removes the entire permanent talent folder."""
-    # Database First: Delete records
+    """Removes the entire permanent talent folder and all associated assets."""
     await db.asset_metadata.delete_many({"talent_id": talent_id})
-    
-    # 2. Synchronize to Cloudinary (Bulk Delete)
     try:
         talent_slug = re.sub(r'[^a-zA-Z0-9_]', '', talent_name.lower().replace(' ', '_'))
         folder_prefix = f"talentgram/talents/{talent_id}_{talent_slug}/"
         cloudinary.api.delete_resources_by_prefix(folder_prefix)
-        # Attempt to delete the folder
         cloudinary.api.delete_folder(f"talentgram/talents/{talent_id}_{talent_slug}")
     except Exception as e:
         logger.warning(f"Failed to fully delete Cloudinary talent folder {talent_id}: {e}")
 
-    # 3. Write audit log
-    await log_storage_action(
-        user_id=admin.get("id"),
-        action_type="DELETE",
-        talent_id=talent_id
-    )
+    await log_storage_action(user_id=admin.get("id"), action_type="DELETE", talent_id=talent_id)
     return {"status": "success", "message": f"Talent {talent_id} assets deleted successfully"}

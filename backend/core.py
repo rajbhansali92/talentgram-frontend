@@ -2673,6 +2673,9 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
         mirror["source_submission_media_id"] = source_id
 
     if mapped_cat == "video":
+        prev_videos = [m for m in (talent.get("media") or []) if m.get("category") == "video"]
+        for pv in prev_videos:
+            await cleanup_media_storage(pv, scope="talent", parent_id=talent["id"])
         await db.talents.update_one(
             {"id": talent["id"]},
             {"$pull": {"media": {"category": "video"}}}

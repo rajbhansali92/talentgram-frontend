@@ -645,6 +645,13 @@ async def submission_upload(
     # Single-slot replacement: intro video + legacy fixed takes
     single_slot = {"intro_video", "take_1", "take_2", "take_3"}
     if category in single_slot:
+        old_sub = await db.submissions.find_one({"id": sid}, {"media": 1})
+        if old_sub and "media" in old_sub:
+            prev_items = [m for m in old_sub["media"] if m.get("category") == category]
+            for pi in prev_items:
+                from core import cleanup_media_storage, remove_synced_media_from_global_talent
+                await cleanup_media_storage(pi, scope="submission", parent_id=sid)
+                await remove_synced_media_from_global_talent(sub, pi["id"])
         await db.submissions.update_one(
             {"id": sid}, {"$pull": {"media": {"category": category}}}
         )
@@ -1473,6 +1480,13 @@ async def video_complete(
 
         # Single-slot replacement for intro_video
         if category == "intro_video":
+            old_sub = await db.submissions.find_one({"id": sid}, {"media": 1})
+            if old_sub and "media" in old_sub:
+                prev_items = [m for m in old_sub["media"] if m.get("category") == "intro_video"]
+                for pi in prev_items:
+                    from core import cleanup_media_storage, remove_synced_media_from_global_talent
+                    await cleanup_media_storage(pi, scope="submission", parent_id=sid)
+                    await remove_synced_media_from_global_talent(sub, pi["id"])
             await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"category": "intro_video"}}})
 
         await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
@@ -2778,6 +2792,23 @@ async def admin_add_media(
     }
 
     await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})
+    try:
+        await db.asset_metadata.insert_one({
+            "id": media_id,
+            "public_id": result["public_id"],
+            "folder": folder,
+            "resource_type": rt,
+            "asset_type": "admin_upload",
+            "talent_id": sub.get("talent_id") or "unknown_talent",
+            "talent_name": sub.get("talent_name") or "",
+            "project_id": pid,
+            "submission_id": sid,
+            "file_size": result.get("bytes") or size_bytes,
+            "created_at": _now(),
+            "status": "completed"
+        })
+    except Exception as e:
+        logger.warning(f"admin-media: asset_metadata write failed: {e}")
     fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return fresh_sub
 

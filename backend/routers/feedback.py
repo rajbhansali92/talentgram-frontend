@@ -222,6 +222,22 @@ async def create_voice_feedback(
         resource_type="auto",  # Use auto-detection to prevent Cloudinary errors on short audio/WebM
         content_type=ct or "application/octet-stream",
     )
+    try:
+        await db.asset_metadata.insert_one({
+            "id": feedback_id,
+            "public_id": result.get("public_id") or f"{folder}/{feedback_id}",
+            "folder": folder,
+            "resource_type": "video",
+            "asset_type": "voice_note",
+            "talent_id": talent_id,
+            "project_id": project_id,
+            "submission_id": submission_id,
+            "file_size": result.get("bytes") or len(data),
+            "created_at": _now(),
+            "status": "completed"
+        })
+    except Exception as e:
+        logger.warning(f"Failed to track voice note feedback in asset_metadata: {e}")
     doc = await _persist_feedback(
         link=link,
         viewer=viewer,

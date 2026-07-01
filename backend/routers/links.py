@@ -3,7 +3,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 class LinkTrackIn(BaseModel):
@@ -2008,6 +2008,171 @@ async def download_talent_zip(
         event_generator(),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )
+
+
+@router.get("/public/links/{slug}/media/{talent_id}/{media_id}")
+async def proxy_media(
+    slug: str,
+    talent_id: str,
+    media_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = None,
+):
+    """Authenticated, same-backend media proxy.
+
+    The client review page needs to `fetch()` media bytes to build File objects
+    for native WhatsApp file sharing. Cloudflare Stream / R2 send no CORS headers,
+    so a browser fetch of the raw storage URL fails ("Failed to fetch"). This
+    endpoint streams the media through Talentgram's own (CORS-enabled) origin.
+
+    Security parity with folder download — NOT a new hole:
+      • same viewer-token auth
+      • same `visibility.download` gate (never bypasses download permission)
+      • only serves media the client is already allowed to see
+      • the raw storage URL is resolved server-side and NEVER returned
+    HTTP Range, Content-Type and Content-Disposition are preserved.
+    """
+    # ── Auth (identical to folder download) ──────────────────────────────────
+    t = token
+    if not t and authorization and authorization.lower().startswith("bearer "):
+        t = authorization.split(" ", 1)[1]
+    if not t:
+        raise HTTPException(401, "Identity required")
+    viewer = decode_token(t)
+    if not viewer or viewer.get("role") != "viewer" or viewer.get("slug") != slug:
+        raise HTTPException(401, "Identity required")
+
+    link = await db.links.find_one({"slug": slug}, {"_id": 0})
+    if not link:
+        raise HTTPException(404, "Link not found")
+    _require_active_link(link)
+    # Sharing the real file is download-equivalent — respect the same permission.
+    if not link.get("visibility", {}).get("download"):
+        raise HTTPException(403, "Downloads disabled")
+
+    # ── Resolve talent + client-visible media (mirror folder download) ───────
+    talent_ids = link.get("talent_ids", []) or []
+    submission_ids = link.get("submission_ids", []) or []
+    if link.get("auto_pull") and link.get("auto_project_id"):
+        auto_subs = await db.submissions.find(
+            {"project_id": link["auto_project_id"], "decision": "approved"}, {"_id": 0},
+        ).to_list(5000)
+        submission_ids = [s["id"] for s in auto_subs]
+
+    is_sub = False
+    talent_doc = None
+    target_sub = None
+    if talent_id in talent_ids:
+        talent_doc = await db.talents.find_one({"id": talent_id}, {"_id": 0})
+        if not talent_doc:
+            raise HTTPException(404, "Talent not found")
+    elif talent_id in submission_ids:
+        sub = await db.submissions.find_one({"id": talent_id}, {"_id": 0})
+        if not sub:
+            raise HTTPException(404, "Talent not found")
+        sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
+        talent_doc = _submission_to_client_shape(sub, project=sub_project)
+        is_sub = True
+        target_sub = sub
+    else:
+        sub_docs = await db.submissions.find({"id": {"$in": submission_ids}}, {"_id": 0}).to_list(5000)
+        matching_sub = next((s for s in sub_docs if s["id"] == talent_id or s.get("talent_id") == talent_id), None)
+        if not matching_sub:
+            raise HTTPException(404, "Talent not found in this link")
+        ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
+        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
+        is_sub = True
+        target_sub = matching_sub
+
+    if not is_sub:
+        talent_doc = enrich_talent(talent_doc)
+        per_t = (link.get("talent_field_visibility") or {}).get(talent_doc["id"])
+        eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
+        filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
+    else:
+        filtered_talent = _filter_talent_for_client(talent_doc, submission_client_visibility(target_sub))
+
+    media_list = filtered_talent.get("media", []) or []
+    m = next((x for x in media_list if x.get("id") == media_id), None)
+    if not m:
+        raise HTTPException(404, "Media not found")
+
+    # Recover raw media (provider / stream_uid) for accurate Stream resolution.
+    raw_m = m
+    if target_sub:
+        raw_m = next((rm for rm in (target_sub.get("media") or []) if rm.get("id") == media_id), m)
+    else:
+        _raw_t = await db.talents.find_one({"id": talent_id}, {"_id": 0, "media": 1})
+        raw_m = next((rm for rm in ((_raw_t or {}).get("media") or []) if rm.get("id") == media_id), m)
+
+    is_video = (m.get("category") in ("video", "take")) or (m.get("resource_type") == "video")
+
+    # ── Resolve the real upstream URL (never returned to the client) ─────────
+    client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0, connect=10.0))
+    try:
+        if is_video:
+            upstream = await _resolve_video_download_url(client, raw_m, m.get("url"))
+        else:
+            upstream = m.get("url")
+        if not upstream:
+            await client.aclose()
+            raise HTTPException(404, "Media unavailable")
+
+        fwd = {}
+        rng = request.headers.get("range")
+        if rng:
+            fwd["Range"] = rng  # preserve HTTP Range for seek/resume
+        upstream_resp = await client.send(client.build_request("GET", upstream, headers=fwd), stream=True)
+    except HTTPException:
+        raise
+    except Exception:
+        await client.aclose()
+        logger.exception("media proxy upstream fetch failed")
+        raise HTTPException(502, "Unable to load media")
+
+    if upstream_resp.status_code not in (200, 206):
+        code = upstream_resp.status_code
+        await upstream_resp.aclose()
+        await client.aclose()
+        raise HTTPException(502 if code >= 500 else 404, "Media unavailable")
+
+    # Safe download filename + content type.
+    import os as _os
+    ext = _os.path.splitext((m.get("url") or "").split("?")[0])[1]
+    if is_video and not ext:
+        ext = ".mp4"
+    if (not is_video) and ext.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    safe_talent = privatize_name(filtered_talent.get("name")).replace(".", "").strip()
+    label = m.get("label") or (m.get("category") or "media")
+    safe_label = "".join(c for c in str(label) if c.isalnum() or c in (" ", "-", "_")).strip() or "media"
+    disp_name = f"{safe_talent} - {safe_label}{ext}".strip()
+
+    media_ct = upstream_resp.headers.get("content-type") or ("video/mp4" if is_video else "image/jpeg")
+    resp_headers = {
+        "Content-Disposition": f'attachment; filename="{disp_name}"',
+        "Accept-Ranges": upstream_resp.headers.get("accept-ranges", "bytes"),
+        "Cache-Control": "private, max-age=300",
+    }
+    for h in ("content-length", "content-range", "content-encoding"):
+        if h in upstream_resp.headers:
+            resp_headers[h.title()] = upstream_resp.headers[h]
+
+    async def _body():
+        try:
+            async for chunk in upstream_resp.aiter_raw(chunk_size=65536):
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _body(),
+        status_code=upstream_resp.status_code,
+        media_type=media_ct,
+        headers=resp_headers,
     )
 
 

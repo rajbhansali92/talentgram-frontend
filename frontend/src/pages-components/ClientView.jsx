@@ -1775,6 +1775,13 @@ function TalentDetail({
     const [sharing, setSharing] = useState(false);
     const [shareMode, setShareMode] = useState(false);
     const [shareSel, setShareSel] = useState(() => new Set());
+    // On-device share diagnostics — panel appears only with ?sharedebug=1.
+    const [shareDiag, setShareDiag] = useState(null);
+    const shareDebug = useMemo(() => {
+        if (typeof window === "undefined") return false;
+        try { return new URLSearchParams(window.location.search).get("sharedebug") === "1"; }
+        catch { return false; }
+    }, []);
 
     // Ordered, visibility-aware list of every shareable media item.
     const shareableMedia = useMemo(() => {
@@ -1821,6 +1828,7 @@ function TalentDetail({
                 talentId: talent.id,
                 talentName: privatizeName(talent.name),
                 items,
+                // (trace captured below for the on-device diagnostic panel)
                 // INTENTIONAL: the Download permission also governs whether the
                 // ORIGINAL file may leave Talentgram. When downloads are off we
                 // share secure links only (mobile + desktop) — never raw files —
@@ -1828,10 +1836,22 @@ function TalentDetail({
                 allowFiles: !!vis.download,
                 sessionId: getSessionId(),
             });
+            // Capture the full runtime trace for the on-device diagnostic panel.
+            if (res?.trace) {
+                console.info("[tg-share] trace", res.trace);
+                setShareDiag(res.trace);
+            }
             if (res?.method === "native_file_share") {
-                toast.success(`Sharing ${res.count} item${res.count === 1 ? "" : "s"}…`);
+                toast.success(`Sharing ${res.count} file${res.count === 1 ? "" : "s"} — choose WhatsApp…`);
             } else if (res?.method === "whatsapp_link_share") {
-                toast.success("Opening WhatsApp…");
+                toast.success(
+                    res.via === "native_sheet"
+                        ? "Sharing secure links — choose WhatsApp…"
+                        : "Opening WhatsApp with secure links…",
+                );
+                if (res.reason) {
+                    toast(`Files not attached: ${res.reason}`, { duration: 8000 });
+                }
             }
             if (res && !res.aborted) exitShareMode();
         } catch (e) {
@@ -2390,7 +2410,7 @@ function TalentDetail({
                 <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
-                    <div className="w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-auto min-h-0 pb-10">
+                    <div className={`w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-auto min-h-0 ${shareMode ? "pb-32" : "pb-10"}`}>
                         {/* Mobile Download Talent Folder Button */}
                         {vis.download && (
                             <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04]">
@@ -2945,10 +2965,13 @@ function TalentDetail({
                     </div>
                 </div>
 
-                {/* Sticky multi-select share bar */}
+                {/* Sticky multi-select share bar — fixed to the viewport so the
+                    overlay's overflow-hidden + 100dvh can't clip it below the
+                    fold on mobile (Android). */}
                 {shareMode && (
                     <div
-                        className="shrink-0 border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex items-center justify-between gap-3 shadow-[0_-4px_20px_rgba(0,0,0,0.05)]"
+                        className="fixed bottom-0 left-0 right-0 z-[60] border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex items-center justify-between gap-3 shadow-[0_-4px_20px_rgba(0,0,0,0.10)]"
+                        style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
                         data-testid="share-action-bar"
                     >
                         <div className="flex items-center gap-2 min-w-0">
@@ -2982,6 +3005,64 @@ function TalentDetail({
                                 {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                                 Send via WhatsApp{shareSel.size > 0 ? ` (${shareSel.size})` : ""}
                             </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* On-device share diagnostics — only with ?sharedebug=1 */}
+                {shareDebug && shareDiag && (
+                    <div className="fixed inset-0 z-[80] bg-black/60 flex items-end sm:items-center justify-center p-3" data-testid="share-diag-panel">
+                        <div className="w-full sm:max-w-lg max-h-[80vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+                            <div className="sticky top-0 bg-white border-b border-[#eaeaea] px-4 py-3 flex items-center justify-between">
+                                <span className="text-sm font-bold text-[#111111]">Share diagnostics</span>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={async () => {
+                                            try {
+                                                await navigator.clipboard.writeText(JSON.stringify(shareDiag, null, 2));
+                                                toast.success("Diagnostics copied");
+                                            } catch { toast.error("Copy failed — screenshot instead"); }
+                                        }}
+                                        className="px-3 py-1.5 rounded-full bg-[#111111] text-white text-xs font-semibold"
+                                    >
+                                        Copy
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShareDiag(null)}
+                                        className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center"
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="p-4 space-y-1.5 text-[12px] font-mono text-[#111111]">
+                                {[
+                                    ["path (Q8)", shareDiag.q8_path],
+                                    ["reason (Q9)", shareDiag.q9_reason ?? "—"],
+                                    ["downloads allowed", String(shareDiag.allowFiles)],
+                                    ["1. navigator.share", String(shareDiag.q1_navigatorShare)],
+                                    ["2. navigator.canShare", String(shareDiag.q2_navigatorCanShare)],
+                                    ["3. canShare({files})", String(shareDiag.q3_canShareFiles)],
+                                    ["4. all fetched", String(shareDiag.q4_allFetched)],
+                                    ["5. all HTTP 200", String(shareDiag.q5_allHttp200)],
+                                    ["6. all Blob ok", String(shareDiag.q6_allBlobOk)],
+                                    ["7. all File ok", String(shareDiag.q7_allFileOk)],
+                                    ["items", String(shareDiag.itemCount)],
+                                ].map(([k, v]) => (
+                                    <div key={k} className="flex justify-between gap-3 border-b border-black/[0.04] pb-1">
+                                        <span className="text-[#8A8A8A]">{k}</span>
+                                        <span className="text-right break-all">{v}</span>
+                                    </div>
+                                ))}
+                                <div className="pt-2 text-[#8A8A8A]">per item:</div>
+                                {(shareDiag.perItem || []).map((r, i) => (
+                                    <pre key={i} className="whitespace-pre-wrap break-all bg-slate-50 rounded-lg p-2 text-[11px]">
+                                        {JSON.stringify(r, null, 1)}
+                                    </pre>
+                                ))}
+                            </div>
                         </div>
                     </div>
                 )}

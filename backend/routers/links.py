@@ -643,7 +643,19 @@ def build_project_shoot_dates(projects: List[dict], avail_visible: bool) -> List
     return out
 
 
-def submission_client_visibility(sub: Optional[dict]) -> Dict[str, bool]:
+def map_link_visibility_to_submission(link_vis: dict) -> dict:
+    mapped = {}
+    for k in ["age", "height", "location", "ethnicity", "availability", "budget", "work_links", "intro_video", "takes", "portfolio", "download"]:
+        if k in link_vis:
+            mapped[k] = link_vis[k]
+    if "instagram" in link_vis:
+        mapped["instagram_handle"] = link_vis["instagram"]
+    if "instagram_followers" in link_vis:
+        mapped["instagram_followers"] = link_vis["instagram_followers"]
+    return mapped
+
+
+def submission_client_visibility(sub: Optional[dict], project_defaults: Optional[dict] = None) -> Dict[str, bool]:
     """Per-submission client visibility map fed to _filter_talent_for_client.
 
     SINGLE SOURCE OF TRUTH for submission-gated field visibility across every
@@ -651,24 +663,31 @@ def submission_client_visibility(sub: Optional[dict]) -> Dict[str, bool]:
     To expose a new submission field to clients, add its key here once.
     """
     s_fv = (sub or {}).get("field_visibility") or {}
+    defaults = project_defaults or {}
+
+    def get_val(key: str, fallback: bool) -> bool:
+        if key in s_fv:
+            return s_fv[key]
+        return defaults.get(key, fallback)
+
     return {
-        "portfolio": True,       # always show client-visible media attached to the submission
-        "intro_video": True,
-        "takes": True,
-        "age": s_fv.get("age", True),
-        "height": s_fv.get("height", True),
-        "gender": s_fv.get("gender", True),
-        "location": s_fv.get("location", True),
-        "ethnicity": s_fv.get("ethnicity", True),
-        "instagram": s_fv.get("instagram_handle", True),
-        "instagram_followers": s_fv.get("instagram_followers", True),
-        "languages": s_fv.get("languages", True),
-        "skills": s_fv.get("skills", True),
-        "special_abilities": s_fv.get("special_abilities", True),
-        "availability": s_fv.get("availability", True),
-        "budget": s_fv.get("budget", True),
-        "work_links": s_fv.get("work_links", True),
-        "download": True,
+        "portfolio": get_val("portfolio", True),
+        "intro_video": get_val("intro_video", True),
+        "takes": get_val("takes", True),
+        "age": get_val("age", True),
+        "height": get_val("height", True),
+        "gender": get_val("gender", True),
+        "location": get_val("location", True),
+        "ethnicity": get_val("ethnicity", True),
+        "instagram": get_val("instagram_handle", True),
+        "instagram_followers": get_val("instagram_followers", True),
+        "languages": get_val("languages", True),
+        "skills": get_val("skills", True),
+        "special_abilities": get_val("special_abilities", True),
+        "availability": get_val("availability", True),
+        "budget": get_val("budget", True),
+        "work_links": get_val("work_links", True),
+        "download": get_val("download", True),
     }
 
 
@@ -779,7 +798,8 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
         shape = _submission_to_client_shape(s, project=s_project)
         
         # Strict per-submission visibility — shared single source of truth.
-        sub_review_vis = submission_client_visibility(s)
+        mapped_defaults = map_link_visibility_to_submission(visibility)
+        sub_review_vis = submission_client_visibility(s, mapped_defaults)
         talents.append(_filter_talent_for_client(shape, sub_review_vis))
 
     # Client-facing project budget (gated strictly by project/submission settings)
@@ -1471,7 +1491,8 @@ async def get_share_preview(share_id: str):
         eff_vis = {**visibility, **per_t} if per_t else visibility
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        sub_review_vis = submission_client_visibility(target_sub)
+        mapped_defaults = map_link_visibility_to_submission(visibility)
+        sub_review_vis = submission_client_visibility(target_sub, mapped_defaults)
         filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
 
     if media_id:
@@ -1822,7 +1843,8 @@ async def download_talent_zip(
         eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        sub_review_vis = submission_client_visibility(target_sub)
+        mapped_defaults = map_link_visibility_to_submission(link.get("visibility") or {})
+        sub_review_vis = submission_client_visibility(target_sub, mapped_defaults)
         filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
 
     media_list = filtered_talent.get("media", [])
@@ -2092,7 +2114,8 @@ async def proxy_media(
         eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        filtered_talent = _filter_talent_for_client(talent_doc, submission_client_visibility(target_sub))
+        mapped_defaults = map_link_visibility_to_submission(link.get("visibility") or {})
+        filtered_talent = _filter_talent_for_client(talent_doc, submission_client_visibility(target_sub, mapped_defaults))
 
     media_list = filtered_talent.get("media", []) or []
     m = next((x for x in media_list if x.get("id") == media_id), None)

@@ -882,6 +882,11 @@ export default function SubmissionReviewCenter() {
         // Show override indicator when original_form_data exists and value has been changed
         const origVal = detail?.original_form_data?.[f.key];
         const hasOverride = origVal !== undefined && JSON.stringify(origVal) !== JSON.stringify(form[f.key]);
+
+        const isFvOverridden = fv[f.key] !== undefined;
+        const defaultVal = detail?.project_default_visibility?.[f.key] ?? true;
+        const effectiveVal = isFvOverridden ? fv[f.key] : defaultVal;
+
         return (
             <div key={f.key} className={`flex items-start gap-3 p-3 rounded-lg border ${hasOverride ? "border-amber-200 bg-amber-50/40" : "bg-[#fafaf9] border-black/[0.03]"}`}>
                 <div className="flex-1 min-w-0">
@@ -914,14 +919,34 @@ export default function SubmissionReviewCenter() {
                         />
                     )}
                 </div>
-                <button
-                    type="button"
-                    onClick={() => setFv({ ...fv, [f.key]: fv[f.key] === false ? undefined : false })}
-                    title={fv[f.key] !== false ? "Visible to client" : "Hidden from client"}
-                    className={`mt-4 w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv[f.key] !== false ? "bg-black" : "bg-black/15"}`}
-                >
-                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv[f.key] !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
-                </button>
+                <div className="flex flex-col items-end gap-1.5 shrink-0 mt-2">
+                    <div className="flex items-center gap-2">
+                        <span className={`text-[8px] font-mono uppercase tracking-wider ${isFvOverridden ? "text-indigo-600 font-semibold" : "text-black/30"}`}>
+                            {isFvOverridden ? "Override" : "Project Default"}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => setFv({ ...fv, [f.key]: effectiveVal ? false : true })}
+                            title={effectiveVal ? "Visible to client" : "Hidden from client"}
+                            className={`w-9 h-5 rounded-full relative transition-colors ${effectiveVal ? "bg-black" : "bg-black/15"}`}
+                        >
+                            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${effectiveVal ? "translate-x-4 bg-white" : "bg-black"}`} />
+                        </button>
+                    </div>
+                    {isFvOverridden && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const nextFv = { ...fv };
+                                delete nextFv[f.key];
+                                setFv(nextFv);
+                            }}
+                            className="text-[9px] text-neutral-400 hover:text-black hover:underline font-mono"
+                        >
+                            Reset
+                        </button>
+                    )}
+                </div>
             </div>
         );
     };
@@ -1444,7 +1469,7 @@ export default function SubmissionReviewCenter() {
                                     </div>
                                     {isPreviewMode ? (
                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
-                                            {PERSONAL_FIELDS.filter(f => fv[f.key] !== false).map(f => {
+                                            {PERSONAL_FIELDS.filter(f => (fv[f.key] !== undefined ? fv[f.key] : (detail?.project_default_visibility?.[f.key] ?? true)) !== false).map(f => {
                                                 let val = form[f.key];
                                                 if (f.key === "location") {
                                                     val = formatLocation(val);
@@ -1465,7 +1490,7 @@ export default function SubmissionReviewCenter() {
                                         </div>
                                     )}
                                 </section>
-
+ 
                                 {/* ── SECTION B: Professional Information ── */}
                                 <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
                                     <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 gap-4">
@@ -1504,7 +1529,7 @@ export default function SubmissionReviewCenter() {
                                     </div>
                                     {isPreviewMode ? (
                                         <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-2">
-                                            {PROFESSIONAL_FIELDS.filter(f => fv[f.key] !== false).map(f => {
+                                            {PROFESSIONAL_FIELDS.filter(f => (fv[f.key] !== undefined ? fv[f.key] : (detail?.project_default_visibility?.[f.key] ?? true)) !== false).map(f => {
                                                 let val = form[f.key];
                                                 if (Array.isArray(val)) val = val.join(", ");
                                                 return (
@@ -1552,87 +1577,136 @@ export default function SubmissionReviewCenter() {
                                     </div>
 
                                     {/* Availability + Budget — preview vs edit */}
-                                    {isPreviewMode ? (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                            {fv.availability !== false && form.availability?.status && (
-                                                <div>
-                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
-                                                    <p className="text-sm font-medium text-black/85">
-                                                        {form.availability?.status === "yes" ? "🟢 Available" : "🔴 Unavailable"}
-                                                        {form.availability?.note ? ` — ${form.availability.note}` : ""}
-                                                    </p>
-                                                </div>
-                                            )}
-                                            {fv.budget !== false && form.budget?.status && (
-                                                <div>
-                                                    <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Budget</p>
-                                                    <p className="text-sm font-medium text-black/85">
-                                                        {form.budget?.status === "accept" ? "🟢 Accepts Day Rate" : "🔴 Expected Day Rate"}
-                                                        {form.budget?.value ? ` — ${form.budget.value}` : ""}
-                                                    </p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    ) : (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
-                                            {/* Structured Availability */}
-                                            <div className="bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03] space-y-2">
-                                                <div className="flex items-center justify-between">
-                                                    <label className="text-[10px] text-black/45 tracking-widest uppercase">Availability</label>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setFv({ ...fv, availability: fv.availability === false ? undefined : false })}
-                                                        className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv.availability !== false ? "bg-black" : "bg-black/15"}`}
-                                                    >
-                                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.availability !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
-                                                    </button>
-                                                </div>
-                                                <div className="flex items-center gap-3">
-                                                    <select
-                                                        value={form.availability?.status || ""}
-                                                        onChange={(e) => setForm({ ...form, availability: { ...form.availability, status: e.target.value } })}
-                                                        className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
-                                                    >
-                                                        <option value="">—</option>
-                                                        {AVAILABILITY_OPTIONS.map((opt) => (
-                                                            <option key={opt.key} value={opt.key}>{opt.label}</option>
-                                                        ))}
-                                                    </select>
-                                                    <input
-                                                        type="text"
-                                                        value={form.availability?.note || ""}
-                                                        onChange={(e) => setForm({ ...form, availability: { ...form.availability, note: e.target.value } })}
-                                                        placeholder="Note / reason"
-                                                        className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 placeholder:text-black/30 font-medium"
-                                                    />
-                                                </div>
-                                            </div>
+                                    {(() => {
+                                        const isAvailOverridden = fv.availability !== undefined;
+                                        const defaultAvail = detail?.project_default_visibility?.availability ?? true;
+                                        const effectiveAvail = isAvailOverridden ? fv.availability : defaultAvail;
 
-                                            {/* Structured Budget */}
-                                            <div className="bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03] space-y-2">
-                                                <div className="flex items-center justify-between">
-                                                    <label className="text-[10px] text-black/45 tracking-widest uppercase">Budget</label>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setFv({ ...fv, budget: fv.budget === false ? undefined : false })}
-                                                        className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${fv.budget !== false ? "bg-black" : "bg-black/15"}`}
-                                                    >
-                                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${fv.budget !== false ? "translate-x-4 bg-white" : "bg-black"}`} />
-                                                    </button>
+                                        const isBudgetOverridden = fv.budget !== undefined;
+                                        const defaultBudget = detail?.project_default_visibility?.budget ?? false;
+                                        const effectiveBudget = isBudgetOverridden ? fv.budget : defaultBudget;
+
+                                        return isPreviewMode ? (
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                {effectiveAvail && form.availability?.status && (
+                                                    <div>
+                                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Availability</p>
+                                                        <p className="text-sm font-medium text-black/85">
+                                                            {form.availability?.status === "yes" ? "🟢 Available" : "🔴 Unavailable"}
+                                                            {form.availability?.note ? ` — ${form.availability.note}` : ""}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {effectiveBudget && form.budget?.status && (
+                                                    <div>
+                                                        <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">Budget</p>
+                                                        <p className="text-sm font-medium text-black/85">
+                                                            {form.budget?.status === "accept" ? "🟢 Accepts Day Rate" : "🔴 Expected Day Rate"}
+                                                            {form.budget?.value ? ` — ${form.budget.value}` : ""}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+                                                {/* Structured Availability */}
+                                                <div className="bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03] space-y-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <label className="text-[10px] text-black/45 tracking-widest uppercase">Availability</label>
+                                                            <span className={`text-[8px] font-mono uppercase tracking-wider ${isAvailOverridden ? "text-indigo-600 font-semibold" : "text-black/30"}`}>
+                                                                {isAvailOverridden ? "Override" : "Project Default"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            {isAvailOverridden && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const nextFv = { ...fv };
+                                                                        delete nextFv.availability;
+                                                                        setFv(nextFv);
+                                                                    }}
+                                                                    className="text-[9px] text-neutral-400 hover:text-black hover:underline font-mono"
+                                                                >
+                                                                    Reset
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setFv({ ...fv, availability: effectiveAvail ? false : true })}
+                                                                className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${effectiveAvail ? "bg-black" : "bg-black/15"}`}
+                                                            >
+                                                                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${effectiveAvail ? "translate-x-4 bg-white" : "bg-black"}`} />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-3">
+                                                        <select
+                                                            value={form.availability?.status || ""}
+                                                            onChange={(e) => setForm({ ...form, availability: { ...form.availability, status: e.target.value } })}
+                                                            className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
+                                                        >
+                                                            <option value="">—</option>
+                                                            {AVAILABILITY_OPTIONS.map((opt) => (
+                                                                <option key={opt.key} value={opt.key}>{opt.label}</option>
+                                                            ))}
+                                                        </select>
+                                                        <input
+                                                            type="text"
+                                                            value={form.availability?.note || ""}
+                                                            onChange={(e) => setForm({ ...form, availability: { ...form.availability, note: e.target.value } })}
+                                                            placeholder="Note / reason"
+                                                            className="flex-1 bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1 text-sm text-black/85 placeholder:text-black/30 font-medium"
+                                                        />
+                                                    </div>
                                                 </div>
-                                                <div className="flex items-center gap-3">
-                                                    <select
-                                                        value={form.budget?.status || ""}
-                                                        onChange={(e) => setForm({ ...form, budget: { ...form.budget, status: e.target.value } })}
-                                                        className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
-                                                    >
-                                                        <option value="">—</option>
-                                                        {BUDGET_OPTIONS.map((opt) => (
-                                                            <option key={opt.key} value={opt.key}>{opt.label}</option>
-                                                        ))}
-                                                    </select>
-                                                    <input
-                                                        type="text"
+
+                                                {/* Structured Budget */}
+                                                <div className="bg-[#fafaf9] p-3 rounded-lg border border-black/[0.03] space-y-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <label className="text-[10px] text-black/45 tracking-widest uppercase">Budget</label>
+                                                            <span className={`text-[8px] font-mono uppercase tracking-wider ${isBudgetOverridden ? "text-indigo-600 font-semibold" : "text-black/30"}`}>
+                                                                {isBudgetOverridden ? "Override" : "Project Default"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            {isBudgetOverridden && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const nextFv = { ...fv };
+                                                                        delete nextFv.budget;
+                                                                        setFv(nextFv);
+                                                                    }}
+                                                                    className="text-[9px] text-neutral-400 hover:text-black hover:underline font-mono"
+                                                                >
+                                                                    Reset
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setFv({ ...fv, budget: effectiveBudget ? false : true })}
+                                                                className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${effectiveBudget ? "bg-black" : "bg-black/15"}`}
+                                                            >
+                                                                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${effectiveBudget ? "translate-x-4 bg-white" : "bg-black"}`} />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-3">
+                                                        <select
+                                                            value={form.budget?.status || ""}
+                                                            onChange={(e) => setForm({ ...form, budget: { ...form.budget, status: e.target.value } })}
+                                                            className="bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-1.5 text-sm text-black/85 font-medium"
+                                                        >
+                                                            <option value="">—</option>
+                                                            {BUDGET_OPTIONS.map((opt) => (
+                                                                <option key={opt.key} value={opt.key}>{opt.label}</option>
+                                                            ))}
+                                                        </select>
+                                                        <input
+                                                            type="text"
                                                         value={form.budget?.value || ""}
                                                         onChange={(e) => setForm({ ...form, budget: { ...form.budget, value: e.target.value } })}
                                                         placeholder="Expected budget (if custom)"
@@ -1641,7 +1715,7 @@ export default function SubmissionReviewCenter() {
                                                 </div>
                                             </div>
                                         </div>
-                                    )}
+                                    )})()}
 
                                     {/* Custom Question Answers — editable with override indicator */}
                                     {Array.isArray(project?.custom_questions) && project.custom_questions.length > 0 && (

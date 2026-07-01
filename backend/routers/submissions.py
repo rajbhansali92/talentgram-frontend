@@ -2550,8 +2550,17 @@ async def get_admin_submission(
                             item["internal_only"] = ov["internal_only"]
                     talent_portfolio_media.append(item)
 
+    # Fetch project visibility defaults
+    from .links import map_link_visibility_to_submission, DEFAULT_VISIBILITY
+    link = await db.links.find_one({"auto_project_id": pid}, {"_id": 0, "visibility": 1})
+    if link and link.get("visibility"):
+        project_default_visibility = map_link_visibility_to_submission(link["visibility"])
+    else:
+        project_default_visibility = map_link_visibility_to_submission(DEFAULT_VISIBILITY)
+
     result = dict(sub)
     result["talent_portfolio_media"] = talent_portfolio_media
+    result["project_default_visibility"] = project_default_visibility
     return sign_r2_media_if_needed(result)
 
 

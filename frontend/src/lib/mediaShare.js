@@ -9,7 +9,7 @@
 //
 // This module is purely additive — it does not touch download logic.
 // ────────────────────────────────────────────────────────────────────────
-import { api as axios, getViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { api as axios, getViewerToken, PUBLIC_FRONTEND_URL, API } from "@/lib/api";
 
 // Path/diagnostics logging — intentionally always on. WhatsApp sharing is a
 // low-frequency, user-initiated action, and these logs are how we verify on a
@@ -50,12 +50,12 @@ export function deviceSupportsFileShare() {
 // Fully instrumented fetch→Blob→File. Writes every step's outcome into `rec`
 // (mutated in place) so the caller can report the exact runtime reason, and
 // returns the File on success or null on failure (never throws).
-async function urlToFileTraced(url, filename, mimeHint, rec) {
+async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
     rec.url = url;
     // Step 5 — HTTP fetch
     let res;
     try {
-        res = await fetch(url, { mode: "cors" });
+        res = await fetch(url, { mode: "cors", ...init });
     } catch (e) {
         // A thrown fetch (TypeError "Failed to fetch") is the classic signature
         // of a CORS block or network failure — the response never arrives.
@@ -234,16 +234,22 @@ export async function shareMediaViaWhatsApp({
         const recs = items.map((it) => ({ name: it.name, type: it.type }));
         trace.perItem = recs;
 
-        // urlToFileTraced never throws (returns null + records the failure in its
-        // rec), so every item is reported even if one fails. Parallel keeps total
+        // Fetch through Talentgram's own authenticated media proxy (same backend,
+        // CORS-enabled) instead of the raw Cloudflare Stream / R2 URL, which sends
+        // no CORS headers and fails the browser fetch. The proxy resolves the real
+        // storage URL server-side (never exposed) and enforces the same viewer
+        // auth + Download permission. urlToFileTraced never throws (records the
+        // failure in its rec), so every item is reported. Parallel keeps total
         // time short so the transient user-activation for navigator.share holds.
+        const authHeader = { Authorization: `Bearer ${getViewerToken(slug)}` };
         const files = await Promise.all(
             items.map((it, i) =>
                 urlToFileTraced(
-                    it.fileUrl,
+                    `${API}/public/links/${slug}/media/${talentId}/${it.id}`,
                     it.filename || it.name,
                     it.type === "video" ? "video/mp4" : "image/jpeg",
                     recs[i],
+                    { headers: authHeader },
                 ),
             ),
         );

@@ -2918,21 +2918,31 @@ def get_r2_client():
     # every in-progress-video GET. boto3 clients are thread-safe and presigning is
     # a local (no-network) operation, so a module-level singleton is safe.
     global _r2_client
+    if not R2_ENDPOINT_URL or not R2_ACCESS_KEY_ID or not R2_SECRET_ACCESS_KEY:
+        logger.info("get_r2_client: Cloudflare R2 is not fully configured or disabled.")
+        return None
     if _r2_client is None:
         import boto3
         from botocore.config import Config
-        _r2_client = boto3.client(
-            "s3",
-            endpoint_url=R2_ENDPOINT_URL,
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-            config=Config(signature_version="s3v4"),
-        )
+        try:
+            _r2_client = boto3.client(
+                "s3",
+                endpoint_url=R2_ENDPOINT_URL,
+                aws_access_key_id=R2_ACCESS_KEY_ID,
+                aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+                config=Config(signature_version="s3v4"),
+            )
+        except Exception as e:
+            logger.error(f"get_r2_client: failed to initialize boto3 client: {e}", exc_info=True)
+            return None
     return _r2_client
 
 def generate_r2_presigned_url(key: str, method: str = "PUT", expiry: int = 3600) -> str:
     """Generate a pre-signed S3 URL for Cloudflare R2 operations (PUT or GET)."""
     s3 = get_r2_client()
+    if not s3:
+        logger.warning("generate_r2_presigned_url: R2 client is unconfigured or unavailable. Returning empty URL.")
+        return ""
     client_method = "put_object" if method.upper() == "PUT" else "get_object"
     params = {"Bucket": R2_BUCKET_NAME, "Key": key}
     if method.upper() == "PUT":

@@ -29,33 +29,59 @@ from core import (
 router = APIRouter(prefix="/api/admin/cloudinary", tags=["cloudinary-admin"])
 
 async def assert_providers_healthy():
+    from core import ENABLE_R2_MEDIA_PIPELINE, R2_ENDPOINT_URL
     cld_ok = await check_cloudinary_health()
     if not cld_ok:
+        logger.error("assert_providers_healthy: Cloudinary is unreachable")
         raise HTTPException(
             status_code=503,
             detail="Storage cleanup aborted. Cloudinary is currently unreachable. No changes have been made."
         )
-    r2_ok = await check_r2_health()
-    if not r2_ok:
-        raise HTTPException(
-            status_code=503,
-            detail="Storage cleanup aborted. Cloudflare R2 is currently unreachable. No changes have been made."
-        )
+    if ENABLE_R2_MEDIA_PIPELINE or R2_ENDPOINT_URL:
+        r2_ok = await check_r2_health()
+        if not r2_ok:
+            logger.error("assert_providers_healthy: Cloudflare R2 is unreachable or misconfigured")
+            raise HTTPException(
+                status_code=503,
+                detail="Storage cleanup aborted. Cloudflare R2 is currently unreachable or misconfigured. No changes have been made."
+            )
 logger = logging.getLogger(__name__)
 
 # Quotas and defaults (in bytes)
 CLOUDINARY_QUOTA_DEFAULT = 25 * 1024 * 1024 * 1024  # 25 GB
 R2_QUOTA_DEFAULT = 100 * 1024 * 1024 * 1024         # 100 GB
 
+def safe_get_usage(metric: Any, default_limit: int = 0) -> tuple:
+    """Extract (usage, limit) from a Cloudinary metric value defensively."""
+    if isinstance(metric, dict):
+        usage = metric.get("usage")
+        limit = metric.get("limit")
+        try:
+            u = int(usage) if usage is not None else 0
+        except (ValueError, TypeError):
+            u = 0
+        try:
+            l = int(limit) if limit is not None else default_limit
+        except (ValueError, TypeError):
+            l = default_limit
+        return u, l
+    elif isinstance(metric, (int, float)):
+        return int(metric), default_limit
+    else:
+        return 0, default_limit
+
 def fetch_cloudinary_usage_sync() -> Dict[str, Any]:
     try:
-        return cloudinary.api.usage()
+        res = cloudinary.api.usage()
+        return res if isinstance(res, dict) else {}
     except Exception as e:
         logger.warning(f"Failed to fetch Cloudinary usage: {e}")
         return {}
 
 def fetch_r2_objects_sync() -> tuple:
     s3 = get_r2_client()
+    if not s3:
+        return 0, 0
     total_size = 0
     object_count = 0
     try:
@@ -67,10 +93,13 @@ def fetch_r2_objects_sync() -> tuple:
                     object_count += 1
     except Exception as e:
         logger.warning(f"Error listing R2 objects in health check: {e}")
+        raise e
     return total_size, object_count
 
 def list_r2_physical_objects_sync() -> List[Dict[str, Any]]:
     s3 = get_r2_client()
+    if not s3:
+        return []
     objects = []
     try:
         paginator = s3.get_paginator('list_objects_v2')
@@ -115,19 +144,72 @@ def list_cloudinary_physical_resources_sync() -> List[Dict[str, Any]]:
 @router.get("/analytics")
 async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
     """Compute aggregates over tracked assets metadata across Cloudinary and R2."""
+    import time
+    start_time = time.monotonic()
+    op_id = str(uuid.uuid4())
     
     # 1. Cloudinary Usage
-    cld_live = await run_in_threadpool(fetch_cloudinary_usage_sync)
-    cld_storage = cld_live.get("storage", {})
-    cld_objects = cld_live.get("objects", {})
-    cld_bandwidth = cld_live.get("credits", {})  # fallback, Cloudinary credits
-    
-    cld_used = cld_storage.get("usage") or 0
-    cld_quota = cld_storage.get("limit") or CLOUDINARY_QUOTA_DEFAULT
-    cld_count = cld_objects.get("usage") or 0
+    cld_live = {}
+    cld_status = "healthy"
+    cld_err_reason = None
+    try:
+        cld_live = await run_in_threadpool(fetch_cloudinary_usage_sync)
+        if not cld_live:
+            cld_status = "unavailable"
+            cld_err_reason = "Empty response returned from Cloudinary API"
+            logger.warning(
+                f"Provider: Cloudinary | Reason: {cld_err_reason} | "
+                f"Operation ID: {op_id} | Endpoint: /analytics | "
+                f"Duration: {time.monotonic() - start_time:.4f}s"
+            )
+    except Exception as e:
+        cld_status = "unavailable"
+        cld_err_reason = str(e)
+        logger.error(
+            f"Provider: Cloudinary | Reason: {cld_err_reason} | "
+            f"Operation ID: {op_id} | Endpoint: /analytics | "
+            f"Duration: {time.monotonic() - start_time:.4f}s"
+        )
+        
+    cld_used, cld_quota = safe_get_usage(cld_live.get("storage"), CLOUDINARY_QUOTA_DEFAULT)
+    cld_count, _ = safe_get_usage(cld_live.get("objects"))
+    cld_bandwidth_used, _ = safe_get_usage(cld_live.get("bandwidth"))
+    cld_requests_used, _ = safe_get_usage(cld_live.get("requests"))
     
     # 2. Cloudflare R2 Usage
-    r2_used, r2_count = await run_in_threadpool(fetch_r2_objects_sync)
+    r2_used, r2_count = 0, 0
+    r2_status = "healthy"
+    r2_err_reason = None
+    
+    from core import R2_ENDPOINT_URL, ENABLE_R2_MEDIA_PIPELINE
+    if not R2_ENDPOINT_URL:
+        r2_status = "disabled"
+        r2_err_reason = "R2_ENDPOINT_URL is not configured"
+        logger.info(
+            f"Provider: Cloudflare R2 | Reason: {r2_err_reason} | "
+            f"Operation ID: {op_id} | Endpoint: /analytics | "
+            f"Duration: {time.monotonic() - start_time:.4f}s"
+        )
+    elif not ENABLE_R2_MEDIA_PIPELINE:
+        r2_status = "disabled"
+        r2_err_reason = "ENABLE_R2_MEDIA_PIPELINE is set to false"
+        logger.info(
+            f"Provider: Cloudflare R2 | Reason: {r2_err_reason} | "
+            f"Operation ID: {op_id} | Endpoint: /analytics | "
+            f"Duration: {time.monotonic() - start_time:.4f}s"
+        )
+    else:
+        try:
+            r2_used, r2_count = await run_in_threadpool(fetch_r2_objects_sync)
+        except Exception as e:
+            r2_status = "unavailable"
+            r2_err_reason = str(e)
+            logger.error(
+                f"Provider: Cloudflare R2 | Reason: {r2_err_reason} | "
+                f"Operation ID: {op_id} | Endpoint: /analytics | "
+                f"Duration: {time.monotonic() - start_time:.4f}s"
+            )
+            
     r2_quota = R2_QUOTA_DEFAULT
     
     # 3. Combined Metrics
@@ -148,9 +230,14 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
             }
         }
     ]
-    cursor = db.asset_metadata.aggregate(pipeline)
-    by_category_raw = await cursor.to_list(length=500)
     
+    by_category_raw = []
+    try:
+        cursor = db.asset_metadata.aggregate(pipeline)
+        by_category_raw = await cursor.to_list(length=500)
+    except Exception as e:
+        logger.error(f"Mongo: asset_metadata aggregate breakdown failed: {e}")
+        
     # Organize categories
     categories = {
         "audition_videos": {"size": 0, "count": 0, "label": "Audition Videos"},
@@ -162,41 +249,51 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
         "admin_uploads": {"size": 0, "count": 0, "label": "Admin Uploads"},
     }
     
-    for item in by_category_raw:
-        grp = item["_id"] or {}
-        atype = grp.get("asset_type")
-        cat = grp.get("category")
-        size = item["total_size"] or 0
-        count = item["count"] or 0
-        
-        if atype == "audition_video" or cat in ("take", "take_1", "take_2", "take_3"):
-            categories["audition_videos"]["size"] += size
-            categories["audition_videos"]["count"] += count
-        elif atype == "intro_video" or cat == "intro_video":
-            categories["intro_videos"]["size"] += size
-            categories["intro_videos"]["count"] += count
-        elif cat == "indian":
-            categories["indian_look_images"]["size"] += size
-            categories["indian_look_images"]["count"] += count
-        elif cat == "western":
-            categories["western_look_images"]["size"] += size
-            categories["western_look_images"]["count"] += count
-        elif cat in ("image", "portfolio") or (atype == "profile_image" and cat not in ("indian", "western")):
-            categories["portfolio_images"]["size"] += size
-            categories["portfolio_images"]["count"] += count
-        elif atype == "voice_note" or cat == "voice":
-            categories["voice_notes"]["size"] += size
-            categories["voice_notes"]["count"] += count
-        elif atype == "admin_upload" or cat == "admin":
-            categories["admin_uploads"]["size"] += size
-            categories["admin_uploads"]["count"] += count
-        else:
-            # default fallback to general portfolio
-            categories["portfolio_images"]["size"] += size
-            categories["portfolio_images"]["count"] += count
+    if isinstance(by_category_raw, list):
+        for item in by_category_raw:
+            if not isinstance(item, dict):
+                continue
+            grp = item.get("_id") or {}
+            if not isinstance(grp, dict):
+                grp = {}
+            atype = grp.get("asset_type")
+            cat = grp.get("category")
+            size = item.get("total_size") or 0
+            count = item.get("count") or 0
+            
+            if atype == "audition_video" or cat in ("take", "take_1", "take_2", "take_3"):
+                categories["audition_videos"]["size"] += size
+                categories["audition_videos"]["count"] += count
+            elif atype == "intro_video" or cat == "intro_video":
+                categories["intro_videos"]["size"] += size
+                categories["intro_videos"]["count"] += count
+            elif cat == "indian":
+                categories["indian_look_images"]["size"] += size
+                categories["indian_look_images"]["count"] += count
+            elif cat == "western":
+                categories["western_look_images"]["size"] += size
+                categories["western_look_images"]["count"] += count
+            elif cat in ("image", "portfolio") or (atype == "profile_image" and cat not in ("indian", "western")):
+                categories["portfolio_images"]["size"] += size
+                categories["portfolio_images"]["count"] += count
+            elif atype == "voice_note" or cat == "voice":
+                categories["voice_notes"]["size"] += size
+                categories["voice_notes"]["count"] += count
+            elif atype == "admin_upload" or cat == "admin":
+                categories["admin_uploads"]["size"] += size
+                categories["admin_uploads"]["count"] += count
+            else:
+                # default fallback to general portfolio
+                categories["portfolio_images"]["size"] += size
+                categories["portfolio_images"]["count"] += count
 
     # Add legacy voice notes from feedback collection if not already captured
-    voice_feedback_count = await db.feedback.count_documents({"type": "voice"})
+    voice_feedback_count = 0
+    try:
+        voice_feedback_count = await db.feedback.count_documents({"type": "voice"})
+    except Exception as e:
+        logger.error(f"Mongo: feedback count_documents failed: {e}")
+        
     if categories["voice_notes"]["count"] < voice_feedback_count:
         diff_count = voice_feedback_count - categories["voice_notes"]["count"]
         # estimate 500KB per legacy audio
@@ -208,9 +305,14 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
         {"$match": {"project_status": "archived"}},
         {"$group": {"_id": None, "total_size": {"$sum": "$file_size"}}}
     ]
-    cursor_archived = db.asset_metadata.aggregate(pipeline_archived)
-    archived_list = await cursor_archived.to_list(length=1)
-    archived_storage = archived_list[0]["total_size"] if archived_list else 0
+    archived_storage = 0
+    try:
+        cursor_archived = db.asset_metadata.aggregate(pipeline_archived)
+        archived_list = await cursor_archived.to_list(length=1)
+        if isinstance(archived_list, list) and archived_list:
+            archived_storage = archived_list[0].get("total_size") or 0
+    except Exception as e:
+        logger.error(f"Mongo: archived storage aggregate failed: {e}")
 
     # Top storage consuming projects
     pipeline_projects = [
@@ -218,22 +320,35 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
         {"$sort": {"total_size": -1}},
         {"$limit": 5}
     ]
-    cursor_projects = db.asset_metadata.aggregate(pipeline_projects)
-    top_projects = await cursor_projects.to_list(length=5)
-    
+    top_projects = []
+    try:
+        cursor_projects = db.asset_metadata.aggregate(pipeline_projects)
+        top_projects = await cursor_projects.to_list(length=5)
+    except Exception as e:
+        logger.error(f"Mongo: top projects aggregate failed: {e}")
+        
     enriched_top_projects = []
-    for tp in top_projects:
-        pid = tp["_id"]
-        if pid:
-            proj = await db.projects.find_one({"id": pid}, {"name": 1})
-            name = proj.get("name") if proj else pid
-        else:
-            name = "Permanent / System"
-        enriched_top_projects.append({
-            "project_id": pid,
-            "name": name,
-            "size": tp["total_size"]
-        })
+    if isinstance(top_projects, list):
+        for tp in top_projects:
+            if not isinstance(tp, dict):
+                continue
+            pid = tp.get("_id")
+            size = tp.get("total_size") or 0
+            name = pid or "Permanent / System"
+            if pid:
+                try:
+                    proj = await db.projects.find_one({"id": pid}, {"name": 1, "brand_name": 1})
+                    if isinstance(proj, dict):
+                        name = proj.get("brand_name") or proj.get("name") or pid
+                except Exception:
+                    pass
+            else:
+                name = "Permanent / System"
+            enriched_top_projects.append({
+                "project_id": pid,
+                "name": name,
+                "size": size
+            })
 
     # Top storage consuming talents
     pipeline_talents = [
@@ -241,19 +356,33 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
         {"$sort": {"total_size": -1}},
         {"$limit": 5}
     ]
-    cursor_talents = db.asset_metadata.aggregate(pipeline_talents)
-    top_talents = await cursor_talents.to_list(length=5)
-    
+    top_talents = []
+    try:
+        cursor_talents = db.asset_metadata.aggregate(pipeline_talents)
+        top_talents = await cursor_talents.to_list(length=5)
+    except Exception as e:
+        logger.error(f"Mongo: top talents aggregate failed: {e}")
+        
     enriched_top_talents = []
-    for tt in top_talents:
-        tid = tt["_id"]
-        talent = await db.talents.find_one({"id": tid}, {"name": 1})
-        name = talent.get("name") if talent else tid
-        enriched_top_talents.append({
-            "talent_id": tid,
-            "name": name,
-            "size": tt["total_size"]
-        })
+    if isinstance(top_talents, list):
+        for tt in top_talents:
+            if not isinstance(tt, dict):
+                continue
+            tid = tt.get("_id")
+            size = tt.get("total_size") or 0
+            name = tid or "Unnamed / System"
+            if tid:
+                try:
+                    talent = await db.talents.find_one({"id": tid}, {"name": 1})
+                    if isinstance(talent, dict):
+                        name = talent.get("name") or tid
+                except Exception:
+                    pass
+            enriched_top_talents.append({
+                "talent_id": tid,
+                "name": name,
+                "size": size
+            })
 
     return {
         "total_storage": total_used,
@@ -262,20 +391,24 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
         "providers": {
             "cloudinary": {
                 "name": "Cloudinary",
+                "status": cld_status,
+                "error_reason": cld_err_reason,
                 "used_bytes": cld_used,
                 "quota": cld_quota,
                 "remaining_capacity": max(0, cld_quota - cld_used),
                 "object_count": cld_count,
-                "bandwidth_used": cld_live.get("bandwidth", {}).get("usage") or 0,
-                "api_usage": cld_live.get("requests", {}).get("usage") or 0
+                "bandwidth_used": cld_bandwidth_used,
+                "api_usage": cld_requests_used
             },
             "cloudflare_r2": {
                 "name": "Cloudflare R2",
+                "status": r2_status,
+                "error_reason": r2_err_reason,
                 "used_bytes": r2_used,
                 "quota": r2_quota,
                 "remaining_capacity": max(0, r2_quota - r2_used),
                 "object_count": r2_count,
-                "bandwidth_used": 0,  # R2 doesn't easily expose this via S3 API
+                "bandwidth_used": 0,
                 "api_usage": 0
             }
         },

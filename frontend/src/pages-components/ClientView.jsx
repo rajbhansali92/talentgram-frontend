@@ -2425,7 +2425,7 @@ function TalentDetail({
                         {!isSharePreview && (
                             <button
                                 onClick={() => onShare(talent.id)}
-                                className="hidden md:flex w-9 h-9 md:w-10 md:h-10 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center justify-center transition-colors duration-150 shadow-sm"
+                                className="flex w-9 h-9 md:w-10 md:h-10 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center justify-center transition-colors duration-150 shadow-sm"
                                 title="Share Portfolio"
                                 data-testid="header-share-btn"
                             >
@@ -2580,7 +2580,7 @@ function TalentDetail({
                                         className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-full text-[11px] font-semibold transition-colors duration-150 min-h-[40px] ${
                                             shareMode
                                                 ? "bg-slate-100 text-[#4A4A4A] hover:bg-slate-200"
-                                                : "border border-[#eaeaea] text-[#111111] hover:border-[#d4d4d4] hover:bg-slate-50"
+                                                : "border border-black text-black hover:bg-slate-50"
                                         }`}
                                     >
                                         {shareMode ? (
@@ -2589,7 +2589,7 @@ function TalentDetail({
                                             </>
                                         ) : (
                                             <>
-                                                <CheckSquare className="w-3.5 h-3.5 text-emerald-600" /> Select &amp; Send
+                                                <CheckSquare className="w-3.5 h-3.5 text-black" /> Select &amp; Send
                                             </>
                                         )}
                                     </button>
@@ -2604,15 +2604,6 @@ function TalentDetail({
                                                 <p className="text-[11px] text-[#8A8A8A] mb-2 font-mono tracking-[0.08em] truncate flex items-center justify-between">
                                                     <span className="flex items-center gap-1.5 min-w-0">
                                                         <span className="truncate">{t.label || `Take ${i + 1}`}</span>
-                                                        {!isSharePreview && (
-                                                            <button
-                                                                onClick={() => onShare(talent.id, t.id)}
-                                                                className="p-1 hover:bg-black/5 rounded text-[#333333] hover:text-[#111111] transition-colors shrink-0"
-                                                                title="Share this take only"
-                                                            >
-                                                                <Share2 className="w-3 h-3" />
-                                                            </button>
-                                                        )}
                                                     </span>
                                                     {t.primary_take && (
                                                         <span className="text-[8px] bg-[var(--tg-navy-primary)] text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider shrink-0">

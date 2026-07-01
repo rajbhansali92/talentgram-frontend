@@ -36,6 +36,7 @@ from core import (
     hash_password,
     hash_reset_token,
     verify_password,
+    check_rate_limit,
 )
 
 router = APIRouter(prefix="/api", tags=["password"])
@@ -126,19 +127,11 @@ async def forgot_password(payload: ForgotPasswordIn, request: Request):
 
     Does NOT generate a reset token. Admin-triggered flow via
     `/api/users/{uid}/reset-password` is the only source of reset links.
-    Rate-limited to 5/15min per IP to slow down enumeration attempts.
     """
-    ip = _client_ip(request)
-    bucket = f"forgot:{ip}"
-    ok, retry_after = _check_rate_limit(bucket)
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many requests. Please wait a few minutes and try again.",
-            headers={"Retry-After": str(retry_after)},
-        )
+    email = payload.email.lower()
+    await check_rate_limit(request, "forgot_password", email=email)
     # Deliberately no DB write, no leak, no reset token. Log for auditing.
-    logger.info("FORGOT password request ip=%s email=%s", ip, payload.email.lower())
+    logger.info("FORGOT password request email=%s", email)
     return {"ok": True, "message": _GENERIC_FORGOT_MESSAGE}
 
 
@@ -171,15 +164,17 @@ async def _lookup_reset_token(raw: str) -> dict:
 
 
 @router.post("/public/reset-password/validate")
-async def validate_reset_token(payload: ResetTokenValidateIn):
+async def validate_reset_token(payload: ResetTokenValidateIn, request: Request):
     """Validate a reset token without consuming it — used by the reset page
     to show the associated email + enable the form."""
+    await check_rate_limit(request, "forgot_password")
     doc = await _lookup_reset_token(payload.token)
     return {"ok": True, "email": doc.get("email")}
 
 
 @router.post("/public/reset-password")
-async def complete_reset_password(payload: ResetPasswordCompleteIn):
+async def complete_reset_password(payload: ResetPasswordCompleteIn, request: Request):
+    await check_rate_limit(request, "forgot_password")
     doc = await _lookup_reset_token(payload.token)
     new_pw = (payload.new_password or "").strip()
     enforce_password_policy(new_pw)

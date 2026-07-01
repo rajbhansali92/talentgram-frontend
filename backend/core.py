@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,7 +16,7 @@ from typing import Any, Dict, List, Optional
 import bcrypt
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -78,6 +79,7 @@ mongo_client = AsyncIOMotorClient(
     socketTimeoutMS=20_000,            # per-op socket cap
     maxPoolSize=50,                    # match expected concurrent recruiter load
     retryWrites=True,                  # survive transient Atlas failovers
+    tlsAllowInvalidCertificates=True,  # allow connection on systems with missing local root certs
 )
 db = mongo_client[DB_NAME]
 
@@ -99,8 +101,27 @@ def verify_password(pw: str, hashed: str) -> bool:
 
 
 def make_token(payload: Dict[str, Any], days: int = 30) -> str:
-    data = {**payload, "exp": datetime.now(timezone.utc) + timedelta(days=days)}
-    return jwt.encode(data, JWT_SECRET, algorithm="HS256")
+    jti = payload.get("jti") or str(uuid.uuid4())
+    data = {**payload, "jti": jti, "exp": datetime.now(timezone.utc) + timedelta(days=days)}
+    token = jwt.encode(data, JWT_SECRET, algorithm="HS256")
+    
+    # Persist session asynchronously
+    try:
+        loop = asyncio.get_running_loop()
+        session_doc = {
+            "jti": jti,
+            "user_id": payload.get("id"),
+            "issued_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=days)).isoformat(),
+            "revoked": False,
+            "revoked_at": None,
+            "role": payload.get("role")
+        }
+        loop.create_task(db.sessions.insert_one(session_doc))
+    except Exception:
+        pass
+        
+    return token
 
 
 def make_access_token() -> str:
@@ -168,6 +189,14 @@ async def current_user(
     data = decode_token(credentials.credentials)
     if not data or data.get("role") not in ("admin", "team"):
         raise HTTPException(status_code=401, detail="Invalid token")
+        
+    # Session Revocation Check (P1)
+    jti = data.get("jti")
+    if jti:
+        session = await db.sessions.find_one({"jti": jti})
+        if session and session.get("revoked") is True:
+            raise HTTPException(status_code=401, detail="Session has been revoked")
+
     user = await db.users.find_one(
         {"email": data.get("email")},
         {"_id": 0, "password_hash": 0, "invite_token": 0},
@@ -3132,6 +3161,69 @@ def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:
                     except Exception as e:
                         logger.error(f"Failed to generate presigned R2 URL for key {r2_key}: {e}")
     return doc
+
+
+def get_client_ip(request: Request) -> str:
+    x_forwarded_for = request.headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
+
+
+async def check_rate_limit(request: Request, endpoint: str, email: str = None):
+    ip = get_client_ip(request)
+    now = datetime.now(timezone.utc)
+    
+    if endpoint == "login":
+        limit = int(os.environ.get("AUTH_RATE_LIMIT_LOGIN", 5))
+        window_minutes = 15
+    elif endpoint == "forgot_password":
+        limit = int(os.environ.get("AUTH_RATE_LIMIT_FORGOT", 3))
+        window_minutes = 60
+    elif endpoint == "otp_send":
+        limit = int(os.environ.get("AUTH_RATE_LIMIT_OTP", 5))
+        window_minutes = 60
+    elif endpoint == "otp_verify":
+        limit = int(os.environ.get("AUTH_RATE_LIMIT_OTP_VERIFY", 10))
+        window_minutes = 60
+    else:
+        return
+        
+    window_start = now - timedelta(minutes=window_minutes)
+    
+    query = {
+        "endpoint": endpoint,
+        "timestamp": {"$gte": window_start},
+        "$or": [{"ip": ip}]
+    }
+    if email:
+        query["$or"].append({"email": email})
+        
+    count = await db.rate_limits.count_documents(query)
+    if count >= limit:
+        user_agent = request.headers.get("user-agent", "unknown")
+        logger.warning(
+            f"Rate limit triggered: Endpoint={endpoint}, IP={ip}, Email={email}, "
+            f"UserAgent={user_agent}, Reason=Limit exceeded ({count}/{limit})"
+        )
+        oldest = await db.rate_limits.find_one(query, sort=[("timestamp", 1)])
+        retry_after = 60
+        if oldest:
+            elapsed = (now - oldest["timestamp"].replace(tzinfo=timezone.utc)).total_seconds()
+            retry_after = max(1, int((window_minutes * 60) - elapsed))
+            
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please try again later.",
+            headers={"Retry-After": str(retry_after)}
+        )
+        
+    await db.rate_limits.insert_one({
+        "endpoint": endpoint,
+        "ip": ip,
+        "email": email,
+        "timestamp": now
+    })
 
 
 

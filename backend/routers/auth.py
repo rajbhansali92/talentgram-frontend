@@ -22,6 +22,7 @@ from core import (
     _resolve_cover_url,
     compute_age,
     normalize_email,
+    check_rate_limit,
 )
 
 # Alias for readability inside login()
@@ -218,8 +219,9 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
 
 
 @router.post("/auth/login", response_model=TokenOut)
-async def login(payload: LoginIn):
+async def login(payload: LoginIn, request: Request):
     email = normalize_email(payload.email)
+    await check_rate_limit(request, "login", email=email)
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -639,6 +641,7 @@ async def send_otp(payload: OtpSendIn, request: Request):
     if not email:
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
 
+    await check_rate_limit(request, "otp_send", email=email)
     ip = get_client_ip(request)
     now = datetime.now(timezone.utc)
     one_hour_ago = now - timedelta(hours=1)
@@ -708,6 +711,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
     if not email or not otp:
         raise HTTPException(status_code=400, detail="Email and verification code are required.")
 
+    await check_rate_limit(request, "otp_verify", email=email)
     ip = get_client_ip(request)
     now = datetime.now(timezone.utc)
 
@@ -860,3 +864,56 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
         "email": email,
         "message": "Verification successful. Draft submission initialized."
     }
+
+
+from datetime import datetime, timezone
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+bearer_scheme = HTTPBearer(auto_error=False)
+
+@router.post("/auth/logout")
+async def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    from core import decode_token, db
+    data = decode_token(credentials.credentials)
+    if not data or not data.get("jti"):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    jti = data["jti"]
+    await db.sessions.update_one(
+        {"jti": jti},
+        {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"ok": True, "message": "Successfully logged out"}
+
+
+@router.post("/auth/logout-all")
+async def logout_all(user: dict = Depends(current_user)):
+    user_id = user["id"]
+    await db.sessions.update_many(
+        {"user_id": user_id, "revoked": False},
+        {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"ok": True, "message": "Successfully logged out from all devices"}
+
+
+@router.get("/admin/sessions")
+async def list_admin_sessions(user: dict = Depends(current_user)):
+    user_id = user["id"]
+    cursor = db.sessions.find({"user_id": user_id}).sort("issued_at", -1)
+    sessions = await cursor.to_list(length=100)
+    for s in sessions:
+        s["_id"] = str(s["_id"])
+    return sessions
+
+
+@router.post("/admin/sessions/{jti}/revoke")
+async def revoke_session(jti: str, user: dict = Depends(current_user)):
+    user_id = user["id"]
+    res = await db.sessions.update_one(
+        {"jti": jti, "user_id": user_id},
+        {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+    return {"ok": True, "message": "Session successfully revoked"}

@@ -36,13 +36,22 @@ import {
     Lock,
     ClipboardCheck,
     Copy,
-    Send,
     CheckSquare,
 } from "lucide-react";
 import { shareMediaViaWhatsApp } from "@/lib/mediaShare";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
 // parseStoredWorkLink and WorkLinksDisplay are imported from @/components/WorkLinksDisplay.
+
+// Official WhatsApp glyph, rendered MONOCHROME (currentColor) to match
+// Talentgram's black/white design language — deliberately not the brand green.
+function WhatsAppGlyph({ className = "w-4 h-4" }) {
+    return (
+        <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true" focusable="false">
+            <path d="M.057 24l1.687-6.163a11.867 11.867 0 01-1.587-5.945C.16 5.335 5.495 0 12.05 0a11.817 11.817 0 018.413 3.488 11.824 11.824 0 013.48 8.414c-.003 6.557-5.338 11.892-11.893 11.892a11.9 11.9 0 01-5.688-1.448L.057 24zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884a9.86 9.86 0 001.51 5.26l-.999 3.648 3.978-1.042zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.767.967-.94 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.71.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
+        </svg>
+    );
+}
 
 /**
  * Client-facing privacy helper — collapses the talent's full name to
@@ -1784,13 +1793,25 @@ function TalentDetail({
     }, []);
 
     // Ordered, visibility-aware list of every shareable media item.
+    // `caption` is the human line placed under the talent/project header in the
+    // WhatsApp message; the take name is used exactly as stored.
     const shareableMedia = useMemo(() => {
         const out = [];
-        if (vis.intro_video && intro) out.push({ m: intro, label: "Introduction", type: "video" });
+        if (vis.intro_video && intro)
+            out.push({ m: intro, label: "Introduction", caption: "Introduction Video", type: "video" });
         if (vis.takes !== false) {
-            takes.forEach((t, i) => out.push({ m: t, label: t.label || `Audition Take ${i + 1}`, type: "video" }));
+            takes.forEach((t, i) =>
+                out.push({
+                    m: t,
+                    label: t.label || `Audition Take ${i + 1}`,
+                    caption: `Audition Take: ${t.label || `Take ${i + 1}`}`,
+                    type: "video",
+                }),
+            );
         }
-        images.forEach((m, i) => out.push({ m, label: `Portfolio Image ${i + 1}`, type: "image" }));
+        images.forEach((m, i) =>
+            out.push({ m, label: `Portfolio Image ${i + 1}`, caption: `Portfolio Image ${i + 1}`, type: "image" }),
+        );
         return out;
     }, [intro, takes, images, vis.intro_video, vis.takes]);
 
@@ -1812,7 +1833,7 @@ function TalentDetail({
         setShareSel(new Set());
     }, []);
 
-    // entries: [{ m, label, type }]
+    // entries: [{ m, label, caption, type }]
     const runShare = useCallback(async (entries) => {
         if (sharing || !entries || entries.length === 0) return;
         setSharing(true);
@@ -1823,12 +1844,20 @@ function TalentDetail({
                 const filename = m.original_filename || `${privatizeName(talent.name)} - ${label}`;
                 return { id: m.id, name: label, type, fileUrl, filename };
             });
+            // Caption: "<Talent> — <Project>" then a blank line then each media
+            // line. Project name is read dynamically from the link; nothing is
+            // hardcoded.
+            const projectName = (link.brand_name || link.title || "").trim();
+            const header = projectName
+                ? `${privatizeName(talent.name)} — ${projectName}`
+                : privatizeName(talent.name);
+            const caption = `${header}\n\n${entries.map((e) => e.caption || e.label).join("\n")}`;
             const res = await shareMediaViaWhatsApp({
                 slug,
                 talentId: talent.id,
                 talentName: privatizeName(talent.name),
                 items,
-                // (trace captured below for the on-device diagnostic panel)
+                caption,
                 // INTENTIONAL: the Download permission also governs whether the
                 // ORIGINAL file may leave Talentgram. When downloads are off we
                 // share secure links only (mobile + desktop) — never raw files —
@@ -1843,6 +1872,9 @@ function TalentDetail({
             }
             if (res?.method === "native_file_share") {
                 toast.success(`Sharing ${res.count} file${res.count === 1 ? "" : "s"} — choose WhatsApp…`);
+            } else if (res?.method === "share_blocked") {
+                // iOS transient rejection after retry — plain, non-technical.
+                toast.error("Couldn't open the share sheet. Please tap Send again.");
             } else if (res?.method === "whatsapp_link_share") {
                 toast.success(
                     res.via === "native_sheet"
@@ -1853,20 +1885,25 @@ function TalentDetail({
                     toast(`Files not attached: ${res.reason}`, { duration: 8000 });
                 }
             }
-            if (res && !res.aborted) exitShareMode();
+            // Keep selection when the sheet was blocked so a second tap works.
+            if (res && !res.aborted && res.method !== "share_blocked") exitShareMode();
         } catch (e) {
             console.error("share failed", e);
             toast.error("Couldn't share this media. Please try again.");
         } finally {
             setSharing(false);
         }
-    }, [sharing, slug, talent.id, talent.name, vis.download, exitShareMode]);
+    }, [sharing, slug, talent.id, talent.name, link.brand_name, link.title, vis.download, exitShareMode]);
 
     const shareOne = useCallback((m) => {
+        // Use the precomputed entry (with its caption) so single-item shares get
+        // the same "Introduction Video" / "Audition Take: …" caption line.
+        const entry = shareableMedia.find((s) => s.m.id === m.id);
+        if (entry) { runShare([entry]); return; }
         const label = shareLabelById[m.id] || "Media";
         const type = (m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take")) ? "video" : "image";
-        runShare([{ m, label, type }]);
-    }, [runShare, shareLabelById]);
+        runShare([{ m, label, caption: label, type }]);
+    }, [runShare, shareableMedia, shareLabelById]);
 
     const shareSelected = useCallback(() => {
         const entries = shareableMedia.filter((s) => shareSel.has(s.m.id));
@@ -2295,9 +2332,9 @@ function TalentDetail({
                 title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
                 aria-label="Send via WhatsApp"
                 data-testid={testid}
-                className="w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-9 h-9 bg-white/90 border border-black/[0.06] hover:bg-white rounded-full flex items-center justify-center transition-colors duration-150 shadow-sm text-[#111111] disabled:opacity-50 disabled:cursor-not-allowed"
             >
-                <Send className="w-4 h-4 text-emerald-600" />
+                <WhatsAppGlyph className="w-4 h-4" />
             </button>
         ) : null;
 
@@ -3000,9 +3037,9 @@ function TalentDetail({
                                 disabled={shareSel.size === 0 || sharing}
                                 title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
                                 data-testid="share-send-selected-btn"
-                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#111111] hover:bg-black text-white text-xs font-semibold transition-colors min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                                {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <WhatsAppGlyph className="w-4 h-4" />}
                                 Send via WhatsApp{shareSel.size > 0 ? ` (${shareSel.size})` : ""}
                             </button>
                         </div>

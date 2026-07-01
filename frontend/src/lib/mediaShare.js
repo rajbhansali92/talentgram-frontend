@@ -185,6 +185,7 @@ export async function shareMediaViaWhatsApp({
     items,
     allowFiles = true,
     sessionId,
+    caption,
 }) {
     if (!items || items.length === 0) return { aborted: true };
 
@@ -280,24 +281,45 @@ export async function shareMediaViaWhatsApp({
             const canFiles = hasCanShare ? canShareFiles(goodFiles) : false;
             trace.q3_canShareFiles = canFiles;
             const shareMeta = items.map((it) => ({ id: it.id, type: it.type, name: it.name }));
-            const baseData = {
-                title: `${talentName} — Talentgram`,
-                text: `${talentName} · Shared via Talentgram`,
+            const text = caption || `${talentName} · Shared via Talentgram`;
+            const shareData = {
+                files: goodFiles,
+                title: text.split("\n")[0],
+                text,
             };
             if (canFiles) {
-                try {
-                    await navigator.share({ ...baseData, files: goodFiles });
-                    trace.q8_path = "Native File Share";
-                    await logDispatch(slug, talentId, "native_file_share", goodFiles.length, shareMeta, sessionId);
-                    return emit({ method: "native_file_share", count: goodFiles.length });
-                } catch (e) {
-                    if (e && e.name === "AbortError") {
-                        trace.q8_path = "Native File Share (cancelled)";
-                        trace.q9_reason = "user cancelled the share sheet";
-                        return emit({ aborted: true });
+                // iOS Safari intermittently throws NotAllowedError on the first
+                // attempt even though an immediate retry succeeds. Retry once
+                // before giving up, and NEVER surface the raw exception.
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    try {
+                        await navigator.share(shareData);
+                        trace.q8_path = attempt === 1 ? "Native File Share" : "Native File Share (retry)";
+                        await logDispatch(slug, talentId, "native_file_share", goodFiles.length, shareMeta, sessionId);
+                        return emit({ method: "native_file_share", count: goodFiles.length });
+                    } catch (e) {
+                        if (e && e.name === "AbortError") {
+                            trace.q8_path = "Native File Share (cancelled)";
+                            trace.q9_reason = "user cancelled the share sheet";
+                            return emit({ aborted: true });
+                        }
+                        if (e && e.name === "NotAllowedError" && attempt === 1) {
+                            trace.q9_reason = "share sheet NotAllowedError (retrying once)";
+                            continue; // retry immediately
+                        }
+                        if (e && e.name === "NotAllowedError") {
+                            // Still blocked after the retry — ask the user to tap
+                            // Send again (a manual second tap attaches the files).
+                            // Do NOT fall back to links here.
+                            trace.q8_path = "Share sheet blocked (retry failed)";
+                            trace.q9_reason = "share sheet blocked by the browser after retry";
+                            return emit({ method: "share_blocked" });
+                        }
+                        // Any other error → fall through to the secure-link path.
+                        trace.q8_path = "Link Fallback";
+                        trace.q9_reason = `navigator.share({files}) threw: ${e?.name}: ${e?.message || ""}`.trim();
+                        break;
                     }
-                    trace.q8_path = "Link Fallback";
-                    trace.q9_reason = `navigator.share({files}) threw: ${e?.name}: ${e?.message || ""}`.trim();
                 }
             } else {
                 trace.q8_path = "Link Fallback";

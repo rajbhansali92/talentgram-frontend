@@ -11,9 +11,36 @@ from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 import cloudinary.api
 import cloudinary.uploader
-from core import current_team_or_admin, require_role, db, log_storage_action, cloudinary_destroy, cleanup_media_storage, get_r2_client, R2_BUCKET_NAME, _now, remove_synced_media_from_global_talent
+from core import (
+    current_team_or_admin,
+    require_role,
+    db,
+    log_storage_action,
+    cloudinary_destroy,
+    cleanup_media_storage,
+    get_r2_client,
+    R2_BUCKET_NAME,
+    _now,
+    remove_synced_media_from_global_talent,
+    check_cloudinary_health,
+    check_r2_health
+)
 
 router = APIRouter(prefix="/api/admin/cloudinary", tags=["cloudinary-admin"])
+
+async def assert_providers_healthy():
+    cld_ok = await check_cloudinary_health()
+    if not cld_ok:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage cleanup aborted. Cloudinary is currently unreachable. No changes have been made."
+        )
+    r2_ok = await check_r2_health()
+    if not r2_ok:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage cleanup aborted. Cloudflare R2 is currently unreachable. No changes have been made."
+        )
 logger = logging.getLogger(__name__)
 
 # Quotas and defaults (in bytes)
@@ -323,6 +350,7 @@ async def restore_project(project_id: str, admin: dict = Depends(require_role("a
 @router.delete("/projects/{project_id}/auditions")
 async def delete_project_audition_videos(project_id: str, admin: dict = Depends(require_role("admin"))):
     """Delete all audition videos for a project (remove objects from R2/Cloudinary and database references)."""
+    await assert_providers_healthy()
     # 1. Fetch all submissions for the project
     submissions = await db.submissions.find({"project_id": project_id}).to_list(length=10000)
     deleted_count = 0
@@ -348,6 +376,7 @@ async def delete_project_audition_videos(project_id: str, admin: dict = Depends(
 @router.delete("/projects/{project_id}/voice-notes")
 async def delete_project_voice_notes(project_id: str, admin: dict = Depends(require_role("admin"))):
     """Delete all voice-note feedback for a project (remove stored recordings and associated database records)."""
+    await assert_providers_healthy()
     # 1. Fetch voice notes feedback
     feedbacks = await db.feedback.find({"project_id": project_id, "type": "voice"}).to_list(length=10000)
     deleted_count = 0
@@ -375,6 +404,7 @@ async def delete_project_voice_notes(project_id: str, admin: dict = Depends(requ
 @router.delete("/projects/{project_id}")
 async def delete_project_assets(project_id: str, admin: dict = Depends(require_role("admin"))):
     """Removes the entire project folder and all sub-audition assets and voice notes, updating project status to purged."""
+    await assert_providers_healthy()
     # 1. Delete audition videos and voice notes
     await delete_project_audition_videos(project_id, admin)
     await delete_project_voice_notes(project_id, admin)
@@ -543,6 +573,7 @@ async def get_storage_health(admin: dict = Depends(require_role("admin"))):
 @router.post("/health/cleanup")
 async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
     """One-click repair and cleanup action for storage health violations."""
+    await assert_providers_healthy()
     
     # 1. Fetch physical items
     r2_physical = await run_in_threadpool(list_r2_physical_objects_sync)
@@ -630,13 +661,15 @@ async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
                 "category": doc.get("category"),
                 "provider": "r2" if pid.startswith("raw-uploads/") else "cloudinary"
             }
-            await cleanup_media_storage(wrapper, scope="submission", parent_id=doc.get("submission_id"))
+            op_id = str(uuid.uuid4())
+            await cleanup_media_storage(wrapper, scope="submission", parent_id=doc.get("submission_id"), operation_id=op_id)
             cleaned_unused += 1
 
     await log_storage_action(
         user_id=admin.get("id"),
         action_type="HEALTH_CLEANUP",
-        details=f"Cleaned {cleaned_orphaned} orphaned files, {cleaned_broken} broken references, {cleaned_unused} unused files."
+        details=f"Cleaned {cleaned_orphaned} orphaned files, {cleaned_broken} broken references, {cleaned_unused} unused files.",
+        operation_id=str(uuid.uuid4())
     )
 
     return {

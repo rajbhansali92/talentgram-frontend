@@ -630,13 +630,37 @@ def cloudinary_upload(
     }
 
 
+async def check_cloudinary_health() -> bool:
+    try:
+        from fastapi.concurrency import run_in_threadpool
+        import cloudinary.api
+        res = await run_in_threadpool(cloudinary.api.ping)
+        return res.get("status") == "ok"
+    except Exception as e:
+        logger.warning(f"Cloudinary health check ping failed: {e}")
+        return False
+
+
+async def check_r2_health() -> bool:
+    try:
+        from fastapi.concurrency import run_in_threadpool
+        s3 = get_r2_client()
+        await run_in_threadpool(s3.head_bucket, Bucket=R2_BUCKET_NAME)
+        return True
+    except Exception as e:
+        logger.warning(f"R2 health check head_bucket failed: {e}")
+        return False
+
+
 async def log_storage_action(
     user_id: Optional[str],
     action_type: str, # 'UPLOAD', 'ARCHIVE', 'RESTORE', 'DELETE'
     public_id: Optional[str] = None,
     project_id: Optional[str] = None,
     talent_id: Optional[str] = None,
-    submission_id: Optional[str] = None
+    submission_id: Optional[str] = None,
+    details: Optional[str] = None,
+    operation_id: Optional[str] = None,
 ):
     doc = {
         "user_id": user_id,
@@ -645,9 +669,12 @@ async def log_storage_action(
         "public_id": public_id,
         "project_id": project_id,
         "talent_id": talent_id,
-        "submission_id": submission_id
+        "submission_id": submission_id,
+        "details": details,
+        "operation_id": operation_id or str(uuid.uuid4()),
     }
     await db.storage_audit_log.insert_one(doc)
+
 
 
 async def upload_and_track_asset(
@@ -661,7 +688,14 @@ async def upload_and_track_asset(
     submission_id: Optional[str] = None,
     user_id: Optional[str] = None,
     keep_original: bool = True,
+    operation_id: Optional[str] = None,
 ) -> dict:
+    start_time = datetime.now(timezone.utc)
+    op_id = operation_id or str(uuid.uuid4())
+    logger.info(
+        f"Operation UPLOAD Started | OpID: {op_id} | TalentID: {talent_id} | "
+        f"SubmissionID: {submission_id} | ProjectID: {project_id} | AssetType: {asset_type}"
+    )
     # Lookup talent name if not provided
     if not talent_name and talent_id:
         talent_doc = await db.talents.find_one({"id": talent_id})
@@ -717,7 +751,8 @@ async def upload_and_track_asset(
         "height": None,
         "duration": None,
         "mime_type": content_type,
-        "resource_type": resource_type
+        "resource_type": resource_type,
+        "operation_id": op_id
     }
     await db.asset_metadata.update_one(
         {"public_id": public_id_to_store},
@@ -839,11 +874,19 @@ async def upload_and_track_asset(
             "width": result.get("width"),
             "height": result.get("height"),
             "duration": result.get("duration"),
-            "updated_at": datetime.now(timezone.utc)
+            "updated_at": datetime.now(timezone.utc),
+            "operation_id": op_id
         }
         await db.asset_metadata.update_one(
             {"public_id": result["public_id"]},
             {"$set": final_metadata}
+        )
+
+        duration_sec = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.info(
+            f"Operation UPLOAD Succeeded | OpID: {op_id} | TalentID: {talent_id} | "
+            f"SubmissionID: {submission_id} | ProjectID: {project_id} | AssetType: {asset_type} | "
+            f"NewAssetID: {result.get('asset_id')} | Duration: {duration_sec}s"
         )
 
         await log_storage_action(
@@ -852,22 +895,31 @@ async def upload_and_track_asset(
             public_id=result["public_id"],
             project_id=project_id,
             talent_id=talent_id,
-            submission_id=submission_id
+            submission_id=submission_id,
+            operation_id=op_id
         )
 
         return result
     except Exception as e:
+        duration_sec = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.error(
+            f"Operation UPLOAD Failed | OpID: {op_id} | TalentID: {talent_id} | "
+            f"SubmissionID: {submission_id} | ProjectID: {project_id} | AssetType: {asset_type} | "
+            f"Reason: {str(e)} | Duration: {duration_sec}s"
+        )
         await db.asset_metadata.update_one(
             {"public_id": public_id_to_store},
             {
                 "$set": {
                     "upload_status": "failed",
                     "error_reason": str(e),
-                    "updated_at": datetime.now(timezone.utc)
+                    "updated_at": datetime.now(timezone.utc),
+                    "operation_id": op_id
                 }
             }
         )
         raise
+
 
 
 def cloudinary_destroy(public_id: str, resource_type: str = "image") -> bool:
@@ -2672,10 +2724,9 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
         mirror["source_submission_id"] = submission.get("id")
         mirror["source_submission_media_id"] = source_id
 
+    prev_videos = []
     if mapped_cat == "video":
         prev_videos = [m for m in (talent.get("media") or []) if m.get("category") == "video"]
-        for pv in prev_videos:
-            await cleanup_media_storage(pv, scope="talent", parent_id=talent["id"])
         await db.talents.update_one(
             {"id": talent["id"]},
             {"$pull": {"media": {"category": "video"}}}
@@ -2685,6 +2736,11 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
         {"id": talent["id"]},
         {"$push": {"media": mirror}, "$set": {"updated_at": _now()}},
     )
+
+    if mapped_cat == "video" and prev_videos:
+        for pv in prev_videos:
+            op_id = media.get("operation_id") or str(uuid.uuid4())
+            await cleanup_media_storage(pv, scope="talent", parent_id=talent["id"], operation_id=op_id)
     if not skip_cover_cache:
         await update_talent_cover_cache(talent["id"])
 
@@ -2890,7 +2946,7 @@ def generate_r2_presigned_url(key: str, method: str = "PUT", expiry: int = 3600)
     )
 
 
-async def cleanup_media_storage(media: dict, scope: Optional[str] = None, parent_id: Optional[str] = None) -> None:
+async def cleanup_media_storage(media: dict, scope: Optional[str] = None, parent_id: Optional[str] = None, operation_id: Optional[str] = None) -> None:
     """Best-effort deletion of a single media item's backing storage objects and
     its tracking row. Shared by submission + application media-delete paths.
 
@@ -2909,6 +2965,8 @@ async def cleanup_media_storage(media: dict, scope: Optional[str] = None, parent
     """
     if not media:
         return
+    start_time = datetime.now(timezone.utc)
+    op_id = operation_id or str(uuid.uuid4())
     public_id = media.get("public_id")
     rtype = media.get("resource_type") or ("video" if media.get("category") in {"intro_video", "take", "take_1", "take_2", "take_3", "video", "portfolio_video"} else "image")
     category = media.get("category")
@@ -2918,53 +2976,75 @@ async def cleanup_media_storage(media: dict, scope: Optional[str] = None, parent
     scope = scope or media.get("scope")
     parent_id = parent_id or media.get("submission_id") or media.get("application_id")
 
-    # 1) Cloudflare Stream video — delete by its exact UID.
-    if stream_uid:
-        try:
-            account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-            token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
-            if account_id and token:
-                import httpx
-                async with httpx.AsyncClient(timeout=15.0) as _c:
-                    await _c.delete(
-                        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/stream/{stream_uid}",
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-        except Exception as e:
-            logger.warning(f"[cleanup] Stream delete failed uid={stream_uid}: {e}")
+    logger.info(
+        f"Operation DELETE Started | OpID: {op_id} | TalentID: {media.get('talent_id')} | "
+        f"SubmissionID: {media.get('submission_id')} | ProjectID: {media.get('project_id')} | "
+        f"AssetType: {category or rtype} | OldAssetID: {media.get('id')}"
+    )
 
-    # 2) R2 raw upload — only videos go through R2; key is deterministic + scoped.
-    if rtype == "video" and scope and parent_id and public_id:
-        leaf = public_id.split("/")[-1]
-        r2_key = f"raw-uploads/{scope}s/{parent_id}/{category}/{leaf}.mp4"
-        try:
-            get_r2_client().delete_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
-        except Exception as e:
-            logger.warning(f"[cleanup] R2 delete failed key={r2_key}: {e}")
-        try:
-            await db.asset_metadata.delete_many({"public_id": r2_key})
-        except Exception as e:
-            logger.warning(f"[cleanup] asset_metadata(r2) delete failed key={r2_key}: {e}")
+    try:
+        # 1) Cloudflare Stream video — delete by its exact UID.
+        if stream_uid:
+            try:
+                account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+                token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
+                if account_id and token:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=15.0) as _c:
+                        await _c.delete(
+                            f"https://api.cloudflare.com/client/v4/accounts/{account_id}/stream/{stream_uid}",
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+            except Exception as e:
+                logger.warning(f"[cleanup] Stream delete failed uid={stream_uid}: {e}")
 
-    # 3) Cloudinary asset — images, and legacy Cloudinary-hosted videos. Stream
-    #    videos live on cloudflarestream and must NOT be sent to Cloudinary.
-    is_cloudinary = (
-        provider == "cloudinary"
-        or rtype == "image"
-        or "res.cloudinary.com" in url
-    ) and provider != "stream" and "cloudflarestream.com" not in url
-    if public_id and is_cloudinary:
-        try:
-            cloudinary.uploader.destroy(public_id, resource_type=rtype, invalidate=True)
-        except Exception as e:
-            logger.warning(f"[cleanup] Cloudinary destroy failed pid={public_id}: {e}")
+        # 2) R2 raw upload — only videos go through R2; key is deterministic + scoped.
+        if rtype == "video" and scope and parent_id and public_id:
+            leaf = public_id.split("/")[-1]
+            r2_key = f"raw-uploads/{scope}s/{parent_id}/{category}/{leaf}.mp4"
+            try:
+                get_r2_client().delete_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
+            except Exception as e:
+                logger.warning(f"[cleanup] R2 delete failed key={r2_key}: {e}")
+            try:
+                await db.asset_metadata.delete_many({"public_id": r2_key})
+            except Exception as e:
+                logger.warning(f"[cleanup] asset_metadata(r2) delete failed key={r2_key}: {e}")
 
-    # 4) Tracking row keyed by the media public_id.
-    if public_id:
-        try:
-            await db.asset_metadata.delete_many({"public_id": public_id})
-        except Exception as e:
-            logger.warning(f"[cleanup] asset_metadata delete failed pid={public_id}: {e}")
+        # 3) Cloudinary asset — images, and legacy Cloudinary-hosted videos. Stream
+        #    videos live on cloudflarestream and must NOT be sent to Cloudinary.
+        is_cloudinary = (
+            provider == "cloudinary"
+            or rtype == "image"
+            or "res.cloudinary.com" in url
+        ) and provider != "stream" and "cloudflarestream.com" not in url
+        if public_id and is_cloudinary:
+            try:
+                cloudinary.uploader.destroy(public_id, resource_type=rtype, invalidate=True)
+            except Exception as e:
+                logger.warning(f"[cleanup] Cloudinary destroy failed pid={public_id}: {e}")
+
+        # 4) Tracking row keyed by the media public_id.
+        if public_id:
+            try:
+                await db.asset_metadata.delete_many({"public_id": public_id})
+            except Exception as e:
+                logger.warning(f"[cleanup] asset_metadata delete failed pid={public_id}: {e}")
+
+        duration_sec = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.info(
+            f"Operation DELETE Succeeded | OpID: {op_id} | TalentID: {media.get('talent_id')} | "
+            f"SubmissionID: {media.get('submission_id')} | ProjectID: {media.get('project_id')} | "
+            f"AssetType: {category or rtype} | OldAssetID: {media.get('id')} | Duration: {duration_sec}s"
+        )
+    except Exception as e:
+        duration_sec = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.error(
+            f"Operation DELETE Failed | OpID: {op_id} | TalentID: {media.get('talent_id')} | "
+            f"SubmissionID: {media.get('submission_id')} | ProjectID: {media.get('project_id')} | "
+            f"AssetType: {category or rtype} | OldAssetID: {media.get('id')} | Reason: {str(e)} | Duration: {duration_sec}s"
+        )
+
 
 
 async def trigger_cloudinary_transcode(
@@ -2977,13 +3057,14 @@ async def trigger_cloudinary_transcode(
     parent_id: str = None,
     category: str = None,
     label: str = None,
+    operation_id: str = None,
 ):
     """
     Abstractions wrapper that delegates video processing to the active VideoProvider.
     """
     from providers import get_video_provider
     provider = get_video_provider()
-    logger.info(f"[VideoProvider] Delegating transcode to {provider.__class__.__name__} for media_id={media_id}")
+    logger.info(f"[VideoProvider] Delegating transcode to {provider.__class__.__name__} for media_id={media_id} | OpID: {operation_id}")
     
     res = await provider.create_processing_job(
         parent_id=parent_id,
@@ -2994,7 +3075,8 @@ async def trigger_cloudinary_transcode(
         folder=folder,
         public_id=public_id,
         label=label,
-        eager_transformation=eager_transformation
+        eager_transformation=eager_transformation,
+        operation_id=operation_id
     )
     logger.info(f"[VideoProvider] Result: {res}")
 

@@ -644,17 +644,12 @@ async def submission_upload(
 
     # Single-slot replacement: intro video + legacy fixed takes
     single_slot = {"intro_video", "take_1", "take_2", "take_3"}
+    operation_id = str(uuid.uuid4())
+    prev_items = []
     if category in single_slot:
         old_sub = await db.submissions.find_one({"id": sid}, {"media": 1})
         if old_sub and "media" in old_sub:
             prev_items = [m for m in old_sub["media"] if m.get("category") == category]
-            for pi in prev_items:
-                from core import cleanup_media_storage, remove_synced_media_from_global_talent
-                await cleanup_media_storage(pi, scope="submission", parent_id=sid)
-                await remove_synced_media_from_global_talent(sub, pi["id"])
-        await db.submissions.update_one(
-            {"id": sid}, {"$pull": {"media": {"category": category}}}
-        )
 
     media_id = str(uuid.uuid4())
     folder = f"{APP_NAME}/submissions/{sid}"
@@ -734,6 +729,7 @@ async def submission_upload(
         project_id=sub.get("project_id"),
         submission_id=sid,
         keep_original=keep_orig,
+        operation_id=operation_id,
     )
     is_video = rt == "video"
     is_image = rt == "image"
@@ -756,6 +752,12 @@ async def submission_upload(
     }
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
+
+    if category in single_slot:
+        await db.submissions.update_one(
+            {"id": sid},
+            {"$pull": {"media": {"category": category}}}
+        )
 
     patch: Dict[str, Any] = {"$push": {"media": media}}
     # Re-upload after finalize flips status back to "updated" and decision → pending
@@ -817,6 +819,13 @@ async def submission_upload(
     # via source_submission_media_id; no-op for intro_video/take.
     # ------------------------------------------------------------------
     await sync_media_to_global_talent(updated, media)
+
+    if category in single_slot and prev_items:
+        # Defer old asset deletion until database update is verified
+        for pi in prev_items:
+            from core import cleanup_media_storage, remove_synced_media_from_global_talent
+            await cleanup_media_storage(pi, scope="submission", parent_id=sid, operation_id=operation_id)
+            await remove_synced_media_from_global_talent(sub, pi["id"])
 
     return updated
 
@@ -1478,15 +1487,9 @@ async def video_complete(
         if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
             media["label"] = (payload.label or "").strip() or "Take"
 
-        # Single-slot replacement for intro_video
+        # Single-slot replacement for intro_video: Defer physical deletion until transcode webhook completes
+        operation_id = str(uuid.uuid4())
         if category == "intro_video":
-            old_sub = await db.submissions.find_one({"id": sid}, {"media": 1})
-            if old_sub and "media" in old_sub:
-                prev_items = [m for m in old_sub["media"] if m.get("category") == "intro_video"]
-                for pi in prev_items:
-                    from core import cleanup_media_storage, remove_synced_media_from_global_talent
-                    await cleanup_media_storage(pi, scope="submission", parent_id=sid)
-                    await remove_synced_media_from_global_talent(sub, pi["id"])
             await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"category": "intro_video"}}})
 
         await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
@@ -1495,7 +1498,7 @@ async def video_complete(
         try:
             await db.asset_metadata.update_one(
                 {"public_id": public_id},
-                {"$set": {"upload_status": "processing", "updated_at": datetime.now(timezone.utc)}},
+                {"$set": {"upload_status": "processing", "updated_at": datetime.now(timezone.utc), "operation_id": operation_id}},
             )
         except Exception as e:
             logger.warning(f"video-complete R2: asset_metadata update failed: {e}")
@@ -1512,6 +1515,7 @@ async def video_complete(
             parent_id=sid,
             category=category,
             label=payload.label if category == "take" else None,
+            operation_id=operation_id,
         )
 
         return {"ok": True, "media": media}

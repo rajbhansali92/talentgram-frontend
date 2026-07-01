@@ -21,7 +21,8 @@ class VideoProvider:
         folder: str,
         public_id: str,
         label: str = None,
-        eager_transformation: str = None
+        eager_transformation: str = None,
+        operation_id: str = None,
     ) -> dict:
         raise NotImplementedError()
 
@@ -40,7 +41,8 @@ class CloudinaryProvider(VideoProvider):
         folder: str,
         public_id: str,
         label: str = None,
-        eager_transformation: str = None
+        eager_transformation: str = None,
+        operation_id: str = None,
     ) -> dict:
         backend_url = os.environ.get("REACT_APP_BACKEND_URL", "").strip().rstrip("/")
         if not backend_url:
@@ -69,10 +71,12 @@ class CloudinaryProvider(VideoProvider):
         ]
         if label:
             tags.append(f"label={label}")
+        if operation_id:
+            tags.append(f"operation_id={operation_id}")
         options["tags"] = ",".join(tags)
 
         try:
-            logger.info(f"[CloudinaryProvider] Triggering fetch for media_id={media_id}")
+            logger.info(f"[CloudinaryProvider] Triggering fetch for media_id={media_id} | OpID: {operation_id}")
             res = cloudinary.uploader.upload(r2_url, **options)
             return {"ok": True, "provider_data": res}
         except Exception as e:
@@ -91,7 +95,8 @@ class CloudflareStreamProvider(VideoProvider):
         folder: str,
         public_id: str,
         label: str = None,
-        eager_transformation: str = None
+        eager_transformation: str = None,
+        operation_id: str = None,
     ) -> dict:
         account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
         api_token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
@@ -125,12 +130,13 @@ class CloudflareStreamProvider(VideoProvider):
                 "parent_id": parent_id,
                 "scope": scope,
                 "category": category,
-                "label": label or ""
+                "label": label or "",
+                "operation_id": operation_id or ""
             }
         }
 
         try:
-            logger.info(f"[CloudflareStreamProvider] Triggering copy API for media_id={media_id}")
+            logger.info(f"[CloudflareStreamProvider] Triggering copy API for media_id={media_id} | OpID: {operation_id}")
             async with httpx.AsyncClient(timeout=30.0) as client:
                 res = await client.post(copy_url, json=payload, headers=headers)
                 if res.status_code >= 200 and res.status_code < 300:

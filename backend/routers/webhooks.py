@@ -148,6 +148,22 @@ async def cloudinary_webhook(
             except Exception as e:
                 logger.warning(f"Cloudinary Webhook: asset_metadata update failed: {e}")
 
+            if category == "intro_video":
+                # Find and clean up previous intro videos deferred from replacement
+                sub_doc = await db.submissions.find_one({"id": parent_id}, {"media": 1})
+                if sub_doc and "media" in sub_doc:
+                    prev_items = [m for m in sub_doc.get("media", []) if m.get("category") == "intro_video" and m.get("id") != media_id]
+                    if prev_items:
+                        await db.submissions.update_one(
+                            {"id": parent_id},
+                            {"$pull": {"media": {"id": {"$in": [pi["id"] for pi in prev_items]}}}}
+                        )
+                        for pi in prev_items:
+                            from core import cleanup_media_storage, remove_synced_media_from_global_talent
+                            op_id = tags.get("operation_id") or str(uuid.uuid4())
+                            await cleanup_media_storage(pi, scope="submission", parent_id=parent_id, operation_id=op_id)
+                            await remove_synced_media_from_global_talent(sub_doc, pi["id"])
+
     elif scope == "application":
         if is_failed:
             logger.warning(f"Cloudinary Webhook: reporting failure for application={parent_id}, media_id={media_id}: {failure_reason}")

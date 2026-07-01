@@ -54,6 +54,7 @@ from core import (
     decode_viewer,
     enrich_talent,
     make_token,
+    map_link_visibility_to_submission,
     sign_r2_media_if_needed,
 )
 
@@ -642,19 +643,6 @@ def build_project_shoot_dates(projects: List[dict], avail_visible: bool) -> List
             })
     return out
 
-
-def map_link_visibility_to_submission(link_vis: dict) -> dict:
-    mapped = {}
-    for k in ["age", "height", "location", "ethnicity", "availability", "budget", "work_links", "intro_video", "takes", "portfolio", "download"]:
-        if k in link_vis:
-            mapped[k] = link_vis[k]
-    if "instagram" in link_vis:
-        mapped["instagram_handle"] = link_vis["instagram"]
-    if "instagram_followers" in link_vis:
-        mapped["instagram_followers"] = link_vis["instagram_followers"]
-    return mapped
-
-
 def submission_client_visibility(sub: Optional[dict], project_defaults: Optional[dict] = None) -> Dict[str, bool]:
     """Per-submission client visibility map fed to _filter_talent_for_client.
 
@@ -792,15 +780,10 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
 
     for s in raw_subs:
         # PROJECT SHOWCASE & SUBMISSION/AUDITION LINK: visibility_source = submission_review_settings
-        # Structurally reads ONLY from the submission's own field_visibility (plus default fields if absent).
-        # We do NOT read any settings from Link Visibility Controls (visibility).
+        # Compile using project defaults + talent overrides.
         s_project = project_meta_by_id.get(s.get("project_id") or "")
-        shape = _submission_to_client_shape(s, project=s_project)
-        
-        # Strict per-submission visibility — shared single source of truth.
-        mapped_defaults = map_link_visibility_to_submission(visibility)
-        sub_review_vis = submission_client_visibility(s, mapped_defaults)
-        talents.append(_filter_talent_for_client(shape, sub_review_vis))
+        shape = _submission_to_client_shape(s, project=s_project, project_defaults=visibility)
+        talents.append(shape)
 
     # Client-facing project budget (gated strictly by project/submission settings)
     project_budget: List[Dict[str, Any]] = []
@@ -1455,15 +1438,13 @@ async def get_share_preview(share_id: str):
         ).to_list(5000)
         submission_ids = [s["id"] for s in auto_subs]
 
-    is_sub = False
-    talent_doc = None
-    target_sub = None
+    visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
     if talent_id in submission_ids:
         sub = await db.submissions.find_one({"id": talent_id}, {"_id": 0})
         if not sub:
             raise HTTPException(404, "Talent not found")
         sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
-        talent_doc = _submission_to_client_shape(sub, project=sub_project)
+        talent_doc = _submission_to_client_shape(sub, project=sub_project, project_defaults=visibility)
         is_sub = True
         target_sub = sub
     elif talent_id in talent_ids:
@@ -1480,20 +1461,17 @@ async def get_share_preview(share_id: str):
         if not matching_sub:
             raise HTTPException(404, "Talent not found in this link")
         ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
-        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
+        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project, project_defaults=visibility)
         is_sub = True
         target_sub = matching_sub
 
-    visibility = {**DEFAULT_VISIBILITY, **(link.get("visibility") or {})}
     if not is_sub:
         talent_doc = enrich_talent(talent_doc)
         per_t = (link.get("talent_field_visibility") or {}).get(talent_doc["id"])
         eff_vis = {**visibility, **per_t} if per_t else visibility
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        mapped_defaults = map_link_visibility_to_submission(visibility)
-        sub_review_vis = submission_client_visibility(target_sub, mapped_defaults)
-        filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
+        filtered_talent = talent_doc
 
     if media_id:
         filtered_media = [m for m in filtered_talent.get("media", []) if m.get("id") == media_id]
@@ -1702,13 +1680,24 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
     pdf.ln(4)
     
     pdf.set_text_color(17, 17, 17)
-    fields = [
-        ("Name", privatize_name(talent_doc.get("name") or "Unnamed")),
-        ("Age", str(talent_doc.get("age") or "-")),
-        ("Height", talent_doc.get("height") or "-"),
-        ("Location", talent_doc.get("location") or "-"),
-    ]
+    fields = []
+    fields.append(("Name", privatize_name(talent_doc.get("name") or "Unnamed")))
+    if talent_doc.get("age") is not None:
+        fields.append(("Age", str(talent_doc["age"])))
+    if talent_doc.get("height") is not None:
+        fields.append(("Height", str(talent_doc["height"])))
     
+    loc = talent_doc.get("location")
+    if loc is not None:
+        if isinstance(loc, list):
+            loc_val = ", ".join(loc)
+        else:
+            loc_val = str(loc)
+        fields.append(("Location", loc_val))
+        
+    if talent_doc.get("ethnicity") is not None:
+        fields.append(("Ethnicity", str(talent_doc["ethnicity"])))
+        
     # Availability
     avail = talent_doc.get("availability")
     if avail and isinstance(avail, dict):
@@ -1717,8 +1706,6 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
         if avail.get("note"):
             avail_label += f" - {avail.get('note')}"
         fields.append(("Availability", avail_label))
-    else:
-        fields.append(("Availability", "-"))
         
     # Budget
     budget = talent_doc.get("budget")
@@ -1730,15 +1717,13 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
             fields.append(("Budget", f"Counter Budget: {budget.get('value') or '-'}"))
         else:
             fields.append(("Budget", bstatus.capitalize() or "-"))
-    else:
-        fields.append(("Budget", "-"))
-    
-    if talent_doc.get("competitive_brand"):
-        fields.append(("Competitive Brand", talent_doc["competitive_brand"]))
-    if talent_doc.get("instagram_handle"):
+            
+    if talent_doc.get("competitive_brand") is not None:
+        fields.append(("Competitive Brand", str(talent_doc["competitive_brand"])))
+    if talent_doc.get("instagram_handle") is not None:
         fields.append(("Instagram", f"@{talent_doc['instagram_handle']}"))
-        if talent_doc.get("instagram_followers"):
-            fields.append(("Instagram Followers", talent_doc["instagram_followers"]))
+        if talent_doc.get("instagram_followers") is not None:
+            fields.append(("Instagram Followers", str(talent_doc["instagram_followers"])))
             
     for label, val in fields:
         pdf.set_font("Helvetica", "B", 10)
@@ -1821,7 +1806,7 @@ async def download_talent_zip(
         if not sub:
             raise HTTPException(404, "Talent/Submission not found")
         sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
-        talent_doc = _submission_to_client_shape(sub, project=sub_project)
+        talent_doc = _submission_to_client_shape(sub, project=sub_project, project_defaults=link.get("visibility"))
         is_sub = True
         target_sub = sub
     else:
@@ -1833,7 +1818,7 @@ async def download_talent_zip(
         if not matching_sub:
             raise HTTPException(404, "Talent not found in this link")
         ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
-        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
+        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project, project_defaults=link.get("visibility"))
         is_sub = True
         target_sub = matching_sub
 
@@ -1843,9 +1828,7 @@ async def download_talent_zip(
         eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        mapped_defaults = map_link_visibility_to_submission(link.get("visibility") or {})
-        sub_review_vis = submission_client_visibility(target_sub, mapped_defaults)
-        filtered_talent = _filter_talent_for_client(talent_doc, sub_review_vis)
+        filtered_talent = talent_doc
 
     media_list = filtered_talent.get("media", [])
     
@@ -2095,7 +2078,7 @@ async def proxy_media(
         if not sub:
             raise HTTPException(404, "Talent not found")
         sub_project = await db.projects.find_one({"id": sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if sub.get("project_id") else None
-        talent_doc = _submission_to_client_shape(sub, project=sub_project)
+        talent_doc = _submission_to_client_shape(sub, project=sub_project, project_defaults=link.get("visibility"))
         is_sub = True
         target_sub = sub
     else:
@@ -2104,7 +2087,7 @@ async def proxy_media(
         if not matching_sub:
             raise HTTPException(404, "Talent not found in this link")
         ms_project = await db.projects.find_one({"id": matching_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if matching_sub.get("project_id") else None
-        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project)
+        talent_doc = _submission_to_client_shape(matching_sub, project=ms_project, project_defaults=link.get("visibility"))
         is_sub = True
         target_sub = matching_sub
 
@@ -2114,8 +2097,7 @@ async def proxy_media(
         eff_vis = {**link.get("visibility", {}), **per_t} if per_t else link.get("visibility", {})
         filtered_talent = _filter_talent_for_client(talent_doc, eff_vis)
     else:
-        mapped_defaults = map_link_visibility_to_submission(link.get("visibility") or {})
-        filtered_talent = _filter_talent_for_client(talent_doc, submission_client_visibility(target_sub, mapped_defaults))
+        filtered_talent = talent_doc
 
     media_list = filtered_talent.get("media", []) or []
     m = next((x for x in media_list if x.get("id") == media_id), None)
@@ -2267,8 +2249,8 @@ async def download_campaign_bundle_zip(
         eff_vis = {**visibility, **per_t} if per_t else visibility
         talents.append(_filter_talent_for_client(t, eff_vis))
     for s in raw_subs:
-        shape = _submission_to_client_shape(s)
-        talents.append(_filter_talent_for_client(shape, visibility))
+        shape = _submission_to_client_shape(s, project_defaults=visibility)
+        talents.append(shape)
 
     zip_items = []
     for t_doc in talents:

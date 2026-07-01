@@ -1467,6 +1467,19 @@ DEFAULT_FIELD_VISIBILITY: Dict[str, bool] = {
     "work_links": True,
 }
 
+
+def map_link_visibility_to_submission(link_vis: dict) -> dict:
+    mapped = {}
+    for k in ["age", "height", "location", "ethnicity", "availability", "budget", "work_links", "intro_video", "takes", "portfolio", "download"]:
+        if k in link_vis:
+            mapped[k] = link_vis[k]
+    if "instagram" in link_vis:
+        mapped["instagram_handle"] = link_vis["instagram"]
+    if "instagram_followers" in link_vis:
+        mapped["instagram_followers"] = link_vis["instagram_followers"]
+    return mapped
+
+
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
 MATERIAL_CATEGORIES = {"script", "image", "audio", "video_file"}
 MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
@@ -2138,7 +2151,7 @@ def _public_link_view(link: dict) -> dict:
     }
 
 
-def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> dict:
+def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, project_defaults: Optional[dict] = None) -> dict:
     """Flatten a submission document into the shape clients expect.
 
     Order rules (strict, see product spec):
@@ -2155,6 +2168,36 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
       - When `project` is provided, question IDs in custom_answers are resolved
         to their human-readable question text using project.custom_questions.
     """
+    s_fv = sub.get("field_visibility") or {}
+    defaults = map_link_visibility_to_submission(project_defaults) if project_defaults else {}
+
+    def get_val(key: str, fallback: bool) -> bool:
+        if key in s_fv:
+            return s_fv[key]
+        return defaults.get(key, fallback)
+
+    fv = {
+        "portfolio": get_val("portfolio", True),
+        "intro_video": get_val("intro_video", True),
+        "takes": get_val("takes", True),
+        "age": get_val("age", True),
+        "height": get_val("height", True),
+        "gender": get_val("gender", True),
+        "location": get_val("location", True),
+        "ethnicity": get_val("ethnicity", True),
+        "instagram_handle": get_val("instagram_handle", True),
+        "instagram_followers": get_val("instagram_followers", True),
+        "languages": get_val("languages", True),
+        "skills": get_val("skills", True),
+        "special_abilities": get_val("special_abilities", True),
+        "availability": get_val("availability", True),
+        "budget": get_val("budget", True),
+        "work_links": get_val("work_links", True),
+        "download": get_val("download", True),
+        "competitive_brand": get_val("competitive_brand", True),
+        "custom_answers": get_val("custom_answers", True),
+    }
+
     if sub.get("client_package_snapshot"):
         snap = sub["client_package_snapshot"]
         ca_snap = snap.get("custom_answers")
@@ -2168,11 +2211,10 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
         #   (a) snapshots frozen before custom questions existed get enriched, and
         #   (b) legacy dict-format answers ({uuid: answer}) are converted to arrays.
         fd_for_resolve = sub.get("form_data") or {}
-        fv_for_resolve = {**DEFAULT_FIELD_VISIBILITY, **(sub.get("field_visibility") or {})}
         raw_answers_snap = fd_for_resolve.get("custom_answers") or {}
 
         # Only rebuild when there are actual answers and visibility is enabled.
-        if isinstance(raw_answers_snap, dict) and raw_answers_snap and fv_for_resolve.get("custom_answers"):
+        if isinstance(raw_answers_snap, dict) and raw_answers_snap and fv.get("custom_answers"):
             q_text_by_id_snap: Dict[str, str] = {}
             project_cqs_snap = (project or {}).get("custom_questions") or []
             for cq in project_cqs_snap:
@@ -2184,7 +2226,7 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
                 [cq.get("id") for cq in project_cqs_snap if cq.get("id")]
                 if project_cqs_snap else list(raw_answers_snap.keys())
             )
-            ca_vis_snap = fv_for_resolve.get("custom_answers")
+            ca_vis_snap = fv.get("custom_answers")
             filtered_snap: List[Dict[str, str]] = []
             seen_snap: set = set()
             for q_id in ordered_ids_snap:
@@ -2211,10 +2253,6 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
         return snap
 
     fd = sub.get("form_data") or {}
-    # Merge defaults with stored visibility so newly added keys (e.g.
-    # competitive_brand, custom_answers) inherit safe defaults for
-    # submissions created before those keys existed.
-    fv = {**DEFAULT_FIELD_VISIBILITY, **(sub.get("field_visibility") or {})}
 
     fn = (fd.get("first_name") or "").strip()
     ln = (fd.get("last_name") or "").strip()
@@ -2271,11 +2309,15 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
 
         cat = m.get("category")
         if cat == "image":
+            if not fv.get("portfolio", True):
+                continue
             mapped = {**m, "category": "portfolio"}
             image_items.append(mapped)
             if not cover_mid:
                 cover_mid = mapped.get("id")
         elif cat == "indian":
+            if not fv.get("portfolio", True):
+                continue
             # Phase 3 — preserve Indian-look images as a distinct section so
             # the client view can render Indian / Western / Portfolio
             # buckets independently. Previously these were silently dropped
@@ -2284,12 +2326,18 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None) -> di
             if not cover_mid:
                 cover_mid = m.get("id")
         elif cat == "western":
+            if not fv.get("portfolio", True):
+                continue
             image_items.append({**m, "category": "western"})
             if not cover_mid:
                 cover_mid = m.get("id")
         elif cat == "intro_video":
+            if not fv.get("intro_video", True):
+                continue
             intro_items.append({**m, "category": "video"})
         elif cat in LEGACY_TAKE_CATEGORIES or cat == "take":
+            if not fv.get("takes", True):
+                continue
             take_items.append({
                 **m,
                 "category": "take",

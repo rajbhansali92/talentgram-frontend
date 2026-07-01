@@ -2551,7 +2551,7 @@ async def get_admin_submission(
                     talent_portfolio_media.append(item)
 
     # Fetch project visibility defaults
-    from .links import map_link_visibility_to_submission, DEFAULT_VISIBILITY
+    from core import map_link_visibility_to_submission, DEFAULT_VISIBILITY
     link = await db.links.find_one({"auto_project_id": pid}, {"_id": 0, "visibility": 1})
     if link and link.get("visibility"):
         project_default_visibility = map_link_visibility_to_submission(link["visibility"])

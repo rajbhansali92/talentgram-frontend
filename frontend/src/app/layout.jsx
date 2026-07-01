@@ -93,6 +93,7 @@ export async function generateMetadata() {
 }
 
 import { UploadManagerProvider } from "@/context/UploadManagerContext";
+import PWAInitializer from "@/components/PWAInitializer";
 
 export default function RootLayout({ children }) {
   return (
@@ -117,6 +118,7 @@ export default function RootLayout({ children }) {
             },
           }}
         />
+        <PWAInitializer />
         <UploadManagerProvider>
           {children}
         </UploadManagerProvider>

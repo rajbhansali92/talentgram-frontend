@@ -1759,22 +1759,35 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 raise HTTPException(400, "Introduction Video is required")
 
         min_takes = int(requirements.get("min_audition_takes") or 0)
-        if min_takes > 0:
+        takes_vis = requirements.get("audition_takes_visibility")
+        if not takes_vis:
+            takes_vis = "required" if min_takes > 0 else "optional"
+        if takes_vis == "required":
             takes_count = sum(1 for m in media_list if m.get("category") in {"take", "take_1", "take_2", "take_3"})
             if takes_count < min_takes:
                 raise HTTPException(400, f"Please upload at least {min_takes} audition take(s)")
 
         portfolio_reqs = requirements.get("portfolio") or {}
-        for category, label_name in [("image", "Portfolio (General)"), ("indian", "Indian Look"), ("western", "Western Look")]:
+        for category, label_name, vis_key in [
+            ("image", "Portfolio (General)", "portfolio_image_visibility"),
+            ("indian", "Indian Look", "portfolio_indian_visibility"),
+            ("western", "Western Look", "portfolio_western_visibility")
+        ]:
             min_count = int(portfolio_reqs.get(category) or 0)
-            if min_count > 0:
+            p_vis = requirements.get(vis_key)
+            if not p_vis:
+                p_vis = "required" if min_count > 0 else "optional"
+            if p_vis == "required":
                 count = sum(1 for m in media_list if m.get("category") == category)
                 if count < min_count:
                     raise HTTPException(400, f"{label_name} requires at least {min_count} image(s)")
 
         # 4. Work Links
         min_links = int(requirements.get("min_work_links") or 0)
-        if min_links > 0:
+        links_vis = requirements.get("work_links_visibility")
+        if not links_vis:
+            links_vis = "required" if min_links > 0 else "optional"
+        if links_vis == "required":
             links_count = len(form.get("work_links") or [])
             if links_count < min_links:
                 raise HTTPException(400, f"Please add at least {min_links} work link(s)")

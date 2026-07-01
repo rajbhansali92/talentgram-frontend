@@ -1088,6 +1088,8 @@ function SubmissionPage() {
             return { ...m, _legacy: true, label: m.label || `Take ${n}` };
         });
 
+    const showImagesSection = (requirements.portfolio_image_visibility !== "hidden") || (requirements.portfolio_indian_visibility !== "hidden") || (requirements.portfolio_western_visibility !== "hidden");
+
     const activeConditionalVideoRules = useMemo(() => {
         if (!project || !Array.isArray(project.conditional_video_rules)) return [];
         return project.conditional_video_rules.filter((rule) => {
@@ -1431,7 +1433,8 @@ function SubmissionPage() {
         }
 
         const minTakes = parseInt(requirements.min_audition_takes || 0, 10);
-        if (minTakes > 0) {
+        const takesVis = requirements.audition_takes_visibility || (minTakes > 0 ? "required" : "optional");
+        if (takesVis === "required") {
             const takesCount = mediaList.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length;
             if (takesCount < minTakes) {
                 missingList.push({ id: "takes", label: `Audition Takes (minimum ${minTakes})`, section: "uploads", selector: '[data-testid="takes-section"]' });
@@ -1440,13 +1443,14 @@ function SubmissionPage() {
 
         const portfolioReqs = requirements.portfolio || {};
         const portfolioCats = [
-            { category: "image", label: "Portfolio (General)", selector: '[data-testid="portfolio-group-generic"]' },
-            { category: "indian", label: "Indian Look", selector: '[data-testid="portfolio-group-indian"]' },
-            { category: "western", label: "Western Look", selector: '[data-testid="portfolio-group-western"]' }
+            { category: "image", label: "Portfolio (General)", selector: '[data-testid="portfolio-group-generic"]', visKey: "portfolio_image_visibility" },
+            { category: "indian", label: "Indian Look", selector: '[data-testid="portfolio-group-indian"]', visKey: "portfolio_indian_visibility" },
+            { category: "western", label: "Western Look", selector: '[data-testid="portfolio-group-western"]', visKey: "portfolio_western_visibility" }
         ];
         portfolioCats.forEach(cat => {
             const minCount = parseInt(portfolioReqs[cat.category] || 0, 10);
-            if (minCount > 0) {
+            const pVis = requirements[cat.visKey] || (minCount > 0 ? "required" : "optional");
+            if (pVis === "required") {
                 const count = mediaList.filter(m => m.category === cat.category).length;
                 if (count < minCount) {
                     missingList.push({
@@ -1461,7 +1465,8 @@ function SubmissionPage() {
 
         // 4. Work Links
         const minLinks = parseInt(requirements.min_work_links || 0, 10);
-        if (minLinks > 0) {
+        const linksVis = requirements.work_links_visibility || (minLinks > 0 ? "required" : "optional");
+        if (linksVis === "required") {
             const linksCount = (form.work_links || []).length;
             if (linksCount < minLinks) {
                 missingList.push({ id: "work_links", label: `Work Links (minimum ${minLinks})`, section: "profile", selector: '[data-testid="form-work-links-field"]' });
@@ -2864,48 +2869,50 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 3: Work Links & Additional Material */}
-                        <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
-                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
-                                <div>
-                                    <h3 className="text-base font-bold text-[#111111] tracking-tight">Work Links</h3>
-                                    <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setCollapsedSections(prev => ({
-                                            ...prev,
-                                            workLinks: !prev.workLinks,
-                                        }))
-                                    }
-                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                    title={collapsedSections.workLinks ? "Expand Work Links" : "Collapse Work Links"}
-                                >
-                                    <ChevronDown
-                                        className={`h-4 w-4 transform transition-transform duration-200 ${
-                                            collapsedSections.workLinks ? "-rotate-90" : ""
-                                        }`}
-                                    />
-                                </button>
-                            </div>
-
-                            {!collapsedSections.workLinks && (
-                                <div className="space-y-4 animate-fadeIn">
-                                    <div data-testid="form-work-links-field">
-                                        <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                            Work Links (optional)
-                                        </span>
-                                        <WorkLinksEditor
-                                            links={form.work_links || []}
-                                            onChange={(arr) => {
-                                                setForm({ ...form, work_links: arr });
-                                                setTimeout(saveForm, 0);
-                                            }}
-                                        />
+                        {requirements.work_links_visibility !== "hidden" && (
+                            <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
+                                <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
+                                    <div>
+                                        <h3 className="text-base font-bold text-[#111111] tracking-tight">Work Links</h3>
+                                        <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
                                     </div>
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setCollapsedSections(prev => ({
+                                                ...prev,
+                                                workLinks: !prev.workLinks,
+                                            }))
+                                        }
+                                        className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                        title={collapsedSections.workLinks ? "Expand Work Links" : "Collapse Work Links"}
+                                    >
+                                        <ChevronDown
+                                            className={`h-4 w-4 transform transition-transform duration-200 ${
+                                                collapsedSections.workLinks ? "-rotate-90" : ""
+                                            }`}
+                                        />
+                                    </button>
                                 </div>
-                            )}
-                        </div>
+
+                                {!collapsedSections.workLinks && (
+                                    <div className="space-y-4 animate-fadeIn">
+                                        <div data-testid="form-work-links-field">
+                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                                                Work Links (optional)
+                                            </span>
+                                            <WorkLinksEditor
+                                                links={form.work_links || []}
+                                                onChange={(arr) => {
+                                                    setForm({ ...form, work_links: arr });
+                                                    setTimeout(saveForm, 0);
+                                                }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {!saved && (
                             <button
@@ -2963,106 +2970,111 @@ function SubmissionPage() {
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
 
-                                <PremiumUploadSlot
-                                    title="Introduction Video"
-                                    note="Upload your recent professional introduction video (no contact info)."
-                                    icon={Video}
-                                    accept="video/*"
-                                    inputRef={introRef}
-                                    onPick={(f) => triggerUpload(f[0], "intro_video")}
-                                    uploadState={activeUploads["intro_video"]}
-                                    media={intro}
-                                    onRemove={(m) => removeMedia(m.id)}
-                                    testid="upload-intro"
-                                    cameraCapture="user"
-                                    failed={Boolean(retryQueue["intro_video"]?.failed)}
-                                    onRetry={() => retryUpload("intro_video")}
-                                    hint="Recommended duration: 20–60 seconds."
-                                />
+                                {requirements.intro_video !== "hidden" && (
+                                    <PremiumUploadSlot
+                                        title="Introduction Video"
+                                        note="Upload your recent professional introduction video (no contact info)."
+                                        icon={Video}
+                                        accept="video/*"
+                                        inputRef={introRef}
+                                        onPick={(f) => triggerUpload(f[0], "intro_video")}
+                                        uploadState={activeUploads["intro_video"]}
+                                        media={intro}
+                                        onRemove={(m) => removeMedia(m.id)}
+                                        testid="upload-intro"
+                                        cameraCapture="user"
+                                        failed={Boolean(retryQueue["intro_video"]?.failed)}
+                                        onRetry={() => retryUpload("intro_video")}
+                                        hint="Recommended duration: 20–60 seconds."
+                                    />
+                                )}
 
-                                <div className="mb-10" data-testid="takes-section">
-                                    <div className="flex items-center justify-between mb-4">
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
-                                            Audition Takes{" "}
-                                            <span className="text-[#333333]">
-                                                (up to {MAX_TAKES})
+                                {requirements.audition_takes_visibility !== "hidden" && (
+                                    <div className="mb-10" data-testid="takes-section">
+                                        <div className="flex items-center justify-between mb-4">
+                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
+                                                Audition Takes{" "}
+                                                <span className="text-[#333333]">
+                                                    (up to {MAX_TAKES})
+                                                </span>
+                                            </p>
+                                            <span
+                                                className="text-[11px] font-mono text-[#333333]"
+                                                data-testid="takes-counter"
+                                            >
+                                                {takes.length}/{MAX_TAKES}
                                             </span>
+                                        </div>
+                                        <p className="text-[13px] leading-relaxed text-[#222222] mb-6">
+                                            Upload each take as a separate video and label it (e.g., "Scene 1").
                                         </p>
-                                        <span
-                                            className="text-[11px] font-mono text-[#333333]"
-                                            data-testid="takes-counter"
-                                        >
-                                            {takes.length}/{MAX_TAKES}
-                                        </span>
-                                    </div>
-                                    <p className="text-[13px] leading-relaxed text-[#222222] mb-6">
-                                        Upload each take as a separate video and label it (e.g., "Scene 1").
-                                    </p>
 
-                                    {takes.map((t, i) => (
-                                        <PremiumTakeRow
-                                            key={t.id}
-                                            index={i + 1}
-                                            media={t}
-                                            canRename={!t._legacy}
-                                            onRename={(lbl) =>
-                                                patchTakeLabel(t.id, lbl)
-                                            }
-                                            onRemove={() => removeMedia(t.id)}
-                                            onReplace={(file) => replaceMediaFile(t, file)}
-                                            uploadState={activeUploads[`take:${t.label}`]}
-                                        />
-                                    ))}
+                                        {takes.map((t, i) => (
+                                            <PremiumTakeRow
+                                                key={t.id}
+                                                index={i + 1}
+                                                media={t}
+                                                canRename={!t._legacy}
+                                                onRename={(lbl) =>
+                                                    patchTakeLabel(t.id, lbl)
+                                                }
+                                                onRemove={() => removeMedia(t.id)}
+                                                onReplace={(file) => replaceMediaFile(t, file)}
+                                                uploadState={activeUploads[`take:${t.label}`]}
+                                            />
+                                        ))}
 
-                                    {Object.entries(activeUploads)
-                                        .filter(([key, state]) => state.category === "take" && !takes.some(t => t.label === state.label))
-                                        .map(([key, state]) => (
-                                            <div key={key} className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] text-left">
-                                                <div className="flex items-center justify-between">
-                                                    <div>
-                                                        <span className="text-[11px] font-mono text-[#0c2340]/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
-                                                        <span className="text-sm font-semibold text-[#111111]">{state.label}</span>
+                                        {Object.entries(activeUploads)
+                                            .filter(([key, state]) => state.category === "take" && !takes.some(t => t.label === state.label))
+                                            .map(([key, state]) => (
+                                                <div key={key} className="bg-white border border-[#eaeaea] rounded-3xl p-4 flex flex-col gap-3 mb-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)] text-left">
+                                                    <div className="flex items-center justify-between">
+                                                        <div>
+                                                            <span className="text-[11px] font-mono text-[#0c2340]/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
+                                                            <span className="text-sm font-semibold text-[#111111]">{state.label}</span>
+                                                        </div>
+                                                        <span className="text-[10px] font-mono text-[#333333]">
+                                                            {state.status === "uploading" ? `Uploading ${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                                        </span>
                                                     </div>
-                                                    <span className="text-[10px] font-mono text-[#333333]">
-                                                        {state.status === "uploading" ? `Uploading ${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
-                                                    </span>
+                                                    {state.status === "failed" ? (
+                                                        <div className="text-xs text-rose-500 font-mono mt-1 bg-rose-50/50 p-2.5 rounded-xl border border-rose-100 flex items-center justify-between gap-2">
+                                                            <span className="truncate">{state.error || "Upload failed"}</span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => retryUpload(key)}
+                                                                className="px-3 py-1 bg-white border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 active:scale-[0.97] transition-all duration-150 text-[10px]"
+                                                            >
+                                                                Retry
+                                                            </button>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden mt-1">
+                                                            <div
+                                                                className={`h-full bg-[#0c2340] transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`}
+                                                                style={{ width: `${state.pct}%` }}
+                                                            />
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                {state.status === "failed" ? (
-                                                    <div className="text-xs text-rose-500 font-mono mt-1 bg-rose-50/50 p-2.5 rounded-xl border border-rose-100 flex items-center justify-between gap-2">
-                                                        <span className="truncate">{state.error || "Upload failed"}</span>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => retryUpload(key)}
-                                                            className="px-3 py-1 bg-white border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 active:scale-[0.97] transition-all duration-150 text-[10px]"
-                                                        >
-                                                            Retry
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden mt-1">
-                                                        <div
-                                                            className={`h-full bg-[#0c2340] transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`}
-                                                            style={{ width: `${state.pct}%` }}
-                                                        />
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))
-                                    }
+                                            ))
+                                        }
 
-                                    {canAddTake && (
-                                        <PremiumAddTakeSlot
-                                            number={takes.length + 1}
-                                            activeUploads={activeUploads}
-                                            onPick={(file, label) =>
-                                                triggerUpload(file, "take", label)
-                                            }
-                                            inputRef={newTakeRef}
-                                        />
-                                    )}
-                                </div>
+                                        {canAddTake && (
+                                            <PremiumAddTakeSlot
+                                                number={takes.length + 1}
+                                                activeUploads={activeUploads}
+                                                onPick={(file, label) =>
+                                                    triggerUpload(file, "take", label)
+                                                }
+                                                inputRef={newTakeRef}
+                                            />
+                                        )}
+                                    </div>
+                                )}
 
-                                <div className="mb-8" data-testid="images-upload-section">
+                                {showImagesSection && (
+                                    <div className="mb-8" data-testid="images-upload-section">
                                     <div className="flex items-center justify-between mb-3">
                                         <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
                                             Images{" "}
@@ -3082,251 +3094,258 @@ function SubmissionPage() {
                                     </p>
 
                                     {/* Phase 2 — optional Indian look images */}
-                                    <PremiumPortfolioGroup
-                                        label="Indian Look (optional)"
-                                        hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
-                                        items={indianImages}
-                                        category="indian"
-                                        allImagesCount={indianImages.length}
-                                        maxImages={MAX_IMAGES_PER_CATEGORY}
-                                        inputRef={indianImagesRef}
-                                        uploadImages={uploadImages}
-                                        removeMedia={removeMedia}
-                                        activeUploads={activeUploads}
-                                        onRetry={retryUpload}
-                                        testidPrefix="indian"
-                                        activePortfolioThumbId={activePortfolioThumbId}
-                                        setActivePortfolioThumbId={setActivePortfolioThumbId}
-                                        setActiveLightboxImage={setActiveLightboxImage}
-                                        replaceMediaFile={replaceMediaFile}
-                                    />
+                                    {requirements.portfolio_indian_visibility !== "hidden" && (
+                                        <PremiumPortfolioGroup
+                                            label="Indian Look (optional)"
+                                            hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
+                                            items={indianImages}
+                                            category="indian"
+                                            allImagesCount={indianImages.length}
+                                            maxImages={MAX_IMAGES_PER_CATEGORY}
+                                            inputRef={indianImagesRef}
+                                            uploadImages={uploadImages}
+                                            removeMedia={removeMedia}
+                                            activeUploads={activeUploads}
+                                            onRetry={retryUpload}
+                                            testidPrefix="indian"
+                                            activePortfolioThumbId={activePortfolioThumbId}
+                                            setActivePortfolioThumbId={setActivePortfolioThumbId}
+                                            setActiveLightboxImage={setActiveLightboxImage}
+                                            replaceMediaFile={replaceMediaFile}
+                                        />
+                                    )}
 
                                     {/* Phase 2 — optional Western look images */}
-                                    <PremiumPortfolioGroup
-                                        label="Western Look (optional)"
-                                        hint="Casual, formal or western-styled references."
-                                        items={westernImages}
-                                        category="western"
-                                        allImagesCount={westernImages.length}
-                                        maxImages={MAX_IMAGES_PER_CATEGORY}
-                                        inputRef={westernImagesRef}
-                                        uploadImages={uploadImages}
-                                        removeMedia={removeMedia}
-                                        activeUploads={activeUploads}
-                                        onRetry={retryUpload}
-                                        testidPrefix="western"
-                                        activePortfolioThumbId={activePortfolioThumbId}
-                                        setActivePortfolioThumbId={setActivePortfolioThumbId}
-                                        setActiveLightboxImage={setActiveLightboxImage}
-                                        replaceMediaFile={replaceMediaFile}
-                                    />
+                                    {requirements.portfolio_western_visibility !== "hidden" && (
+                                        <PremiumPortfolioGroup
+                                            label="Western Look (optional)"
+                                            hint="Casual, formal or western-styled references."
+                                            items={westernImages}
+                                            category="western"
+                                            allImagesCount={westernImages.length}
+                                            maxImages={MAX_IMAGES_PER_CATEGORY}
+                                            inputRef={westernImagesRef}
+                                            uploadImages={uploadImages}
+                                            removeMedia={removeMedia}
+                                            activeUploads={activeUploads}
+                                            onRetry={retryUpload}
+                                            testidPrefix="western"
+                                            activePortfolioThumbId={activePortfolioThumbId}
+                                            setActivePortfolioThumbId={setActivePortfolioThumbId}
+                                            setActiveLightboxImage={setActiveLightboxImage}
+                                            replaceMediaFile={replaceMediaFile}
+                                        />
+                                    )}
 
                                     {/* Generic Portfolio collapsible group */}
-                                    <div className="mb-6 bg-slate-50/50 border border-[#eaeaea]/60 rounded-2xl p-4" data-testid="portfolio-group-generic">
-                                        <div
-                                            className="flex items-center justify-between cursor-pointer select-none"
-                                            onClick={() => setIsGenericPortfolioCollapsed(!isGenericPortfolioCollapsed)}
-                                        >
-                                            <div className="flex items-center gap-2">
-                                                <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-[#111111]">Portfolio (general)</p>
-                                                <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-[#222222] px-2 py-0.5 rounded-full">
-                                                    {images.length}
-                                                </span>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                                title={isGenericPortfolioCollapsed ? "Expand" : "Collapse"}
+                                    {requirements.portfolio_image_visibility !== "hidden" && (
+                                        <div className="mb-6 bg-slate-50/50 border border-[#eaeaea]/60 rounded-2xl p-4" data-testid="portfolio-group-generic">
+                                            <div
+                                                className="flex items-center justify-between cursor-pointer select-none"
+                                                onClick={() => setIsGenericPortfolioCollapsed(!isGenericPortfolioCollapsed)}
                                             >
-                                                <ChevronDown
-                                                    className={`h-3.5 w-3.5 transform transition-transform duration-200 ${
-                                                        isGenericPortfolioCollapsed ? "-rotate-90" : ""
-                                                    }`}
-                                                />
-                                            </button>
-                                        </div>
+                                                <div className="flex items-center gap-2">
+                                                    <p className="uppercase tracking-[0.08em] text-[11px] font-semibold font-mono text-[#111111]">Portfolio (general)</p>
+                                                    <span className="text-[10px] font-mono font-semibold bg-slate-200/80 text-[#222222] px-2 py-0.5 rounded-full">
+                                                        {images.length}
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                                    title={isGenericPortfolioCollapsed ? "Expand" : "Collapse"}
+                                                >
+                                                    <ChevronDown
+                                                        className={`h-3.5 w-3.5 transform transition-transform duration-200 ${
+                                                            isGenericPortfolioCollapsed ? "-rotate-90" : ""
+                                                        }`}
+                                                    />
+                                                </button>
+                                            </div>
 
-                                        {!isGenericPortfolioCollapsed && (
-                                            <div className="mt-4 animate-fadeIn">
-                                                <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-                                                    {images.map((m) => {
-                                                        // Actions are hidden by default and revealed:
-                                                        //   • Desktop — on hover (group-hover:opacity-100)
-                                                        //   • Mobile  — on tap (activePortfolioThumbId === m.id)
-                                                        const isActionsVisible = activePortfolioThumbId === m.id;
-                                                        return (
-                                                            <div
-                                                                key={m.id}
-                                                                className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-[#eaeaea] group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02] cursor-pointer"
-                                                                onClick={(e) => {
-                                                                    // Touch devices: first tap reveals the overlay;
-                                                                    // the dismiss useEffect clears it when tapping outside.
-                                                                    // Desktop: hover already shows the overlay, so click
-                                                                    // goes straight to lightbox.
-                                                                    const isTouch = window.matchMedia("(hover: none)").matches;
-                                                                    if (isTouch && !isActionsVisible) {
-                                                                        e.stopPropagation();
-                                                                        setActivePortfolioThumbId(m.id);
-                                                                        return;
-                                                                    }
-                                                                    setActivePortfolioThumbId(null);
-                                                                    setActiveLightboxImage(m);
-                                                                }}
-                                                            >
-                                                                <img
-                                                                    src={m.url}
-                                                                    alt=""
-                                                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                                                                />
-                                                                {/* Action overlay — hidden by default, revealed on
-                                                                    hover (desktop) or tap (mobile). */}
+                                            {!isGenericPortfolioCollapsed && (
+                                                <div className="mt-4 animate-fadeIn">
+                                                    <div className="grid grid-cols-3 md:grid-cols-4 gap-3 mb-4">
+                                                        {images.map((m) => {
+                                                            // Actions are hidden by default and revealed:
+                                                            //   • Desktop — on hover (group-hover:opacity-100)
+                                                            //   • Mobile  — on tap (activePortfolioThumbId === m.id)
+                                                            const isActionsVisible = activePortfolioThumbId === m.id;
+                                                            return (
                                                                 <div
-                                                                    className={`absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2 transition-opacity duration-200 ${
-                                                                        isActionsVisible
-                                                                            ? "opacity-100"
-                                                                            : "opacity-0 group-hover:opacity-100"
-                                                                    }`}
+                                                                    key={m.id}
+                                                                    className="relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border border-[#eaeaea] group shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.1)] transition-all duration-300 hover:scale-[1.02] cursor-pointer"
+                                                                    onClick={(e) => {
+                                                                        // Touch devices: first tap reveals the overlay;
+                                                                        // the dismiss useEffect clears it when tapping outside.
+                                                                        // Desktop: hover already shows the overlay, so click
+                                                                        // goes straight to lightbox.
+                                                                        const isTouch = window.matchMedia("(hover: none)").matches;
+                                                                        if (isTouch && !isActionsVisible) {
+                                                                            e.stopPropagation();
+                                                                            setActivePortfolioThumbId(m.id);
+                                                                            return;
+                                                                        }
+                                                                        setActivePortfolioThumbId(null);
+                                                                        setActiveLightboxImage(m);
+                                                                    }}
                                                                 >
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            setActivePortfolioThumbId(null);
-                                                                            setActiveLightboxImage(m);
-                                                                        }}
-                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                                        title="Zoom"
+                                                                    <img
+                                                                        src={m.url}
+                                                                        alt=""
+                                                                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                                                    />
+                                                                    {/* Action overlay — hidden by default, revealed on
+                                                                        hover (desktop) or tap (mobile). */}
+                                                                    <div
+                                                                        className={`absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2 transition-opacity duration-200 ${
+                                                                            isActionsVisible
+                                                                                ? "opacity-100"
+                                                                                : "opacity-0 group-hover:opacity-100"
+                                                                        }`}
                                                                     >
-                                                                        <Search className="w-3.5 h-3.5" />
-                                                                    </button>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            setActivePortfolioThumbId(null);
-                                                                            const inp = document.createElement("input");
-                                                                            inp.type = "file";
-                                                                            inp.accept = "image/*";
-                                                                            inp.onchange = (ev) => {
-                                                                                if (ev.target.files?.length) {
-                                                                                    replaceMediaFile(m, ev.target.files[0]);
-                                                                                }
-                                                                            };
-                                                                            inp.click();
-                                                                        }}
-                                                                        className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                                        title="Replace"
-                                                                    >
-                                                                        <Upload className="w-3.5 h-3.5" />
-                                                                    </button>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            setActivePortfolioThumbId(null);
-                                                                            removeMedia(m.id);
-                                                                        }}
-                                                                        className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
-                                                                        title="Delete"
-                                                                    >
-                                                                        <Trash2 className="w-3.5 h-3.5" />
-                                                                    </button>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                    {Object.entries(activeUploads)
-                                                        .filter(([key, state]) => state.category === "image")
-                                                        .map(([key, state]) => (
-                                                            <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                                                                <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
-                                                                <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
-                                                                <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
-                                                                    {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
-                                                                </span>
-                                                                {state.status === "failed" ? (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => retryUpload(key)}
-                                                                        className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
-                                                                    >
-                                                                        Retry
-                                                                    </button>
-                                                                ) : (
-                                                                    <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                                                        <div className={`bg-[#0c2340] h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                setActivePortfolioThumbId(null);
+                                                                                setActiveLightboxImage(m);
+                                                                            }}
+                                                                            className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                            title="Zoom"
+                                                                        >
+                                                                            <Search className="w-3.5 h-3.5" />
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                setActivePortfolioThumbId(null);
+                                                                                const inp = document.createElement("input");
+                                                                                inp.type = "file";
+                                                                                inp.accept = "image/*";
+                                                                                inp.onchange = (ev) => {
+                                                                                    if (ev.target.files?.length) {
+                                                                                        replaceMediaFile(m, ev.target.files[0]);
+                                                                                    }
+                                                                                };
+                                                                                inp.click();
+                                                                            }}
+                                                                            className="w-7 h-7 bg-white/90 hover:bg-white text-[#111111] rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                            title="Replace"
+                                                                        >
+                                                                            <Upload className="w-3.5 h-3.5" />
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                setActivePortfolioThumbId(null);
+                                                                                removeMedia(m.id);
+                                                                            }}
+                                                                            className="w-7 h-7 bg-white/90 hover:bg-rose-50 text-rose-600 rounded-full shadow-sm flex items-center justify-center transition-all active:scale-[0.9]"
+                                                                            title="Delete"
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" />
+                                                                        </button>
                                                                     </div>
-                                                                )}
-                                                            </div>
-                                                        ))
-                                                    }
-                                                    {images.length < MAX_IMAGES_PER_CATEGORY && (
+                                                                </div>
+                                                            );
+                                                        })}
+                                                        {Object.entries(activeUploads)
+                                                            .filter(([key, state]) => state.category === "image")
+                                                            .map(([key, state]) => (
+                                                                <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
+                                                                    <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
+                                                                    <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
+                                                                    <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
+                                                                        {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                                                    </span>
+                                                                    {state.status === "failed" ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => retryUpload(key)}
+                                                                            className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                                                        >
+                                                                            Retry
+                                                                        </button>
+                                                                    ) : (
+                                                                        <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
+                                                                            <div className={`bg-[#0c2340] h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            ))
+                                                        }
+                                                        {images.length < MAX_IMAGES_PER_CATEGORY && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    imagesRef.current?.click()
+                                                                }
+                                                                data-testid="add-image-btn"
+                                                                className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-[#0c2340]/30 hover:bg-[#0c2340]/5 flex items-center justify-center text-[#333333] hover:text-[#0c2340] transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                                            >
+                                                                <div className="relative flex flex-col items-center gap-1">
+                                                                    <Camera className="w-5 h-5" />
+                                                                    <span className="text-[10px] font-mono">
+                                                                        Add
+                                                                    </span>
+                                                                </div>
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    <input
+                                                        ref={imagesRef}
+                                                        type="file"
+                                                        accept="image/*"
+                                                        multiple
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            if (e.target.files?.length)
+                                                                uploadImages(e.target.files);
+                                                            e.target.value = "";
+                                                        }}
+                                                    />
+                                                    {/* Mobile-only camera-first action */}
+                                                    <input
+                                                        ref={cameraImagesRef}
+                                                        type="file"
+                                                        accept="image/*"
+                                                        capture="environment"
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            if (e.target.files?.length)
+                                                                uploadImages(e.target.files);
+                                                            e.target.value = "";
+                                                        }}
+                                                    />
+                                                    <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
                                                         <button
                                                             type="button"
-                                                            onClick={() =>
-                                                                imagesRef.current?.click()
-                                                            }
-                                                            data-testid="add-image-btn"
-                                                            className="relative aspect-square rounded-2xl border border-dashed border-[#d4d4d4] hover:border-[#0c2340]/30 hover:bg-[#0c2340]/5 flex items-center justify-center text-[#333333] hover:text-[#0c2340] transition-all duration-200 overflow-hidden bg-gradient-to-b from-white to-slate-50/70 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px]"
+                                                            onClick={() => cameraImagesRef.current?.click()}
+                                                            disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                                            data-testid="add-image-camera-btn"
+                                                            className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
                                                         >
-                                                            <div className="relative flex flex-col items-center gap-1">
-                                                                <Camera className="w-5 h-5" />
-                                                                <span className="text-[10px] font-mono">
-                                                                    Add
-                                                                </span>
-                                                            </div>
+                                                            <Camera className="w-3.5 h-3.5" /> Take photo
                                                         </button>
-                                                    )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => imagesRef.current?.click()}
+                                                            disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
+                                                            data-testid="add-image-library-btn"
+                                                            className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
+                                                        >
+                                                            <FolderOpen className="w-3.5 h-3.5" /> From library
+                                                        </button>
+                                                    </div>
                                                 </div>
-                                                <input
-                                                    ref={imagesRef}
-                                                    type="file"
-                                                    accept="image/*"
-                                                    multiple
-                                                    className="hidden"
-                                                    onChange={(e) => {
-                                                        if (e.target.files?.length)
-                                                            uploadImages(e.target.files);
-                                                        e.target.value = "";
-                                                    }}
-                                                />
-                                                {/* Mobile-only camera-first action */}
-                                                <input
-                                                    ref={cameraImagesRef}
-                                                    type="file"
-                                                    accept="image/*"
-                                                    capture="environment"
-                                                    className="hidden"
-                                                    onChange={(e) => {
-                                                        if (e.target.files?.length)
-                                                            uploadImages(e.target.files);
-                                                        e.target.value = "";
-                                                    }}
-                                                />
-                                                <div className="md:hidden grid grid-cols-2 gap-2 mt-3">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => cameraImagesRef.current?.click()}
-                                                        disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
-                                                        data-testid="add-image-camera-btn"
-                                                        className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                                    >
-                                                        <Camera className="w-3.5 h-3.5" /> Take photo
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => imagesRef.current?.click()}
-                                                        disabled={Object.values(activeUploads).some((u) => u.category === "image" && u.status === "uploading") || images.length >= MAX_IMAGES_PER_CATEGORY}
-                                                        data-testid="add-image-library-btn"
-                                                        className="border border-[#eaeaea] hover:border-[#d4d4d4] p-3 text-[12px] rounded-full inline-flex items-center justify-center gap-2 min-h-[48px] active:scale-[0.97] transition-all duration-200 bg-white/60"
-                                                    >
-                                                        <FolderOpen className="w-3.5 h-3.5" /> From library
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
+                                )}
                             </div>
                         )}
 

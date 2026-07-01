@@ -1136,12 +1136,17 @@ export default function ProjectEdit() {
                             },
                             custom_questions: {},
                             intro_video: "optional",
+                            audition_takes_visibility: "optional",
                             min_audition_takes: 0,
+                            portfolio_image_visibility: "optional",
+                            portfolio_indian_visibility: "optional",
+                            portfolio_western_visibility: "optional",
                             portfolio: {
                                 indian: 0,
                                 western: 0,
                                 image: 0,
                             },
+                            work_links_visibility: "optional",
                             min_work_links: 0,
                             skills: {
                                 Dance: false,
@@ -1152,7 +1157,7 @@ export default function ProjectEdit() {
                                 Performance: false,
                                 "Special Skills": false,
                                 Languages: false,
-                            },
+                             },
                             interested_in: "optional",
                             conditional_rules: [],
                         };
@@ -1160,6 +1165,11 @@ export default function ProjectEdit() {
                         const reqs = {
                             ...defaultRequirements,
                             ...(project.submission_requirements || {}),
+                            audition_takes_visibility: (project.submission_requirements || {}).audition_takes_visibility || (((project.submission_requirements || {}).min_audition_takes || 0) > 0 ? "required" : "optional"),
+                            work_links_visibility: (project.submission_requirements || {}).work_links_visibility || (((project.submission_requirements || {}).min_work_links || 0) > 0 ? "required" : "optional"),
+                            portfolio_image_visibility: (project.submission_requirements || {}).portfolio_image_visibility || ((((project.submission_requirements || {}).portfolio || {}).image || 0) > 0 ? "required" : "optional"),
+                            portfolio_indian_visibility: (project.submission_requirements || {}).portfolio_indian_visibility || ((((project.submission_requirements || {}).portfolio || {}).indian || 0) > 0 ? "required" : "optional"),
+                            portfolio_western_visibility: (project.submission_requirements || {}).portfolio_western_visibility || ((((project.submission_requirements || {}).portfolio || {}).western || 0) > 0 ? "required" : "optional"),
                             fields: {
                                 ...defaultRequirements.fields,
                                 ...((project.submission_requirements || {}).fields || {}),
@@ -1339,111 +1349,303 @@ export default function ProjectEdit() {
                                     </div>
                                 )}
 
-                                {/* Media & Portfolio Limits */}
-                                <div className="border-t border-[#eaeaea] pt-6">
-                                    <h3 className="text-sm font-semibold text-black/85 mb-4">Media & Portfolio Requirements</h3>
-                                    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                                        <div>
-                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
-                                                Introduction Video
-                                            </label>
-                                            <Select
-                                                value={reqs.intro_video}
-                                                onValueChange={(v) => isEditing && updateReqs({ intro_video: v })}
-                                                disabled={!isEditing}
-                                            >
-                                                <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
-                                                    <SelectItem value="required">Required</SelectItem>
-                                                    <SelectItem value="optional">Optional</SelectItem>
-                                                    <SelectItem value="hidden">Hidden</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
-                                                Min Audition Takes
-                                            </label>
-                                            <Select
-                                                value={String(reqs.min_audition_takes || 0)}
-                                                onValueChange={(v) => isEditing && updateReqs({ min_audition_takes: parseInt(v) })}
-                                                disabled={!isEditing}
-                                            >
-                                                <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
-                                                    {[0, 1, 2, 3, 4, 5].map((n) => (
-                                                        <SelectItem key={n} value={String(n)}>{n} Take(s)</SelectItem>
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
-                                                Min Work Links
-                                            </label>
-                                            <Select
-                                                value={String(reqs.min_work_links || 0)}
-                                                onValueChange={(v) => isEditing && updateReqs({ min_work_links: parseInt(v) })}
-                                                disabled={!isEditing}
-                                            >
-                                                <SelectTrigger className="w-full bg-transparent border border-black/[0.10] rounded-sm text-xs h-9 px-3">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
-                                                    {[0, 1, 2, 3, 4, 5].map((n) => (
-                                                        <SelectItem key={n} value={String(n)}>{n} Link(s)</SelectItem>
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
-                                                Min Portfolio (General) Images
-                                            </label>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                max="10"
-                                                value={reqs.portfolio.image}
-                                                onChange={(e) => updatePortfolio("image", e.target.value)}
-                                                disabled={!isEditing}
-                                                className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
-                                                Min Indian Look Images
-                                            </label>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                max="10"
-                                                value={reqs.portfolio.indian}
-                                                onChange={(e) => updatePortfolio("indian", e.target.value)}
-                                                disabled={!isEditing}
-                                                className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2">
-                                                Min Western Look Images
-                                            </label>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                max="10"
-                                                value={reqs.portfolio.western}
-                                                onChange={(e) => updatePortfolio("western", e.target.value)}
-                                                disabled={!isEditing}
-                                                className="w-full bg-transparent border-b border-black/[0.10] focus:border-black/40 outline-none py-2 text-sm text-black/85"
-                                            />
-                                        </div>
-                                    </div>
-                                </div>
+                                 {/* Media & Portfolio Limits */}
+                                 <div className="border-t border-[#eaeaea] pt-6">
+                                     <h3 className="text-sm font-semibold text-black/85 mb-4">Media & Portfolio Requirements</h3>
+                                     <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                         {/* Introduction Video */}
+                                         <div className="bg-slate-50/30 border border-[#eaeaea] rounded-xl p-4 flex flex-col justify-between min-h-[140px]">
+                                             <div>
+                                                 <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2 font-semibold">
+                                                     Introduction Video
+                                                 </label>
+                                                 <Select
+                                                     value={reqs.intro_video}
+                                                     onValueChange={(v) => isEditing && updateReqs({ intro_video: v })}
+                                                     disabled={!isEditing}
+                                                 >
+                                                     <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                         <SelectValue />
+                                                     </SelectTrigger>
+                                                     <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                         <SelectItem value="required">Required</SelectItem>
+                                                         <SelectItem value="optional">Optional</SelectItem>
+                                                         <SelectItem value="hidden">Hidden</SelectItem>
+                                                     </SelectContent>
+                                                 </Select>
+                                             </div>
+                                             <div className="mt-4">
+                                                 <span className="text-[10px] text-black/40">Minimum upload: 1 (Fixed)</span>
+                                             </div>
+                                         </div>
+
+                                         {/* Audition Takes */}
+                                         <div className="bg-slate-50/30 border border-[#eaeaea] rounded-xl p-4 flex flex-col justify-between min-h-[140px]">
+                                             <div>
+                                                 <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2 font-semibold">
+                                                     Audition Takes
+                                                 </label>
+                                                 <div className="space-y-3">
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Visibility</span>
+                                                         <Select
+                                                             value={reqs.audition_takes_visibility}
+                                                             onValueChange={(v) => {
+                                                                 if (!isEditing) return;
+                                                                 const patch = { audition_takes_visibility: v };
+                                                                 if (v === "hidden") {
+                                                                     patch.min_audition_takes = 0;
+                                                                 }
+                                                                 updateReqs(patch);
+                                                             }}
+                                                             disabled={!isEditing}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 <SelectItem value="required">Required</SelectItem>
+                                                                 <SelectItem value="optional">Optional</SelectItem>
+                                                                 <SelectItem value="hidden">Hidden</SelectItem>
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Min Count</span>
+                                                         <Select
+                                                             value={String(reqs.min_audition_takes || 0)}
+                                                             onValueChange={(v) => isEditing && updateReqs({ min_audition_takes: parseInt(v) })}
+                                                             disabled={!isEditing || reqs.audition_takes_visibility === "hidden"}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 {[0, 1, 2, 3, 4, 5].map((n) => (
+                                                                     <SelectItem key={n} value={String(n)}>{n} Take(s)</SelectItem>
+                                                                 ))}
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                 </div>
+                                             </div>
+                                         </div>
+
+                                         {/* Work Links */}
+                                         <div className="bg-slate-50/30 border border-[#eaeaea] rounded-xl p-4 flex flex-col justify-between min-h-[140px]">
+                                             <div>
+                                                 <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2 font-semibold">
+                                                     Work Links
+                                                 </label>
+                                                 <div className="space-y-3">
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Visibility</span>
+                                                         <Select
+                                                             value={reqs.work_links_visibility}
+                                                             onValueChange={(v) => {
+                                                                 if (!isEditing) return;
+                                                                 const patch = { work_links_visibility: v };
+                                                                 if (v === "hidden") {
+                                                                     patch.min_work_links = 0;
+                                                                 }
+                                                                 updateReqs(patch);
+                                                             }}
+                                                             disabled={!isEditing}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 <SelectItem value="required">Required</SelectItem>
+                                                                 <SelectItem value="optional">Optional</SelectItem>
+                                                                 <SelectItem value="hidden">Hidden</SelectItem>
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Min Count</span>
+                                                         <Select
+                                                             value={String(reqs.min_work_links || 0)}
+                                                             onValueChange={(v) => isEditing && updateReqs({ min_work_links: parseInt(v) })}
+                                                             disabled={!isEditing || reqs.work_links_visibility === "hidden"}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 {[0, 1, 2, 3, 4, 5].map((n) => (
+                                                                     <SelectItem key={n} value={String(n)}>{n} Link(s)</SelectItem>
+                                                                 ))}
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                 </div>
+                                             </div>
+                                         </div>
+
+                                         {/* Portfolio (General) Images */}
+                                         <div className="bg-slate-50/30 border border-[#eaeaea] rounded-xl p-4 flex flex-col justify-between min-h-[140px]">
+                                             <div>
+                                                 <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2 font-semibold">
+                                                     Portfolio (General) Images
+                                                 </label>
+                                                 <div className="space-y-3">
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Visibility</span>
+                                                         <Select
+                                                             value={reqs.portfolio_image_visibility}
+                                                             onValueChange={(v) => {
+                                                                 if (!isEditing) return;
+                                                                 const patch = { portfolio_image_visibility: v };
+                                                                 if (v === "hidden") {
+                                                                     updateReqs({
+                                                                         ...patch,
+                                                                         portfolio: {
+                                                                             ...reqs.portfolio,
+                                                                             image: 0
+                                                                         }
+                                                                     });
+                                                                 } else {
+                                                                     updateReqs(patch);
+                                                                 }
+                                                             }}
+                                                             disabled={!isEditing}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 <SelectItem value="required">Required</SelectItem>
+                                                                 <SelectItem value="optional">Optional</SelectItem>
+                                                                 <SelectItem value="hidden">Hidden</SelectItem>
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Min Count</span>
+                                                         <input
+                                                             type="number"
+                                                             min="0"
+                                                             max="10"
+                                                             value={reqs.portfolio.image}
+                                                             onChange={(e) => updatePortfolio("image", e.target.value)}
+                                                             disabled={!isEditing || reqs.portfolio_image_visibility === "hidden"}
+                                                             className="w-full bg-white border border-black/[0.10] focus:border-black/40 outline-none rounded-sm px-3 text-xs h-9 text-black/85"
+                                                         />
+                                                     </div>
+                                                 </div>
+                                             </div>
+                                         </div>
+
+                                         {/* Indian Look Images */}
+                                         <div className="bg-slate-50/30 border border-[#eaeaea] rounded-xl p-4 flex flex-col justify-between min-h-[140px]">
+                                             <div>
+                                                 <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2 font-semibold">
+                                                     Indian Look Images
+                                                 </label>
+                                                 <div className="space-y-3">
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Visibility</span>
+                                                         <Select
+                                                             value={reqs.portfolio_indian_visibility}
+                                                             onValueChange={(v) => {
+                                                                 if (!isEditing) return;
+                                                                 const patch = { portfolio_indian_visibility: v };
+                                                                 if (v === "hidden") {
+                                                                     updateReqs({
+                                                                         ...patch,
+                                                                         portfolio: {
+                                                                             ...reqs.portfolio,
+                                                                             indian: 0
+                                                                         }
+                                                                     });
+                                                                 } else {
+                                                                     updateReqs(patch);
+                                                                 }
+                                                             }}
+                                                             disabled={!isEditing}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 <SelectItem value="required">Required</SelectItem>
+                                                                 <SelectItem value="optional">Optional</SelectItem>
+                                                                 <SelectItem value="hidden">Hidden</SelectItem>
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Min Count</span>
+                                                         <input
+                                                             type="number"
+                                                             min="0"
+                                                             max="10"
+                                                             value={reqs.portfolio.indian}
+                                                             onChange={(e) => updatePortfolio("indian", e.target.value)}
+                                                             disabled={!isEditing || reqs.portfolio_indian_visibility === "hidden"}
+                                                             className="w-full bg-white border border-black/[0.10] focus:border-black/40 outline-none rounded-sm px-3 text-xs h-9 text-black/85"
+                                                         />
+                                                     </div>
+                                                 </div>
+                                             </div>
+                                         </div>
+
+                                         {/* Western Look Images */}
+                                         <div className="bg-slate-50/30 border border-[#eaeaea] rounded-xl p-4 flex flex-col justify-between min-h-[140px]">
+                                             <div>
+                                                 <label className="block text-[11px] text-black/45 tracking-widest uppercase mb-2 font-semibold">
+                                                     Western Look Images
+                                                 </label>
+                                                 <div className="space-y-3">
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Visibility</span>
+                                                         <Select
+                                                             value={reqs.portfolio_western_visibility}
+                                                             onValueChange={(v) => {
+                                                                 if (!isEditing) return;
+                                                                 const patch = { portfolio_western_visibility: v };
+                                                                 if (v === "hidden") {
+                                                                     updateReqs({
+                                                                         ...patch,
+                                                                         portfolio: {
+                                                                             ...reqs.portfolio,
+                                                                             western: 0
+                                                                         }
+                                                                     });
+                                                                 } else {
+                                                                     updateReqs(patch);
+                                                                 }
+                                                             }}
+                                                             disabled={!isEditing}
+                                                         >
+                                                             <SelectTrigger className="w-full bg-white border border-black/[0.10] rounded-sm text-xs h-9 px-3">
+                                                                 <SelectValue />
+                                                             </SelectTrigger>
+                                                             <SelectContent className="bg-white border border-[#eaeaea] text-black shadow-xl">
+                                                                 <SelectItem value="required">Required</SelectItem>
+                                                                 <SelectItem value="optional">Optional</SelectItem>
+                                                                 <SelectItem value="hidden">Hidden</SelectItem>
+                                                             </SelectContent>
+                                                         </Select>
+                                                     </div>
+                                                     <div>
+                                                         <span className="text-[10px] text-black/45 uppercase tracking-wider block mb-1">Min Count</span>
+                                                         <input
+                                                             type="number"
+                                                             min="0"
+                                                             max="10"
+                                                             value={reqs.portfolio.western}
+                                                             onChange={(e) => updatePortfolio("western", e.target.value)}
+                                                             disabled={!isEditing || reqs.portfolio_western_visibility === "hidden"}
+                                                             className="w-full bg-white border border-black/[0.10] focus:border-black/40 outline-none rounded-sm px-3 text-xs h-9 text-black/85"
+                                                         />
+                                                     </div>
+                                                 </div>
+                                             </div>
+                                         </div>
+                                     </div>
+                                 </div>
 
                                 {/* Required Skill Categories */}
                                 <div className="border-t border-[#eaeaea] pt-6">

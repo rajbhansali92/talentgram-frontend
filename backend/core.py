@@ -1772,12 +1772,17 @@ def default_submission_requirements() -> Dict[str, Any]:
         },
         "custom_questions": {},
         "intro_video": "optional",
+        "audition_takes_visibility": "optional",
         "min_audition_takes": 0,
+        "portfolio_image_visibility": "optional",
+        "portfolio_indian_visibility": "optional",
+        "portfolio_western_visibility": "optional",
         "portfolio": {
             "indian": 0,
             "western": 0,
             "image": 0
         },
+        "work_links_visibility": "optional",
         "min_work_links": 0,
         "skills": {
             "language": False,
@@ -2198,6 +2203,15 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
         "custom_answers": get_val("custom_answers", True),
     }
 
+    reqs = (project or {}).get("submission_requirements") or {}
+    if reqs.get("audition_takes_visibility") == "hidden":
+        fv["takes"] = False
+    if reqs.get("work_links_visibility") == "hidden":
+        fv["work_links"] = False
+    if reqs.get("intro_video") == "hidden":
+        fv["intro_video"] = False
+
+
     if sub.get("client_package_snapshot"):
         snap = sub["client_package_snapshot"]
         ca_snap = snap.get("custom_answers")
@@ -2309,14 +2323,14 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
 
         cat = m.get("category")
         if cat == "image":
-            if not fv.get("portfolio", True):
+            if not fv.get("portfolio", True) or reqs.get("portfolio_image_visibility") == "hidden":
                 continue
             mapped = {**m, "category": "portfolio"}
             image_items.append(mapped)
             if not cover_mid:
                 cover_mid = mapped.get("id")
         elif cat == "indian":
-            if not fv.get("portfolio", True):
+            if not fv.get("portfolio", True) or reqs.get("portfolio_indian_visibility") == "hidden":
                 continue
             # Phase 3 — preserve Indian-look images as a distinct section so
             # the client view can render Indian / Western / Portfolio
@@ -2326,7 +2340,7 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
             if not cover_mid:
                 cover_mid = m.get("id")
         elif cat == "western":
-            if not fv.get("portfolio", True):
+            if not fv.get("portfolio", True) or reqs.get("portfolio_western_visibility") == "hidden":
                 continue
             image_items.append({**m, "category": "western"})
             if not cover_mid:

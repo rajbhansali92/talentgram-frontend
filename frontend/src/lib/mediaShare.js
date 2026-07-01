@@ -47,17 +47,67 @@ export function deviceSupportsFileShare() {
     }
 }
 
-async function urlToFile(url, filename, mimeHint) {
-    const res = await fetch(url, { mode: "cors" });
-    if (!res.ok) throw new Error(`fetch ${res.status}`);
-    const blob = await res.blob();
+// Fully instrumented fetch→Blob→File. Writes every step's outcome into `rec`
+// (mutated in place) so the caller can report the exact runtime reason, and
+// returns the File on success or null on failure (never throws).
+async function urlToFileTraced(url, filename, mimeHint, rec) {
+    rec.url = url;
+    // Step 5 — HTTP fetch
+    let res;
+    try {
+        res = await fetch(url, { mode: "cors" });
+    } catch (e) {
+        // A thrown fetch (TypeError "Failed to fetch") is the classic signature
+        // of a CORS block or network failure — the response never arrives.
+        rec.fetchThrew = `${e?.name || "Error"}: ${e?.message || ""}`.trim();
+        rec.fetchOk = false;
+        rec.step = "fetch_threw_cors_or_network";
+        return null;
+    }
+    rec.httpStatus = res.status;
+    rec.fetchOk = res.ok;
+    rec.responseType = res.type; // "cors" | "opaque" | "basic" — opaque means no CORS access
+    if (res.type === "opaque") {
+        // Opaque responses (no CORS headers) can't be read into a usable Blob.
+        rec.step = "opaque_response_no_cors";
+        return null;
+    }
+    if (!res.ok) {
+        rec.step = `http_${res.status}`;
+        return null;
+    }
+    // Step 6 — Blob
+    let blob;
+    try {
+        blob = await res.blob();
+    } catch (e) {
+        rec.blobOk = false;
+        rec.blobThrew = `${e?.name || "Error"}: ${e?.message || ""}`.trim();
+        rec.step = "blob_failed";
+        return null;
+    }
+    rec.blobOk = true;
+    rec.blobType = blob.type;
+    rec.blobSize = blob.size;
+    // Step 7 — File
     const type = blob.type || mimeHint || "application/octet-stream";
-    // Ensure the filename has an extension WhatsApp recognises.
     let name = filename || "media";
     if (!/\.[a-z0-9]{2,4}$/i.test(name)) {
         name += type.startsWith("video/") ? ".mp4" : ".jpg";
     }
-    return new File([blob], name, { type });
+    try {
+        const file = new File([blob], name, { type });
+        rec.fileOk = true;
+        rec.fileType = file.type;
+        rec.fileName = file.name;
+        rec.step = "ok";
+        return file;
+    } catch (e) {
+        rec.fileOk = false;
+        rec.fileThrew = `${e?.name || "Error"}: ${e?.message || ""}`.trim();
+        rec.step = "file_construction_failed";
+        return null;
+    }
 }
 
 /** Mint (or reuse) a secure, viewer-scoped Talentgram share link for one media item. */
@@ -138,108 +188,127 @@ export async function shareMediaViaWhatsApp({
 }) {
     if (!items || items.length === 0) return { aborted: true };
 
-    const nativeShare = canNativeShare();
-    // INTENTIONAL PRODUCT DECISION — not a technical limitation:
-    // The link's Download permission (`allowFiles` = `visibility.download`) is the
-    // single control over whether an ORIGINAL file may leave Talentgram. Native
-    // file sharing hands the real file to the recipient, so it is download-
-    // equivalent and only offered when downloads are enabled. When disabled we
-    // fall through to secure links on EVERY device. Do not remove this guard
-    // without product sign-off.
-    const willTryFiles = allowFiles && nativeShare;
-    shareLog("start", {
-        items: items.length,
-        allowFiles,
-        nativeShare,
-        canShareFilesApi: typeof navigator !== "undefined" && typeof navigator.canShare === "function",
-        willTryFiles,
+    const hasShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
+    const hasCanShare = typeof navigator !== "undefined" && typeof navigator.canShare === "function";
+
+    // ── Full per-attempt diagnostic trace (the 9 requested data points) ──────
+    const trace = {
+        when: new Date().toISOString(),
+        itemCount: items.length,
+        allowFiles,                    // Download permission (visibility.download)
+        q1_navigatorShare: hasShare,   // 1. navigator.share exists?
+        q2_navigatorCanShare: hasCanShare, // 2. navigator.canShare exists?
+        q3_canShareFiles: null,        // 3. navigator.canShare({files}) result
+        q4_allFetched: null,           // 4. every media fetched?
+        q5_allHttp200: null,           // 5. every fetch HTTP 200?
+        q6_allBlobOk: null,            // 6. blob creation succeeded (all)?
+        q7_allFileOk: null,            // 7. File construction succeeded (all)?
+        q8_path: null,                 // 8. "Native File Share" | "Link Fallback"
+        q9_reason: null,               // 9. exact reason if Link Fallback
+        perItem: [],
         ua: typeof navigator !== "undefined" ? navigator.userAgent : "n/a",
-    });
+    };
+    const emit = (result) => {
+        shareLog("TRACE", trace);
+        return { ...result, trace };
+    };
 
-    // Desktop popup-safety: window.open() after an await is blocked by popup
-    // blockers (it's no longer in the click gesture). We only use window.open on
-    // DESKTOP (no native share sheet), so pre-open a tab synchronously here and
-    // redirect it after minting. On mobile we use navigator.share() (no window),
-    // so we must NOT pre-open — that would orphan a blank tab.
+    // INTENTIONAL PRODUCT DECISION — the Download permission (`allowFiles`) is the
+    // single control over whether an ORIGINAL file may leave Talentgram. Native
+    // file sharing is download-equivalent, so it is only offered when downloads
+    // are enabled; otherwise we share secure links on every device.
+    const willTryFiles = allowFiles && hasShare;
+
+    // Desktop popup-safety: window.open() after an await is popup-blocked. We
+    // only use window.open on DESKTOP (no native sheet), so pre-open there and
+    // redirect after minting. On mobile we use navigator.share (no window).
     let linkWin = null;
-    if (!nativeShare && typeof window !== "undefined") {
+    if (!hasShare && typeof window !== "undefined") {
         linkWin = window.open("", "_blank");
-        if (linkWin) {
-            try { linkWin.opener = null; } catch { /* ignore */ }
-        }
+        if (linkWin) { try { linkWin.opener = null; } catch { /* ignore */ } }
     }
-
-    // Reason native file sharing was abandoned (only set when we actually tried
-    // and failed) — surfaced on-screen so the cause is visible without devtools.
-    let fileFallbackReason = null;
 
     // ── 1 & 2: native FILE share (attach the real media) ─────────────────────
     if (willTryFiles) {
-        try {
-            shareLog("fetching files", items.map((i) => ({ name: i.name, url: i.fileUrl })));
-            // Parallel fetch keeps total time short so the transient user
-            // activation (needed by navigator.share, ~5s on Android) doesn't
-            // expire while we download.
-            const files = await Promise.all(
-                items.map((it) =>
-                    urlToFile(
-                        it.fileUrl,
-                        it.filename || it.name,
-                        it.type === "video" ? "video/mp4" : "image/jpeg",
-                    ),
-                ),
-            );
-            shareLog("fetched files", files.map((f) => ({ name: f.name, type: f.type, size: f.size })));
+        // Pre-seed one record per item so we always report all of them.
+        const recs = items.map((it) => ({ name: it.name, type: it.type }));
+        trace.perItem = recs;
 
+        // urlToFileTraced never throws (returns null + records the failure in its
+        // rec), so every item is reported even if one fails. Parallel keeps total
+        // time short so the transient user-activation for navigator.share holds.
+        const files = await Promise.all(
+            items.map((it, i) =>
+                urlToFileTraced(
+                    it.fileUrl,
+                    it.filename || it.name,
+                    it.type === "video" ? "video/mp4" : "image/jpeg",
+                    recs[i],
+                ),
+            ),
+        );
+
+        trace.q4_allFetched = recs.every((r) => r.fetchOk === true);
+        trace.q5_allHttp200 = recs.every((r) => r.httpStatus === 200);
+        trace.q6_allBlobOk = recs.every((r) => r.blobOk === true);
+        trace.q7_allFileOk = recs.every((r) => r.fileOk === true);
+
+        const goodFiles = files.filter(Boolean);
+        const allFilesReady = goodFiles.length === items.length && goodFiles.length > 0;
+
+        if (!allFilesReady) {
+            // Derive the exact reason from the first item that failed.
+            const bad = recs.find((r) => r.step && r.step !== "ok");
+            trace.q3_canShareFiles = false;
+            trace.q8_path = "Link Fallback";
+            trace.q9_reason = bad
+                ? {
+                      opaque_response_no_cors: "CORS blocked (opaque response — media host sent no Access-Control-Allow-Origin)",
+                      fetch_threw_cors_or_network: `fetch failed / CORS blocked (${bad.fetchThrew || "network error"})`,
+                      blob_failed: `Blob creation failed (${bad.blobThrew || ""})`,
+                      file_construction_failed: `File construction failed (${bad.fileThrew || ""})`,
+                  }[bad.step] || `fetch failed (${bad.step}${bad.httpStatus ? " HTTP " + bad.httpStatus : ""})`
+                : "one or more files could not be prepared";
+        } else {
+            // Files are ready — ask the platform if it will share them.
+            const canFiles = hasCanShare ? canShareFiles(goodFiles) : false;
+            trace.q3_canShareFiles = canFiles;
             const shareMeta = items.map((it) => ({ id: it.id, type: it.type, name: it.name }));
             const baseData = {
                 title: `${talentName} — Talentgram`,
                 text: `${talentName} · Shared via Talentgram`,
             };
-
-            if (files.length > 0 && canShareFiles(files)) {
-                shareLog("path → native_file_share (all)", files.length);
-                await navigator.share({ ...baseData, files });
-                await logDispatch(slug, talentId, "native_file_share", files.length, shareMeta, sessionId);
-                return { method: "native_file_share", count: files.length };
+            if (canFiles) {
+                try {
+                    await navigator.share({ ...baseData, files: goodFiles });
+                    trace.q8_path = "Native File Share";
+                    await logDispatch(slug, talentId, "native_file_share", goodFiles.length, shareMeta, sessionId);
+                    return emit({ method: "native_file_share", count: goodFiles.length });
+                } catch (e) {
+                    if (e && e.name === "AbortError") {
+                        trace.q8_path = "Native File Share (cancelled)";
+                        trace.q9_reason = "user cancelled the share sheet";
+                        return emit({ aborted: true });
+                    }
+                    trace.q8_path = "Link Fallback";
+                    trace.q9_reason = `navigator.share({files}) threw: ${e?.name}: ${e?.message || ""}`.trim();
+                }
+            } else {
+                trace.q8_path = "Link Fallback";
+                trace.q9_reason = hasCanShare
+                    ? "navigator.canShare({files}) returned false (browser won't share these file types)"
+                    : "navigator.canShare is unavailable (can't offer file sharing safely)";
             }
-            if (files.length === 1 && canShareFiles([files[0]])) {
-                shareLog("path → native_file_share (single)");
-                await navigator.share({ ...baseData, files: [files[0]] });
-                await logDispatch(slug, talentId, "native_file_share", 1, [shareMeta[0]], sessionId);
-                return { method: "native_file_share", count: 1 };
-            }
-            // Files fetched but the browser won't share them as attachments.
-            fileFallbackReason = "browser can't share these files";
-            shareLog("files not shareable → link fallback", {
-                count: files.length,
-                canShareAll: canShareFiles(files),
-            });
-        } catch (e) {
-            if (e && e.name === "AbortError") {
-                shareLog("user cancelled native sheet");
-                return { aborted: true };
-            }
-            // TypeError "Failed to fetch" here almost always means the media
-            // host (Cloudinary/R2) didn't return CORS headers for the fetch.
-            fileFallbackReason =
-                e?.name === "TypeError"
-                    ? `couldn't fetch file (likely storage CORS): ${e?.message || ""}`.trim()
-                    : `${e?.name || "error"}${e?.message ? ": " + e.message : ""}`;
-            shareLog("native file share FAILED → link fallback", {
-                name: e?.name,
-                message: e?.message,
-            });
         }
     } else {
-        shareLog("skipping native files", {
-            reason: !allowFiles ? "downloads_disabled" : "no_navigator_share",
-        });
+        trace.q8_path = "Link Fallback";
+        trace.q9_reason = !allowFiles
+            ? "downloads disabled for this link (files intentionally not shared)"
+            : "navigator.share unavailable (no native sharing)";
     }
 
     // ── 3: secure LINK share ─────────────────────────────────────────────────
     try {
-        shareLog("minting secure links", items.length);
         const lines = [];
         const mediaMeta = [];
         for (const it of items) {
@@ -249,39 +318,28 @@ export async function shareMediaViaWhatsApp({
         }
         const text = buildWhatsAppMessage(talentName, lines);
 
-        // On mobile, share the message through the OS share sheet so the user
-        // can choose WhatsApp vs WhatsApp Business (and any other target).
-        // wa.me deep-links straight into one app — we reserve it for DESKTOP.
-        if (nativeShare && !linkWin) {
+        // Mobile: share the message via the OS sheet (user picks WhatsApp vs
+        // Business). wa.me deep-links one app — reserved for DESKTOP.
+        if (hasShare && !linkWin) {
             try {
-                shareLog("path → link share via native sheet");
                 await navigator.share({ title: `${talentName} — Talentgram`, text });
                 await logDispatch(slug, talentId, "whatsapp_link_share", items.length, mediaMeta, sessionId);
-                return { method: "whatsapp_link_share", via: "native_sheet", count: items.length, fileFallbackReason };
+                return emit({ method: "whatsapp_link_share", via: "native_sheet", count: items.length, reason: trace.q9_reason });
             } catch (e) {
-                if (e && e.name === "AbortError") {
-                    shareLog("user cancelled link sheet");
-                    return { aborted: true };
-                }
+                if (e && e.name === "AbortError") return emit({ aborted: true });
                 shareLog("native sheet for links failed → wa.me", { name: e?.name });
             }
         }
 
         const waUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
-        if (linkWin) {
-            shareLog("path → link share via wa.me (pre-opened tab)");
-            linkWin.location.href = waUrl;
-        } else {
-            shareLog("path → link share via wa.me (window.open)");
-            window.open(waUrl, "_blank", "noopener,noreferrer");
-        }
+        if (linkWin) linkWin.location.href = waUrl;
+        else window.open(waUrl, "_blank", "noopener,noreferrer");
         await logDispatch(slug, talentId, "whatsapp_link_share", items.length, mediaMeta, sessionId);
-        return { method: "whatsapp_link_share", via: "wa_me", count: items.length, fileFallbackReason };
+        return emit({ method: "whatsapp_link_share", via: "wa_me", count: items.length, reason: trace.q9_reason });
     } catch (e) {
-        if (linkWin) {
-            try { linkWin.close(); } catch { /* ignore */ }
-        }
+        if (linkWin) { try { linkWin.close(); } catch { /* ignore */ } }
+        trace.q9_reason = (trace.q9_reason ? trace.q9_reason + " | " : "") + `link share failed: ${e?.name}: ${e?.message || ""}`;
         shareLog("link share FAILED", { name: e?.name, message: e?.message });
-        throw e;
+        return emit({ method: "error", error: String(e?.message || e) });
     }
 }

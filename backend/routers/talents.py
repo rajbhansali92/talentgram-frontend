@@ -349,10 +349,86 @@ async def get_migration_report(admin: dict = Depends(current_admin)):
 
 @router.get("/talents/{tid}")
 async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
+    import logging
+    import httpx
+    import os
+    logger = logging.getLogger("talentgram")
+    
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "created_by": 0})
     if not t:
         raise HTTPException(404, "Talent not found")
-    return enrich_talent(t)
+        
+    logger.info(f"[DIAGNOSTICS] Raw MongoDB doc for talent_id={tid}: {t}")
+    
+    # Run diagnostics on video assets
+    debug_info = []
+    for m in t.get("media") or []:
+        resource_type = m.get("resource_type")
+        is_video = resource_type == "video" or m.get("category") == "video" or (m.get("content_type") or "").startswith("video/")
+        if is_video:
+            url = m.get("url") or ""
+            public_id = m.get("public_id")
+            
+            # Extract Cloudflare Stream UID from URL or metadata
+            stream_uid = m.get("stream_uid")
+            if not stream_uid and "cloudflarestream.com" in url:
+                try:
+                    # e.g. https://customer-xxx.cloudflarestream.com/stream_uid/manifest/video.m3u8
+                    stream_uid = url.split("cloudflarestream.com/", 1)[1].split("/", 1)[0]
+                except Exception:
+                    pass
+            
+            cf_info = {"status": "not_queried", "exists": None}
+            account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+            api_token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
+            
+            if stream_uid and account_id and api_token:
+                cf_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/stream/{stream_uid}"
+                headers = {"Authorization": f"Bearer {api_token}"}
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get(cf_url, headers=headers)
+                        if resp.status_code == 200:
+                            cf_data = resp.json()
+                            cf_info = {
+                                "status": "success",
+                                "exists": True,
+                                "response": cf_data.get("result", {})
+                            }
+                        elif resp.status_code == 404:
+                            cf_info = {
+                                "status": "not_found",
+                                "exists": False,
+                                "response_code": 404
+                            }
+                        else:
+                            cf_info = {
+                                "status": f"http_{resp.status_code}",
+                                "exists": None,
+                                "response_text": resp.text[:500]
+                            }
+                except Exception as ex:
+                    cf_info = {
+                        "status": "error",
+                        "error": str(ex)
+                    }
+                    
+            debug_item = {
+                "media_id": m.get("id"),
+                "category": m.get("category"),
+                "stored_url": url,
+                "public_id": public_id,
+                "stream_uid": stream_uid,
+                "cloudflare_status": cf_info
+            }
+            debug_info.append(debug_item)
+            logger.info(f"[DIAGNOSTICS] Video diagnostics for media_id={m.get('id')}: {debug_item}")
+            
+    enriched = enrich_talent(t)
+    if enriched:
+        enriched["_debug_video_info"] = debug_info
+        
+    return enriched
 
 
 @router.put("/talents/{tid}", response_model=TalentOut)

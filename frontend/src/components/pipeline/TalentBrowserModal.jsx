@@ -6,6 +6,7 @@ import { adminApi } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
+import HlsVideo from "@/components/HlsVideo";
 
 /* ---------------------------------------------------------------------
  * TalentBrowserModal — Elite Enterprise ATS-Grade Talent Browser
@@ -1490,7 +1491,7 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                     <div className="space-y-2">
                         <h4 className="text-xs font-semibold uppercase tracking-wider text-[#333333]">Intro Video</h4>
                         <div className="aspect-video w-full rounded-xl overflow-hidden bg-black border border-gray-200 shadow-inner">
-                            <video src={video.url} controls className="w-full h-full object-contain" />
+                            <HlsVideo src={video.url} controls className="w-full h-full object-contain" />
                         </div>
                     </div>
                 )}

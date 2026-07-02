@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import { formatLocation } from "@/lib/sanitize";
+import HlsVideo from "@/components/HlsVideo";
 
 const STATUS_FILTERS = [
     { key: "all", label: "All" },
@@ -468,13 +469,13 @@ function ReviewModal({ app, onClose, onDecide }) {
                             Introduction Video
                         </p>
                         {intro ? (
-                            <video
-                                src={intro.url}
-                                controls
-                                preload="metadata"
-                                className="w-full max-w-3xl border border-black/[0.08] rounded-lg bg-black/5"
-                                data-testid="review-intro-video"
-                            />
+                             <HlsVideo
+                                 src={intro.url}
+                                 controls
+                                 preload="metadata"
+                                 className="w-full max-w-3xl border border-black/[0.08] rounded-lg bg-black/5"
+                                 data-testid="review-intro-video"
+                             />
                         ) : (
                             <div className="max-w-3xl border border-dashed border-black/[0.08] rounded-lg bg-[#fafaf8] aspect-video flex items-center justify-center text-black/40 text-xs font-mono">
                                 Not submitted

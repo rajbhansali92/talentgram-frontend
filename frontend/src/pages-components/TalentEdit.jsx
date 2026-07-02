@@ -37,6 +37,7 @@ import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
 import DobInput from "@/components/DobInput";
+import HlsVideo from "@/components/HlsVideo";
 
 
 
@@ -1655,7 +1656,7 @@ export default function TalentEdit() {
                             const isVideo = currentItem.content_type?.startsWith("video") || currentItem.category === "video" || currentItem.resource_type === "video";
                             if (isVideo) {
                                 return (
-                                    <video
+                                    <HlsVideo
                                         src={currentItem.url}
                                         controls
                                         autoPlay

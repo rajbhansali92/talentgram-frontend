@@ -451,6 +451,13 @@ async def main() -> None:
     logger.info("worker: entering job polling loop")
     try:
         while True:
+            # Check for admin session reset request dynamically
+            db = get_db()
+            doc = await db.whatsapp_sessions.find_one({"id": "default"})
+            if doc and doc.get("reset_requested"):
+                logger.warning("worker: session reset requested by admin, exiting to trigger clean container restart...")
+                break
+
             if not session.is_healthy:
                 logger.error("worker: session is unhealthy, attempting restart...")
                 await session.stop()

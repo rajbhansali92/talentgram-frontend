@@ -185,6 +185,7 @@ function SubmissionPage() {
     const { activeUploads, retryQueue, uploadFile, retryUpload } = useUploadManager();
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
+    const requirements = project?.submission_requirements || {};
 
     // Collapsible sections state
     const [collapsedSections, setCollapsedSections] = useState({

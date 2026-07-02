@@ -774,12 +774,12 @@ export default function SubmissionReviewCenter() {
     useEffect(() => {
         const handleKeyDown = (e) => {
             // P0-1: never hijack OS/browser combos (Cmd/Ctrl/Alt/Shift — e.g.
-            // Cmd+A select-all must NOT approve), never act while typing, while
-            // saving, or while the resume modal is open.
+            // Cmd+A select-all must NOT approve), never act while typing, or while
+            // saving.
             if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
             if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
             if (document.activeElement?.isContentEditable) return;
-            if (saving || showResumePrompt) return;
+            if (saving) return;
 
             if (e.key === "ArrowLeft") {
                 handlePrev();
@@ -799,7 +799,7 @@ export default function SubmissionReviewCenter() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [handlePrev, handleNext, handleDecision, saving, showResumePrompt, isPreviewMode]);
+    }, [handlePrev, handleNext, handleDecision, saving, isPreviewMode]);
 
     // Media grouping helper
     const getCuratedMedia = (categoryGroup) => {

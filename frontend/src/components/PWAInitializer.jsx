@@ -2,18 +2,41 @@
 
 import React, { useEffect, useState } from "react";
 import { Download, X, Share, Plus, Sparkles } from "lucide-react";
+import { usePathname } from "next/navigation";
 
 export default function PWAInitializer() {
+    const pathname = usePathname();
     const [deferredPrompt, setDeferredPrompt] = useState(null);
     const [showBanner, setShowBanner] = useState(false);
     const [showIosPrompt, setShowIosPrompt] = useState(false);
     const [isStandalone, setIsStandalone] = useState(false);
     const [platform, setPlatform] = useState({ isIos: false, isAndroid: false, isDesktop: false });
 
+    // Helper to identify if the current user session is an authenticated internal user on an internal route
+    const checkIsInternalUser = () => {
+        if (typeof window === "undefined") return false;
+        
+        // 1. Route Gating: Must be on an admin/internal route
+        const isInternalRoute = pathname.startsWith('/admin');
+        if (!isInternalRoute) return false;
+        
+        // 2. Auth Gating: Must have a valid admin session token and tg_admin details
+        const hasAdminToken = localStorage.getItem("tg_admin_token");
+        if (!hasAdminToken) return false;
+        
+        try {
+            const adminData = JSON.parse(localStorage.getItem("tg_admin") || "null");
+            const role = adminData?.role;
+            return role === "admin" || role === "team" || role === "staff";
+        } catch (e) {
+            return false;
+        }
+    };
+
     useEffect(() => {
         if (typeof window === "undefined") return;
 
-        // 1. Register Service Worker
+        // 1. Register Service Worker globally (always registers for correct app behavior)
         if ("serviceWorker" in navigator) {
             navigator.serviceWorker
                 .register("/sw.js")
@@ -23,6 +46,19 @@ export default function PWAInitializer() {
                 .catch((err) => {
                     console.error("[PWA] Service Worker registration failed:", err);
                 });
+        }
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+
+        // Check if the current context belongs to an authenticated internal user
+        const isInternal = checkIsInternalUser();
+        if (!isInternal) {
+            // Suppress installation prompts on public/unauthenticated pages
+            setShowBanner(false);
+            setShowIosPrompt(false);
+            return;
         }
 
         // 2. Check if running in Standalone Mode (Installed PWA)
@@ -36,6 +72,7 @@ export default function PWAInitializer() {
         };
 
         const standalone = checkStandalone();
+        if (standalone) return; // No prompts needed if already installed
 
         // 3. Detect Platform
         const ua = navigator.userAgent.toLowerCase();
@@ -44,11 +81,8 @@ export default function PWAInitializer() {
         const isDesktop = !isIos && !isAndroid;
         setPlatform({ isIos, isAndroid, isDesktop });
 
-        if (standalone) return; // No prompts needed if already installed
-
         // 4. Handle Android/Desktop Install Event
         const handleBeforeInstallPrompt = (e) => {
-            // Prevent Chrome 67 and earlier from automatically showing the prompt
             e.preventDefault();
             
             // Check dismissal rules in localStorage
@@ -60,23 +94,19 @@ export default function PWAInitializer() {
                 return;
             }
 
-            // Stash the event so it can be triggered later.
             setDeferredPrompt(e);
-            // Show our custom install banner
             setShowBanner(true);
         };
 
         window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
 
         // 5. Handle iOS Onboarding Prompts
-        // Safari doesn't support beforeinstallprompt, so we detect iOS Safari and display custom onboarding card
-        if (isIos && !standalone) {
+        if (isIos) {
             const iosPromptDismissed = localStorage.getItem("tg_pwa_ios_dismissed") === "true";
             const iosDismissedUntil = localStorage.getItem("tg_pwa_ios_dismissed_until");
             const isIosDismissedForNow = iosDismissedUntil && Date.now() < parseInt(iosDismissedUntil, 10);
 
             if (!iosPromptDismissed && !isIosDismissedForNow) {
-                // Show the card after a short delay for better UX
                 const timer = setTimeout(() => {
                     setShowIosPrompt(true);
                 }, 3000);
@@ -87,7 +117,7 @@ export default function PWAInitializer() {
         return () => {
             window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
         };
-    }, []);
+    }, [pathname]);
 
     // Action: Android / Desktop PWA Trigger
     const handleInstallClick = async () => {

@@ -371,10 +371,7 @@ export default function SubmissionReviewCenter() {
         }, 200);
         return () => clearTimeout(handler);
     }, [searchQuery]);
-    const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false);
-    const [isEndOfList, setIsEndOfList] = useState(false);
-    const [savedProgressId, setSavedProgressId] = useState(null);
-    const [showResumePrompt, setShowResumePrompt] = useState(false);
+        const [isEndOfList, setIsEndOfList] = useState(false);
     const [visibleCount, setVisibleCount] = useState(50);
     
     // Advanced Filters & Sorting states
@@ -434,22 +431,12 @@ export default function SubmissionReviewCenter() {
         try {
             const { data } = await adminApi.get(`/projects/${id}/submissions`);
             setSubmissions(data);
-            
-            // Check if there is saved progress
-            const savedId = localStorage.getItem(`review_center_progress_${id}`);
-            const hasSaved = savedId && data.some(s => s.id === savedId);
-            
-            if (hasSaved) {
-                setSavedProgressId(savedId);
-                setShowResumePrompt(true);
-            } else {
-                setSelectedId(prev => {
-                    if (!prev && data.length > 0) {
-                        return data[0].id;
-                    }
-                    return prev;
-                });
-            }
+            setSelectedId(prev => {
+                if (!prev && data.length > 0) {
+                    return data[0].id;
+                }
+                return prev;
+            });
         } catch (e) {
             toast.error("Failed to load submissions");
         } finally {
@@ -490,12 +477,7 @@ export default function SubmissionReviewCenter() {
         fetchDetail();
     }, [selectedId, id]);
 
-    // Auto-save progress when selectedId changes
-    useEffect(() => {
-        if (selectedId && id) {
-            localStorage.setItem(`review_center_progress_${id}`, selectedId);
-        }
-    }, [selectedId, id]);
+
 
 
 
@@ -1179,47 +1161,7 @@ export default function SubmissionReviewCenter() {
 
                 {/* ── RIGHT PANEL (CURATED REVIEW PANEL) ── */}
                 <main className={`flex-1 flex flex-col bg-white overflow-hidden transition-all duration-300 ${!isMobileDetailOpen ? "hidden lg:flex" : "flex"} relative`}>
-                    {showResumePrompt && (
-                        <div className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-6 z-50">
-                            <div className="max-w-sm w-full bg-white border border-black/[0.08] rounded-xl p-6 shadow-xl space-y-6 text-center animate-in fade-in zoom-in-95 duration-200">
-                                <div className="w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center mx-auto text-amber-600 border border-amber-200">
-                                    <Clock className="w-6 h-6 animate-pulse" />
-                                </div>
-                                <div className="space-y-1">
-                                    <h3 className="text-md font-display font-semibold text-black/95">Resume Review?</h3>
-                                    <p className="text-xs text-black/55">You have a saved review progress from your last session.</p>
-                                </div>
-                                <div className="flex flex-col gap-2">
-                                    <button
-                                        onClick={() => {
-                                            setSelectedId(savedProgressId);
-                                            setShowResumePrompt(false);
-                                            setIsEndOfList(false);
-                                            setIsMobileDetailOpen(true);
-                                            toast.info("Resumed review progress");
-                                        }}
-                                        className="w-full py-2 bg-black hover:bg-black/90 text-white rounded-md text-xs font-semibold shadow-sm transition-all"
-                                    >
-                                        Resume Review
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            if (submissions.length > 0) {
-                                                setSelectedId(submissions[0].id);
-                                                localStorage.setItem(`review_center_progress_${id}`, submissions[0].id);
-                                            }
-                                            setShowResumePrompt(false);
-                                            setIsEndOfList(false);
-                                            toast.info("Started from beginning");
-                                        }}
-                                        className="w-full py-2 border border-black/[0.08] hover:border-black/20 text-black/80 rounded-md text-xs font-semibold shadow-sm transition-all bg-white"
-                                    >
-                                        Start From Beginning
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
+
                     
                     {/* Detail Panel Sub-header */}
                     <div className="px-6 py-3 border-b border-black/[0.08] bg-[#fafaf9] flex items-center justify-between gap-4 shrink-0">
@@ -1256,7 +1198,7 @@ export default function SubmissionReviewCenter() {
                         <div className="flex items-center gap-3">
                             {!isPreviewMode && (
                                 <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[10px] font-mono uppercase tracking-wider select-none">
-                                    <button
+                                                                    <button
                                         type="button"
                                         onClick={() => {
                                             const nextFv = { ...fv };
@@ -1265,7 +1207,9 @@ export default function SubmissionReviewCenter() {
                                             nextFv.availability = undefined;
                                             nextFv.budget = undefined;
                                             setFv(nextFv);
-                                            toast.success("All fields set to Visible");
+                                            setMediaList(prev => prev.map(m => ({ ...m, client_visible: true, internal_only: false })));
+                                            setTalentPortfolioMedia(prev => prev.map(m => ({ ...m, client_visible: true, internal_only: false })));
+                                            toast.success("All fields and media set to Visible");
                                         }}
                                         className="px-2.5 py-1 hover:text-black text-black/55 transition-colors"
                                     >
@@ -1281,7 +1225,9 @@ export default function SubmissionReviewCenter() {
                                             nextFv.availability = false;
                                             nextFv.budget = false;
                                             setFv(nextFv);
-                                            toast.success("All fields set to Hidden");
+                                            setMediaList(prev => prev.map(m => ({ ...m, client_visible: false, internal_only: false })));
+                                            setTalentPortfolioMedia(prev => prev.map(m => ({ ...m, client_visible: false, internal_only: false })));
+                                            toast.success("All fields and media set to Hidden");
                                         }}
                                         className="px-2.5 py-1 hover:text-black text-black/55 transition-colors"
                                     >
@@ -1417,10 +1363,11 @@ export default function SubmissionReviewCenter() {
                                             <button
                                                 type="button"
                                                 onClick={regenerateSnapshot}
-                                                className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider px-3.5 py-2 border border-green-600/20 hover:border-green-600/40 rounded-sm bg-green-50 text-green-700 hover:text-green-800 transition-all font-semibold shadow-sm"
+                                                title="Locks in the current curation layout, overrides, and media visibility settings for clients to view. Safe to run repeatedly."
+                                                className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider px-3.5 py-2 border border-green-600/20 hover:border-green-600/40 rounded-sm bg-green-50 text-green-700 hover:text-green-800 transition-all font-semibold shadow-sm cursor-pointer"
                                             >
                                                 <RefreshCw className="w-3.5 h-3.5 animate-spin-hover" />
-                                                Regenerate Client Package
+                                                Refresh Client Snapshot
                                             </button>
                                         )}
                                     </div>
@@ -1944,33 +1891,93 @@ export default function SubmissionReviewCenter() {
                                 )}
 
                                 {/* Section 2b: Submission Images (category "image" — reaches client as portfolio) */}
-                                {(!isPreviewMode || portfolioImages.length > 0) && portfolioImages.length > 0 && (
+                                {(!isPreviewMode || portfolioImages.length > 0) && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
-                                        <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Submission Images ({portfolioImages.length})</p>
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                            {portfolioImages.map((m) => (
-                                                <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                    <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
-                                                    {(m.client_visible === false || m.internal_only) && (
-                                                        <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                            {m.internal_only ? "Internal" : "Hidden"}
-                                                        </span>
-                                                    )}
-                                                    {!isPreviewMode && (
-                                                        <div className="absolute bottom-1 left-1 z-10">
-                                                            <MediaVisControls media={m} onChange={setMediaVisibility} />
-                                                        </div>
-                                                    )}
+                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
+                                            <p className="eyebrow">Submission Images ({portfolioImages.length})</p>
+                                            {!isPreviewMode && portfolioImages.length > 0 && (
+                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setMediaList(prev => prev.map(m => m.category === "image" ? { ...m, client_visible: true, internal_only: false } : m));
+                                                            toast.success("All submission images set to Visible");
+                                                        }}
+                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                    >
+                                                        Show All
+                                                     </button>
+                                                     <span className="text-black/10 self-center">|</span>
+                                                     <button
+                                                         type="button"
+                                                         onClick={() => {
+                                                             setMediaList(prev => prev.map(m => m.category === "image" ? { ...m, client_visible: false, internal_only: false } : m));
+                                                             toast.success("All submission images set to Hidden");
+                                                         }}
+                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                     >
+                                                         Hide All
+                                                     </button>
                                                 </div>
-                                            ))}
+                                            )}
                                         </div>
+                                        {portfolioImages.length === 0 ? (
+                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
+                                                No submission images
+                                            </div>
+                                        ) : (
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                                {portfolioImages.map((m) => (
+                                                    <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                                                        <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        {(m.client_visible === false || m.internal_only) && (
+                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
+                                                        {!isPreviewMode && (
+                                                            <div className="absolute bottom-1 left-1 z-10">
+                                                                <MediaVisControls media={m} onChange={setMediaVisibility} />
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </section>
                                 )}
 
                                 {/* Section 3: Indian Look Images */}
                                 {(!isPreviewMode || indianImages.length > 0) && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
-                                        <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Indian Look Images ({indianImages.length})</p>
+                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
+                                            <p className="eyebrow">Indian Look Images ({indianImages.length})</p>
+                                            {!isPreviewMode && indianImages.length > 0 && (
+                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setMediaList(prev => prev.map(m => m.category === "indian" ? { ...m, client_visible: true, internal_only: false } : m));
+                                                            toast.success("All Indian look images set to Visible");
+                                                        }}
+                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                    >
+                                                        Show All
+                                                     </button>
+                                                     <span className="text-black/10 self-center">|</span>
+                                                     <button
+                                                         type="button"
+                                                         onClick={() => {
+                                                             setMediaList(prev => prev.map(m => m.category === "indian" ? { ...m, client_visible: false, internal_only: false } : m));
+                                                             toast.success("All Indian look images set to Hidden");
+                                                         }}
+                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                     >
+                                                         Hide All
+                                                     </button>
+                                                </div>
+                                            )}
+                                        </div>
                                         {indianImages.length === 0 ? (
                                             <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
                                                 No Indian look images
@@ -2000,7 +2007,34 @@ export default function SubmissionReviewCenter() {
                                 {/* Section 4: Western Look Images */}
                                 {(!isPreviewMode || westernImages.length > 0) && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
-                                        <p className="eyebrow mb-4 border-b border-black/[0.05] pb-3">Western Look Images ({westernImages.length})</p>
+                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
+                                            <p className="eyebrow">Western Look Images ({westernImages.length})</p>
+                                            {!isPreviewMode && westernImages.length > 0 && (
+                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setMediaList(prev => prev.map(m => m.category === "western" ? { ...m, client_visible: true, internal_only: false } : m));
+                                                            toast.success("All Western look images set to Visible");
+                                                        }}
+                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                    >
+                                                        Show All
+                                                     </button>
+                                                     <span className="text-black/10 self-center">|</span>
+                                                     <button
+                                                         type="button"
+                                                         onClick={() => {
+                                                             setMediaList(prev => prev.map(m => m.category === "western" ? { ...m, client_visible: false, internal_only: false } : m));
+                                                             toast.success("All Western look images set to Hidden");
+                                                         }}
+                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                     >
+                                                         Hide All
+                                                     </button>
+                                                </div>
+                                            )}
+                                        </div>
                                         {westernImages.length === 0 ? (
                                             <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
                                                 No Western look images
@@ -2028,56 +2062,116 @@ export default function SubmissionReviewCenter() {
                                 )}
 
                                 {/* Section 5: Talent Portfolio Images (from db.talents) */}
-                                {talentPortfolioImages.length > 0 && (
+                                {(!isPreviewMode || talentPortfolioImages.length > 0) && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                                         <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
                                             <p className="eyebrow">Portfolio Images ({talentPortfolioImages.length})</p>
-                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · visibility editable</span>
-                                        </div>
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                            {talentPortfolioImages.map((m, idx) => (
-                                                <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                    <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
-                                                    {(m.client_visible === false || m.internal_only) && (
-                                                        <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                            {m.internal_only ? "Internal" : "Hidden"}
-                                                        </span>
-                                                    )}
-                                                    {!isPreviewMode && m.id && (
-                                                        <div className="absolute bottom-1 left-1 z-10">
-                                                            <MediaVisControls media={m} onChange={setTalentMediaVisibility} />
-                                                        </div>
-                                                    )}
+                                            {!isPreviewMode && talentPortfolioImages.length > 0 && (
+                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setTalentPortfolioMedia(prev => prev.map(m => m.category === "portfolio" ? { ...m, client_visible: true, internal_only: false } : m));
+                                                            toast.success("All portfolio images set to Visible");
+                                                        }}
+                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                    >
+                                                        Show All
+                                                     </button>
+                                                     <span className="text-black/10 self-center">|</span>
+                                                     <button
+                                                         type="button"
+                                                         onClick={() => {
+                                                             setTalentPortfolioMedia(prev => prev.map(m => m.category === "portfolio" ? { ...m, client_visible: false, internal_only: false } : m));
+                                                             toast.success("All portfolio images set to Hidden");
+                                                         }}
+                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                     >
+                                                         Hide All
+                                                     </button>
                                                 </div>
-                                            ))}
+                                            )}
                                         </div>
+                                        {talentPortfolioImages.length === 0 ? (
+                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
+                                                No portfolio images uploaded
+                                            </div>
+                                        ) : (
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                                {talentPortfolioImages.map((m, idx) => (
+                                                    <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                                                        <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                        {(m.client_visible === false || m.internal_only) && (
+                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
+                                                        {!isPreviewMode && m.id && (
+                                                            <div className="absolute bottom-1 left-1 z-10">
+                                                                <MediaVisControls media={m} onChange={setTalentMediaVisibility} />
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </section>
                                 )}
 
                                 {/* Section 6: Additional Portfolio (from db.talents) */}
-                                {talentAdditionalPortfolio.length > 0 && (
+                                {(!isPreviewMode || talentAdditionalPortfolio.length > 0) && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                                         <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
                                             <p className="eyebrow">Additional Portfolio ({talentAdditionalPortfolio.length})</p>
-                                            <span className="text-[9px] text-black/35 font-mono shrink-0">From talent profile · visibility editable</span>
-                                        </div>
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                            {talentAdditionalPortfolio.map((m, idx) => (
-                                                <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                    <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
-                                                    {(m.client_visible === false || m.internal_only) && (
-                                                        <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                            {m.internal_only ? "Internal" : "Hidden"}
-                                                        </span>
-                                                    )}
-                                                    {!isPreviewMode && m.id && (
-                                                        <div className="absolute bottom-1 left-1 z-10">
-                                                            <MediaVisControls media={m} onChange={setTalentMediaVisibility} />
-                                                        </div>
-                                                    )}
+                                            {!isPreviewMode && talentAdditionalPortfolio.length > 0 && (
+                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setTalentPortfolioMedia(prev => prev.map(m => (m.category === "additional_portfolio" || m.category === "portfolio_general") ? { ...m, client_visible: true, internal_only: false } : m));
+                                                            toast.success("All additional portfolio images set to Visible");
+                                                        }}
+                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                    >
+                                                        Show All
+                                                     </button>
+                                                     <span className="text-black/10 self-center">|</span>
+                                                     <button
+                                                         type="button"
+                                                         onClick={() => {
+                                                             setTalentPortfolioMedia(prev => prev.map(m => (m.category === "additional_portfolio" || m.category === "portfolio_general") ? { ...m, client_visible: false, internal_only: false } : m));
+                                                             toast.success("All additional portfolio images set to Hidden");
+                                                         }}
+                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                                                     >
+                                                         Hide All
+                                                     </button>
                                                 </div>
-                                            ))}
+                                            )}
                                         </div>
+                                        {talentAdditionalPortfolio.length === 0 ? (
+                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
+                                                No additional portfolio images
+                                            </div>
+                                        ) : (
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                                {talentAdditionalPortfolio.map((m, idx) => (
+                                                    <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                                                        <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                        {(m.client_visible === false || m.internal_only) && (
+                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                            </span>
+                                                        )}
+                                                        {!isPreviewMode && m.id && (
+                                                            <div className="absolute bottom-1 left-1 z-10">
+                                                                <MediaVisControls media={m} onChange={setTalentMediaVisibility} />
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </section>
                                 )}
                             </div>

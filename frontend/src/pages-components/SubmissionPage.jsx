@@ -333,7 +333,20 @@ function SubmissionPage() {
                     const { data } = await axios.get(
                         `/public/prefill?email=${encodeURIComponent(formatted)}`,
                     );
-                    if (data && Object.keys(data).length > 0 && data.first_name) {
+                    if (data && data.exists) {
+                        // Talent exists but we are unauthenticated. Trigger OTP send and popup verification modal immediately.
+                        setPrefillSuggestion(null);
+                        setGatewayEmail(formatted);
+                        try {
+                            await axios.post("/auth/otp/send", { email: formatted });
+                            setOtpSent(true);
+                            toast.message("Welcome back! Please verify your email", {
+                                description: "We've sent a 6-digit code to pre-fill your profile.",
+                            });
+                        } catch (otpErr) {
+                            toast.error(otpErr?.response?.data?.detail || "Verification required to pre-fill.");
+                        }
+                    } else if (data && Object.keys(data).length > 0 && data.first_name) {
                         populatePrefillData(data);
                         setPrefillSuggestion({ data });
                         setPrefillTried(true);
@@ -696,6 +709,22 @@ function SubmissionPage() {
             const { data } = await axios.get(
                 `/public/prefill?email=${encodeURIComponent(email)}`,
             );
+            if (data && data.exists) {
+                // Talent exists but we are unauthenticated. Trigger OTP send and popup verification modal immediately.
+                setPrefillSuggestion(null);
+                setGatewayEmail(email);
+                try {
+                    await axios.post("/auth/otp/send", { email });
+                    setOtpSent(true);
+                    toast.message("Welcome back! Please verify your email", {
+                        description: "We've sent a 6-digit code to pre-fill your profile.",
+                    });
+                } catch (otpErr) {
+                    toast.error(otpErr?.response?.data?.detail || "Verification required to pre-fill.");
+                    setEmailGateUnlocked(true);
+                }
+                return;
+            }
             if (!data || !data.first_name) {
                 // New talent — quietly unlock the rest of the form.
                 setPrefillSuggestion(null);
@@ -2100,11 +2129,18 @@ function SubmissionPage() {
                                         type="email"
                                         value={form.email}
                                         onChange={(v) => {
+                                            const trimmed = v.trim().toLowerCase();
                                             setForm({ ...form, email: v });
-                                            if (!saved && v.trim().toLowerCase() !== prefillEmail) {
+                                            if (!saved && trimmed !== prefillEmail) {
                                                 setPrefillTried(false);
                                                 setPrefillSuggestion(null);
                                                 setEmailGateUnlocked(false);
+                                            }
+                                            // Safari Autofill / Keystroke detection: trigger prefill immediately when a valid email structure is completed
+                                            if (!saved && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+                                                setTimeout(() => {
+                                                    tryPrefill();
+                                                }, 50);
                                             }
                                         }}
                                         onBlur={() => {

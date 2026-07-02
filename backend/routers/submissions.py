@@ -194,7 +194,22 @@ async def prefill_for_email(
     # the apply/submission start flows, so the frontend only needs to present
     # the portal token it already holds after verification.
     if not await verify_email_ownership(authorization, email):
-        # Prevent email enumeration: generic empty schema on invalid auth.
+        # Prevent anonymous PII leak, but allow frontend to prompt verification
+        # if the email already exists in the system.
+        talent_exists = await db.talents.find_one(
+            {"$or": [
+                {"normalized_email": email},
+                {"email": email},
+                {"source.talent_email": email}
+            ]},
+            {"_id": 1}
+        )
+        existing_sub = await db.submissions.find_one(
+            {"talent_email": email},
+            {"_id": 1}
+        )
+        if talent_exists or existing_sub:
+            return {"exists": True}
         return {}
 
     talent = await db.talents.find_one(

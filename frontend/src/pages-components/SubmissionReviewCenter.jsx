@@ -371,7 +371,8 @@ export default function SubmissionReviewCenter() {
         }, 200);
         return () => clearTimeout(handler);
     }, [searchQuery]);
-        const [isEndOfList, setIsEndOfList] = useState(false);
+    const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false);
+    const [isEndOfList, setIsEndOfList] = useState(false);
     const [visibleCount, setVisibleCount] = useState(50);
     
     // Advanced Filters & Sorting states

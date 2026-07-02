@@ -129,7 +129,16 @@ function linksToText(links) {
         .join("\n");
 }
 
-function Field({ label, value, onChange, type = "text", ...rest }) {
+function Field({
+    label,
+    value,
+    onChange,
+    type = "text",
+    disabled,
+    placeholder,
+    onBlur,
+    "data-testid": dataTestid,
+}) {
     return (
         <label className="block">
             <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
@@ -139,8 +148,11 @@ function Field({ label, value, onChange, type = "text", ...rest }) {
                 type={type}
                 value={value || ""}
                 onChange={(e) => onChange(e.target.value)}
+                disabled={disabled}
+                placeholder={placeholder}
+                onBlur={onBlur}
+                data-testid={dataTestid}
                 className="mt-2 w-full bg-transparent border-b border-[#eaeaea] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 placeholder:text-black/30"
-                {...rest}
             />
         </label>
     );
@@ -173,6 +185,7 @@ export default function TalentEdit() {
     // Lightbox states
     const [lightboxIndex, setLightboxIndex] = useState(null);
     const [lightboxCategory, setLightboxCategory] = useState(null);
+
     
     // File refs
     const fileRefs = useRef({

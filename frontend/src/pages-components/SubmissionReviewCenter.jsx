@@ -771,36 +771,7 @@ export default function SubmissionReviewCenter() {
         }
     }, [selectedId, saving, id, decisionNote, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
 
-    // Keyboard navigation shortcuts
-    useEffect(() => {
-        const handleKeyDown = (e) => {
-            // P0-1: never hijack OS/browser combos (Cmd/Ctrl/Alt/Shift — e.g.
-            // Cmd+A select-all must NOT approve), never act while typing, or while
-            // saving.
-            if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-            if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
-            if (document.activeElement?.isContentEditable) return;
-            if (saving) return;
 
-            if (e.key === "ArrowLeft") {
-                handlePrev();
-            } else if (e.key === "ArrowRight") {
-                handleNext();
-            } else if (isPreviewMode) {
-                // No decisions while previewing the client-facing view.
-                return;
-            } else if (e.key.toLowerCase() === "a") {
-                handleDecision("approved");
-            } else if (e.key.toLowerCase() === "r") {
-                handleDecision("rejected");
-            } else if (e.key.toLowerCase() === "h") {
-                handleDecision("hold");
-            }
-        };
-
-        window.addEventListener("keydown", handleKeyDown);
-        return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [handlePrev, handleNext, handleDecision, saving, isPreviewMode]);
 
     // Media grouping helper
     const getCuratedMedia = (categoryGroup) => {
@@ -2216,10 +2187,6 @@ export default function SubmissionReviewCenter() {
                                         <Check className="w-4 h-4" /> Approve
                                     </button>
                                 </div>
-                            </div>
-                            <div className="flex items-center justify-between border-t border-black/[0.04] pt-3 text-[10px] text-black/35 font-mono select-none">
-                                <span>⚡ Shortcuts: <kbd className="bg-black/5 px-1 py-0.5 rounded border border-black/[0.08]">←</kbd> / <kbd className="bg-black/5 px-1 py-0.5 rounded border border-black/[0.08]">→</kbd> navigate · <kbd className="bg-black/5 px-1.5 py-0.5 rounded border border-black/[0.08]">A</kbd> Approve · <kbd className="bg-black/5 px-1.5 py-0.5 rounded border border-black/[0.08]">H</kbd> Hold · <kbd className="bg-black/5 px-1.5 py-0.5 rounded border border-black/[0.08]">R</kbd> Reject</span>
-                                <span className="hidden sm:inline">Press shortcut key when inputs are not focused</span>
                             </div>
                         </footer>
                     )}

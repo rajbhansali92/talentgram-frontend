@@ -7,6 +7,7 @@ import React, {
     useMemo,
 } from "react";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
 import TalentAvatar from "./TalentAvatar";
 import {
@@ -205,7 +206,7 @@ const PipelineCard = memo(function PipelineCard({
                 return;
             }
             console.error("Move failed:", e);
-            toast.error(e?.response?.data?.detail || "Move failed");
+            toast.error(formatErrorDetail(e, "Move failed"));
             // Future: implement retry logic here
         } finally {
             setMoving(false);

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { X, Plus, Search, Tag, Loader2, AlertTriangle } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 
 export default function TagPopover({ talent, onSave, onClose }) {
     const [allTags, setAllTags] = useState([]);
@@ -35,7 +36,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
             onSave(talent.id, updated);
             toast.success(`Assigned tag "${tag.name}"`);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to assign tag");
+            toast.error(formatErrorDetail(e, "Failed to assign tag"));
         } finally {
             setSaving(false);
         }
@@ -50,7 +51,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
             onSave(talent.id, updated);
             toast.success("Tag removed");
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to remove tag");
+            toast.error(formatErrorDetail(e, "Failed to remove tag"));
         } finally {
             setSaving(false);
         }
@@ -76,7 +77,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
             setTagSearch("");
             toast.success(data.created ? `Tag "${name}" created and assigned` : `Tag "${name}" assigned`);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to create tag");
+            toast.error(formatErrorDetail(e, "Failed to create tag"));
         } finally {
             setSaving(false);
         }

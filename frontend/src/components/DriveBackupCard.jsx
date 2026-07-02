@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { adminApi, getAdmin } from "@/lib/api";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { Cloud, Loader2, RefreshCw, AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 
 /**
@@ -67,7 +68,7 @@ export default function DriveBackupCard() {
             window.open(data.authorization_url, "_blank", "noopener,noreferrer,width=520,height=700");
             toast.info("Complete consent in the new window — this card auto-updates.");
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Could not start OAuth flow");
+            toast.error(formatErrorDetail(e, "Could not start OAuth flow"));
         } finally {
             setActing(false);
         }
@@ -81,7 +82,7 @@ export default function DriveBackupCard() {
             toast.success("Drive disconnected");
             refresh();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Disconnect failed");
+            toast.error(formatErrorDetail(e, "Disconnect failed"));
         } finally {
             setActing(false);
         }
@@ -94,7 +95,7 @@ export default function DriveBackupCard() {
             toast.success(`Re-queued ${data.requeued} pending uploads`);
             refresh();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Retry failed");
+            toast.error(formatErrorDetail(e, "Retry failed"));
         } finally {
             setActing(false);
         }

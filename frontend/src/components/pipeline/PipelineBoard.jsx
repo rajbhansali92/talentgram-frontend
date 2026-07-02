@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useState, useMemo } from "react";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
 
 import { usePipelineData } from "@/hooks/usePipelineData";
@@ -166,7 +167,7 @@ function PipelineBoard({ projectId, projectName }) {
             toast.success(`Added ${count} talent(s)`);
         } catch (e) {
             console.error("Failed to add talents:", e);
-            toast.error(e?.response?.data?.detail || "Failed to add talents");
+            toast.error(formatErrorDetail(e, "Failed to add talents"));
         }
     };
 
@@ -194,7 +195,7 @@ function PipelineBoard({ projectId, projectName }) {
             toast.success(`Added ${talentIds.length} talent(s)`);
         } catch (e) {
             console.error("Bulk add failed:", e);
-            toast.error(e?.response?.data?.detail || "Failed to add talents");
+            toast.error(formatErrorDetail(e, "Failed to add talents"));
         } finally {
             setBulkAdding(false);
         }
@@ -217,7 +218,7 @@ function PipelineBoard({ projectId, projectName }) {
             );
         } catch (e) {
             console.error("Bulk move failed:", e);
-            toast.error(e?.response?.data?.detail || "Failed to move talents");
+            toast.error(formatErrorDetail(e, "Failed to move talents"));
         }
     };
 

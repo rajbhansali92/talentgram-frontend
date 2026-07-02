@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { api as axios } from "@/lib/api";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { Mic, MessageCircle, Loader2, Send, ShieldCheck } from "lucide-react";
 import VoiceRecorder from "@/components/VoiceRecorder";
 
@@ -66,7 +67,7 @@ export default function FeedbackComposer({
             toast.success("Sent for review — your team will moderate before sharing.");
             if (onSent) onSent();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to send");
+            toast.error(formatErrorDetail(e, "Failed to send"));
         } finally {
             setSending(false);
         }
@@ -96,7 +97,7 @@ export default function FeedbackComposer({
             toast.success("Voice note sent for moderation.");
             if (onSent) onSent();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to upload voice note");
+            toast.error(formatErrorDetail(e, "Failed to upload voice note"));
         } finally {
             setSending(false);
         }

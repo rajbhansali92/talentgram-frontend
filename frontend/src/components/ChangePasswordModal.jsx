@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi, clearAdminSession } from "@/lib/api";
 import { Lock, Eye, EyeOff, Loader2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -63,7 +64,7 @@ export default function ChangePasswordModal({ open, onClose }) {
             onClose?.();
             nav("/admin/login", { replace: true });
         } catch (err) {
-            toast.error(err?.response?.data?.detail || "Could not change password");
+            toast.error(formatErrorDetail(err, "Could not change password"));
         } finally {
             setBusy(false);
         }

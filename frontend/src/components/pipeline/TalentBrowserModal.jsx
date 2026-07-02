@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "
 import { createPortal } from "react-dom";
 import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Calendar, Award, List, Eye } from "lucide-react";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
@@ -769,7 +770,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             onClose();
         } catch (err) {
             console.error("Add to pipeline failed:", err);
-            toast.error(err?.response?.data?.detail || "Failed to add talents");
+            toast.error(formatErrorDetail(err, "Failed to add talents"));
         } finally {
             isSubmittingRef.current = false;
             setSubmitting(false);

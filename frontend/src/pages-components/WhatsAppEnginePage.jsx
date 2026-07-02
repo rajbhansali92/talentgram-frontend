@@ -5,6 +5,7 @@ import {
   ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info, User
 } from "lucide-react";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 
 import {
   getTemplates, createTemplate, updateTemplate, deleteTemplate,
@@ -262,7 +263,7 @@ function WESessionPanel() {
                 toast.success("Session reset requested. Restart the worker, then scan the new QR code.");
                 fetchSession();
               } catch (err) {
-                toast.error(err?.response?.data?.detail || "Failed to reset session.");
+                toast.error(formatErrorDetail(err, "Failed to reset session."));
               }
             }}
             className="text-xs font-semibold uppercase tracking-widest text-red-600 hover:text-white hover:bg-red-600 border border-red-200/50 px-4 py-3 rounded-lg w-full text-center transition-colors h-[48px] active:scale-[0.98] duration-120"
@@ -485,7 +486,7 @@ function WECampaignLauncher() {
       toast.success(`Saved list "${listName.trim()}" successfully!`);
       setContactLists(prev => [newList, ...prev]);
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to save contact list");
+      toast.error(formatErrorDetail(err, "Failed to save contact list"));
     }
   };
 
@@ -571,7 +572,7 @@ function WECampaignLauncher() {
       setDryRunResult(res);
       toast.success("Dry run preview compiled successfully");
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed compilation of dry run");
+      toast.error(formatErrorDetail(err, "Failed compilation of dry run"));
     } finally {
       setLaunching(false);
     }
@@ -592,7 +593,7 @@ function WECampaignLauncher() {
       setCrmContactType("");
       resetResolution();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed launching batch campaign");
+      toast.error(formatErrorDetail(err, "Failed launching batch campaign"));
     } finally {
       setLaunching(false);
     }
@@ -1207,7 +1208,7 @@ function WEHistoryPanel() {
         handleBatchClick(batchId);
       }
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Execution failed");
+      toast.error(formatErrorDetail(err, "Execution failed"));
     }
   };
 
@@ -1513,7 +1514,7 @@ function WETemplateManager() {
       setEditingId(null);
       fetchTemplates();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Template save failed");
+      toast.error(formatErrorDetail(err, "Template save failed"));
     }
   };
 
@@ -1526,7 +1527,7 @@ function WETemplateManager() {
       toast.success("Template deleted successfully");
       fetchTemplates();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to delete template");
+      toast.error(formatErrorDetail(err, "Failed to delete template"));
     }
   };
 
@@ -1764,7 +1765,7 @@ function WEConfigPanel() {
       setTestResult(res);
       toast.success("Test notification queued successfully");
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to trigger test notification");
+      toast.error(formatErrorDetail(err, "Failed to trigger test notification"));
     } finally {
       setTestingNotification(false);
     }
@@ -2222,7 +2223,7 @@ function WEContactListManager() {
       setEditingId(null);
       fetchLists();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to save contact list");
+      toast.error(formatErrorDetail(err, "Failed to save contact list"));
     }
   };
 

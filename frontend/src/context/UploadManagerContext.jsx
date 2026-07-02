@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { api } from "../lib/api";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import FloatingUploadManager from "../components/shared/FloatingUploadManager";
 import axios from "axios";
 import { directVideoUpload } from "../lib/directVideoUpload";
@@ -497,9 +498,10 @@ export function UploadManagerProvider({ children }) {
         }
 
         // Failed after all retries
+        const formattedErr = formatErrorDetail(lastErr, "Upload failed");
         setRetryQueue((q) => ({
             ...q,
-            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: lastErr?.response?.data?.detail || "Upload failed" }
+            [slotKey]: { ...(q[slotKey] || {}), failed: true, error: formattedErr }
         }));
 
         setActiveUploads((prev) => ({
@@ -507,11 +509,11 @@ export function UploadManagerProvider({ children }) {
             [slotKey]: {
                 ...prev[slotKey],
                 status: "failed",
-                error: lastErr?.response?.data?.detail || "Upload failed"
+                error: formattedErr
             }
         }));
 
-        toast.error(lastErr?.response?.data?.detail || "Upload failed — tap Retry to try again");
+        toast.error(formattedErr + " — tap Retry to try again");
         delete inFlightUploads.current[slotKey]; // release lock on failure
     };
 

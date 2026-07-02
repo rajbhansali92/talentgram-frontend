@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { X, Tag, Loader2 } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 
 export default function BulkTagDialog({ selectedCount, selectedIds, actionType, onSave, onClose }) {
     const [allTags, setAllTags] = useState([]);
@@ -35,7 +36,7 @@ export default function BulkTagDialog({ selectedCount, selectedIds, actionType, 
             toast.success(`Successfully ${actionType === "assign" ? "assigned" : "removed"} tag "${tag.name}" for selected talents.`);
             onClose();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || `Bulk operation failed`);
+            toast.error(formatErrorDetail(e, "Bulk operation failed"));
         } finally {
             setSaving(false);
         }
@@ -56,7 +57,7 @@ export default function BulkTagDialog({ selectedCount, selectedIds, actionType, 
             toast.success(`Created & assigned tag "${name}" for selected talents.`);
             onClose();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to create & assign tag");
+            toast.error(formatErrorDetail(e, "Failed to create & assign tag"));
         } finally {
             setSaving(false);
         }

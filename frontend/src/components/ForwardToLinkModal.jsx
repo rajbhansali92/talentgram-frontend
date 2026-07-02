@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
 import VisibilityToggles, {
     DEFAULT_VISIBILITY,
@@ -60,7 +61,7 @@ export default function ForwardToLinkModal({
             toast.success("Client link generated");
             onDone?.(data);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to generate link");
+            toast.error(formatErrorDetail(e, "Failed to generate link"));
         } finally {
             setSaving(false);
         }

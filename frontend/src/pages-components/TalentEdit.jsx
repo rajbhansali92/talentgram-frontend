@@ -38,6 +38,7 @@ import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
 import DobInput from "@/components/DobInput";
 import HlsVideo from "@/components/HlsVideo";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 
 
 
@@ -298,6 +299,21 @@ export default function TalentEdit() {
     }, []);
 
     const save = async () => {
+        const validationErrors = [];
+        if (!talent.name?.trim()) {
+            validationErrors.push("Full Name — Required");
+        }
+        if (talent.email?.trim()) {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(talent.email.trim())) {
+                validationErrors.push("Email — Invalid email address");
+            }
+        }
+        if (validationErrors.length > 0) {
+            toast.error(`Please fix the following:\n${validationErrors.map(err => `• ${err}`).join("\n")}`);
+            return;
+        }
+
         setSaving(true);
         try {
             const payload = {
@@ -322,7 +338,7 @@ export default function TalentEdit() {
                 nav(`/admin/talents/${data.id}`);
             }
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Save failed");
+            toast.error(formatErrorDetail(e, "Save failed"));
         } finally {
             setSaving(false);
         }
@@ -348,9 +364,7 @@ export default function TalentEdit() {
                 console.error("[delete talent] failed", err?.response?.data || err);
             }
             toast.error(
-                err?.response?.data?.detail ||
-                    err?.message ||
-                    "Delete failed — check console for details",
+                formatErrorDetail(err, "Delete failed — check console for details")
             );
             throw err;
         }
@@ -426,7 +440,7 @@ export default function TalentEdit() {
             
             toast.success(`${validFiles.length} upload(s) added`);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Upload failed");
+            toast.error(formatErrorDetail(e, "Upload failed"));
         } finally {
             setUploading(null);
         }
@@ -447,7 +461,7 @@ export default function TalentEdit() {
             });
             toast.success("Media removed");
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Remove failed");
+            toast.error(formatErrorDetail(e, "Remove failed"));
         } finally {
             setConfirmRemoveOpen(false);
             setMediaToRemove(null);
@@ -466,7 +480,7 @@ export default function TalentEdit() {
             });
             toast.success("Cover updated");
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to set cover");
+            toast.error(formatErrorDetail(e, "Failed to set cover"));
         }
     };
 
@@ -493,7 +507,7 @@ export default function TalentEdit() {
             updateTalent({ tags: updated });
             setOriginalTalent(prev => ({ ...prev, tags: updated }));
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to assign tag");
+            toast.error(formatErrorDetail(e, "Failed to assign tag"));
         }
     }, [id, isEdit, talent.tags, updateTalent]);
 
@@ -523,7 +537,7 @@ export default function TalentEdit() {
             setTagInput("");
             toast.success(data.created ? `Tag "${name}" created` : `Tag "${name}" assigned`);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to create tag");
+            toast.error(formatErrorDetail(e, "Failed to create tag"));
         } finally {
             setTagSaving(false);
         }
@@ -544,7 +558,7 @@ export default function TalentEdit() {
             updateTalent({ tags: updated });
             setOriginalTalent(prev => ({ ...prev, tags: updated }));
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to remove tag");
+            toast.error(formatErrorDetail(e, "Failed to remove tag"));
         }
     }, [id, isEdit, talent.tags, updateTalent]);
 
@@ -556,7 +570,7 @@ export default function TalentEdit() {
             updateTalent({ tags: (talent.tags || []).filter(t => t.id !== globalTagDeleteTarget.id) });
             toast.success(`Tag "${globalTagDeleteTarget.name}" deleted globally`);
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to delete tag");
+            toast.error(formatErrorDetail(e, "Failed to delete tag"));
         } finally {
             setGlobalTagDeleteTarget(null);
             setGlobalTagDeleteConfirmText("");
@@ -1215,7 +1229,7 @@ export default function TalentEdit() {
                                                                         setTagSearch("");
                                                                         setIsTagDropdownOpen(false);
                                                                     } catch (e) {
-                                                                        toast.error(e?.response?.data?.detail || "Failed to create tag");
+                                                                         toast.error(formatErrorDetail(e, "Failed to create tag"));
                                                                     } finally {
                                                                         setTagSaving(false);
                                                                     }

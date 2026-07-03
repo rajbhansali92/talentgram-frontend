@@ -73,6 +73,13 @@ export default function GoogleCallback() {
                         localStorage.setItem("talentgram_google_first_name", data.first_name || "");
                         localStorage.setItem("talentgram_google_last_name", data.last_name || "");
                         localStorage.setItem("talentgram_google_profile_data", JSON.stringify(data));
+                        // Issue 1: mark this Google auth as belonging to THIS
+                        // project so the submission page only unlocks its gate
+                        // here — never on another project from the same global
+                        // Google session.
+                        if (state && state !== "apply") {
+                            localStorage.setItem(`tg_google_done_${state}`, "1");
+                        }
                         toast.success(`Welcome back, ${data.first_name || "Talent"}!`);
                     }
                 } else {
@@ -81,6 +88,11 @@ export default function GoogleCallback() {
                     localStorage.setItem("talentgram_google_first_name", data.name?.split(" ")[0] || "");
                     localStorage.setItem("talentgram_google_last_name", data.name?.split(" ").slice(1).join(" ") || "");
                     localStorage.setItem("talentgram_google_avatar", data.picture || "");
+                    // Issue 1: per-slug marker (see above) — keeps a stale global
+                    // Google session from bypassing another project's landing page.
+                    if (state && state !== "apply") {
+                        localStorage.setItem(`tg_google_done_${state}`, "1");
+                    }
                     toast.success("Successfully authenticated with Google. Welcome to Talentgram!");
                 }
 

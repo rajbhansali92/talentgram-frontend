@@ -70,6 +70,29 @@ from notifications import fanout as notify_fanout
 router = APIRouter(prefix="/api", tags=["submissions"])
 
 
+def has_been_submitted_once(sub: dict) -> bool:
+    """True once a submission has been successfully finalized at least once.
+
+    Issue 2 — the Global Talent Profile may only be updated from an ORIGINAL
+    submission (and the separate Talent Invite / Profile Update flow). Every
+    workflow that touches a submission AFTER its first successful submit is a
+    resubmission/edit (resubmit, update, replace media, edit, admin-reopen →
+    submit again, …) and must NEVER sync media into the global profile.
+
+    The check is intentionally based on "has this submission ever been
+    submitted?" rather than a single status value, so it is robust across all
+    current and future edit flows:
+      • `submitted_at` is stamped on the first finalize and is NEVER cleared
+        afterwards (a monotonic, edit-flow-proof flag); and
+      • `status in {submitted, updated}` as a belt-and-suspenders fallback.
+    """
+    if sub is None:
+        return False
+    if sub.get("submitted_at"):
+        return True
+    return sub.get("status") in ("submitted", "updated")
+
+
 async def update_talent_submission_metrics(email: str):
     norm_email = normalize_email(email)
     if not norm_email:
@@ -776,7 +799,7 @@ async def submission_upload(
 
     patch: Dict[str, Any] = {"$push": {"media": media}}
     # Re-upload after finalize flips status back to "updated" and decision → pending
-    was_finalized = sub.get("status") in ("submitted", "updated")
+    was_finalized = has_been_submitted_once(sub)
     re_approval = True
     if was_finalized:
         proj = await db.projects.find_one(
@@ -832,15 +855,23 @@ async def submission_upload(
     # record so the talent's profile (/admin/talents/:id) reflects every
     # portfolio image they've uploaded across all projects. Idempotent
     # via source_submission_media_id; no-op for intro_video/take.
+    #
+    # Issue 2: only mirror into the global profile while this is still an
+    # ORIGINAL submission-in-progress. If the submission was already
+    # finalized (`was_finalized`), this upload is a resubmission/edit and
+    # must NOT touch the global Talent Profile — neither adding the new
+    # asset nor removing the original's mirrored media below.
     # ------------------------------------------------------------------
-    await sync_media_to_global_talent(updated, media)
+    if not was_finalized:
+        await sync_media_to_global_talent(updated, media)
 
     if category in single_slot and prev_items:
         # Defer old asset deletion until database update is verified
         for pi in prev_items:
             from core import cleanup_media_storage, remove_synced_media_from_global_talent
             await cleanup_media_storage(pi, scope="submission", parent_id=sid, operation_id=operation_id)
-            await remove_synced_media_from_global_talent(sub, pi["id"])
+            if not was_finalized:
+                await remove_synced_media_from_global_talent(sub, pi["id"])
 
     return updated
 
@@ -1055,7 +1086,7 @@ async def submission_complete_upload(
     })
     
     patch: Dict[str, Any] = {"$push": {"media": media}}
-    was_finalized = sub.get("status") in ("submitted", "updated")
+    was_finalized = has_been_submitted_once(sub)
     re_approval = True
     if was_finalized:
         proj = await db.projects.find_one(
@@ -1069,11 +1100,14 @@ async def submission_complete_upload(
         if re_approval:
             set_patch["decision"] = "pending"
         patch["$set"] = set_patch
-        
+
     await db.submissions.update_one({"id": sid}, patch)
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    await sync_media_to_global_talent(updated, media)
-    
+    # Issue 2: original submissions only — resubmission uploads must never
+    # mirror into the global Talent Profile.
+    if not was_finalized:
+        await sync_media_to_global_talent(updated, media)
+
     if was_finalized:
         brand = (proj or {}).get("brand_name") or sub.get("project_slug") or "Project"
         talent_name = sub.get("talent_name") or sub.get("talent_email") or "A talent"
@@ -1129,16 +1163,21 @@ async def submission_delete_media(
     if not sub:
         raise HTTPException(404, "Submission not found")
     target_media = next((m for m in (sub.get("media") or []) if m.get("id") == mid), None)
+    already_submitted = has_been_submitted_once(sub)
     patch: Dict[str, Any] = {"$pull": {"media": {"id": mid}}}
-    if sub.get("status") in ("submitted", "updated"):
+    if already_submitted:
         patch["$set"] = {
             "status": "updated",
             "decision": "pending",
             "updated_at": _now(),
         }
     await db.submissions.update_one({"id": sid}, patch)
-    # Phase 3 v37i — keep the global talent profile in sync.
-    await remove_synced_media_from_global_talent(sub, mid)
+    # Phase 3 v37i — keep the global talent profile in sync, but ONLY while the
+    # submission is still ORIGINAL. Deleting media from an already-submitted
+    # submission is a resubmission/edit and must NOT mutate the global profile
+    # (Issue 2). The submission's own media is still pulled above.
+    if not already_submitted:
+        await remove_synced_media_from_global_talent(sub, mid)
     # Parity sprint: best-effort delete the backing storage (Stream/R2/Cloudinary)
     # + tracking row so deletes don't leave orphans. Never fails the user action.
     if target_media:
@@ -1923,8 +1962,10 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         if pending_assets:
             raise HTTPException(400, "Cloudinary uploads are still in progress. Please wait until uploads are complete.")
 
-    # First-time finalize vs retest finalize
-    is_retest = sub.get("status") in ("submitted", "updated")
+    # First-time finalize vs retest finalize. Based on "has this submission
+    # ever been submitted?" so EVERY post-first-submit workflow (resubmit,
+    # update, edit, admin-reopen → submit again, …) is treated as a retest.
+    is_retest = has_been_submitted_once(sub)
     new_status = "updated" if is_retest else "submitted"
     patch: Dict[str, Any] = {
         "status": new_status,
@@ -1963,7 +2004,14 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             {"_id": 0},
         )
 
-    if talent_doc:
+    if is_retest:
+        # Resubmission / edit finalize (status was already submitted/updated).
+        # NEVER overwrite the global Talent Profile or its media from a
+        # resubmission — those are project-specific corrections. Only an
+        # ORIGINAL first-time submission (and the separate Talent Invite /
+        # Profile Update flow) may update the master profile. See Issue 2.
+        pass
+    elif talent_doc:
         from core import merge_talent_profile
         # Merge fields (Task 4 & 6)
         form_to_merge = dict(form)
@@ -2057,7 +2105,9 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # Sync all uploads retroactively into the talent's global media.
     # Idempotent via source_submission_media_id.
     finalized_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    if finalized_sub and talent_doc:
+    # Original submissions only — a resubmission/edit must never mirror its
+    # media into the global Talent Profile (Issue 2).
+    if not is_retest and finalized_sub and talent_doc:
         # Enforce replacement policy: clear existing canonical media for the incoming categories
         incoming_categories = set()
         cat_mapping = {

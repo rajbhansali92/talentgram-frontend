@@ -150,10 +150,21 @@ async def cloudinary_webhook(
 
             if category == "intro_video":
                 # Find and clean up previous intro videos deferred from replacement
-                sub_doc = await db.submissions.find_one({"id": parent_id}, {"media": 1})
+                sub_doc = await db.submissions.find_one(
+                    {"id": parent_id}, {"media": 1, "status": 1, "submitted_at": 1}
+                )
                 if sub_doc and "media" in sub_doc:
                     prev_items = [m for m in sub_doc.get("media", []) if m.get("category") == "intro_video" and m.get("id") != media_id]
                     if prev_items:
+                        # Issue 2: only mirror removals into the global profile
+                        # while the submission is still ORIGINAL. Replacing an
+                        # intro video on an already-submitted submission is a
+                        # resubmission/edit and must not mutate the global
+                        # profile. `submitted_at` is set on first finalize and
+                        # never cleared, so it robustly identifies edits across
+                        # all workflows.
+                        already_submitted = bool(sub_doc.get("submitted_at")) or \
+                            sub_doc.get("status") in ("submitted", "updated")
                         await db.submissions.update_one(
                             {"id": parent_id},
                             {"$pull": {"media": {"id": {"$in": [pi["id"] for pi in prev_items]}}}}
@@ -162,7 +173,8 @@ async def cloudinary_webhook(
                             from core import cleanup_media_storage, remove_synced_media_from_global_talent
                             op_id = tags.get("operation_id") or str(uuid.uuid4())
                             await cleanup_media_storage(pi, scope="submission", parent_id=parent_id, operation_id=op_id)
-                            await remove_synced_media_from_global_talent(sub_doc, pi["id"])
+                            if not already_submitted:
+                                await remove_synced_media_from_global_talent(sub_doc, pi["id"])
 
     elif scope == "application":
         if is_failed:

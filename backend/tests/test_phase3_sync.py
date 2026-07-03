@@ -1,17 +1,23 @@
 """Phase 3 v37i — submission ↔ global-talent media sync.
 
 Verifies sync_media_to_global_talent + remove_synced_media_from_global_talent
-wired into submissions.upload + submissions.delete_media.
+wired into submissions.upload/finalize + submissions.delete_media.
+
+Issue 2 contract: the global Talent Profile is updated ONLY from an ORIGINAL
+submission (media uploaded while still a draft, mirrored on first finalize).
+A RESUBMISSION / edit — any upload to an already-finalized submission — must
+NEVER touch the global profile.
 
 Matrix:
- - Upload image/indian/western → mirrored into db.talents.media with
-   source_submission_media_id set.
+ - ORIGINAL submission image/indian/western → mirrored into db.talents.media
+   with source_submission_media_id set (on first finalize).
+ - Post-finalize (edit/resubmission) upload → NOT mirrored (Issue 2).
  - Upload intro_video / take → NOT mirrored.
- - Idempotency: repeated uploads via resumed submission produce no dupes.
- - Delete submission media → mirror removed from talent.
+ - Idempotency: repeated original drafts produce no dupes.
+ - Delete an original (mirrored) submission media → mirror removed from talent.
  - Anonymous submission (no talent_email) → no talent writes.
- - Submission with talent_email but NO talent record yet → no crash; after
-   finalize creates the talent, next upload DOES mirror.
+ - Submission with talent_email but NO talent record yet → no crash; original
+   draft media mirrors on finalize; a later edit upload does NOT mirror.
  - Regression: admin login + listing endpoints still 200.
 """
 import io
@@ -151,15 +157,31 @@ def _get_talent(admin_headers, tid):
     return r.json()
 
 
-# --------------------------- Fixture: a finalized talent -------------------
-@pytest.fixture(scope="module")
-def finalized_talent(project_slug, admin_headers):
-    """Start + finalize a submission so talent record exists in db.talents."""
-    email = f"TEST_sync_{uuid.uuid4().hex[:8]}@example.com"
-    sid, tok = _start(project_slug, email)
-    # Finalize without media first so talent record is created.
+# --------------------------- helper: original submission flow --------------
+def _img(cat):
+    """Convenience tuple for an image upload of `cat` in _original_flow."""
+    return (cat, None, None, "image/jpeg")
+
+
+def _original_flow(slug, admin_headers, cats, email=None):
+    """Drive a full ORIGINAL submission: start → upload each category while
+    still a DRAFT → finalize. On first finalize the talent record is created
+    and its media mirrored into db.talents (the only media path allowed to
+    update the global profile). `cats` is a list of
+    (category, filename, content, mime) tuples. Returns sid, token,
+    talent_id and `uploaded` — a list of (category, source_media_id, status).
+    """
+    email = email or f"TEST_sync_{uuid.uuid4().hex[:8]}@example.com"
+    sid, tok = _start(slug, email)
+    uploaded = []
+    for cat, filename, content, mime in cats:
+        r = _upload(sid, tok, cat, filename=filename, content=content, mime=mime)
+        if r.status_code != 200:
+            uploaded.append((cat, None, r.status_code))
+            continue
+        media = [m for m in r.json().get("media", []) if m.get("category") == cat]
+        uploaded.append((cat, media[-1]["id"] if media else None, 200))
     _finalize(sid, tok)
-    # Wait for talent to be visible via list.
     t = None
     for _ in range(10):
         t = _talent_by_email(admin_headers, email)
@@ -167,23 +189,29 @@ def finalized_talent(project_slug, admin_headers):
             break
         time.sleep(0.3)
     assert t, f"talent not created for {email}"
-    return {"sid": sid, "token": tok, "email": email, "talent_id": t["id"]}
+    return {"sid": sid, "token": tok, "email": email,
+            "talent_id": t["id"], "uploaded": uploaded}
+
+
+# --------------------------- Fixture: a finalized talent -------------------
+@pytest.fixture(scope="module")
+def finalized_talent(project_slug, admin_headers):
+    """A talent finalized from an ORIGINAL submission carrying one `indian`
+    image, so the global profile already holds one mirrored media item."""
+    return _original_flow(project_slug, admin_headers, [_img("indian")])
 
 
 # ===========================================================================
-# 1) Forward sync: image / indian / western
+# 1) Forward sync (ORIGINAL submission): image / indian / western are mirrored
+#    into the global talent when the first submission is finalized.
 # ===========================================================================
 class TestForwardSync:
     @pytest.mark.parametrize("cat", ["image", "indian", "western"])
-    def test_upload_is_mirrored(self, finalized_talent, admin_headers, cat):
-        sid, tok, tid = finalized_talent["sid"], finalized_talent["token"], finalized_talent["talent_id"]
-        r = _upload(sid, tok, cat)
-        assert r.status_code == 200, f"upload {cat}: {r.status_code} {r.text}"
-        sub = r.json()
-        # Find the just-uploaded media id (last of that category).
-        media = [m for m in sub.get("media", []) if m.get("category") == cat]
-        assert media, f"no {cat} media on submission"
-        source_id = media[-1]["id"]
+    def test_original_media_is_mirrored(self, project_slug, admin_headers, cat):
+        res = _original_flow(project_slug, admin_headers, [_img(cat)])
+        tid = res["talent_id"]
+        _cat, source_id, status = res["uploaded"][0]
+        assert status == 200 and source_id, f"draft upload {cat} failed: {status}"
 
         # Give the async helper a moment (same event loop, should be instant).
         time.sleep(0.5)
@@ -193,75 +221,86 @@ class TestForwardSync:
             if m.get("source_submission_media_id") == source_id
         ]
         assert len(mirrored) == 1, (
-            f"expected 1 mirror for {cat}, got {len(mirrored)}; "
+            f"expected 1 mirror for original {cat}, got {len(mirrored)}; "
             f"talent media={talent.get('media')}"
         )
         assert mirrored[0].get("category") == cat
-        assert mirrored[0].get("source_submission_id") == sid
-        assert mirrored[0].get("storage_path"), "mirror missing storage_path"
+        assert mirrored[0].get("source_submission_id") == res["sid"]
+
+
+# ===========================================================================
+# 1b) Issue 2 — RESUBMISSION / edit uploads must NEVER touch the global
+#     profile. Once the original submission is finalized, further uploads are
+#     project-specific edits.
+# ===========================================================================
+class TestResubmissionNotMirrored:
+    def test_post_finalize_upload_not_mirrored(self, finalized_talent, admin_headers):
+        sid, tok, tid = finalized_talent["sid"], finalized_talent["token"], finalized_talent["talent_id"]
+        # The submission is already finalized → this upload is an edit.
+        r = _upload(sid, tok, "western")
+        assert r.status_code == 200, f"{r.status_code} {r.text}"
+        src = [m for m in r.json().get("media", []) if m.get("category") == "western"][-1]["id"]
+        time.sleep(0.5)
+        talent = _get_talent(admin_headers, tid)
+        mirrored = [
+            m for m in (talent.get("media") or [])
+            if m.get("source_submission_media_id") == src
+        ]
+        assert mirrored == [], f"resubmission upload leaked into global profile: {mirrored}"
 
 
 # ===========================================================================
 # 2) Idempotency — no dupes on repeated visible upload
 # ===========================================================================
 class TestIdempotency:
-    def test_no_duplicate_mirror_per_source_id(self, finalized_talent, admin_headers):
-        sid, tok, tid = finalized_talent["sid"], finalized_talent["token"], finalized_talent["talent_id"]
-        # Upload 3 distinct items — each must mirror exactly once.
-        source_ids = []
-        for _ in range(3):
-            r = _upload(sid, tok, "indian")
-            assert r.status_code == 200, f"{r.status_code} {r.text}"
-            sub = r.json()
-            indian = [m for m in sub.get("media", []) if m.get("category") == "indian"]
-            source_ids.append(indian[-1]["id"])
+    def test_no_duplicate_mirror_per_source_id(self, project_slug, admin_headers):
+        # Original submission with 3 distinct indian drafts — each mirrors once.
+        res = _original_flow(
+            project_slug, admin_headers,
+            [("indian", None, None, "image/jpeg") for _ in range(3)],
+        )
+        tid = res["talent_id"]
+        source_ids = [sid for (_c, sid, st) in res["uploaded"] if st == 200 and sid]
+        assert len(source_ids) == 3, f"expected 3 drafted uploads, got {source_ids}"
         time.sleep(0.5)
         talent = _get_talent(admin_headers, tid)
         media = talent.get("media") or []
         for src in source_ids:
             matches = [m for m in media if m.get("source_submission_media_id") == src]
-            assert len(matches) == 1, f"duplicate mirrors for {src}: {len(matches)}"
+            assert len(matches) == 1, f"duplicate/missing mirrors for {src}: {len(matches)}"
 
 
 # ===========================================================================
 # 3) Non-image categories must NOT mirror
 # ===========================================================================
 class TestNonImageNotMirrored:
-    def test_intro_video_not_mirrored(self, finalized_talent, admin_headers):
-        sid, tok, tid = finalized_talent["sid"], finalized_talent["token"], finalized_talent["talent_id"]
-        r = _upload(
-            sid, tok, "intro_video",
-            filename="intro.mp4", content=TINY_MP4, mime="video/mp4",
+    def test_intro_video_not_mirrored(self, project_slug, admin_headers):
+        res = _original_flow(
+            project_slug, admin_headers,
+            [("intro_video", "intro.mp4", TINY_MP4, "video/mp4")],
         )
-        # Accept either 200 or 400-if-video-validation-strict. Test only when upload accepted.
-        if r.status_code != 200:
-            pytest.skip(f"intro_video upload rejected ({r.status_code}) — env-specific; skipping mirror check")
-        sub = r.json()
-        iv = [m for m in sub.get("media", []) if m.get("category") == "intro_video"]
-        assert iv, "intro_video not on submission"
-        src = iv[-1]["id"]
+        _cat, src, status = res["uploaded"][0]
+        # Accept env-specific strict video validation — only test when accepted.
+        if status != 200 or not src:
+            pytest.skip(f"intro_video upload rejected ({status}) — env-specific")
         time.sleep(0.4)
-        talent = _get_talent(admin_headers, tid)
+        talent = _get_talent(admin_headers, res["talent_id"])
         mirrored = [
             m for m in (talent.get("media") or [])
             if m.get("source_submission_media_id") == src
         ]
         assert mirrored == [], f"intro_video should NOT mirror; got {mirrored}"
 
-    def test_take_not_mirrored(self, finalized_talent, admin_headers):
-        sid, tok, tid = finalized_talent["sid"], finalized_talent["token"], finalized_talent["talent_id"]
-        r = _upload(
-            sid, tok, "take",
-            filename="take.mp4", content=TINY_MP4, mime="video/mp4",
+    def test_take_not_mirrored(self, project_slug, admin_headers):
+        res = _original_flow(
+            project_slug, admin_headers,
+            [("take", "take.mp4", TINY_MP4, "video/mp4")],
         )
-        if r.status_code != 200:
-            pytest.skip(f"take upload rejected ({r.status_code}) — env-specific")
-        sub = r.json()
-        takes = [m for m in sub.get("media", []) if m.get("category") == "take"]
-        assert takes
-        src = takes[-1]["id"]
+        _cat, src, status = res["uploaded"][0]
+        if status != 200 or not src:
+            pytest.skip(f"take upload rejected ({status}) — env-specific")
         time.sleep(0.4)
-        talent = _get_talent(admin_headers, tid)
+        talent = _get_talent(admin_headers, res["talent_id"])
         mirrored = [
             m for m in (talent.get("media") or [])
             if m.get("source_submission_media_id") == src
@@ -270,24 +309,27 @@ class TestNonImageNotMirrored:
 
 
 # ===========================================================================
-# 4) Delete sync: remove mirror when submission media deleted
+# 4) Delete sync (Issue 2): deleting media from an ALREADY-SUBMITTED
+#    submission is a resubmission/edit — it removes the media from the
+#    submission but must NOT remove the original mirror from the global
+#    profile. (The submission's own media IS removed either way.)
 # ===========================================================================
 class TestDeleteSync:
-    def test_delete_indian_removes_mirror(self, finalized_talent, admin_headers):
-        sid, tok, tid = finalized_talent["sid"], finalized_talent["token"], finalized_talent["talent_id"]
-        r = _upload(sid, tok, "indian")
-        assert r.status_code == 200
-        sub = r.json()
-        indian = [m for m in sub.get("media", []) if m.get("category") == "indian"]
-        source_id = indian[-1]["id"]
+    def test_post_finalize_delete_keeps_global_mirror(self, project_slug, admin_headers):
+        res = _original_flow(project_slug, admin_headers, [_img("indian")])
+        sid, tok, tid = res["sid"], res["token"], res["talent_id"]
+        _cat, source_id, status = res["uploaded"][0]
+        assert status == 200 and source_id
         time.sleep(0.3)
-        # Confirm mirror exists.
+        # Original media mirrored at finalize.
         talent = _get_talent(admin_headers, tid)
         assert any(
             m.get("source_submission_media_id") == source_id
             for m in (talent.get("media") or [])
-        ), "mirror missing before delete"
+        ), "mirror missing after original finalize"
 
+        # Delete post-finalize = an edit. Submission media is removed, but the
+        # global mirror must survive (resubmissions never mutate the profile).
         d = requests.delete(
             f"{BASE_URL}/api/public/submissions/{sid}/media/{source_id}",
             headers={"Authorization": f"Bearer {tok}"},
@@ -296,32 +338,30 @@ class TestDeleteSync:
         assert d.status_code == 200, f"delete {d.status_code} {d.text}"
         time.sleep(0.4)
         talent = _get_talent(admin_headers, tid)
-        assert not any(
+        assert any(
             m.get("source_submission_media_id") == source_id
             for m in (talent.get("media") or [])
-        ), "mirror still present after submission media delete"
+        ), "post-finalize delete wrongly removed the original from the global profile"
 
 
 # ===========================================================================
-# 5) Edge: email but NO talent record → no crash; mirror after finalize works
+# 5) Edge: email but NO talent record → no crash. Original draft media mirrors
+#    on first finalize; a later edit upload does NOT mirror (Issue 2).
 # ===========================================================================
 class TestTalentMissingEdge:
-    def test_upload_without_talent_record_is_safe(self, project_slug, admin_headers):
-        # Use a brand-new email that has never been finalized. Upload
-        # pre-finalize → no talent record exists yet → should succeed with
-        # no db.talents write.
+    def test_original_mirrors_but_edit_does_not(self, project_slug, admin_headers):
+        # Brand-new email that has never been finalized. Draft upload happens
+        # before any talent record exists → must succeed with no crash.
         email = f"TEST_pre_{uuid.uuid4().hex[:8]}@example.com"
         sid, tok = _start(project_slug, email)
         r = _upload(sid, tok, "indian")
         assert r.status_code == 200, f"pre-finalize upload failed: {r.status_code} {r.text}"
-        sub = r.json()
-        source_id = [m for m in sub.get("media", []) if m.get("category") == "indian"][-1]["id"]
+        draft_src = [m for m in r.json().get("media", []) if m.get("category") == "indian"][-1]["id"]
 
         # Talent should NOT yet exist.
-        t = _talent_by_email(admin_headers, email)
-        assert t is None, "talent existed before finalize — unexpected"
+        assert _talent_by_email(admin_headers, email) is None, "talent existed before finalize"
 
-        # Finalize — creates talent.
+        # Finalize — creates the talent AND mirrors the original draft media.
         _finalize(sid, tok)
         t = None
         for _ in range(10):
@@ -330,23 +370,23 @@ class TestTalentMissingEdge:
                 break
             time.sleep(0.3)
         assert t, "talent not created after finalize"
-        # Pre-finalize media were NOT backfilled on finalize (by design).
-        assert not any(
-            m.get("source_submission_media_id") == source_id
+        time.sleep(0.4)
+        t = _get_talent(admin_headers, t["id"])
+        assert any(
+            m.get("source_submission_media_id") == draft_src
             for m in (t.get("media") or [])
-        ), "unexpected pre-finalize mirror"
+        ), "original draft media was not mirrored on first finalize"
 
-        # Next upload after finalize SHOULD mirror.
+        # A post-finalize upload is an edit/resubmission → must NOT mirror.
         r2 = _upload(sid, tok, "indian")
         assert r2.status_code == 200
-        sub2 = r2.json()
-        new_src = [m for m in sub2.get("media", []) if m.get("category") == "indian"][-1]["id"]
+        edit_src = [m for m in r2.json().get("media", []) if m.get("category") == "indian"][-1]["id"]
         time.sleep(0.5)
         t2 = _get_talent(admin_headers, t["id"])
-        assert any(
-            m.get("source_submission_media_id") == new_src
+        assert not any(
+            m.get("source_submission_media_id") == edit_src
             for m in (t2.get("media") or [])
-        ), "post-finalize upload did not mirror"
+        ), "post-finalize (edit) upload leaked into global profile"
 
 
 # ===========================================================================

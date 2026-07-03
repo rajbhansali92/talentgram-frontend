@@ -213,9 +213,14 @@ function SubmissionPage() {
     // validateForm / validateStep1 can read it without TDZ surprises.
     const [emailGateUnlocked, setEmailGateUnlocked] = useState(() => {
         if (typeof window === "undefined") return false;
-        const hasDraft = !!readSaved(slug);
-        const hasPortalSession = !!localStorage.getItem("talentgram_portal_email");
-        return hasDraft || hasPortalSession;
+        // Issue 1: every project submission link must ALWAYS begin on the
+        // landing page and require fresh authentication. Only a per-slug
+        // in-progress submission for THIS exact project (its saved
+        // JWT/ATK session) may skip the gate — that represents a submission
+        // the talent already authenticated to create on this project. A
+        // GLOBAL cross-project portal/Google session must NOT bypass the
+        // landing page.
+        return !!readSaved(slug);
     });
     const [prefillTried, setPrefillTried] = useState(false);
     const [prefillSuggestion, setPrefillSuggestion] = useState(null); // {data}
@@ -275,42 +280,61 @@ function SubmissionPage() {
         };
     }, [activePortfolioThumbId]);
 
-    // Prefill from query params, localStorage talent portal session, or Google Sign-In
+    // Auth restoration / prefill on mount.
+    //
+    // Issue 1: every project submission link must ALWAYS begin on the landing
+    // page and authenticate BEFORE any profile data is fetched. A GLOBAL
+    // cross-project session (talentgram_portal_email / talentgram_google_*
+    // left over from another project) must NEVER auto-unlock the gate or
+    // auto-load a profile here. Only a signal proving authentication happened
+    // FOR THIS project is honoured:
+    //   • a per-slug Google auth (GoogleCallback writes `tg_google_done_<slug>`)
+    //   • the per-slug JWT/ATK submission session (handled by the resume effects)
     useEffect(() => {
         const urlParams = new URLSearchParams(window.location.search);
         const queryEmail = urlParams.get("email");
-        const portalEmail = localStorage.getItem("talentgram_portal_email");
-        
-        // Google authentication checks
+
+        // Google Sign-In — only when the OAuth round-trip completed for THIS
+        // project. Existing talents WITH a submission are restored by the
+        // JWT/ATK resume effects; the branches below cover the "just
+        // authenticated, no submission yet" and "new talent" cases.
+        const googleDone = localStorage.getItem(`tg_google_done_${slug}`);
         const googleEmail = localStorage.getItem("talentgram_google_email");
-        if (googleEmail) {
+        if (googleDone && googleEmail) {
             const profileDataStr = localStorage.getItem("talentgram_google_profile_data");
-            const avatar = localStorage.getItem("talentgram_google_avatar") || "";
-            
+            setForm((f) => ({ ...f, email: f.email || googleEmail }));
+            setPrefillEmail(googleEmail);
+            setEmailGateUnlocked(true);
+
             if (profileDataStr) {
-                // Existing Google-authenticated talent
-                const profileData = JSON.parse(profileDataStr);
-                setGatewayRecognition({
-                    name: `${profileData.first_name || ""} ${profileData.last_name || ""}`.trim(),
-                    email: googleEmail,
-                    location: profileData.location || [],
-                    image_url: avatar || profileData.image_url || profileData.cover_url || "",
-                    isGoogle: true
-                });
-                setEmailGateUnlocked(false);
+                // Existing Google-authenticated talent — auth is proven, so
+                // fetch the full profile (the portal token is attached
+                // automatically) and populate media/video.
+                (async () => {
+                    try {
+                        const { data } = await axios.get(
+                            `/public/prefill?email=${encodeURIComponent(googleEmail)}`,
+                        );
+                        if (data && data.first_name) {
+                            populatePrefillData(data);
+                            setPrefillSuggestion({ data });
+                            setPrefillTried(true);
+                        } else {
+                            populatePrefillData(JSON.parse(profileDataStr));
+                        }
+                    } catch (e) {
+                        console.error("Auto prefill lookup failed:", e);
+                    }
+                })();
             } else {
-                // New Google-authenticated talent
+                // New Google-authenticated talent — prefill identity only.
                 const first = localStorage.getItem("talentgram_google_first_name") || "";
                 const last = localStorage.getItem("talentgram_google_last_name") || "";
                 setForm((f) => ({
                     ...f,
-                    email: googleEmail,
                     first_name: f.first_name || first,
                     last_name: f.last_name || last,
                 }));
-                setEmailGateUnlocked(true);
-                
-                // Show welcome banner once
                 const onboardKey = `tg_onboard_shown_${slug}`;
                 if (!localStorage.getItem(onboardKey)) {
                     toast.success("Welcome to Talentgram! Let's create your profile");
@@ -320,43 +344,36 @@ function SubmissionPage() {
             return;
         }
 
-        const emailToPrefill = queryEmail || portalEmail;
-        if (emailToPrefill && !form.email) {
-            const formatted = emailToPrefill.trim().toLowerCase();
-            setForm((f) => ({ ...f, email: formatted }));
-            setPrefillEmail(formatted);
-            setEmailGateUnlocked(true);
-            
-            // Trigger pre-fill lookup immediately
+        // Deep-link ?email=<addr> — pre-fill the LANDING email field and, for a
+        // returning talent, send the OTP so the verification step appears. The
+        // gate stays LOCKED: authentication must precede any profile load.
+        if (queryEmail && !emailGateUnlocked && !gatewayEmail) {
+            const formatted = queryEmail.trim().toLowerCase();
+            setGatewayEmail(formatted);
             (async () => {
                 try {
                     const { data } = await axios.get(
                         `/public/prefill?email=${encodeURIComponent(formatted)}`,
                     );
                     if (data && data.exists) {
-                        // Talent exists but we are unauthenticated. Trigger OTP send and popup verification modal immediately.
-                        setPrefillSuggestion(null);
-                        setGatewayEmail(formatted);
                         try {
                             await axios.post("/auth/otp/send", { email: formatted });
                             setOtpSent(true);
                             toast.message("Welcome back! Please verify your email", {
-                                description: "We've sent a 6-digit code to pre-fill your profile.",
+                                description: "We've sent a 6-digit code to load your profile.",
                             });
                         } catch (otpErr) {
-                            toast.error(otpErr?.response?.data?.detail || "Verification required to pre-fill.");
+                            toast.error(otpErr?.response?.data?.detail || "Verification required to continue.");
                         }
-                    } else if (data && Object.keys(data).length > 0 && data.first_name) {
-                        populatePrefillData(data);
-                        setPrefillSuggestion({ data });
-                        setPrefillTried(true);
                     }
+                    // New talent with ?email= : leave them on the landing email step.
                 } catch (e) {
                     console.error("Auto prefill lookup failed:", e);
                 }
             })();
         }
-    }, [form.email, slug]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [slug]);
 
 
     // Branded page title — replaces the raw slug-based title users used to
@@ -750,6 +767,7 @@ function SubmissionPage() {
         localStorage.removeItem("talentgram_google_last_name");
         localStorage.removeItem("talentgram_google_avatar");
         localStorage.removeItem("talentgram_google_profile_data");
+        localStorage.removeItem(`tg_google_done_${slug}`);
         const onboardKey = `tg_onboard_shown_${slug}`;
         localStorage.removeItem(onboardKey);
         
@@ -932,6 +950,7 @@ function SubmissionPage() {
         localStorage.removeItem("talentgram_google_last_name");
         localStorage.removeItem("talentgram_google_avatar");
         localStorage.removeItem("talentgram_google_profile_data");
+        localStorage.removeItem(`tg_google_done_${slug}`);
         const onboardKey = `tg_onboard_shown_${slug}`;
         localStorage.removeItem(onboardKey);
         setGatewayRecognition(null);

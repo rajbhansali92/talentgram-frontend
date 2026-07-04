@@ -212,6 +212,14 @@ class WhatsAppSession:
             )
 
         await asyncio.sleep(2)  # let chats hydrate
+        # Sweep post-login dialogs (feature announcements etc.) so the first
+        # job doesn't hit a blocked chat list. Best-effort: an unknown dialog
+        # is captured+logged by the framework and each send fails gracefully.
+        try:
+            from modals import dismiss_blocking_dialogs
+            await dismiss_blocking_dialogs(self.page, "login")
+        except Exception as exc:
+            logger.warning("session: post-login dialog sweep failed: %s", exc)
         self._healthy = True
         await self._update_session_doc(
             "authenticated",

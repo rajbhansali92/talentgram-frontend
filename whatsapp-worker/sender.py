@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 from db import get_db
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from modals import dismiss_blocking_dialogs
 from session import SEL
 
 logger = logging.getLogger(__name__)
@@ -208,12 +209,18 @@ async def _first_present(page: Page, selectors: list) -> Tuple[bool, Optional[st
     return False, None
 
 
-async def _verify_chat_open(page: Page) -> Tuple[bool, bool, bool, str]:
+def _norm_title(text: str) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
+async def _verify_chat_open(page: Page, expected_name: Optional[str] = None) -> Tuple[bool, bool, bool, str]:
     """TASK 1: prove a real conversation is open BEFORE typing.
 
     Requires the conversation panel (#main), a header inside it, and a visible
     recipient name/phone. The compose box alone is NOT accepted (it can exist on
-    the home screen). Returns (ready, header_found, recipient_found, recipient_text).
+    the home screen). When expected_name is given (group sends), the header
+    title must also MATCH it — never type into the wrong chat.
+    Returns (ready, header_found, recipient_found, recipient_text).
     """
     panel_found, panel_sel = await _first_present(page, CONV_PANEL_SELECTORS)
     header_found, _ = await _first_present(page, CONV_HEADER_SELECTORS)
@@ -233,11 +240,18 @@ async def _verify_chat_open(page: Page) -> Tuple[bool, bool, bool, str]:
             pass
 
     conversation_ready = bool(panel_found and header_found)
+    title_match = None
+    if expected_name and recipient_text:
+        title_match = _norm_title(recipient_text) == _norm_title(expected_name)
+        if not title_match:
+            conversation_ready = False
     logger.info("sender: CHAT OPEN VERIFICATION")
     logger.info("sender:   panel_found=%s (%s)", panel_found, panel_sel)
     logger.info("sender:   header_found=%s", header_found)
     logger.info("sender:   recipient_found=%s", recipient_found)
     logger.info("sender:   recipient_text=%r", recipient_text[:60])
+    if expected_name:
+        logger.info("sender:   expected_name=%r title_match=%s", expected_name[:60], title_match)
     logger.info("sender:   conversation_ready=%s", conversation_ready)
     return conversation_ready, header_found, recipient_found, recipient_text
 
@@ -567,17 +581,36 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     title_xpath = f"xpath=//span[@title='{title}']"
 
     # Strategy 1: the group is already visible in the chat list — click directly.
+    # Fast-fail (5s, not the 30s default): a blocking dialog surfaces quickly,
+    # gets dismissed via the modal framework, and the click is retried ONCE.
+    direct_visible = False
+    loc = page.locator(title_xpath)
     try:
-        loc = page.locator(title_xpath)
-        if await loc.count() and await loc.first.is_visible():
-            logger.info("sender: group %r already visible — opening directly", group_name)
-            await loc.first.click()
-            await asyncio.sleep(1.0)
-            return "OPENED"
+        direct_visible = bool(await loc.count()) and await loc.first.is_visible()
     except Exception as exc:
         logger.info("sender: direct group-open probe error=%s", exc)
+    if direct_visible:
+        logger.info("sender: group %r already visible — opening directly", group_name)
+        try:
+            await loc.first.click(timeout=5_000)
+            await asyncio.sleep(1.0)
+            return "OPENED"
+        except Exception as exc:
+            logger.warning("sender: direct group-open click blocked (%s) — "
+                           "dismissing dialogs and retrying once", exc)
+            if not await dismiss_blocking_dialogs(page, "open-chat"):
+                return "SEARCH_FAILED"  # blocked by unhandled dialog — retryable, nothing sent
+            try:
+                await loc.first.click(timeout=5_000)
+                await asyncio.sleep(1.0)
+                return "OPENED"
+            except Exception as exc2:
+                logger.warning("sender: retry after dialog dismissal also failed (%s) — "
+                               "falling back to search", exc2)
 
     # Strategy 2: resilient search box → type → click result.
+    if not await dismiss_blocking_dialogs(page, "search"):
+        return "SEARCH_FAILED"
     search_sel = await _find_search_box(page)
     if not search_sel:
         logger.warning("sender: NO search-box selector resolved — cannot search for group")
@@ -596,11 +629,22 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
 
     try:
         await page.wait_for_selector(title_xpath, timeout=10_000)
-        await page.click(title_xpath)
-        await asyncio.sleep(1.0)
-        return "OPENED"
     except PlaywrightTimeoutError:
         return "NOT_FOUND"
+    try:
+        await page.click(title_xpath, timeout=5_000)
+    except Exception as exc:
+        logger.warning("sender: search-result click blocked (%s) — "
+                       "dismissing dialogs and retrying once", exc)
+        if not await dismiss_blocking_dialogs(page, "open-chat"):
+            return "SEARCH_FAILED"
+        try:
+            await page.click(title_xpath, timeout=5_000)
+        except Exception as exc2:
+            logger.warning("sender: search-result click retry also failed: %s", exc2)
+            return "SEARCH_FAILED"
+    await asyncio.sleep(1.0)
+    return "OPENED"
 
 
 async def send_whatsapp_message(
@@ -617,7 +661,13 @@ async def send_whatsapp_message(
     If destination_type is "number", navigates directly using the wa.me URL.
     """
     logger.info("sender: preparing to send to %s (%s)", destination, destination_type)
-    
+
+    # Clear any blocking dialog BEFORE any interaction (login nags, feature
+    # announcements). Unknown/undismissable dialogs -> retryable, nothing sent.
+    if not await dismiss_blocking_dialogs(page, "pre-open"):
+        logger.warning("sender: blocking dialog could not be handled -> CHAT_NOT_OPENED")
+        return CHAT_NOT_OPENED
+
     if destination_type == "number":
         # Format clean phone number (digits only, e.g. 919876543210)
         phone = "".join(filter(str.isdigit, destination))
@@ -669,8 +719,10 @@ async def send_whatsapp_message(
         return CHAT_NOT_OPENED
 
     # TASK 1: the compose box is NOT sufficient — confirm a real conversation is
-    # open (panel + header + recipient) before typing anything.
-    conversation_ready, _hdr, _rcp, _rtext = await _verify_chat_open(page)
+    # open (panel + header + recipient) before typing anything. For groups the
+    # header title must equal the target group name (wrong-chat guard).
+    expected_name = destination if destination_type == "group" else None
+    conversation_ready, _hdr, _rcp, _rtext = await _verify_chat_open(page, expected_name)
     if not conversation_ready:
         logger.warning("sender: conversation NOT open -> CHAT_NOT_OPENED (refusing to type)")
         return CHAT_NOT_OPENED
@@ -745,6 +797,10 @@ async def send_whatsapp_message(
                     # But we'll keep it to send separately.
             
             # Click send button on preview page (resilient fallback chain)
+            if not await dismiss_blocking_dialogs(page, "send"):
+                logger.warning("sender: blocking dialog before media send — not pressing "
+                               "anything -> MESSAGE_NOT_SENT")
+                return MESSAGE_NOT_SENT
             await _safe_screenshot(page, "/tmp/pre_send.png")
             sent_via = await _find_and_click_send(page)
             logger.info("sender: media send click executed via %s", sent_via)
@@ -759,8 +815,11 @@ async def send_whatsapp_message(
                     pass
     else:
         # Text-only message
-        # Focus message box
+        # Focus message box and clear any stale draft (a prior blocked attempt
+        # may have left text in the composer — retyping on top would double it).
         await page.click(SEL["msg_box"])
+        await page.keyboard.press("Control+A")   # Linux worker — NOT macOS Meta+A
+        await page.keyboard.press("Backspace")
         # Standard approach: paste or type text. Since we want to preserve newlines, we can use copy-paste
         # or press Shift+Enter for newlines. Let's type line by line or paste via keyboard.
         # Typing character by character can be slow, but using page.type with delay 0 is fast enough
@@ -777,7 +836,13 @@ async def send_whatsapp_message(
         
         logger.info("sender: message text inserted? True (%d line(s))", len(lines))
         await asyncio.sleep(0.5)
-        # Click send button via resilient fallback chain
+        # Click send button via resilient fallback chain. If a dialog is
+        # blocking, do NOT press anything (Enter could activate a dialog
+        # button) — composer still holds the text, so this is retryable.
+        if not await dismiss_blocking_dialogs(page, "send"):
+            logger.warning("sender: blocking dialog before send — not pressing anything "
+                           "-> MESSAGE_NOT_SENT")
+            return MESSAGE_NOT_SENT
         await _safe_screenshot(page, "/tmp/pre_send.png")
         sent_via = await _find_and_click_send(page)
         logger.info("sender: text send click executed via %s", sent_via)

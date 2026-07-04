@@ -166,6 +166,7 @@ On startup, the backend runs migrations:
 - QR code for WhatsApp authentication stored in MongoDB for admin UI display
 - Circuit breaker pauses batch after 5 consecutive send failures
 - Human-like delays: 8-15 seconds between messages
+- **Dialog handling**: `modals.py` sweeps for blocking `aria-modal` dialogs at login, pre-open, search, and pre-send. Known-benign dialogs are auto-dismissed (Escape → Close → whitelist button). Unknown dialogs are captured to `whatsapp_dom_snapshots` and the send fails gracefully (retryable). Check logs for `UNKNOWN_DIALOG` events after WhatsApp Web updates.
 
 ## Rollback Procedure
 
@@ -192,15 +193,11 @@ On startup, the backend runs migrations:
    ```
 2. Verify WhatsApp session is still valid (may need re-scan)
 
-### KNOWN OPERATIONAL ISSUE: GitHub → Railway Auto-Deploy Is Disconnected
+### KNOWN OPERATIONAL ISSUE: GitHub → Railway Auto-Deploy — Status Uncertain
 
-As of 2026-07-04, pushes to `main` do **not** automatically trigger a new Railway deployment for either service. Both services still show the correct repo/branch/root, but no GitHub webhook is firing.
+As of 2026-07-04, auto-deploy may have reconnected. Earlier (2026-07-02–03) pushes did NOT trigger Railway deploys, but the 2026-07-04 push appeared to auto-deploy both services. Verification needed on the next push (see [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md) Issue #0).
 
-Symptoms observed:
-- `railway status --json` showed both services on commit `840adbe` while `main` HEAD was `eb8c057` (4 commits ahead).
-- Vercel auto-deploy works normally.
-
-Until reconnected in the Railway dashboard (Settings → Source → Reconnect Repo, and verify the Railway GitHub App has access), you must **manually redeploy after every backend push**:
+If auto-deploy is still disconnected, you must **manually redeploy after every backend push**:
 
 ```
 railway redeploy --service talentgram-railway --from-source --yes

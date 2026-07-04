@@ -417,13 +417,14 @@ links.talentgramagency.com/l/{slug}
 | **CRM** | | |
 | `clients` | Marketing CRM client records | -- |
 | `interactions` | CRM interaction notes | -- |
-| **WhatsApp Engine (6 collections)** | | |
+| **WhatsApp Engine (7 collections)** | | |
 | `whatsapp_templates` | Message templates | -- |
 | `whatsapp_batches` | Batch send records | -- |
 | `whatsapp_jobs` | Individual send jobs | -- |
 | `whatsapp_sessions` | WhatsApp Web session state | -- |
 | `whatsapp_config` | Engine configuration | -- |
 | `whatsapp_audit_log` | WhatsApp audit trail | -- |
+| `whatsapp_dom_snapshots` | Dialog/DOM captures for unknown or undismissable dialogs | -- |
 | **Workflow (3 collections)** | | |
 | `workflow_tasks` | Internal tasks | -- |
 | `workflow_scouts` | Scouting entries | -- |

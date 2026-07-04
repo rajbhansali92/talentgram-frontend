@@ -262,7 +262,26 @@ update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
 
 ---
 
-## D21: Backend Runs On Railway (Not Emergent)
+## D21: Recognition-Based Modal Handling (WhatsApp Worker)
+
+**Decision**: WhatsApp Web dialogs are handled by a recognition-based framework that only dismisses dialogs matching a known-benign registry. Unrecognized dialogs are never touched — they are captured, logged, and the send fails gracefully (retryable).
+
+**Rationale**: WhatsApp Web periodically shows `aria-modal="true"` announcement dialogs that intercept all pointer events on the page. Playwright's actionability checks correctly refuse to click through overlays, causing every job to time out. Force-clicking or blindly clicking any button could inadvertently confirm dangerous dialogs (logout, delete chat, block contact). A recognition-based approach ensures only known-safe dialogs are dismissed and new/unknown dialogs are surfaced for human review before any action.
+
+**Implementation**:
+- `whatsapp-worker/modals.py`: `dismiss_blocking_dialogs(page, context)` is called at login, pre-open, search, and pre-send.
+- Registry: `KNOWN_DIALOG_PATTERNS` (casefolded regex list); currently matches "what's new on whatsapp", "turn on notifications", "whatsapp is now faster".
+- Dismissal priority: Escape → `button[aria-label="Close"]` / `[role="button"][aria-label="Close"]` → exact-label whitelist (`Continue`, `Got it`, `OK`, `Not now`, `Done`, `Dismiss`). Never `force=True`, never clicks an unrecognized button.
+- Unknown dialogs: screenshot + dialog HTML + title/body stored to `whatsapp_dom_snapshots` collection, logged as `UNKNOWN_DIALOG`, function returns `False` (caller fails gracefully, job retries).
+- Every encounter emits a structured `DIALOG_EVENT` JSON log line: `{context, title, body, method, success, outcome}`.
+
+**Safety rules**: Never force-click. Never click an unlisted button. Never dismiss an unrecognized dialog. Structured logging on every encounter — nothing is silent.
+
+**Established by**: Commit `914b1fa` (2026-07-04) "fix(whatsapp): dismiss blocking WhatsApp Web dialogs before every interaction".
+
+---
+
+## D22: Backend Runs On Railway (Not Emergent)
 
 **Decision**: The FastAPI backend is deployed to Railway (`talentgram-railway` service, root `/backend`, `uvicorn server:app`). The `.emergent/emergent.yml` file that suggests an Emergent base image is historical (dated 2026-05-16) and does not drive the live deploy.
 
@@ -270,4 +289,4 @@ update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
 
 **Implementation**: Railway service `talentgram-railway` (service ID `b3242fe8-67b3-4d5d-9fce-a875d05b58ce`) in project `pacific-art`. Source: `rajbhansali92/talentgram-frontend`, branch `main`, root `/backend`. Public URL: `https://talentgram-app-production.up.railway.app`. Start command: `uvicorn server:app --host 0.0.0.0 --port $PORT`. Health: `GET /health`.
 
-**Trade-off**: See open issue #0 -- GitHub → Railway auto-deploy is currently disconnected and every push needs a manual `railway redeploy` until re-authorized.
+**Trade-off**: See open issue #0 -- GitHub → Railway auto-deploy status is uncertain (may have reconnected as of 2026-07-04; verify on next push).

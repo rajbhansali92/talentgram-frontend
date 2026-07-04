@@ -2,15 +2,15 @@
 
 ## Known Issues
 
-### 0. Railway Auto-Deploy From GitHub Is Disconnected
-**Status**: Active operational issue (as of 2026-07-04)
-**Impact**: High
-**Evidence**: Live `railway status --json` showed both services (`talentgram-railway`, `talentgram-frontend - whatsapp`) on commit `840adbe` while `main` HEAD was `eb8c057` — 4 commits behind. Three pushes (`8cfb1b5`, `1b15075`, `eb8c057`) did not deploy. The plan is `pro` and the services are Online, so it is not a paused-project or expired-subscription issue. The repo has no repo-level webhooks; Railway's GitHub App connection is not firing.
-**Risk**: Every backend push silently fails to reach production until someone runs a manual redeploy. This masked the initial "hidden media on the client link" report because the backend fix was in the repo but not on the running service.
-**Recommendation**:
-1. Reconnect the source in Railway (dashboard → each service → Settings → Source → Disconnect → Reconnect Repo `rajbhansali92/talentgram-frontend`, branch `main`, root `/backend` or `/whatsapp-worker`).
-2. Re-authorize Railway's GitHub App (Settings → Applications → Installed GitHub Apps → Railway → Configure → grant access to `talentgram-frontend`).
-3. Push a trivial commit and confirm a new deployment starts within ~30 seconds.
+### 0. Railway Auto-Deploy From GitHub — Status Uncertain
+**Status**: Possibly reconnected (as of 2026-07-04); needs verification on next push
+**Impact**: High (if still disconnected)
+**Evidence**: Earlier (2026-07-02–03), three pushes (`8cfb1b5`, `1b15075`, `eb8c057`) did NOT auto-deploy — both services were stuck on `840adbe`. However, the 2026-07-04 push of commits `914b1fa`/`1a9d556` appeared to trigger an automatic backend deploy (both services updated without a manual `railway redeploy`). This may indicate Railway's GitHub App reconnected, or a manual redeploy happened to coincide.
+**Risk**: If still disconnected, backend pushes silently fail to reach production. If reconnected, the issue is resolved.
+**Verification needed**:
+1. Push a trivial commit (docs-only or whitespace) and observe whether a new Railway deployment starts within ~30 seconds without a manual redeploy.
+2. If it does NOT auto-deploy, reconnect the source in Railway (dashboard → each service → Settings → Source → Disconnect → Reconnect Repo `rajbhansali92/talentgram-frontend`, branch `main`, root `/backend` or `/whatsapp-worker`).
+3. Re-authorize Railway's GitHub App if needed (Settings → Applications → Installed GitHub Apps → Railway → Configure → grant access to `talentgram-frontend`).
 **Interim workaround** (documented in `05_DEPLOYMENT_RULES.md`):
 ```
 railway redeploy --service talentgram-railway --from-source --yes
@@ -81,11 +81,13 @@ railway redeploy --service "talentgram-frontend - whatsapp" --from-source --yes
 **Recommendation**: Standardize on `NEXT_PUBLIC_*` and remove `REACT_APP_*` references.
 
 ### 10. WhatsApp Worker Session Fragility
-**Status**: Operational risk
+**Status**: Partially mitigated (as of 2026-07-04)
 **Impact**: Medium
 **Evidence**: WhatsApp Web session stored on Railway persistent volume. Requires QR code re-scan when session expires.
-**Risk**: Session can break on Railway redeploy, container restart, or WhatsApp server-side invalidation. No auto-recovery.
-**Recommendation**: Monitor session health via admin UI. Consider alerting when session drops.
+**Risk**: Session can break on Railway redeploy, container restart, or WhatsApp server-side invalidation. No auto-recovery. Feature-announcement dialogs (`aria-modal`) used to silently block all sends until the container was restarted.
+**Mitigation added**: The modal handling framework (`whatsapp-worker/modals.py`, commit `914b1fa`) now auto-dismisses known-benign dialogs at login, pre-open, search, and pre-send. Unknown dialogs are captured and logged without interaction, causing a graceful retryable failure instead of a 30s timeout. This eliminates the most common cause of "session appears healthy but all sends time out."
+**Remaining risk**: QR expiry and WhatsApp server-side session invalidation still require manual re-scan. No alerting pipeline exists.
+**Recommendation**: Monitor session health via admin UI. Consider alerting when session drops or when `UNKNOWN_DIALOG` events appear in logs.
 
 ### 11. `internal_only` Cleanup Migration Is Manual
 **Status**: Pending run

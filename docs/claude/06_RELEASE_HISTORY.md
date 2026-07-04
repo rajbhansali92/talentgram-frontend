@@ -2,9 +2,18 @@
 
 ## Timeline of Major Releases
 
-This timeline covers repository history through July 4, 2026. The project has no tags or formal release branches; releases are tracked by merge commits and significant feature commits to `main`.
+This timeline covers repository history through July 5, 2026. The project has no tags or formal release branches; releases are tracked by merge commits and significant feature commits to `main`.
 
 ---
+
+### 2026-07-04: WhatsApp Engine Modal Handling Framework
+
+| Field | Value |
+|---|---|
+| Commits | `914b1fa`, `1a9d556` |
+| Date | 2026-07-04 |
+| Purpose | Fix WhatsApp worker blocking on undismissed dialogs; add a generic recognition-based modal handling framework |
+| Impact | Root cause: WhatsApp Web's "What's new on WhatsApp Web" announcement dialog (`role="dialog" aria-modal="true"`) intercepted all pointer events, causing every send to time out after 30s. New `whatsapp-worker/modals.py` module recognizes known-benign dialogs via a casefolded regex registry, dismisses them via Escape → explicit Close/X → exact-label whitelist (`Continue`, `Got it`, `OK`, `Not now`, `Done`, `Dismiss`), and never touches unrecognized dialogs (captures screenshot + DOM to `whatsapp_dom_snapshots`, logs as `UNKNOWN_DIALOG`, fails gracefully). Every encounter emits a structured `DIALOG_EVENT` JSON log (title, body, method, context, outcome). Dialog sweeps integrated at session login, pre-open, search, and pre-send. Second commit (`1a9d556`) fixes the group header title-match guard: `_verify_chat_open()` now scans ALL header title candidates (up to 6 per selector) instead of only the first span (which returned "click here for group info" subtitle). Additionally: direct-open click timeout reduced from 30s to 5s with dismiss+retry before falling to search; stale-draft guard (Ctrl+A, Backspace) added before typing. 7 new regression tests in `tests/test_modals.py`. |
 
 ### 2026-07-04: Client Link Viewed-Tracking Fix
 

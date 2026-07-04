@@ -2,9 +2,45 @@
 
 ## Timeline of Major Releases
 
-This timeline covers repository history from June 12-23, 2026. The project has no tags or formal release branches; releases are tracked by merge commits and significant feature commits to `main`.
+This timeline covers repository history through July 4, 2026. The project has no tags or formal release branches; releases are tracked by merge commits and significant feature commits to `main`.
 
 ---
+
+### 2026-07-04: Client Link Viewed-Tracking Fix
+
+| Field | Value |
+|---|---|
+| Commit | `b1c902a` |
+| Date | 2026-07-04 |
+| Purpose | Stop auto-marking submissions viewed on landing / scroll |
+| Impact | Removed the `TalentCard` IntersectionObserver and the 15s auto-review timer. `markSeen` now fires only on explicit open (card click, modal prev/next, Resume). Header counter switched from decision-based (`reviewedCount`) to opened-based (`seenCount = filter(seenIds.has)`). Server `/seen` uses `$addToSet` for first-view idempotency. Frontend-only; no new endpoints. |
+
+### 2026-07-03: Immediate Visibility Persistence (Review Center)
+
+| Field | Value |
+|---|---|
+| Commit | `eb8c057` |
+| Date | 2026-07-03 |
+| Purpose | Persist media / field-visibility toggles to Mongo immediately |
+| Impact | Root cause of the earlier "hidden media still appears on the Client Review Link" report was persistence: the Hide toggles only mutated React state; the Client View preview filtered that local state (so it looked right), but the DB was never written until an explicit "Save Project Overrides" click. Toggles now PUT `/api/projects/{pid}/submissions/{sid}` on every change, serialized so overlapping toggles apply in order. `executeDecision` awaits any in-flight visibility save before the decision POST, eliminating any Hide → Approve race. |
+
+### 2026-07-02: Single Live Client Pipeline + Client/Hidden Visibility + Review Centre UX
+
+| Field | Value |
+|---|---|
+| Commit | `1b15075` |
+| Date | 2026-07-02 |
+| Purpose | Make Review Centre Client View and every client-facing renderer share one shaping/filter engine; simplify visibility to Client / Hidden; remove Google Drive folder button |
+| Impact | Removed the `client_package_snapshot` render short-circuit in `_submission_to_client_shape` — every client surface (link, PDF, bundle, slideshow, individual media serve, Review Centre preview) now renders live from the same submission + visibility engine. Snapshot infra retained one release, deprecated. Media/field visibility collapsed from 3 states (Client/Hidden/Internal) to 2 (Client/Hidden); legacy `internal_only` is folded on read/write; migration `backend/migrations/remove_internal_visibility.py` cleans historical rows. Removed the "Open Google Drive folder" button and `GET /api/submissions/{sid}/drive` endpoint (Cloudinary-only). Languages / Special Abilities dropped from recruiter and client shapes (duplicate of Skills). Safari decision-bar disappearance fixed via `min-h-0` on the scroll flex child. Decision-change confirmation modal only when changing an already-registered decision. |
+
+### 2026-07-02: Submission Landing Page Always Shown + Resubmissions Never Sync
+
+| Field | Value |
+|---|---|
+| Commit | `8cfb1b5` |
+| Date | 2026-07-02 |
+| Purpose | Every project link opens on the landing/OTP page; every post-first-submit workflow is treated as a resubmission and never mutates the global talent profile |
+| Impact | (Issue 1) Global cross-project sessions (`talentgram_portal_email`, `talentgram_google_*`) no longer auto-unlock a new project's gate. Only a per-slug JWT/ATK session or a per-slug `tg_google_done_<slug>` marker (written by `GoogleCallback`) may skip the landing. Deep-links `?email=` pre-fill the field and send OTP but keep the gate locked. (Issue 2) New helper `has_been_submitted_once(sub)`, keyed on the monotonic `submitted_at` flag with a status fallback, guards every write-to-global path: upload mirror + replace-removal, signed/complete upload, media delete, finalize field-merge, finalize media re-sync, and the async Cloudinary webhook intro-video replace. Test `test_phase3_sync.py` rewritten to the new contract. |
 
 ### 2026-06-23: Direct Cloudinary Video Upload (Architecture C)
 

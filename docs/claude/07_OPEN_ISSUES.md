@@ -2,6 +2,21 @@
 
 ## Known Issues
 
+### 0. Railway Auto-Deploy From GitHub Is Disconnected
+**Status**: Active operational issue (as of 2026-07-04)
+**Impact**: High
+**Evidence**: Live `railway status --json` showed both services (`talentgram-railway`, `talentgram-frontend - whatsapp`) on commit `840adbe` while `main` HEAD was `eb8c057` — 4 commits behind. Three pushes (`8cfb1b5`, `1b15075`, `eb8c057`) did not deploy. The plan is `pro` and the services are Online, so it is not a paused-project or expired-subscription issue. The repo has no repo-level webhooks; Railway's GitHub App connection is not firing.
+**Risk**: Every backend push silently fails to reach production until someone runs a manual redeploy. This masked the initial "hidden media on the client link" report because the backend fix was in the repo but not on the running service.
+**Recommendation**:
+1. Reconnect the source in Railway (dashboard → each service → Settings → Source → Disconnect → Reconnect Repo `rajbhansali92/talentgram-frontend`, branch `main`, root `/backend` or `/whatsapp-worker`).
+2. Re-authorize Railway's GitHub App (Settings → Applications → Installed GitHub Apps → Railway → Configure → grant access to `talentgram-frontend`).
+3. Push a trivial commit and confirm a new deployment starts within ~30 seconds.
+**Interim workaround** (documented in `05_DEPLOYMENT_RULES.md`):
+```
+railway redeploy --service talentgram-railway --from-source --yes
+railway redeploy --service "talentgram-frontend - whatsapp" --from-source --yes
+```
+
 ### 1. No CI/CD Pipeline
 **Status**: Active gap
 **Impact**: High
@@ -71,6 +86,24 @@
 **Evidence**: WhatsApp Web session stored on Railway persistent volume. Requires QR code re-scan when session expires.
 **Risk**: Session can break on Railway redeploy, container restart, or WhatsApp server-side invalidation. No auto-recovery.
 **Recommendation**: Monitor session health via admin UI. Consider alerting when session drops.
+
+### 11. `internal_only` Cleanup Migration Is Manual
+**Status**: Pending run
+**Impact**: Low (read paths are already tolerant)
+**Evidence**: `backend/migrations/remove_internal_visibility.py` was added in commit `1b15075`. It folds legacy `internal_only: true` into `client_visible: false` across `db.submissions.media[]`, `db.submissions.talent_media_visibility.*`, and `db.talents.media[]`. It is idempotent and non-destructive, but not wired into the startup migrations.
+**Risk**: Data older than 2026-07-02 still carries the deprecated flag until the migration is run. All read paths already normalize on read, so there is no correctness bug — it's a cleanliness / future-simplicity concern.
+**Recommendation**: Run once against production:
+```
+python -m migrations.remove_internal_visibility --dry-run
+python -m migrations.remove_internal_visibility
+```
+
+### 12. Snapshot Infrastructure Dormant For One Release
+**Status**: Deprecated, scheduled for removal
+**Impact**: Low
+**Evidence**: `client_package_snapshot` is no longer used for rendering. `_submission_to_client_shape()` always computes live. `generate_submission_snapshot()` in `backend/core.py` and `POST /api/projects/{pid}/submissions/{sid}/snapshot` are retained for one release as a safety net for any lingering external caller (or a cached frontend during rolling deploy). Nothing in the current app calls them.
+**Risk**: A stale `client_package_snapshot` may still be present on old approved submissions in Mongo, but is ignored by the shape function.
+**Recommendation**: Remove `generate_submission_snapshot()`, the `/snapshot` endpoint, and the `client_package_snapshot`/`client_package_snapshots` fields (via `$unset` migration) in the next release cycle. See D15 in [08_DECISION_LOG.md](08_DECISION_LOG.md).
 
 ## Technical Debt
 

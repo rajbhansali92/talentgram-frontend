@@ -56,10 +56,13 @@ Talentgram replaces manual casting workflows (spreadsheets, email chains, WeTran
 ### Backend
 - **Framework**: FastAPI (Python 3.11)
 - **Database**: MongoDB Atlas via Motor (async driver)
-- **Object Storage**: Cloudinary (images, videos, PDFs)
+- **Object Storage**:
+  - **Cloudinary** (images, PDFs, and legacy videos)
+  - **Cloudflare Stream** (HLS/`.m3u8` audition videos)
+  - **Cloudflare R2** (raw uploads that feed Stream)
 - **Email**: Resend > SendGrid > AWS SES (cascade fallback)
 - **Auth**: JWT (HS256) + email OTP + Google OAuth2
-- **Deployment**: Emergent platform (FastAPI base image)
+- **Deployment**: Railway (service `talentgram-railway`, root `/backend`, `uvicorn server:app`)
 
 ### WhatsApp Worker
 - **Runtime**: Python 3.11 + Playwright/Chromium
@@ -75,8 +78,10 @@ Talentgram replaces manual casting workflows (spreadsheets, email chains, WeTran
 
 | Environment | Frontend | Backend | Domain |
 |---|---|---|---|
-| Production | Vercel | Emergent | `talentgramagency.com` |
-| Preview | Vercel preview deploys | Same backend | `*.vercel.app` |
+| Production | Vercel | Railway (`talentgram-railway`) | `talentgramagency.com` |
+| Preview | Vercel preview deploys | Same production Railway backend | `*.vercel.app` |
+
+There is no staging backend. See [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md).
 
 ### Production Subdomains
 - `talentgramagency.com` -- Landing page

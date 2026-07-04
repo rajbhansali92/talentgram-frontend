@@ -111,16 +111,17 @@ draft --> submitted (via finalize) --> updated (if edited after submit)
 ### Re-approval Rule
 Projects can set `require_reapproval_on_edit: true`. When enabled, any edit to a submitted submission resets the decision back to `pending`.
 
-### Media Sync on Upload
-When a talent uploads portfolio media to a submission:
+### Media Sync on Upload (ORIGINAL submissions only)
+When a talent uploads portfolio media to a submission that has NEVER been finalized (draft state), sync fires:
 - Portfolio images (`image`, `indian`, `western`) sync to `db.talents` via `sync_media_to_global_talent()`
 - Intro video (`intro_video`) syncs to talent (single slot, replaces existing)
 - **Audition takes (`take`, `take_1`, `take_2`, `take_3`) do NOT sync** -- they are project-specific
+- **Any upload after the first finalize does NOT sync.** This includes resubmit, update, replace media, edit, and admin-reopen → submit again. The Global Talent Profile only accepts data from the first successful submission (and the separate Talent Invite / Profile Update flow).
 
-### Media Sync on Delete
-When submission media is deleted:
-- The mirrored copy on `db.talents` is also removed via `remove_synced_media_from_global_talent()`
-- Matched by `source_submission_media_id` / `source_application_media_id`
+The gate is the helper `has_been_submitted_once(sub)` in `backend/routers/submissions.py`, keyed on the monotonic `submitted_at` (never cleared) with a status fallback. It guards: submission upload, signed/complete upload, media delete, finalize field-merge, finalize media re-sync, and the async Cloudinary webhook intro-video replace path. See D17 in [08_DECISION_LOG.md](08_DECISION_LOG.md).
+
+### Media Sync on Delete (ORIGINAL submissions only)
+When submission media is deleted before first finalize, the mirrored copy on `db.talents` is also removed via `remove_synced_media_from_global_talent()`, matched by `source_submission_media_id` / `source_application_media_id`. After first finalize, deletes only remove the media from the submission — the global mirror is preserved.
 
 ## Casting Pipeline
 
@@ -141,7 +142,7 @@ ask_to_test -> approved -> hold -> shortlisted -> already_tested -> locked -> re
 
 ## Client Link Rules
 
-### Visibility Control (Two Layers)
+### Visibility Control (Two Layers + Per-Media)
 
 **Layer 1 -- Link-level visibility**: Controls which categories of information are shown across all talents in the link:
 ```
@@ -163,7 +164,11 @@ download: false (default)
 
 **Layer 2 -- Per-submission field_visibility**: Controls which fields are visible for each individual submission within the link.
 
-**Final gate**: A `CLIENT_ALLOWED_FIELDS` strict allowlist enforces what fields can ever reach the client, regardless of visibility settings.
+**Per-media**: Each media item carries `client_visible: true|false`. Two states only -- Client / Hidden. The Client state means "show to the client"; Hidden means "recruiter/admin still sees it, client never does". Legacy `internal_only: true` values are folded to `client_visible: false` on read and on write; the deprecated flag is never persisted (see D16 in [08_DECISION_LOG.md](08_DECISION_LOG.md)).
+
+**Final gate**: A `CLIENT_ALLOWED_FIELDS` strict allowlist enforces what fields can ever reach the client, regardless of visibility settings. `languages` and `special_abilities` were removed from the client shape (they duplicate `skills`).
+
+**Single live engine**: The Client Review Link, the Review Centre Client View, the download bundle, the client PDF, and the individual media serve endpoint all render through the same shaping/filter pipeline. Snapshots are no longer used for rendering — snapshot generation is deprecated but retained for one release.
 
 ### Privacy Rules
 - Talent names are privatized to "First L." via `privatizeName()`
@@ -183,8 +188,11 @@ download: false (default)
 All client interactions are tracked:
 - `link_views`: page opens
 - `link_actions`: decisions on talents
-- `client_states`: per-viewer state (unique: link_id + viewer_email)
+- `client_states`: per-viewer state (unique: link_id + viewer_email). Stores `seen_talent_ids` (opened) and `reviewed_talent_ids` (decided).
 - Events: `open`, `view_talent`, `view_media`, `watch_video`
+
+### Viewed = Opened (not decided)
+A submission is marked viewed only when its detail is explicitly opened by the client -- card click, modal prev/next navigation, or the Resume banner. Landing on the page, scrolling, rendering the card list, and prefetching do not count as viewed. The `IntersectionObserver` and the 15s auto-review timer were removed. `POST /public/links/{slug}/seen` uses `$addToSet` so each submission's first-viewed state is recorded exactly once. The header counter reads `seenCount = talents.filter(t => seenIds.has(t.id)).length` (see D19 in [08_DECISION_LOG.md](08_DECISION_LOG.md)).
 
 ## Onboarding Configuration
 

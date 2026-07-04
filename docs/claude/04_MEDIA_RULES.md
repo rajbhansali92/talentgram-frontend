@@ -1,5 +1,22 @@
 # Media Rules
 
+## Video Delivery Architecture
+
+Talentgram uses **multiple storage/delivery backends** for media, and the client shape is provider-aware:
+
+| Content type | Storage | Delivery | Notes |
+|---|---|---|---|
+| Images (portfolio, headshots, indian, western) | Cloudinary | Cloudinary URL transforms | Fingerprinted magic-byte validation |
+| Client-facing PDFs (talent packages) | Cloudinary | Cloudinary URL | Generated at request time |
+| Audition videos (intro_video, takes) | Cloudflare R2 (raw upload) → Cloudflare Stream (transcode + HLS) | HLS `.m3u8` from `*.cloudflarestream.com` | See "Cloudflare Stream Pipeline" below |
+| Legacy videos | Cloudinary | Cloudinary URL | Detected via `res.cloudinary.com` domain in stored URL |
+
+`_public_media()` in `backend/core.py` inspects each media record: if `provider == "stream"`, `stream_uid` is set, the URL contains `cloudflarestream.com`, or it ends with `.m3u8`, the stored URL is passed through untouched. Only genuine Cloudinary videos get rewritten through the Cloudinary transform.
+
+### Frontend HLS playback (`HlsVideo` component)
+
+Located at `frontend/src/components/HlsVideo.jsx`. Chrome and Firefox do not have native HLS support, so `hls.js` is lazy-loaded and attached for `.m3u8` sources. Safari (macOS/iOS) uses its native HLS. `LazyVideoPlayer` picks `HlsVideo` for any URL containing `.m3u8`.
+
 ## Cloudinary Architecture
 
 ### Configuration
@@ -133,7 +150,11 @@ Browser --> POST /video-complete --> FastAPI (confirms, stores metadata)
 
 ### What Syncs to Global Talent (`db.talents`)
 
-| Source Category | Syncs To | Syncs? |
+Sync only fires when **both** conditions hold:
+1. The category is in the mapping below.
+2. The submission has never been finalized (`has_been_submitted_once(sub) == False`). Any upload/delete after the first finalize is treated as a resubmission and skips sync entirely (see D17 in [08_DECISION_LOG.md](08_DECISION_LOG.md)).
+
+| Source Category | Syncs To | Syncs on ORIGINAL? |
 |---|---|---|
 | `image` / `portfolio` | `portfolio` | YES |
 | `indian` | `indian` | YES |
@@ -141,19 +162,20 @@ Browser --> POST /video-complete --> FastAPI (confirms, stores metadata)
 | `video` / `intro_video` | `video` | YES (single slot, replaces) |
 | `headshot` / `headshots` | `headshot` | YES |
 | `additional_portfolio` | `additional_portfolio` | YES |
-| **`take`** | -- | **NEVER** |
-| **`take_1`** | -- | **NEVER** |
-| **`take_2`** | -- | **NEVER** |
-| **`take_3`** | -- | **NEVER** |
+| **`take`** | -- | **NEVER (any state)** |
+| **`take_1`** | -- | **NEVER (any state)** |
+| **`take_2`** | -- | **NEVER (any state)** |
+| **`take_3`** | -- | **NEVER (any state)** |
 
-### CRITICAL RULE: Audition Takes Never Sync
+### CRITICAL RULE 1: Audition Takes Never Sync
 
-**Audition take categories (`take`, `take_1`, `take_2`, `take_3`) must NEVER sync to the global talent record.**
+**Audition take categories (`take`, `take_1`, `take_2`, `take_3`) must NEVER sync to the global talent record.** They are project-specific and would violate client confidentiality if mirrored globally.
 
-These are project-specific audition recordings. They belong only to the submission. Syncing them to the global talent profile would:
-- Contaminate the canonical talent portfolio with project-specific content
-- Violate client confidentiality (auditions for one client visible to another)
-- Bloat the talent media with ephemeral audition content
+### CRITICAL RULE 2: Resubmissions Never Sync
+
+**A submission that has already been finalized once cannot mutate the Global Talent Profile.** Every post-first-submit workflow -- resubmit, update, replace media, edit existing submission, admin-reopen → talent submits again -- is a project-specific correction and must not propagate to `db.talents`. Only the FIRST original submission (and the separate Talent Invite / Profile Update flow) may update the master profile.
+
+Enforcement is centralized via `has_been_submitted_once(sub)` in `backend/routers/submissions.py` and applied at every write-to-global path: upload mirror, upload replace-removal, signed/complete upload, media delete, finalize field-merge, finalize media re-sync, and the async Cloudinary webhook intro-video replace path. The `submitted_at` flag is monotonic (never cleared by any edit flow) which makes the check robust across current and future edit workflows.
 
 ### Sync Implementation: `sync_media_to_global_talent()`
 

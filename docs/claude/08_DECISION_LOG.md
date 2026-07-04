@@ -183,3 +183,91 @@ update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
 **Implementation**: `frontend/src/hooks/useTheme.js` -- always returns `"light"`.
 
 **Trade-off**: Toggle exists in UI but does nothing, which may confuse users. Documented as a known issue.
+
+---
+
+## D15: Always-Live Client Rendering (No Frozen Snapshots)
+
+**Decision**: The Client Review Link, Review Centre Client View, download bundle, client PDF, and individual media serve endpoint all render live from the same shaping/filtering pipeline (`_submission_to_client_shape` + `_filter_talent_for_client`). No frozen `client_package_snapshot` is used for rendering.
+
+**Rationale**: A frozen snapshot was silently keeping recruiter visibility edits from reaching the Client Review Link (the link short-circuited to the snapshot captured at approval time). A single always-live engine eliminates the divergence class entirely and makes the Review Centre Client View a true live preview of the client link.
+
+**Implementation**: `backend/core.py:_submission_to_client_shape()` -- the `if sub.get("client_package_snapshot"): return snap` short-circuit was removed. The auto-write on approve and the PUT `regenerate_snapshot` branch were also removed. `generate_submission_snapshot()` and `POST /api/projects/{pid}/submissions/{sid}/snapshot` are retained for one release (dormant) to protect any lingering external caller.
+
+**Established by**: Commit `1b15075` (2026-07-02) "feat(review-center): single live client pipeline, Client/Hidden visibility, UX fixes".
+
+---
+
+## D16: Client / Hidden Two-State Visibility Model
+
+**Decision**: Media and field visibility is Client / Hidden only. The third state ("Internal") was removed.
+
+**Rationale**: "Hidden" and "Internal" both mean "the client cannot see this" -- the only relevant distinction from a recruiter's perspective. The third state added UI complexity without carrying operationally distinct semantics.
+
+**Implementation**:
+- Frontend: `MediaVisControls` in `frontend/src/pages-components/SubmissionReviewCenter.jsx` renders two buttons. Any legacy `internal_only: true` displayed as "Hidden".
+- Backend write: PUT handler folds `internal_only: true` into `client_visible: false` and strips the deprecated flag before persisting.
+- Backend read: `_submission_to_client_shape` and `_filter_talent_for_client` still exclude both `client_visible: false` and `internal_only: true` for safety.
+- Migration: `backend/migrations/remove_internal_visibility.py` (idempotent) cleans historical documents.
+
+**Established by**: Commit `1b15075` (2026-07-02).
+
+---
+
+## D17: Resubmission Never Overwrites Global Talent Profile
+
+**Decision**: A submission that has already been finalized once cannot mutate `db.talents`. Every post-first-submit workflow -- resubmit, update, replace media, edit, admin-reopen → submit again -- is treated as a project-specific correction and skips the sync.
+
+**Rationale**: A talent may edit a submitted audition weeks later to swap or hide media for one client. That project-specific correction must not become the canonical portfolio -- otherwise a future project auto-loads the wrong (project-A-scoped) media instead of the latest true master profile. Only the FIRST successful submission (and the separate Talent Invite / Profile Update flow) should update the master.
+
+**Implementation**: New helper `has_been_submitted_once(sub)` in `backend/routers/submissions.py`, keyed on the monotonic `submitted_at` (never cleared by any current or foreseeable edit flow) with a `status in {submitted, updated}` fallback. Guards every write-to-global path: upload mirror (submissions.py:801), upload replace-removal, signed/complete upload (1088), media delete (1165), finalize field-merge and media re-sync (1967), and the async Cloudinary webhook intro-video replace path (webhooks.py).
+
+**Established by**: Commit `8cfb1b5` (2026-07-02) "fix(submissions): always start at landing page; never sync resubmissions to global profile".
+
+---
+
+## D18: Immediate Visibility Persistence (No Debounce)
+
+**Decision**: Media and field-visibility toggles in the Review Centre persist to Mongo the instant they change, with no debounce. Saves are serialized so overlapping toggles apply in order, and the decision POST awaits any in-flight visibility save.
+
+**Rationale**: The Review Centre Client View filters local React state; the Client Review Link reads Mongo. If the toggles only mutate React state (as they did before this decision), the preview looks right but the DB was never written -- and Approve publishes stale visibility to the client. Debouncing would only mask the race. Immediate persistence + explicit await in `executeDecision` proves the DB is up to date before any decision publishes.
+
+**Implementation**: `frontend/src/pages-components/SubmissionReviewCenter.jsx` -- a single effect over `mediaList`, `talentPortfolioMedia`, `fv` diffs against the last-persisted baseline via `curationSig()` and fires the PUT immediately. `savePromiseRef` serializes overlapping saves. `executeDecision` awaits `savePromiseRef.current` (and flushes any not-yet-captured change) before the decision POST.
+
+**Established by**: Commit `eb8c057` (2026-07-03) "fix(review-center): persist media/field visibility immediately (no debounce)".
+
+---
+
+## D19: Viewed = Explicitly Opened
+
+**Decision**: A submission is marked viewed only when the client explicitly opens its detail (card click, modal prev/next navigation, or Resume banner). Rendering the card list, scrolling, prefetching, and landing on the page do not count as viewed. No timer counts as viewed.
+
+**Rationale**: Auto-marking on visibility (via IntersectionObserver) inflated analytics -- a client who landed and left after 30 seconds looked like they had actively reviewed the talent. The header "N / M viewed" is a decision-support signal for the recruiter; it must reflect actual engagement.
+
+**Implementation**: `frontend/src/pages-components/ClientView.jsx` -- removed the `TalentCard` IntersectionObserver and the 15s auto-review timer inside the detail view. `markSeen` fires only from `handleOpen` (card click), `onNavigate` (modal keyboard/swipe/click), and the Resume button. Server `/seen` uses `$addToSet` so the first-viewed state is idempotent. Header counter reads `seenCount = talents.filter(t => seenIds.has(t.id)).length`.
+
+**Established by**: Commit `b1c902a` (2026-07-04) "fix(client-link): only mark a submission viewed when its detail is opened".
+
+---
+
+## D20: Every Project Link Always Starts On The Landing Page
+
+**Decision**: Every project submission link opens on the landing / OTP page. No global cross-project session can auto-unlock a new project's gate.
+
+**Rationale**: On iPhone Safari, a returning talent who previously authenticated on Project A was skipping the landing on Project B -- landing on a bare form with a silently-sent OTP hidden behind it, producing the "stuck, nothing loads" report. Only a signal proving authentication happened for THIS project should skip the gate.
+
+**Implementation**: `frontend/src/pages-components/SubmissionPage.jsx` -- the email-gate initial state and mount effect were rewritten. Only two signals unlock the gate: a per-slug JWT/ATK submission session (already handled by resume effects), or a per-slug `tg_google_done_<slug>` marker written by `GoogleCallback.jsx`. Global `talentgram_portal_email` / `talentgram_google_*` do not bypass. Deep-link `?email=` pre-fills the landing field and sends the OTP but keeps the gate LOCKED.
+
+**Established by**: Commit `8cfb1b5` (2026-07-02) — bundled with D17.
+
+---
+
+## D21: Backend Runs On Railway (Not Emergent)
+
+**Decision**: The FastAPI backend is deployed to Railway (`talentgram-railway` service, root `/backend`, `uvicorn server:app`). The `.emergent/emergent.yml` file that suggests an Emergent base image is historical (dated 2026-05-16) and does not drive the live deploy.
+
+**Rationale**: Consolidating the backend API onto the same Railway account that already hosted the WhatsApp worker simplified operations (one dashboard, one CLI, one plan). Railway's Nixpacks builder handles the FastAPI app without a Dockerfile.
+
+**Implementation**: Railway service `talentgram-railway` (service ID `b3242fe8-67b3-4d5d-9fce-a875d05b58ce`) in project `pacific-art`. Source: `rajbhansali92/talentgram-frontend`, branch `main`, root `/backend`. Public URL: `https://talentgram-app-production.up.railway.app`. Start command: `uvicorn server:app --host 0.0.0.0 --port $PORT`. Health: `GET /health`.
+
+**Trade-off**: See open issue #0 -- GitHub → Railway auto-deploy is currently disconnected and every push needs a manual `railway redeploy` until re-authorized.

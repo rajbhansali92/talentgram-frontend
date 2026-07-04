@@ -4,24 +4,32 @@
 
 ```
 +--------------------+     +--------------------+     +--------------------+
-| Frontend           |     | Backend            |     | WhatsApp Worker    |
-| Vercel             |     | Emergent Platform  |     | Railway            |
+| Frontend           |     | Backend API        |     | WhatsApp Worker    |
+| Vercel             |     | Railway            |     | Railway            |
 | Next.js App Router |     | FastAPI + Motor    |     | Python + Playwright|
-| Auto-deploy on push|     |                    |     | Docker             |
+| Auto-deploy on push|     | uvicorn / /backend |     | Docker / /whatsapp-|
+|                    |     | (Nixpacks)         |     | worker             |
 +--------------------+     +--------------------+     +--------------------+
          |                          |                          |
          +-------------+------------+--------------------------+
                         |
-               +--------v---------+
-               | MongoDB Atlas    |
-               | (shared DB)      |
-               +------------------+
-                        |
-               +--------v---------+
-               | Cloudinary       |
-               | (shared storage) |
-               +------------------+
+       +----------------+----------------+-----------------+
+       |                |                |                 |
++------v-------+  +-----v---------+  +---v----------+  +---v----------+
+| MongoDB Atlas |  | Cloudinary    |  | Cloudflare   |  | Cloudflare R2|
+| (shared DB)   |  | (images, PDFs |  | Stream       |  | (raw uploads |
+|               |  | legacy video) |  | (HLS video)  |  | for Stream)  |
++---------------+  +---------------+  +--------------+  +--------------+
 ```
+
+Two Railway services in the `pacific-art` project:
+
+| Service | Root dir | Start command | Purpose |
+|---|---|---|---|
+| `talentgram-railway` | `/backend` | `uvicorn server:app --host 0.0.0.0 --port $PORT` | FastAPI backend API |
+| `talentgram-frontend - whatsapp` | `/whatsapp-worker` | `python worker.py` (via Dockerfile) | Playwright WhatsApp automation |
+
+**Historical note**: An earlier `Emergent Platform` deployment target is documented by the stale `.emergent/emergent.yml` file (dated 2026-05-16). It is not the live backend and can be treated as historical.
 
 ## GitHub Workflow
 
@@ -94,13 +102,21 @@ https://links.talentgramagency.com
 
 Plus regex pattern for Vercel preview deploys.
 
-## Emergent Platform Deployment (Backend)
+## Railway Deployment (Backend API)
 
 ### Configuration
-- **Base image**: `fastapi_react_mongo_shadcn_base_image_cloud_arm:release-17042026-1`
+- **Service name**: `talentgram-railway`
+- **Public URL**: `https://talentgram-app-production.up.railway.app`
+- **Repository**: `rajbhansali92/talentgram-frontend`, branch `main`, root directory `/backend`
+- **Builder**: Nixpacks (no `Dockerfile`, no `railway.json` at `/backend`)
 - **Runtime**: Python 3.11 (`backend/runtime.txt`)
 - **Entry point**: `backend/server.py` (single-file FastAPI app)
-- **Config**: `.emergent/emergent.yml`
+- **Start command** (configured in Railway dashboard): `uvicorn server:app --host 0.0.0.0 --port $PORT`
+- **Plan**: pro
+
+### Health Endpoint
+- `GET /health` returns `{"status": "ok", "ocr": {...}}` — always returns 200 as long as the app boots. OCR readiness is best-effort and does not gate the probe.
+- `GET /api/` returns `{"app": "talentgram", "ok": true}`.
 
 ### Startup Behavior
 On startup, the backend runs migrations:
@@ -109,6 +125,7 @@ On startup, the backend runs migrations:
 3. `run_draft_expiration_and_backfill` -- expire 30-day-old drafts, recalculate metrics
 4. Index creation for all collections (idempotent)
 5. Seed admin user using `ADMIN_EMAIL` + `ADMIN_PASSWORD` (creates admin if none exists)
+6. EasyOCR model warmup (best-effort background task; do not gate on it)
 
 ### Required Environment Variables
 | Variable | Description |
@@ -128,6 +145,7 @@ On startup, the backend runs migrations:
 | `APP_NAME` | `"talentgram"` | App name (used in Cloudinary folder paths) |
 | `CORS_ORIGINS` | `""` | Comma-separated allowed origins |
 | `DIRECT_VIDEO_UPLOAD` | `"false"` | Feature flag: direct browser-to-Cloudinary video upload |
+| Cloudflare Stream / R2 credentials | -- | Optional; used for HLS video pipeline. See 04_MEDIA_RULES. |
 
 ## Railway Deployment (WhatsApp Worker)
 
@@ -157,16 +175,39 @@ On startup, the backend runs migrations:
 3. Click "Promote to Production" on the earlier deployment
 4. Vercel instantly serves the previous build
 
-### Backend (Emergent)
+### Backend (Railway)
 1. Identify the last known-good commit
-2. Revert to that commit: `git revert <bad-commit>` or `git reset`
-3. Push to trigger redeploy
-4. Note: Database migrations that ran on startup may need manual reversal
+2. Redeploy that specific commit from Railway's dashboard **or** the CLI:
+   ```
+   railway redeploy --service talentgram-railway --from-source --yes
+   ```
+   `--from-source` pulls the latest commit from the configured GitHub source. To roll back further, revert on `main` and redeploy.
+3. Confirm the running commit via `railway status --json` (look for `commitHash` under the `talentgram-railway` service).
+4. Note: database migrations that ran on startup may need manual reversal.
 
 ### WhatsApp Worker (Railway)
-1. Railway dashboard > Deployments
-2. Redeploy from previous successful deployment
-3. Verify WhatsApp session is still valid (may need re-scan)
+1. Redeploy from CLI:
+   ```
+   railway redeploy --service "talentgram-frontend - whatsapp" --from-source --yes
+   ```
+2. Verify WhatsApp session is still valid (may need re-scan)
+
+### KNOWN OPERATIONAL ISSUE: GitHub → Railway Auto-Deploy Is Disconnected
+
+As of 2026-07-04, pushes to `main` do **not** automatically trigger a new Railway deployment for either service. Both services still show the correct repo/branch/root, but no GitHub webhook is firing.
+
+Symptoms observed:
+- `railway status --json` showed both services on commit `840adbe` while `main` HEAD was `eb8c057` (4 commits ahead).
+- Vercel auto-deploy works normally.
+
+Until reconnected in the Railway dashboard (Settings → Source → Reconnect Repo, and verify the Railway GitHub App has access), you must **manually redeploy after every backend push**:
+
+```
+railway redeploy --service talentgram-railway --from-source --yes
+railway redeploy --service "talentgram-frontend - whatsapp" --from-source --yes
+```
+
+See [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md) for the tracked action item.
 
 ### Database
 - No automated rollback for MongoDB changes
@@ -186,11 +227,16 @@ On startup, the backend runs migrations:
 4. Check browser console for errors
 
 ### After Backend Deploy
-1. Hit health endpoint: `GET /health` (should return `{ok: true}`)
-2. Hit API root: `GET /api/` (should return `{app: "talentgram", ok: true}`)
-3. Check startup migrations ran without errors (check logs)
-4. Test affected API endpoints
-5. Verify no CORS issues from frontend
+1. Verify the running commit hash matches `main`:
+   ```
+   railway status --json | grep commitHash
+   ```
+   Both `talentgram-railway` and `talentgram-frontend - whatsapp` should show the same commit as `git rev-parse origin/main`.
+2. Hit health endpoint: `GET /health` (should return `{"status": "ok", "ocr": {...}}`)
+3. Hit API root: `GET /api/` (should return `{app: "talentgram", ok: true}`)
+4. Check Railway logs for startup migration errors and OCR warmup crashes
+5. Test affected API endpoints
+6. Verify no CORS issues from frontend
 
 ### After WhatsApp Worker Deploy
 1. Check Railway deployment logs for startup success

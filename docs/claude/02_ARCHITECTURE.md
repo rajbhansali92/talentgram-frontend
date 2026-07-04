@@ -19,24 +19,22 @@
                              |
                     +--------v----------+
                     |  FastAPI Backend   |
-                    |  (Emergent/Railway)|
+                    |  Railway           |
+                    |  (talentgram-      |
+                    |   railway)         |
                     +--------+----------+
                              |
-              +--------------+--------------+
-              |              |              |
-    +---------v---+  +-------v-----+  +----v--------+
-    | MongoDB     |  | Cloudinary  |  | Email       |
-    | Atlas       |  | (media)     |  | (Resend/    |
-    | (data)      |  |             |  |  SG/SES)    |
-    +-------------+  +-------------+  +-------------+
-                             |
-                    +--------v----------+
-                    | WhatsApp Worker   |
-                    | (Railway/Docker)  |
-                    | Playwright +      |
-                    | Chromium          |
-                    +-------------------+
+       +---------+-----------+-----------+-----------+-----------+
+       |         |           |           |           |           |
+   +---v----+  +-v-------+  +v---------+ +v---------+ +v--------+ +v--------+
+   |MongoDB |  |Cloudinary| |Cloudflare| |Cloudflare| |Email    | |WhatsApp |
+   |Atlas   |  |(images / | |Stream    | |R2        | |(Resend/ | |Worker   |
+   |(data)  |  |PDFs /    | |(HLS      | |(raw video| |SG/SES)  | |(Railway |
+   |        |  |legacy vid)| |video)   | |uploads)  | |         | |Docker)  |
+   +--------+  +----------+ +----------+ +----------+ +---------+ +---------+
 ```
+
+Both the backend API and the WhatsApp worker are Railway services in the same project. See [05_DEPLOYMENT_RULES.md](05_DEPLOYMENT_RULES.md) for service names, roots, and start commands.
 
 ## Talent Invite / Application Flow
 
@@ -171,7 +169,8 @@ submit.talentgramagency.com/submit/{slug}
 - **Entry point**: `frontend/src/pages-components/SubmissionPage.jsx`
 - **Backend**: `POST /api/public/projects/{slug}/submission` (start), `POST /api/public/submissions/{sid}/upload` (media), `POST /api/public/submissions/{sid}/finalize` (submit)
 - **Draft storage**: localStorage keys `tg_submission_{slug}`, `tg_draft_{slug}`, `tg_atk_{slug}`
-- **Media sync**: On upload, portfolio media syncs to `db.talents` via `sync_media_to_global_talent()`. Audition takes do NOT sync.
+- **Landing page always shown**: A returning talent always begins on the project landing / email gate. Global cross-project sessions (`talentgram_portal_email`, `talentgram_google_*`) never auto-unlock a new project's gate. Only a per-slug JWT/ATK session or a per-slug Google marker (`tg_google_done_<slug>`) may skip it. Deep-links `?email=` pre-fill the landing field and send an OTP but keep the gate locked (established by commit `8cfb1b5`, 2026-07-02).
+- **Media sync — ORIGINAL submissions only**: On upload while the submission is still a DRAFT, portfolio/intro-video media syncs to `db.talents` via `sync_media_to_global_talent()`. Audition takes never sync. **Any post-finalize workflow (resubmit / update / replace media / edit / admin-reopen → submit again) does NOT sync to the global talent profile.** The gate is a helper `has_been_submitted_once(sub)` in `backend/routers/submissions.py`, keyed on the monotonic `submitted_at` flag (never cleared by any edit flow) with a status fallback. Also enforced in the async Cloudinary webhook intro-video replace path (established by commit `8cfb1b5`).
 - **Direct upload**: When `DIRECT_VIDEO_UPLOAD=true`, video uploads go direct browser-to-Cloudinary (Architecture C)
 
 ## Review Center Flow
@@ -234,6 +233,10 @@ Admin logs into review.talentgramagency.com
 - **Backend**: `GET /api/projects/{pid}/submissions` (list), `POST /api/projects/{pid}/submissions/{sid}/decision` (decide)
 - **Auth**: Admin JWT via `adminApi` axios instance
 - **Talent portfolio**: Displayed alongside submission media; sourced from `db.talents` master record
+- **Visibility persistence (immediate save)**: Media and field-visibility toggles PUT `/api/projects/{pid}/submissions/{sid}` the moment they change. Saves are serialized so overlapping toggles apply in order; `executeDecision` awaits any in-flight visibility save before recording the decision, so Hide → Approve cannot race. There is no separate "Save Overrides" gating (established by commit `eb8c057`, 2026-07-03).
+- **Visibility model (Client / Hidden only)**: The three-state Client / Hidden / Internal model was collapsed to two states in commit `1b15075`. Legacy `internal_only: true` values are folded to `client_visible: false` on read and never persisted on write. A one-shot migration `backend/migrations/remove_internal_visibility.py` cleans the historical rows (see [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md)).
+- **Live shaping (no frozen snapshots)**: `_submission_to_client_shape()` in `backend/core.py` always computes the client-facing shape from the current submission. The `client_package_snapshot` short-circuit was removed. Snapshot generation is deprecated but retained for one release (see D15 in [08_DECISION_LOG.md](08_DECISION_LOG.md)).
+- **Google Drive folder button removed**: The "Open Google Drive folder" action and its backend endpoint `GET /api/submissions/{sid}/drive` were removed (Cloudinary-only). The env-gated backup pipeline in `backend/drive_backup.py` is untouched.
 
 ## Client Review Flow
 
@@ -304,8 +307,10 @@ links.talentgramagency.com/l/{slug}
 - **Backend**: `GET /api/public/links/{slug}` (view), `POST /api/public/links/{slug}/action` (decide)
 - **Auth**: Viewer JWT via `viewerApi` axios instance, stored as `tg_viewer_{slug}`
 - **Privacy**: `privatizeName()` collapses full names to "First L."
-- **Visibility**: Two layers -- link-level `visibility` (category toggles) and per-submission `field_visibility` (field toggles)
-- **Tracking**: Opens, views, media views, and video watches are tracked via `/track` endpoint
+- **Visibility**: Two layers -- link-level `visibility` (category toggles) and per-submission `field_visibility` (field toggles). The per-media state is now Client / Hidden only (Internal removed; see Review Center notes above).
+- **Single live engine**: The Client Review Link, the Review Centre Client View preview, the download bundle, the client PDF, and the individual media serve all render through the same shaping/filter pipeline (`_submission_to_client_shape` + `_filter_talent_for_client`). Changes made in the Review Centre take effect on the client link immediately (established by commit `1b15075`).
+- **Viewed = Opened**: A submission is marked viewed **only** when its detail is explicitly opened (card click → `handleOpen`, modal prev/next → `onNavigate`, or Resume banner). Landing on the page, scrolling, and rendering the card list do not count. The 15s auto-review timer and the `IntersectionObserver` were both removed. The header counter reads `seenCount = talents.filter(t => seenIds.has(t.id)).length`; `/seen` uses `$addToSet` for first-view idempotency (established by commit `b1c902a`, 2026-07-04).
+- **Analytics tracking**: Opens (link-level), talent-open (`view_talent`), media views, and video watch durations are tracked via `POST /api/public/links/{slug}/track`. Talent-open events dedupe via `trackedSeenRef` per session.
 
 ## Global Talent Flow
 

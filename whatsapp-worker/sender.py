@@ -225,31 +225,40 @@ async def _verify_chat_open(page: Page, expected_name: Optional[str] = None) -> 
     panel_found, panel_sel = await _first_present(page, CONV_PANEL_SELECTORS)
     header_found, _ = await _first_present(page, CONV_HEADER_SELECTORS)
 
-    recipient_found = False
-    recipient_text = ""
+    # Collect ALL header title candidates — group-chat headers contain several
+    # span[title] elements (group name + "click here for group info" subtitle),
+    # and the name is not guaranteed to be first.
+    candidates = []
     for sel in RECIPIENT_SELECTORS:
         try:
             loc = page.locator(sel)
-            if await loc.count():
-                recipient_text = (await loc.first.inner_text()).strip() or \
-                                 (await loc.first.get_attribute("title") or "").strip()
-                if recipient_text:
-                    recipient_found = True
-                    break
+            n = await loc.count()
+            for i in range(min(n, 6)):
+                item = loc.nth(i)
+                t = (await item.inner_text()).strip() or \
+                    (await item.get_attribute("title") or "").strip()
+                if t and t not in candidates:
+                    candidates.append(t)
         except Exception:
             pass
+    recipient_found = bool(candidates)
+    recipient_text = candidates[0] if candidates else ""
 
     conversation_ready = bool(panel_found and header_found)
     title_match = None
-    if expected_name and recipient_text:
-        title_match = _norm_title(recipient_text) == _norm_title(expected_name)
-        if not title_match:
+    if expected_name and candidates:
+        title_match = any(_norm_title(t) == _norm_title(expected_name) for t in candidates)
+        if title_match:
+            recipient_text = next(t for t in candidates
+                                  if _norm_title(t) == _norm_title(expected_name))
+        else:
             conversation_ready = False
     logger.info("sender: CHAT OPEN VERIFICATION")
     logger.info("sender:   panel_found=%s (%s)", panel_found, panel_sel)
     logger.info("sender:   header_found=%s", header_found)
     logger.info("sender:   recipient_found=%s", recipient_found)
-    logger.info("sender:   recipient_text=%r", recipient_text[:60])
+    logger.info("sender:   recipient_text=%r (candidates=%s)", recipient_text[:60],
+                [c[:40] for c in candidates[:6]])
     if expected_name:
         logger.info("sender:   expected_name=%r title_match=%s", expected_name[:60], title_match)
     logger.info("sender:   conversation_ready=%s", conversation_ready)

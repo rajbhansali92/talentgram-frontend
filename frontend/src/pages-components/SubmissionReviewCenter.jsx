@@ -170,6 +170,20 @@ function privatizeName(fullName) {
     return `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.`;
 }
 
+// Persistence fix: visibility toggles must reach Mongo the moment they change,
+// not only when "Save Project Overrides" is pressed — otherwise the Client View
+// preview (which reads local React state) diverges from the Client Review Link
+// (which reads the DB). This stable signature of the visibility-bearing state
+// lets us detect a change and auto-save it.
+function curationSig(media, talentPortfolio, fieldVisibility) {
+    const v = (m) => (m.client_visible === false || m.internal_only) ? 0 : 1;
+    return JSON.stringify({
+        m: (media || []).map((x) => `${x.id}:${v(x)}`),
+        t: (talentPortfolio || []).map((x) => `${x.id}:${v(x)}`),
+        f: fieldVisibility || {},
+    });
+}
+
 // Issue #2/#3: compact per-media visibility control (recruiter view only).
 // Two states only — Client (visible to client) or Hidden (never visible to
 // client; recruiter/admin still sees it). Legacy `internal_only` collapses
@@ -394,6 +408,14 @@ export default function SubmissionReviewCenter() {
     const [talentPortfolioMedia, setTalentPortfolioMedia] = useState([]);
     const [isPreviewMode, setIsPreviewMode] = useState(false);
     const [saving, setSaving] = useState(false);
+    // Persistence fix: auto-save visibility changes. `autoSaveStatus` drives a
+    // subtle indicator; `curationBaselineRef` holds the signature of the
+    // last-persisted visibility state so we only save on an actual change.
+    const [autoSaveStatus, setAutoSaveStatus] = useState("idle"); // idle | saving | saved
+    const curationBaselineRef = useRef(null);
+    // Serializes visibility saves so overlapping toggles apply in order, and so
+    // executeDecision can await the in-flight save before recording a decision.
+    const savePromiseRef = useRef(Promise.resolve());
 
     // Admin media upload state
     const adminMediaInputRef = useRef(null);
@@ -471,6 +493,12 @@ export default function SubmissionReviewCenter() {
                 // and injected by the backend into the response. It includes items with
                 // category: 'portfolio', 'additional_portfolio', 'portfolio_general'.
                 setTalentPortfolioMedia(data?.talent_portfolio_media || []);
+                // Record the just-loaded visibility as the auto-save baseline so
+                // loading a submission never triggers a spurious save.
+                curationBaselineRef.current = curationSig(
+                    data?.media || [], data?.talent_portfolio_media || [], data?.field_visibility || {}
+                );
+                setAutoSaveStatus("idle");
             } catch (e) {
                 toast.error("Failed to load submission details");
             } finally {
@@ -484,28 +512,28 @@ export default function SubmissionReviewCenter() {
 
 
 
+    // Shared payload builder — the single shape every persist (explicit Save
+    // and auto-save) sends. Unified visibility: talent-level portfolio media
+    // can't carry flags on the submission itself, so persist a small id->flags
+    // override map (no media duplication).
+    const buildCurationPayload = useCallback(() => {
+        const talent_media_visibility = {};
+        for (const m of talentPortfolioMedia) {
+            if (!m.id) continue;
+            // Issue #2/#3: Client / Hidden only. `internal_only` (legacy)
+            // collapses into hidden.
+            talent_media_visibility[m.id] = {
+                client_visible: m.client_visible !== false && !m.internal_only,
+            };
+        }
+        return { form_data: form, field_visibility: fv, media: mediaList, talent_media_visibility };
+    }, [form, fv, mediaList, talentPortfolioMedia]);
+
     const handleSaveCuration = async () => {
         if (!selectedId) return;
         setSaving(true);
         try {
-            // Unified visibility: talent-level portfolio media can't carry flags
-            // on the submission itself, so persist a small id->flags override map
-            // (no media duplication). Built from the current talent media state.
-            const talent_media_visibility = {};
-            for (const m of talentPortfolioMedia) {
-                if (!m.id) continue;
-                // Issue #2/#3: Client / Hidden only. `internal_only` (legacy)
-                // collapses into hidden.
-                talent_media_visibility[m.id] = {
-                    client_visible: m.client_visible !== false && !m.internal_only,
-                };
-            }
-            await adminApi.put(`/projects/${id}/submissions/${selectedId}`, {
-                form_data: form,
-                field_visibility: fv,
-                media: mediaList,
-                talent_media_visibility,
-            });
+            await adminApi.put(`/projects/${id}/submissions/${selectedId}`, buildCurationPayload());
             toast.success("Curation settings saved");
 
             // Reload detailed snapshot
@@ -515,12 +543,45 @@ export default function SubmissionReviewCenter() {
             setFv(data?.field_visibility || {});
             setMediaList(data?.media || []);
             setTalentPortfolioMedia(data?.talent_portfolio_media || []);
+            // Keep the auto-save baseline in step with the freshly-persisted state.
+            curationBaselineRef.current = curationSig(
+                data?.media || [], data?.talent_portfolio_media || [], data?.field_visibility || {}
+            );
+            setAutoSaveStatus("saved");
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to save curation settings");
         } finally {
             setSaving(false);
         }
     };
+
+    // Persistence fix: persist visibility IMMEDIATELY when any media or field
+    // visibility changes — no debounce — so the Client View preview and the
+    // Client Review Link can never diverge. Saves are serialized through
+    // `savePromiseRef` so overlapping toggles apply in order; `executeDecision`
+    // awaits that same promise before recording a decision. Form-value edits
+    // still persist via the explicit Save button.
+    useEffect(() => {
+        if (!selectedId || curationBaselineRef.current == null) return;
+        const cur = curationSig(mediaList, talentPortfolioMedia, fv);
+        if (cur === curationBaselineRef.current) return;
+        const prevBaseline = curationBaselineRef.current;
+        curationBaselineRef.current = cur; // optimistic — prevents a duplicate re-fire
+        const sid = selectedId;
+        const payload = buildCurationPayload();
+        setAutoSaveStatus("saving");
+        savePromiseRef.current = savePromiseRef.current
+            .catch(() => {})
+            .then(() => adminApi.put(`/projects/${id}/submissions/${sid}`, payload))
+            .then(() => setAutoSaveStatus("saved"))
+            .catch((e) => {
+                // Roll the baseline back so the change is re-persisted on the
+                // next toggle / decision flush rather than silently marked saved.
+                curationBaselineRef.current = prevBaseline;
+                setAutoSaveStatus("idle");
+                toast.error(e?.response?.data?.detail || "Failed to save visibility change");
+            });
+    }, [mediaList, talentPortfolioMedia, fv, selectedId, id, buildCurationPayload]);
 
     // P0-4: restore per-media client-visibility control (backend already
     // supports client_visible / internal_only on the PUT media payload).
@@ -723,6 +784,20 @@ export default function SubmissionReviewCenter() {
 
         setSaving(true);
         try {
+            // Guarantee the exact curation the recruiter sees is persisted
+            // BEFORE the decision publishes it to the client link. First flush
+            // any change the auto-save effect hasn't captured yet, then AWAIT
+            // all in-flight visibility saves so the PUT completes before the
+            // decision POST (proves no Hide -> Approve race).
+            const curSig = curationSig(mediaList, talentPortfolioMedia, fv);
+            if (curSig !== curationBaselineRef.current) {
+                curationBaselineRef.current = curSig;
+                await savePromiseRef.current.catch(() => {});
+                await adminApi.put(`/projects/${id}/submissions/${actedId}`, buildCurationPayload());
+            } else {
+                await savePromiseRef.current.catch(() => {});
+            }
+
             await adminApi.post(`/projects/${id}/submissions/${actedId}/decision`, {
                 decision,
                 note: decisionNote,
@@ -750,7 +825,7 @@ export default function SubmissionReviewCenter() {
         } finally {
             setSaving(false);
         }
-    }, [selectedId, saving, id, decisionNote, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
+    }, [selectedId, saving, id, decisionNote, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving, mediaList, talentPortfolioMedia, fv, buildCurationPayload]);
 
     // Issue #5: prevent accidental decision changes. A first-time decision is
     // one click; CHANGING an already-registered decision (approved/hold/
@@ -1659,9 +1734,20 @@ export default function SubmissionReviewCenter() {
                                         </div>
                                     )}
 
-                                    {/* Save button */}
+                                    {/* Save button + auto-save status. Visibility changes
+                                        persist automatically; this button also flushes any
+                                        pending form-value edits. */}
                                     {!isPreviewMode && (
-                                        <div className="flex justify-end pt-2">
+                                        <div className="flex items-center justify-end gap-3 pt-2">
+                                            <span className="text-[10px] font-mono uppercase tracking-wider text-black/45 inline-flex items-center gap-1.5" data-testid="curation-autosave-status">
+                                                {autoSaveStatus === "saving" ? (
+                                                    <><Loader2 className="w-3 h-3 animate-spin" /> Saving visibility…</>
+                                                ) : autoSaveStatus === "saved" ? (
+                                                    <><Check className="w-3 h-3 text-emerald-600" /> Visibility saved</>
+                                                ) : (
+                                                    <>Visibility saves automatically</>
+                                                )}
+                                            </span>
                                             <button
                                                 type="button"
                                                 onClick={handleSaveCuration}

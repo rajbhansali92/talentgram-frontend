@@ -970,8 +970,11 @@ export default function ClientView() {
     const markSeen = useCallback(
         async (talentId) => {
             if (!talentId) return;
-            // Analytics deduplication: fire view_talent track at most once per session per talent.
-            // Prevents double-firing from concurrent IntersectionObserver + onOpen calls.
+            // markSeen fires only when a talent detail is OPENED (card click,
+            // modal navigate, resume). Analytics deduplication: fire the
+            // view_talent track at most once per session per talent so repeated
+            // opens don't create duplicate view events; the server-side /seen
+            // ($addToSet) records the submission as viewed exactly once.
             if (!trackedSeenRef.current.has(talentId)) {
                 trackedSeenRef.current.add(talentId);
                 axios.post(`${API}/public/links/${slug}/track`, {
@@ -1198,10 +1201,12 @@ export default function ClientView() {
         return new Date(t).getTime() > new Date(prevVisitAt).getTime();
     };
 
-    const reviewedCount = talents.filter((t) => reviewedIds.has(t.id) || !!viewerActions[t.id]?.action).length;
-    const seenCount = reviewedCount;
+    // "Viewed" = the client OPENED this talent's detail at least once (seenIds).
+    // Landing on the page, scrolling, or rendering the card list never counts —
+    // a submission is only viewed once its profile/detail is opened.
+    const seenCount = talents.filter((t) => seenIds.has(t.id)).length;
     const totalCount = talents.length;
-    const reviewedPct = totalCount === 0 ? 0 : Math.round((reviewedCount / totalCount) * 100);
+    const viewedPct = totalCount === 0 ? 0 : Math.round((seenCount / totalCount) * 100);
 
     return (
         <div className="h-[100dvh] flex flex-col bg-white text-[#111111] overflow-hidden" data-testid="client-view-page">
@@ -1220,7 +1225,7 @@ export default function ClientView() {
                     <div className="md:hidden mt-3 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
                         <div
                             className="h-full bg-[var(--tg-navy-primary)] transition-all duration-500"
-                            style={{ width: `${reviewedPct}%` }}
+                            style={{ width: `${viewedPct}%` }}
                             data-testid="review-progress-bar-mobile"
                         />
                     </div>
@@ -1299,7 +1304,7 @@ export default function ClientView() {
                     <div className="flex-1 h-0.5 bg-black/[0.04] rounded-full overflow-hidden">
                         <div
                             className="h-full bg-[var(--tg-navy-primary)] transition-all duration-500"
-                            style={{ width: `${reviewedPct}%` }}
+                            style={{ width: `${viewedPct}%` }}
                             data-testid="review-progress-bar"
                         />
                     </div>
@@ -2122,13 +2127,9 @@ function TalentDetail({
         trackedMediaRefs.current.clear();
     }, [talent.id]);
 
-    useEffect(() => {
-        if (!talent?.id || isReviewed) return;
-        const timer = setTimeout(() => {
-            onMarkReviewed(talent.id);
-        }, 15000);
-        return () => clearTimeout(timer);
-    }, [talent?.id, isReviewed, onMarkReviewed]);
+    // Removed: the 15s auto-review timer. A submission must never be marked
+    // viewed/reviewed on a timeout — only an explicit open (handleOpen ->
+    // markSeen) or an explicit decision (setAction -> markReviewed) counts.
 
     const prev = useCallback(() => {
         setIdx((i) => {
@@ -3106,19 +3107,23 @@ function TalentDetail({
  * - Accepts `slug`, `setActiveTalent`, `markSeen` as stable props instead of inline
  *   arrow functions. This prevents 100+ new function objects per parent render.
  * - `handleOpen` is computed inside the card via useCallback with stable deps.
- * - IntersectionObserver deps are now [seen, talent.id, markSeen] — all stable —
- *   eliminating the observer disconnect/reconnect churn on every parent re-render.
+ * - A submission is marked viewed ONLY on open (`handleOpen` -> markSeen); the
+ *   card no longer runs an IntersectionObserver, so appearing on screen /
+ *   scrolling never counts as viewed.
  * - `transition-all` on cover image replaced with `transition-transform` (cheaper).
  */
 const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, isNew, slug, setActiveTalent, markSeen, selected, onSelect }) {
     const ref = useRef(null);
-    const timerRef = useRef(null);
 
     const cover = resolveTalentCover(talent);
     const isShortlisted = action === "shortlist";
 
-    // Stable open handler — computed inside the card so the parent doesn't need
-    // to create a new inline arrow function per render per card.
+    // Stable open handler — this is the ONLY thing that marks a submission
+    // viewed. Opening the card sets the active talent (opens the detail) and
+    // calls markSeen(). A card merely appearing on screen (landing/scrolling/
+    // rendering the list) must NOT count as viewed — the previous
+    // IntersectionObserver that auto-fired markSeen after 5s of visibility was
+    // removed for exactly that reason.
     const handleOpen = useCallback(() => {
         setActiveTalent(talent);
         markSeen(talent.id);
@@ -3126,37 +3131,6 @@ const TalentCard = React.memo(function TalentCard({ talent, vis, action, seen, i
             localStorage.setItem(`tg_last_viewed_${slug}`, talent.id);
         } catch (e) { console.error(e); }
     }, [talent, slug, setActiveTalent, markSeen]);
-
-    // Stabilized deps: [seen, talent.id, markSeen] are all stable references.
-    // Previously [seen, onSeen] where onSeen was a new inline arrow per render,
-    // causing all 100 observers to disconnect and reconnect on every state change.
-    useEffect(() => {
-        if (seen || !ref.current) return;
-        const node = ref.current;
-        const observer = new IntersectionObserver(
-            (entries) => {
-                entries.forEach((entry) => {
-                    if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
-                        if (!timerRef.current) {
-                            timerRef.current = setTimeout(() => {
-                                markSeen(talent.id);
-                                timerRef.current = null;
-                            }, 5000);
-                        }
-                    } else if (timerRef.current) {
-                        clearTimeout(timerRef.current);
-                        timerRef.current = null;
-                    }
-                });
-            },
-            { threshold: [0, 0.5, 1] },
-        );
-        observer.observe(node);
-        return () => {
-            if (timerRef.current) clearTimeout(timerRef.current);
-            observer.disconnect();
-        };
-    }, [seen, talent.id, markSeen]);
 
     return (
         <div className="relative group/card">

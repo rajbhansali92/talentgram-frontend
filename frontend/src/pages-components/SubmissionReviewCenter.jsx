@@ -19,8 +19,6 @@ import {
     Image as ImageIcon,
     FileText,
     Download,
-    Cloud,
-    RefreshCw,
     User,
     Phone,
     Mail,
@@ -172,14 +170,15 @@ function privatizeName(fullName) {
     return `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.`;
 }
 
-// P0-4: compact per-media visibility control (recruiter view only). Reuses the
-// existing client_visible / internal_only flags; persistence is the shared Save.
+// Issue #2/#3: compact per-media visibility control (recruiter view only).
+// Two states only — Client (visible to client) or Hidden (never visible to
+// client; recruiter/admin still sees it). Legacy `internal_only` collapses
+// into Hidden. Persistence is the shared Save.
 function MediaVisControls({ media, onChange }) {
-    const state = media.internal_only ? "internal" : media.client_visible === false ? "hidden" : "client";
+    const state = (media.client_visible === false || media.internal_only) ? "hidden" : "client";
     const opts = [
         { key: "client", label: "Client", title: "Show to client" },
         { key: "hidden", label: "Hidden", title: "Hide from client" },
-        { key: "internal", label: "Internal", title: "Internal only" },
     ];
     return (
         <div className="inline-flex rounded-md border border-black/[0.08] overflow-hidden bg-white/90 backdrop-blur-sm" onClick={(e) => e.stopPropagation()}>
@@ -386,6 +385,9 @@ export default function SubmissionReviewCenter() {
     
     // Curation / Decision states
     const [decisionNote, setDecisionNote] = useState("");
+    // Issue #5: holds the new decision awaiting confirmation when the recruiter
+    // changes an already-registered decision. null = no pending confirmation.
+    const [pendingDecision, setPendingDecision] = useState(null);
     const [form, setForm] = useState({});
     const [fv, setFv] = useState({});
     const [mediaList, setMediaList] = useState([]);
@@ -492,9 +494,10 @@ export default function SubmissionReviewCenter() {
             const talent_media_visibility = {};
             for (const m of talentPortfolioMedia) {
                 if (!m.id) continue;
+                // Issue #2/#3: Client / Hidden only. `internal_only` (legacy)
+                // collapses into hidden.
                 talent_media_visibility[m.id] = {
-                    client_visible: m.client_visible !== false,
-                    internal_only: !!m.internal_only,
+                    client_visible: m.client_visible !== false && !m.internal_only,
                 };
             }
             await adminApi.put(`/projects/${id}/submissions/${selectedId}`, {
@@ -524,14 +527,12 @@ export default function SubmissionReviewCenter() {
     // Updates mediaList locally (badges + client preview react immediately);
     // the existing Save button persists it via handleSaveCuration.
     const setMediaVisibility = useCallback((mediaId, mode) => {
-        // mode: "client" (visible to client) | "hidden" (hide from client) | "internal" (internal only)
+        // Issue #2/#3: mode is "client" (visible to client) or "hidden".
         setMediaList((prev) =>
             prev.map((m) => {
                 if (m.id !== mediaId) return m;
                 if (mode === "client") return { ...m, client_visible: true, internal_only: false };
-                if (mode === "hidden") return { ...m, client_visible: false, internal_only: false };
-                if (mode === "internal") return { ...m, client_visible: false, internal_only: true };
-                return m;
+                return { ...m, client_visible: false, internal_only: false };
             })
         );
     }, []);
@@ -544,35 +545,15 @@ export default function SubmissionReviewCenter() {
             prev.map((m) => {
                 if (m.id !== mediaId) return m;
                 if (mode === "client") return { ...m, client_visible: true, internal_only: false };
-                if (mode === "hidden") return { ...m, client_visible: false, internal_only: false };
-                if (mode === "internal") return { ...m, client_visible: false, internal_only: true };
-                return m;
+                return { ...m, client_visible: false, internal_only: false };
             })
         );
     }, []);
 
-    const openInDrive = async () => {
-        if (!selectedId) return;
-        try {
-            const { data } = await adminApi.get(`/submissions/${selectedId}/drive`);
-            window.open(data.url, "_blank", "noopener,noreferrer");
-        } catch (e) {
-            toast.error(e?.response?.data?.detail || "Google Drive not configured");
-        }
-    };
-
-    const regenerateSnapshot = async () => {
-        if (!selectedId) return;
-        setSaving(true);
-        try {
-            await adminApi.post(`/projects/${id}/submissions/${selectedId}/snapshot`);
-            toast.success("Client snapshot frozen successfully");
-        } catch (e) {
-            toast.error("Snapshot generation failed");
-        } finally {
-            setSaving(false);
-        }
-    };
+    // Issue #9: the "Open Google Drive folder" action was removed — Talentgram
+    // serves all media from Cloudinary.
+    // Issue #1/#10: the "Refresh Client Snapshot" action was removed — the
+    // client link now renders live, so there is nothing to freeze/refresh.
 
     const handleAdminMediaUpload = async (file) => {
         if (!file || !selectedId) return;
@@ -729,7 +710,7 @@ export default function SubmissionReviewCenter() {
     }, [setSelectedId, setIsEndOfList, setIsMobileDetailOpen]);
 
     // Action handlers
-    const handleDecision = useCallback(async (decision) => {
+    const executeDecision = useCallback(async (decision) => {
         if (!selectedId || saving) return;
         // P0-2: capture the current visible order + the acted item BEFORE any
         // state update, then advance to the *immediate next* item in that order.
@@ -771,6 +752,21 @@ export default function SubmissionReviewCenter() {
         }
     }, [selectedId, saving, id, decisionNote, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving]);
 
+    // Issue #5: prevent accidental decision changes. A first-time decision is
+    // one click; CHANGING an already-registered decision (approved/hold/
+    // rejected) to a different one pops a confirmation first, because it
+    // immediately updates the live client review link.
+    const handleDecision = useCallback((decision) => {
+        if (!selectedId || saving) return;
+        const current = detail?.decision;
+        const hasDecision = current && current !== "pending";
+        if (hasDecision && current !== decision) {
+            setPendingDecision(decision);
+            return;
+        }
+        executeDecision(decision);
+    }, [selectedId, saving, detail, executeDecision]);
+
 
 
     // Media grouping helper
@@ -792,7 +788,6 @@ export default function SubmissionReviewCenter() {
 
     const introVideo = getCuratedMedia("video")[0];
     const takes = getCuratedMedia("takes");
-    const portfolioImages = getCuratedMedia("image");
     const indianImages = getCuratedMedia("indian");
     const westernImages = getCuratedMedia("western");
 
@@ -819,10 +814,11 @@ export default function SubmissionReviewCenter() {
         { key: "instagram_followers", label: "Instagram Followers" },
     ];
 
+    // Issue #7: Languages and Special Abilities were removed — they duplicate
+    // the Skills field (which already carries languages, drive/skate abilities,
+    // etc.). Keep only Skills and Competitive Brand for a cleaner recruiter view.
     const PROFESSIONAL_FIELDS = [
-        { key: "languages", label: "Languages" },
         { key: "skills", label: "Skills" },
-        { key: "special_abilities", label: "Special Abilities" },
         { key: "competitive_brand", label: "Competitive Brand" },
     ];
 
@@ -1283,8 +1279,15 @@ export default function SubmissionReviewCenter() {
                         </div>
                     ) : (
                         <>
-                            {/* Scrollable details view */}
-                            <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                            {/* Scrollable details view.
+                                Issue #4: `min-h-0` is REQUIRED so this flex child can
+                                shrink below its content height. Without it, Safari (and
+                                other browsers) size the scroll area to its full content
+                                on re-render — e.g. when toggling Recruiter/Client view —
+                                which pushes the decision footer off-screen. This is the
+                                root-cause fix; the footer itself no longer depends on any
+                                layout recalculation to stay visible. */}
+                            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-8">
                         {loadingDetail ? (
                             <div className="h-64 flex flex-col items-center justify-center text-black/40 gap-3">
                                 <Loader2 className="w-8 h-8 animate-spin text-black/80" />
@@ -1320,30 +1323,9 @@ export default function SubmissionReviewCenter() {
                                     )}
                                 </div>
 
-                                {/* Curators External Integration actions */}
-                                {!isPreviewMode && (
-                                    <div className="flex flex-wrap gap-2 pt-1">
-                                        <button
-                                            type="button"
-                                            onClick={openInDrive}
-                                            className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider px-3.5 py-2 border border-black/[0.08] hover:border-black/40 rounded-sm bg-white text-black/70 hover:text-black transition-all shadow-sm"
-                                        >
-                                            <Cloud className="w-3.5 h-3.5" />
-                                            Open Google Drive folder
-                                        </button>
-                                        {detail.decision === "approved" && (
-                                            <button
-                                                type="button"
-                                                onClick={regenerateSnapshot}
-                                                title="Locks in the current curation layout, overrides, and media visibility settings for clients to view. Safe to run repeatedly."
-                                                className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider px-3.5 py-2 border border-green-600/20 hover:border-green-600/40 rounded-sm bg-green-50 text-green-700 hover:text-green-800 transition-all font-semibold shadow-sm cursor-pointer"
-                                            >
-                                                <RefreshCw className="w-3.5 h-3.5 animate-spin-hover" />
-                                                Refresh Client Snapshot
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
+                                {/* Issue #9 / #1: the Google Drive folder link and the
+                                    Refresh Client Snapshot action were removed. Media is
+                                    Cloudinary-only and the client link renders live. */}
 
                                 {/* ── SECTION A: Personal Information ── */}
                                 <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
@@ -1725,7 +1707,7 @@ export default function SubmissionReviewCenter() {
                                                         </div>
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1.5 left-1.5 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                                {"Hidden"}
                                                             </span>
                                                         )}
                                                         <button
@@ -1803,7 +1785,7 @@ export default function SubmissionReviewCenter() {
                                                     <div className="mt-3 flex items-center gap-2">
                                                         {(introVideo.client_visible === false || introVideo.internal_only) && (
                                                             <span className="text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">
-                                                                {introVideo.internal_only ? "Internal" : "Hidden"}
+                                                                {"Hidden"}
                                                             </span>
                                                         )}
                                                         <MediaVisControls media={introVideo} onChange={setMediaVisibility} />
@@ -1835,11 +1817,8 @@ export default function SubmissionReviewCenter() {
                                                                 {t.label || `Take ${idx + 1}`}
                                                             </span>
                                                             <div className="flex gap-1">
-                                                                {t.client_visible === false && (
+                                                                {(t.client_visible === false || t.internal_only) && (
                                                                     <span className="text-[8px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">Hidden</span>
-                                                                )}
-                                                                {t.internal_only && (
-                                                                    <span className="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">Internal</span>
                                                                 )}
                                                                 {t.primary_take && (
                                                                     <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Primary</span>
@@ -1862,62 +1841,11 @@ export default function SubmissionReviewCenter() {
                                     </section>
                                 )}
 
-                                {/* Section 2b: Submission Images (category "image" — reaches client as portfolio) */}
-                                {(!isPreviewMode || portfolioImages.length > 0) && (
-                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
-                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
-                                            <p className="eyebrow">Submission Images ({portfolioImages.length})</p>
-                                            {!isPreviewMode && portfolioImages.length > 0 && (
-                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setMediaList(prev => prev.map(m => m.category === "image" ? { ...m, client_visible: true, internal_only: false } : m));
-                                                            toast.success("All submission images set to Visible");
-                                                        }}
-                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
-                                                    >
-                                                        Show All
-                                                     </button>
-                                                     <span className="text-black/10 self-center">|</span>
-                                                     <button
-                                                         type="button"
-                                                         onClick={() => {
-                                                             setMediaList(prev => prev.map(m => m.category === "image" ? { ...m, client_visible: false, internal_only: false } : m));
-                                                             toast.success("All submission images set to Hidden");
-                                                         }}
-                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
-                                                     >
-                                                         Hide All
-                                                     </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                        {portfolioImages.length === 0 ? (
-                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
-                                                No submission images
-                                            </div>
-                                        ) : (
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                                {portfolioImages.map((m) => (
-                                                    <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
-                                                        {(m.client_visible === false || m.internal_only) && (
-                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {m.internal_only ? "Internal" : "Hidden"}
-                                                            </span>
-                                                        )}
-                                                        {!isPreviewMode && (
-                                                            <div className="absolute bottom-1 left-1 z-10">
-                                                                <MediaVisControls media={m} onChange={setMediaVisibility} />
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </section>
-                                )}
+                                {/* Issue #6: the standalone "Submission Images" section was removed.
+                                    Talents upload into Indian Look / Western Look / Portfolio, which
+                                    are reviewed in their own sections below — a separate generic
+                                    images grid was redundant. Any legacy category="image" media keep
+                                    their stored visibility and still reach the client as portfolio. */}
 
                                 {/* Section 3: Indian Look Images */}
                                 {(!isPreviewMode || indianImages.length > 0) && (
@@ -1961,7 +1889,7 @@ export default function SubmissionReviewCenter() {
                                                         <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                                {"Hidden"}
                                                             </span>
                                                         )}
                                                         {!isPreviewMode && (
@@ -2018,7 +1946,7 @@ export default function SubmissionReviewCenter() {
                                                         <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                                {"Hidden"}
                                                             </span>
                                                         )}
                                                         {!isPreviewMode && (
@@ -2075,7 +2003,7 @@ export default function SubmissionReviewCenter() {
                                                         <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                                {"Hidden"}
                                                             </span>
                                                         )}
                                                         {!isPreviewMode && m.id && (
@@ -2132,7 +2060,7 @@ export default function SubmissionReviewCenter() {
                                                         <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {m.internal_only ? "Internal" : "Hidden"}
+                                                                {"Hidden"}
                                                             </span>
                                                         )}
                                                         {!isPreviewMode && m.id && (
@@ -2194,6 +2122,55 @@ export default function SubmissionReviewCenter() {
                     )}
                 </main>
             </div>
+
+            {/* Issue #5: confirm changing an already-registered decision. */}
+            {pendingDecision && (
+                <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+                    onClick={() => setPendingDecision(null)}
+                >
+                    <div
+                        className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-black/[0.08] p-6"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <h3 className="text-lg font-bold text-black/90 mb-1">Change decision?</h3>
+                        <div className="text-sm text-black/60 mb-4 space-y-1.5">
+                            <p className="flex items-center gap-2">
+                                <span className="text-black/45 font-mono text-xs uppercase tracking-wider w-16">Current</span>
+                                <span className="font-semibold uppercase text-xs px-2 py-0.5 rounded border border-black/10 bg-black/[0.03]">{detail?.decision || "pending"}</span>
+                            </p>
+                            <p className="flex items-center gap-2">
+                                <span className="text-black/45 font-mono text-xs uppercase tracking-wider w-16">New</span>
+                                <span className="font-semibold uppercase text-xs px-2 py-0.5 rounded border border-black/10 bg-black/[0.03]">{pendingDecision}</span>
+                            </p>
+                        </div>
+                        <p className="text-xs text-black/55 leading-relaxed mb-5">
+                            Changing this decision will immediately update the client review link.
+                        </p>
+                        <div className="flex justify-end gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setPendingDecision(null)}
+                                className="px-4 py-2 rounded-xl text-sm font-semibold border border-black/[0.12] text-black/70 hover:bg-black/[0.03] transition-all"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                disabled={saving}
+                                onClick={() => {
+                                    const d = pendingDecision;
+                                    setPendingDecision(null);
+                                    executeDecision(d);
+                                }}
+                                className="px-5 py-2 rounded-xl text-sm font-bold bg-black text-white hover:bg-black/85 transition-all shadow-sm disabled:opacity-60"
+                            >
+                                Confirm
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

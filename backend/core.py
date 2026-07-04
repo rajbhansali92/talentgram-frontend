@@ -1927,12 +1927,11 @@ class AdminSubmissionEditIn(BaseModel):
     media: Optional[List[Dict[str, Any]]] = None # Custom media curated settings & ordering
     # Per-submission visibility overrides for TALENT-level portfolio media
     # (which live on db.talents, not on the submission). Shape:
-    # { "<talent_media_id>": {"client_visible": bool, "internal_only": bool} }.
-    # Lets a recruiter apply the SAME Client/Hidden/Internal model to talent
+    # { "<talent_media_id>": {"client_visible": bool} }.
+    # Lets a recruiter apply the SAME Client/Hidden model to talent
     # portfolio media without duplicating the media onto the submission.
     talent_media_visibility: Optional[Dict[str, Any]] = None
     restore_revision_id: Optional[str] = None
-    regenerate_snapshot: Optional[bool] = None
 
 
 class SubmissionDecisionIn(BaseModel):
@@ -2179,8 +2178,8 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
         out["gender"] = talent["gender"]
     if v.get("ethnicity") and talent.get("ethnicity"):
         out["ethnicity"] = talent["ethnicity"]
-    if v.get("languages") and talent.get("languages"):
-        out["languages"] = talent["languages"]
+    # Issue #7: Languages and Special Abilities removed from client output
+    # (redundant with Skills) — keeps every client surface consistent.
     if (v.get("instagram_handle") or v.get("instagram")) and talent.get("instagram_handle"):
         out["instagram_handle"] = talent["instagram_handle"]
     if v.get("instagram_followers") and talent.get("instagram_followers"):
@@ -2189,8 +2188,6 @@ def _filter_talent_for_client(talent: dict, visibility: Dict[str, bool]) -> dict
         out["work_links"] = talent["work_links"]
     if v.get("skills") and talent.get("skills"):
         out["skills"] = talent["skills"]
-    if v.get("special_abilities") and talent.get("special_abilities"):
-        out["special_abilities"] = talent["special_abilities"]
     # Availability & budget (structured objects)
     if v.get("availability") and talent.get("availability"):
         a = talent["availability"]
@@ -2293,60 +2290,11 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
         fv["intro_video"] = False
 
 
-    if sub.get("client_package_snapshot"):
-        snap = sub["client_package_snapshot"]
-        ca_snap = snap.get("custom_answers")
-
-        # If snapshot already has correct array format with data, return it as-is.
-        if isinstance(ca_snap, list) and len(ca_snap) > 0:
-            return snap
-
-        # Snapshot exists but custom_answers are absent OR in legacy dict format.
-        # Always attempt to rebuild from live form_data so that:
-        #   (a) snapshots frozen before custom questions existed get enriched, and
-        #   (b) legacy dict-format answers ({uuid: answer}) are converted to arrays.
-        fd_for_resolve = sub.get("form_data") or {}
-        raw_answers_snap = fd_for_resolve.get("custom_answers") or {}
-
-        # Only rebuild when there are actual answers and visibility is enabled.
-        if isinstance(raw_answers_snap, dict) and raw_answers_snap and fv.get("custom_answers"):
-            q_text_by_id_snap: Dict[str, str] = {}
-            project_cqs_snap = (project or {}).get("custom_questions") or []
-            for cq in project_cqs_snap:
-                qid = cq.get("id") or ""
-                qtext = (cq.get("question") or "").strip()
-                if qid and qtext:
-                    q_text_by_id_snap[qid] = qtext
-            ordered_ids_snap = (
-                [cq.get("id") for cq in project_cqs_snap if cq.get("id")]
-                if project_cqs_snap else list(raw_answers_snap.keys())
-            )
-            ca_vis_snap = fv.get("custom_answers")
-            filtered_snap: List[Dict[str, str]] = []
-            seen_snap: set = set()
-            for q_id in ordered_ids_snap:
-                if q_id not in raw_answers_snap:
-                    continue
-                if isinstance(ca_vis_snap, dict) and not ca_vis_snap.get(q_id):
-                    continue
-                ans = str(raw_answers_snap[q_id] or "").strip()
-                if ans:
-                    filtered_snap.append({"question": q_text_by_id_snap.get(q_id) or q_id, "answer": ans})
-                seen_snap.add(q_id)
-            for q_id, a in raw_answers_snap.items():
-                if q_id in seen_snap:
-                    continue
-                if isinstance(ca_vis_snap, dict) and not ca_vis_snap.get(q_id):
-                    continue
-                ans = str(a or "").strip()
-                if ans:
-                    filtered_snap.append({"question": q_text_by_id_snap.get(q_id) or q_id, "answer": ans})
-            if filtered_snap:
-                return {**snap, "custom_answers": filtered_snap}
-
-        # No custom answers to inject — return snapshot as-is.
-        return snap
-
+    # Single source of truth (Issue #1/#10): the client-facing shape is ALWAYS
+    # computed live from the current submission + visibility settings. There are
+    # no frozen snapshots — Client View (Review Center), the Client Review Link,
+    # slideshow, download bundle and PDF all render from this one engine, so a
+    # recruiter's visibility/approval change is reflected everywhere immediately.
     fd = sub.get("form_data") or {}
 
     fn = (fd.get("first_name") or "").strip()
@@ -2491,9 +2439,10 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
         "budget": (fd.get("budget") if fv.get("budget") else None),
         "gender": fd.get("gender") if fv.get("gender") else None,
         "ethnicity": fd.get("ethnicity") if fv.get("ethnicity") else None,
-        "languages": fd.get("languages") if fv.get("languages") else [],
+        # Issue #7: Languages and Special Abilities are no longer surfaced to
+        # the client — they duplicate Skills. Kept out of the single client
+        # shape so every client surface (link, preview, PDF, bundle) matches.
         "skills": fd.get("skills") if fv.get("skills") else [],
-        "special_abilities": fd.get("special_abilities") if fv.get("special_abilities") else None,
         "cover_media_id": cover_mid,
         "media": [_public_media(m) for m in media],
     }
@@ -2562,11 +2511,20 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
 
 
 def generate_submission_snapshot(sub: dict, admin_email: str, project: Optional[dict] = None) -> dict:
-    """Compile an immutable copy of the client-facing shape along with recruiter metadata."""
+    """DEPRECATED (Issue #1/#10). Retained for ONE release only.
+
+    Client-facing rendering no longer reads any frozen snapshot — every client
+    surface is shaped live via `_submission_to_client_shape`. Nothing in the
+    normal app flow calls this anymore (no auto-write on approve, no write on
+    curation save). It is kept in place solely so the deprecated
+    `POST /projects/{pid}/submissions/{sid}/snapshot` endpoint (and any
+    lingering external reference) keeps working during the transition. Remove
+    in the next release.
+    """
     # We temporarily remove the client_package_snapshot field on sub to prevent circular loading
     sub_copy = {k: v for k, v in sub.items() if k != "client_package_snapshot"}
     client_shape = _submission_to_client_shape(sub_copy, project=project)
-    
+
     # Attach snapshot metadata
     client_shape["snapshot_meta"] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

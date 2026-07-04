@@ -63,7 +63,6 @@ from core import (
 from drive_backup import (
     drive_enabled,
     enqueue_drive_upload,
-    submission_folder_url,
 )
 from notifications import fanout as notify_fanout
 
@@ -2255,29 +2254,10 @@ async def get_my_submission_by_token(slug: str, atk: str):
 # --------------------------------------------------------------------------
 # Admin review
 # --------------------------------------------------------------------------
-@router.get("/submissions/{sid}/drive")
-async def submission_drive_link(
-    sid: str, admin: dict = Depends(current_team_or_admin)
-):
-    """Return the Google Drive folder URL for a submission (admin only).
-
-    Lazily creates the folder path if it doesn't yet exist — useful for
-    submissions that have only synced partially. Returns 404 if Drive
-    backup is disabled.
-    """
-    if not drive_enabled():
-        raise HTTPException(404, "Google Drive backup is not configured")
-    sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    if not sub:
-        raise HTTPException(404, "Submission not found")
-    project = await db.projects.find_one(
-        {"id": sub["project_id"]}, {"_id": 0, "brand_name": 1}
-    )
-    brand = (project or {}).get("brand_name") or "Unknown"
-    url = submission_folder_url(brand, sid)
-    if not url:
-        raise HTTPException(503, "Drive folder lookup failed")
-    return {"url": url, "brand": brand, "submission_id": sid}
+# Issue #9: the per-submission "Open Google Drive folder" link endpoint was
+# removed — Talentgram serves all media from Cloudinary and the Review Center
+# no longer surfaces a Drive folder button. (The optional, env-gated Drive
+# backup worker is a separate concern and is left untouched.)
 
 
 @router.get("/submissions/approved")
@@ -2538,26 +2518,11 @@ async def set_decision(
     )
     if not res.matched_count:
         raise HTTPException(404, "Submission not found")
-        
-    # Auto-generate Immutable Package snapshot on Approve (or when decision matches approved/shortlisted/ask_to_test)
-    # The spec specifies "When Approve & Forward is clicked: generate immutable snapshot: client_package_snapshot"
-    if payload.decision == "approved":
-        from core import generate_submission_snapshot
-        fresh_sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
-        snap_project = await db.projects.find_one({"id": pid}, {"_id": 0, "id": 1, "custom_questions": 1}) if pid else None
-        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com", project=snap_project)
-        
-        old_snapshots = fresh_sub.get("client_package_snapshots") or []
-        if fresh_sub.get("client_package_snapshot"):
-            old_snapshots = [fresh_sub["client_package_snapshot"]] + old_snapshots
-            
-        await db.submissions.update_one(
-            {"id": sid, "project_id": pid},
-            {"$set": {
-                "client_package_snapshot": new_snapshot,
-                "client_package_snapshots": old_snapshots
-            }}
-        )
+
+    # Issue #1/#10: no frozen snapshots. The client-facing package is rendered
+    # live from the current submission on every request, so approving no longer
+    # needs to freeze an immutable copy — the client link always reflects the
+    # latest visibility/approval state.
 
     # Fanout — only when the decision actually changes (avoid noise on idempotent calls)
     if prev != payload.decision:
@@ -2630,20 +2595,24 @@ async def get_admin_submission(
     if talent_doc:
         PORTFOLIO_FETCH_CATEGORIES = {"portfolio", "additional_portfolio", "portfolio_general"}
         # Apply any per-submission visibility overrides so the recruiter's
-        # Client/Hidden/Internal choices persist across reloads and drive the
-        # in-page client preview. The talent record itself is never mutated.
+        # Client/Hidden choices persist across reloads and drive the in-page
+        # client preview. The talent record itself is never mutated.
+        # Issue #2/#3: surface the 2-state model — legacy `internal_only`
+        # collapses into client_visible=False.
         tmv = sub.get("talent_media_visibility") or {}
         for m in talent_doc.get("media") or []:
             if m.get("category") in PORTFOLIO_FETCH_CATEGORIES:
                 # Ensure public_id items have resolvable URLs before including.
                 if m.get("url") or m.get("public_id"):
                     item = dict(m)
+                    if item.pop("internal_only", None) is True:
+                        item["client_visible"] = False
                     ov = tmv.get(item.get("id"))
                     if isinstance(ov, dict):
-                        if "client_visible" in ov:
+                        if ov.get("internal_only") is True:
+                            item["client_visible"] = False
+                        elif "client_visible" in ov:
                             item["client_visible"] = ov["client_visible"]
-                        if "internal_only" in ov:
-                            item["internal_only"] = ov["internal_only"]
                     talent_portfolio_media.append(item)
 
     # Fetch project visibility defaults
@@ -2721,9 +2690,26 @@ async def admin_edit_submission(
     # Per-submission visibility overrides for talent-level portfolio media.
     # Merge so partial updates don't drop prior overrides. No media is copied —
     # only a small id->flags map is stored on the submission.
+    #
+    # Issue #2/#3: the visibility model is now just Client / Hidden. Fold any
+    # legacy `internal_only` into `client_visible=False` and never persist it.
     if payload.talent_media_visibility is not None:
         current_tmv = sub.get("talent_media_visibility") or {}
-        update["talent_media_visibility"] = {**current_tmv, **payload.talent_media_visibility}
+        incoming_tmv = {}
+        for mid, ov in (payload.talent_media_visibility or {}).items():
+            if not isinstance(ov, dict):
+                continue
+            cv = ov.get("client_visible")
+            if ov.get("internal_only") is True:
+                cv = False
+            incoming_tmv[mid] = {"client_visible": cv if cv is not None else True}
+        merged_tmv = {**current_tmv, **incoming_tmv}
+        # Drop the deprecated flag from any previously-stored entries too.
+        for mid, ov in merged_tmv.items():
+            if isinstance(ov, dict) and "internal_only" in ov:
+                cv = False if ov.get("internal_only") is True else ov.get("client_visible", True)
+                merged_tmv[mid] = {"client_visible": cv}
+        update["talent_media_visibility"] = merged_tmv
 
     # Curation History Revision Restore OR Curation Save
     if payload.restore_revision_id:
@@ -2743,12 +2729,19 @@ async def admin_edit_submission(
                 # Merge incoming curated properties to preserve old system fields (public_id, content_type, size, url, etc.)
                 existing = media_by_id[mid]
                 merged = {**existing}
-                for k in ["client_visible", "internal_only", "featured_for_client", "primary_take", "featured", "client_cover", "label", "category"]:
+                for k in ["client_visible", "featured_for_client", "primary_take", "featured", "client_cover", "label", "category"]:
                     if k in m:
                         merged[k] = m[k]
+                # Issue #2/#3: Client / Hidden only. Fold any incoming or
+                # legacy `internal_only` into client_visible=False and strip it.
+                if m.get("internal_only") is True or existing.get("internal_only") is True:
+                    if "client_visible" not in m:
+                        merged["client_visible"] = False
+                merged.pop("internal_only", None)
                 updated_media.append(merged)
             else:
                 # Fallback for new/unmatched items
+                m.pop("internal_only", None)
                 updated_media.append(m)
         update["media"] = updated_media
 
@@ -2768,27 +2761,13 @@ async def admin_edit_submission(
 
     if update:
         await db.submissions.update_one({"id": sid}, {"$set": update})
-        
+
     fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    
-    # Optional dynamic snapshot regeneration inside PUT
-    if payload.regenerate_snapshot:
-        from core import generate_submission_snapshot
-        snap_project = await db.projects.find_one({"id": fresh_sub.get("project_id") or ""}, {"_id": 0, "id": 1, "custom_questions": 1}) if fresh_sub.get("project_id") else None
-        new_snapshot = generate_submission_snapshot(fresh_sub, admin.get("email") or "admin@example.com", project=snap_project)
-        old_snapshots = fresh_sub.get("client_package_snapshots") or []
-        if fresh_sub.get("client_package_snapshot"):
-            old_snapshots = [fresh_sub["client_package_snapshot"]] + old_snapshots
-            
-        await db.submissions.update_one(
-            {"id": sid},
-            {"$set": {
-                "client_package_snapshot": new_snapshot,
-                "client_package_snapshots": old_snapshots
-            }}
-        )
-        fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
-        
+
+    # Issue #1/#10: no frozen snapshots. Curation edits (visibility, field
+    # overrides, media order) take effect on the client link immediately
+    # because the link renders live — there is nothing to regenerate.
+
     return fresh_sub
 
 
@@ -2919,19 +2898,27 @@ async def regenerate_submission_snapshot_endpoint(
     sid: str,
     admin: dict = Depends(current_team_or_admin),
 ):
-    """Explicitly regenerate the immutable client package snapshot for a submission."""
+    """DEPRECATED (Issue #1/#10). Retained for ONE release only.
+
+    Client-facing rendering is now always live (single engine), so refreshing a
+    frozen snapshot has no effect on what clients see. The Review Center no
+    longer surfaces a "Refresh Client Snapshot" button. This endpoint is kept
+    in place for one release so an older cached frontend (during a rolling
+    deploy) or any external caller does not 404. It writes the deprecated
+    `client_package_snapshot` field but nothing reads it. Remove next release.
+    """
     sub = await db.submissions.find_one({"id": sid, "project_id": pid})
     if not sub:
         raise HTTPException(404, "Submission not found")
-        
+
     from core import generate_submission_snapshot
     snap_project = await db.projects.find_one({"id": pid}, {"_id": 0, "id": 1, "custom_questions": 1}) if pid else None
     new_snapshot = generate_submission_snapshot(sub, admin.get("email") or "admin@example.com", project=snap_project)
-    
+
     old_snapshots = sub.get("client_package_snapshots") or []
     if sub.get("client_package_snapshot"):
         old_snapshots = [sub["client_package_snapshot"]] + old_snapshots
-        
+
     await db.submissions.update_one(
         {"id": sid, "project_id": pid},
         {"$set": {
@@ -2939,22 +2926,7 @@ async def regenerate_submission_snapshot_endpoint(
             "client_package_snapshots": old_snapshots
         }}
     )
-    
-    # Auto-create history revision for the snapshot regeneration
-    rev_id = str(uuid.uuid4())[:8]
-    revision = {
-        "id": rev_id,
-        "timestamp": _now(),
-        "admin_email": admin.get("email") or "admin@example.com",
-        "media": sub.get("media") or [],
-        "note": "Regenerated Client Package Snapshot",
-    }
-    await db.submissions.update_one(
-        {"id": sid, "project_id": pid},
-        {"$push": {"media_revision_history": {"$each": [revision], "$position": 0}}}
-    )
-    
-    return {"ok": True, "snapshot": new_snapshot}
+    return {"ok": True, "snapshot": new_snapshot, "deprecated": True}
 
 
 # ===========================================================================

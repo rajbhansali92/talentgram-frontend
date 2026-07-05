@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
+import { appDraftKey } from "@/lib/applyDraft";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
@@ -59,7 +60,10 @@ export default function GoogleCallback() {
                             },
                             savedAt: Date.now()
                         };
-                        localStorage.setItem("tg_application", JSON.stringify(ref));
+                        // Write directly to the email-scoped draft slot (same
+                        // key ApplicationPage reads), so the resume needs no
+                        // legacy migration. Auth behaviour is unchanged.
+                        localStorage.setItem(appDraftKey(data.email), JSON.stringify(ref));
                         toast.success("Welcome back! Resuming your application.");
                     } else if (data.token && data.submission_id) {
                         // Existing talent with submission -> resume and unlock

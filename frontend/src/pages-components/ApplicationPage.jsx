@@ -2,6 +2,13 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
+import {
+    appDraftKey,
+    normEmail,
+    newestLocalDraft,
+    LEGACY_APP_DRAFT_KEY as LEGACY_LS_KEY,
+    APP_DRAFT_TTL_MS as DRAFT_TTL_MS,
+} from "@/lib/applyDraft";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
@@ -48,10 +55,9 @@ import {
 // Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
 // `western` is independently capped at this value, NOT combined.
 const MAX_IMAGES_PER_CATEGORY = 10;
-const LS_KEY = "tg_application";
-// Draft expiry: local data (token + PII) is wiped after 30 days even if
-// the user never finalises — defense-in-depth against stale tokens / stale PII.
-const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Apply-draft local storage ownership (key scheme + migration helpers) lives
+// in the shared module so ApplicationPage and GoogleCallback derive identical
+// per-email keys. Aliased to the names used throughout this file.
 
 export default function ApplicationPage() {
     // Flow: identity gate → sections 1-4 → submitted
@@ -235,7 +241,64 @@ export default function ApplicationPage() {
             })();
         }
 
-        const raw = localStorage.getItem(LS_KEY);
+        // ── Resume ONLY the draft that belongs to the resolved identity ─────
+        // Identity precedence (Table A): explicit ?email= invite → verified
+        // portal session. (A Google session returns above.) The most-recent
+        // local draft is consulted only when NONE of those exist, so a stale
+        // draft can never override an invite context.
+        const portalToken = localStorage.getItem(PORTAL_TOKEN_KEY);
+        const intendedEmail =
+            normEmail(queryEmail) || (portalToken ? normEmail(portalEmail) : "");
+
+        let restoreKey = null;
+        let raw = null;
+        if (intendedEmail) {
+            restoreKey = appDraftKey(intendedEmail);
+            raw = localStorage.getItem(restoreKey);
+            if (!raw) {
+                // One-time legacy migration — adopt the old global slot ONLY
+                // when its stored email matches the resolved identity. TTL/
+                // savedAt are preserved by copying the value verbatim.
+                const legacyRaw = localStorage.getItem(LEGACY_LS_KEY);
+                if (legacyRaw) {
+                    try {
+                        const legacy = JSON.parse(legacyRaw);
+                        if (normEmail(legacy?.basics?.email) === intendedEmail) {
+                            localStorage.setItem(restoreKey, legacyRaw);
+                            localStorage.removeItem(LEGACY_LS_KEY);
+                            raw = legacyRaw;
+                            console.log("[ApplicationPage] Migrated legacy draft → per-email slot.");
+                        }
+                    } catch (e) {
+                        console.error("[ApplicationPage] Legacy draft parse failed:", e);
+                    }
+                }
+            }
+        } else {
+            // No invite/session identity — resume the most recently saved draft
+            // (personal-device convenience). This branch only runs when ?email=
+            // and the portal session are both absent, so it cannot override an
+            // invite. A legacy slot is normalized into a per-email slot on adopt.
+            const found = newestLocalDraft();
+            if (found) {
+                raw = found.raw;
+                restoreKey = found.key;
+                if (restoreKey === LEGACY_LS_KEY) {
+                    try {
+                        const legacy = JSON.parse(found.raw);
+                        const em = normEmail(legacy?.basics?.email);
+                        if (em) {
+                            restoreKey = appDraftKey(em);
+                            localStorage.setItem(restoreKey, found.raw);
+                            localStorage.removeItem(LEGACY_LS_KEY);
+                        }
+                    } catch (e) {
+                        console.error("[ApplicationPage] Legacy draft parse failed:", e);
+                    }
+                }
+            }
+        }
+
         if (!raw) return;
         try {
             const saved = JSON.parse(raw);
@@ -243,7 +306,7 @@ export default function ApplicationPage() {
             // TTL guard — purge stale drafts (tokens + PII) after DRAFT_TTL_MS.
             if (saved.savedAt && Date.now() - saved.savedAt > DRAFT_TTL_MS) {
                 console.warn("[ApplicationPage] Draft has expired. Purging local storage.");
-                localStorage.removeItem(LS_KEY);
+                if (restoreKey) localStorage.removeItem(restoreKey);
                 return;
             }
             if (saved.aid && saved.token) {
@@ -262,6 +325,8 @@ export default function ApplicationPage() {
                             { headers: { Authorization: `Bearer ${saved.token}` } },
                         );
                         console.log("[ApplicationPage] Fetch successful. Hydrating form fields.");
+                        // Backend is authoritative — it overwrites the locally
+                        // cached form_data (Table C precedence).
                         setForm((f) => ({ ...f, ...(data.form_data || {}) }));
                         // Resume also rehydrates `basics` from the persisted
                         // application. `basics` (gate-only fields) is what
@@ -285,7 +350,7 @@ export default function ApplicationPage() {
                     } catch (err) {
                         console.error("[ApplicationPage] Hydration request failed. Invalid or expired token. Status:", err?.response?.status, err?.response?.data);
                         // expired/invalid token — reset
-                        localStorage.removeItem(LS_KEY);
+                        if (restoreKey) localStorage.removeItem(restoreKey);
                         setStarted(false);
                         setAid(null);
                         setToken(null);
@@ -296,23 +361,19 @@ export default function ApplicationPage() {
             }
         } catch (e) {
             console.error("[ApplicationPage] Exception decoding saved draft details:", e);
-            localStorage.removeItem(LS_KEY);
+            if (restoreKey) localStorage.removeItem(restoreKey);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const saveLocal = (patch = {}) => {
-        localStorage.setItem(
-            LS_KEY,
-            JSON.stringify({
-                aid,
-                token,
-                basics,
-                form,
-                ...patch,
-                savedAt: Date.now(),
-            }),
-        );
+        const value = { aid, token, basics, form, ...patch, savedAt: Date.now() };
+        // Namespace by the draft's own email so it can only ever be resumed in
+        // that identity's context. A started application always carries an
+        // email; guard defensively so we never write an anonymous slot.
+        const email = normEmail(value.basics?.email);
+        if (!email) return;
+        localStorage.setItem(appDraftKey(email), JSON.stringify(value));
     };
 
     const computedAge = useMemo(() => {
@@ -406,7 +467,7 @@ export default function ApplicationPage() {
                         },
                         savedAt: Date.now()
                     };
-                    localStorage.setItem(LS_KEY, JSON.stringify(ref));
+                    localStorage.setItem(appDraftKey(normEmail(data.email)), JSON.stringify(ref));
                     setAid(data.application_id);
                     setToken(data.token);
                     setBasics(ref.basics);
@@ -706,20 +767,24 @@ export default function ApplicationPage() {
             setToken(newToken);
             setStarted(true);
             if (data.resumed) toast.success("Welcome back — your application is resumed");
-            localStorage.setItem(
-                LS_KEY,
-                JSON.stringify({
-                    aid: newAid,
-                    token: newToken,
-                    basics: {
-                        ...basics,
-                        first_name: finalForm.first_name || basics.first_name,
-                        last_name: finalForm.last_name || basics.last_name,
-                    },
-                    form: finalForm,
-                    savedAt: Date.now(),
-                }),
-            );
+            const startedBasics = {
+                ...basics,
+                first_name: finalForm.first_name || basics.first_name,
+                last_name: finalForm.last_name || basics.last_name,
+            };
+            const startedEmail = normEmail(startedBasics.email);
+            if (startedEmail) {
+                localStorage.setItem(
+                    appDraftKey(startedEmail),
+                    JSON.stringify({
+                        aid: newAid,
+                        token: newToken,
+                        basics: startedBasics,
+                        form: finalForm,
+                        savedAt: Date.now(),
+                    }),
+                );
+            }
         } catch (e) {
             console.error("[startApplication] Failed to start/resume application:", e);
             // P0-1: the backend now requires proof of email ownership before it
@@ -880,7 +945,11 @@ export default function ApplicationPage() {
                 { headers: { Authorization: `Bearer ${token}` } },
             );
             setFinalized(true);
-            localStorage.removeItem(LS_KEY);
+            // Clear this identity's cached draft (and any legacy slot that was
+            // never migrated). Other identities' slots are untouched.
+            const finalizedEmail = normEmail(basics.email);
+            if (finalizedEmail) localStorage.removeItem(appDraftKey(finalizedEmail));
+            localStorage.removeItem(LEGACY_LS_KEY);
             // P2-8: the local draft is the only place we mirrored PII; once the
             // submission is server-side we no longer need the bulky Google
             // profile blob cached in localStorage. Drop it to minimise PII at

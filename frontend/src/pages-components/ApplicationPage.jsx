@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
+import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
@@ -82,6 +83,8 @@ export default function ApplicationPage() {
     });
     const [media, setMedia] = useState([]);
     const { activeUploads, uploadFile } = useUploadManager();
+    const stickyFooterRef = useRef(null);
+    useStickyFooterHeightVar(stickyFooterRef, "--tg-sticky-cta-h");
     const [saving, setSaving] = useState(false);
     // Email-first gate (does NOT touch /api/public/apply, validation, or schema —
     // pure conditional rendering inside the existing identity screen).
@@ -1701,7 +1704,7 @@ export default function ApplicationPage() {
                 </div>
 
                 {/* Safe-area-aware sticky submit footer */}
-                <div data-sticky-footer className="sticky bottom-0 z-20 bg-gradient-to-t from-[#faf9f6] via-[#faf9f6]/95 to-transparent pt-4 pb-safe-offset-6 -mx-4 sm:-mx-6 px-4 sm:px-6">
+                <div ref={stickyFooterRef} data-sticky-footer className="sticky bottom-0 z-20 bg-gradient-to-t from-[#faf9f6] via-[#faf9f6]/95 to-transparent pt-4 pb-safe-offset-6 -mx-4 sm:-mx-6 px-4 sm:px-6">
                 <button
                     onClick={finalize}
                     disabled={saving}

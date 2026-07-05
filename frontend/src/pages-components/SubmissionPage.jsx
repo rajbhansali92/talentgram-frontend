@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
+import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -183,6 +184,8 @@ function SubmissionPage() {
     // options, so backend storage and existing talent data are never touched.
     const [heightUnit, setHeightUnit] = useState("ft");
     const { activeUploads, retryQueue, uploadFile, retryUpload } = useUploadManager();
+    const stickyFooterRef = useRef(null);
+    useStickyFooterHeightVar(stickyFooterRef, "--tg-sticky-cta-h");
     const [finalizing, setFinalizing] = useState(false);
     const [editMode, setEditMode] = useState(false);
     const requirements = project?.submission_requirements || {};
@@ -3405,7 +3408,7 @@ function SubmissionPage() {
                             </div>
                         )}
 
-                        <div data-sticky-footer className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
+                        <div ref={stickyFooterRef} data-sticky-footer className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
                             <p className="text-[12px] text-[#333333] text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
                                 Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
                             </p>

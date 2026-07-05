@@ -11,7 +11,15 @@ export default function FloatingUploadManager({ activeUploads = {}, onRetry, onD
     const failedCount = items.filter(([_, u]) => u.status === "failed").length;
 
     return (
-        <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-50 w-[calc(100vw-2rem)] max-w-xs sm:w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5">
+        <div
+            // Floats clear of the page's sticky submit-CTA footer instead of
+            // overlapping it. `--tg-sticky-cta-h` is the footer's live rendered
+            // height (published by useStickyFooterHeightVar), so this stays
+            // correct regardless of footer height, safe-area insets, or iOS
+            // toolbar resize. Falls back to the original fixed gap on pages
+            // with no sticky footer (the var is simply unset there).
+            className="fixed bottom-[calc(var(--tg-sticky-cta-h,0px)+1rem)] right-4 sm:bottom-[calc(var(--tg-sticky-cta-h,0px)+1.5rem)] sm:right-6 z-50 w-[calc(100vw-2rem)] max-w-xs sm:w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5"
+        >
             <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3 cursor-pointer" onClick={() => setCollapsed(!collapsed)}>
                 <div className="flex items-center gap-2">
                     <div className="relative">

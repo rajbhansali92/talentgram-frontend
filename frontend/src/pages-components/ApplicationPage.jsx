@@ -881,43 +881,13 @@ export default function ApplicationPage() {
             // P2-8: the local draft is the only place we mirrored PII; once the
             // submission is server-side we no longer need the bulky Google
             // profile blob cached in localStorage. Drop it to minimise PII at
-            // rest (the portal token/email remain so "Edit Profile" still works).
+            // rest (the portal token/email remain so a resumed session still works).
             try {
                 localStorage.removeItem("talentgram_google_profile_data");
                 localStorage.removeItem("talentgram_google_avatar");
             } catch (_) { /* localStorage unavailable — non-fatal */ }
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Submission failed");
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    const enableEditing = async () => {
-        setSaving(true);
-        try {
-            console.log("[enableEditing] Requesting edit mode for application:", aid);
-            await axios.post(
-                `/public/apply/${aid}/edit`,
-                {},
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
-            console.log("[enableEditing] Edit mode enabled by backend. Enabling form editing.");
-            setIsEditMode(true);
-            setFinalized(false);
-            localStorage.setItem(
-                LS_KEY,
-                JSON.stringify({
-                    aid,
-                    token,
-                    basics,
-                    form,
-                    savedAt: Date.now(),
-                }),
-            );
-        } catch (e) {
-            console.error("[enableEditing] Failed to enable edit mode:", e);
-            toast.error(e?.response?.data?.detail || "Failed to enable edit mode");
         } finally {
             setSaving(false);
         }
@@ -1310,15 +1280,6 @@ export default function ApplicationPage() {
                         <div className="text-xs text-[#8b8b8b] font-medium mb-6">
                             Thank you for your interest in joining Talentgram.
                         </div>
-                        <button
-                            onClick={enableEditing}
-                            disabled={saving}
-                            data-testid="apply-edit-profile-btn"
-                            className="mt-2 w-full bg-[#1a1a1a] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#333] transition-colors duration-150 disabled:opacity-40 inline-flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.98]"
-                        >
-                            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                            Edit Profile
-                        </button>
                     </div>
                 </div>
             </div>

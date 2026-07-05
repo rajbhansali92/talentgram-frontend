@@ -107,13 +107,27 @@ python -m migrations.remove_internal_visibility
 **Risk**: A stale `client_package_snapshot` may still be present on old approved submissions in Mongo, but is ignored by the shape function.
 **Recommendation**: Remove `generate_submission_snapshot()`, the `/snapshot` endpoint, and the `client_package_snapshot`/`client_package_snapshots` fields (via `$unset` migration) in the next release cycle. See D15 in [08_DECISION_LOG.md](08_DECISION_LOG.md).
 
+### 13. Legacy `tg_application` Draft Migration Pending Retirement
+**Status**: Technical debt, cleanup pending
+**Impact**: Low
+**Evidence**: The Talent Invite draft cache moved from a single global `tg_application` localStorage key to per-email slots (`tg_application_<digest>`, commit `c80a3c9`, see D25). A one-time, identity-matched migration in `ApplicationPage.jsx`'s mount effect still reads/adopts the legacy key for any talent who had an in-flight draft before this change; `GoogleCallback.jsx` was also updated so no live code path writes the legacy key anymore.
+**Risk**: None — the migration is a strict downgrade path (adopt-then-delete, or ignore-on-mismatch) and doesn't affect correctness. It's dead weight once the population of pre-2026-07-05 browsers with a lingering legacy draft has aged out (bounded by the existing 30-day TTL).
+**Recommendation**: Remove the legacy-migration branch from `ApplicationPage.jsx`'s mount effect (and the `LEGACY_APP_DRAFT_KEY` export from `frontend/src/lib/applyDraft.js`) after one 30-day TTL window has passed with no further legacy-key hits in logs.
+
+### 14. Talent Invite: No-Context Resume Picks Newest Draft, Not Per-Person
+**Status**: Accepted design tradeoff (not a regression)
+**Impact**: Low
+**Evidence**: When a plain `/apply` visit has no `?email=`, no verified portal session, and no Google session, the mount effect resumes the single most-recently-saved local draft across all per-email slots (`newestLocalDraft()` in `frontend/src/lib/applyDraft.js`) — matching the prior global-slot behavior for this specific no-context case.
+**Risk**: On a genuinely shared/kiosk device, a second person starting a plain `/apply` visit (no invite, no verified session) could see the first person's draft. This is the same behavior the app already had before the 2026-07-05 storage-ownership fix; the fix's scope was eliminating a stale draft overriding an *invite context* (`?email=`/verified session), not this narrower no-context case.
+**Recommendation**: If this proves to be a real-world problem, consider an explicit "Resume draft / Start fresh" prompt instead of silent auto-resume when no identity context exists, rather than silently picking the newest draft.
+
 ## Technical Debt
 
 ### Frontend
 
 1. **React Router inside Next.js**: Admin SPA (`/admin`) and Portal (`/portal`) use React Router inside Next.js App Router catch-all routes. This works but prevents SSR/SSG benefits for those pages.
 
-2. **localStorage as primary state**: Application drafts, auth tokens, and submission state all persist in localStorage. No server-side session management. Lost if user clears browser data.
+2. **localStorage as primary state**: Application drafts, auth tokens, and submission state all persist in localStorage. No server-side session management. Lost if user clears browser data. Partially addressed for Talent Invite (2026-07-05, see D25 in [08_DECISION_LOG.md](08_DECISION_LOG.md)): the draft cache is now email-scoped and explicitly treated as a convenience cache — the backend document is authoritative on hydrate, and a talent who clears storage can still recover via OTP/Google re-verification (the draft is keyed by identity, not by an unrecoverable local id). Project Submission already had the equivalent per-slug discipline (D20). The underlying architectural pattern (browser storage as cache, not source of truth) is not yet applied everywhere else (e.g. admin sidebar state, CRM recent searches — lower stakes, not in scope here).
 
 3. **No TypeScript**: Frontend is JavaScript-only (`.jsx`, `.js`). No type checking beyond ESLint.
 

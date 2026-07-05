@@ -6,6 +6,33 @@ This timeline covers repository history through July 5, 2026. The project has no
 
 ---
 
+### 2026-07-05: Talent Invite Draft Storage Ownership (Email-Scoped)
+
+| Field | Value |
+|---|---|
+| Commit | `c80a3c9` |
+| Date | 2026-07-05 |
+| Purpose | Stop a stale browser draft from ever overriding the invite/session the talent is actually in |
+| Impact | The apply flow persisted its draft under a single global localStorage key (`tg_application`), so refreshing or reopening an invite could silently restore a draft created under a **different** email — reported as "refreshed a Talent Invite link and got an old draft back." Replaced with per-normalized-email slots (`tg_application_<FNV-1a digest>`, key scheme in new `frontend/src/lib/applyDraft.js`), mirroring `SubmissionPage`'s existing per-`slug` namespacing. Mount now resolves the *intended identity* first — explicit `?email=` invite → verified portal session → Google session → (only if none of those exist) the newest local draft — and reads **only** that identity's slot; the backend document remains authoritative on hydrate, local storage is a cache/hint only. A one-time migration adopts a legacy `tg_application` slot into the new per-email slot **only when its stored email matches the resolved identity** (TTL/`savedAt` preserved), otherwise it's left untouched. `GoogleCallback.jsx`'s apply-resume branch now writes the email-scoped slot directly (storage destination only — OTP/Google/portal auth behavior unchanged), so no live code path writes the legacy key anymore. Project Submission storage untouched. See D25 in [08_DECISION_LOG.md](08_DECISION_LOG.md). |
+
+### 2026-07-05: Floating Upload Manager No Longer Covers the Sticky Submit CTA
+
+| Field | Value |
+|---|---|
+| Commit | `e2a2cd2` |
+| Date | 2026-07-05 |
+| Purpose | Keep "Submit Audition" / "Submit Application" visible for the entire upload lifecycle in both talent-facing flows |
+| Impact | `FloatingUploadManager` (`fixed`, `z-50`, bottom-anchored) and each flow's sticky submit-CTA footer (`sticky bottom-0`) were built independently and share the same bottom-of-screen real estate on mobile whenever an upload is active — the upload card visually covered the button (not a React unmount, not an iOS-only bug; reproducible on any narrow viewport). New `useStickyFooterHeightVar` hook (`frontend/src/hooks/`) publishes the sticky footer's live rendered height to a `--tg-sticky-cta-h` CSS custom property via `ResizeObserver`; `FloatingUploadManager`'s `bottom` offset is now `calc(var(--tg-sticky-cta-h,0px) + gap)` instead of a static `bottom-4`/`bottom-6`, so the overlay always floats clear of the CTA regardless of footer height, safe-area insets, or iOS toolbar-driven reflows — no hardcoded pixel offset, and z-index was deliberately left alone (repositioning prevents the overlap outright rather than just changing which element wins the overlap). Applies to both `ApplicationPage.jsx` and `SubmissionPage.jsx` (same shared `UploadManagerContext`/`FloatingUploadManager`). See D24 in [08_DECISION_LOG.md](08_DECISION_LOG.md). |
+
+### 2026-07-05: Talent Invite — Removed "Edit Profile" From the Thank You Screen
+
+| Field | Value |
+|---|---|
+| Commit | `ac0ce31` |
+| Date | 2026-07-05 |
+| Purpose | Stop routing a just-submitted talent back into edit mode immediately after the Talent Invite flow completes |
+| Impact | Removed the "Edit Profile" button (and its now-unreferenced `enableEditing()` handler, which called `POST /public/apply/{aid}/edit` to reopen the draft) from `ApplicationPage.jsx`'s finalized/Thank-You screen. Per the architecture, the Talent Invite flow is one of only two writers to the Global Talent Profile (D17), and that write is complete once finalize succeeds — a recruiter can always send a fresh invite link if an update is needed later. Thank-You screen messaging/layout otherwise unchanged; `isEditMode` state (still set by the separate returning-talent resume paths) and the backend `/edit` endpoint are untouched. See D23 in [08_DECISION_LOG.md](08_DECISION_LOG.md). |
+
 ### 2026-07-04: WhatsApp Engine Modal Handling Framework
 
 | Field | Value |

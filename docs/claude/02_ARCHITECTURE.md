@@ -75,8 +75,9 @@ apply.talentgramagency.com/apply
 +------------------+
 | Draft Persistence |
 | localStorage      |
-| tg_application    |
-| 30-day TTL        |
+| email-scoped       |
+| (cache only)       |
+| 30-day TTL         |
 +--------+---------+
          |
          v
@@ -106,9 +107,11 @@ apply.talentgramagency.com/apply
 
 - **Entry point**: `frontend/src/pages-components/ApplicationPage.jsx`
 - **Backend**: `POST /api/public/apply` (start/resume), `PUT /api/public/apply/{aid}` (save), `POST /api/public/apply/{aid}/finalize` (submit)
-- **Draft storage**: localStorage key `tg_application` with 30-day TTL
+- **Draft storage (email-scoped, cache only)**: localStorage key `tg_application_<FNV-1a digest of normalized email>` with 30-day TTL, derived by shared module `frontend/src/lib/applyDraft.js`. On mount, the intended identity is resolved first — `?email=` invite → verified portal session → Google session → (only if none of those exist) the newest local draft — and only that identity's slot is read, so a stale draft can never override an invite context. The backend document is authoritative on hydrate; local storage only pre-populates the UI. A one-time migration adopts a legacy global `tg_application` slot only when its stored email matches the resolved identity (see D25 in [08_DECISION_LOG.md](08_DECISION_LOG.md)).
 - **Auth**: Submitter JWT (`role: "submitter", kind: "application"`) backed by persistent `access_token`
 - **Reconciliation**: On GET, draft is hydrated from existing talent profile if fields are empty (`_reconcile_draft_from_talent`)
+- **Terminal on finalize**: The Thank-You screen has no "Edit Profile" path back into the draft (removed — see D23); a new invite link is required to resume editing after submission.
+- **Upload progress overlay**: `FloatingUploadManager` dynamically floats clear of the sticky submit-CTA footer (never statically overlaps it) — see D24.
 
 ## Project Submission Flow
 
@@ -172,6 +175,7 @@ submit.talentgramagency.com/submit/{slug}
 - **Landing page always shown**: A returning talent always begins on the project landing / email gate. Global cross-project sessions (`talentgram_portal_email`, `talentgram_google_*`) never auto-unlock a new project's gate. Only a per-slug JWT/ATK session or a per-slug Google marker (`tg_google_done_<slug>`) may skip it. Deep-links `?email=` pre-fill the landing field and send an OTP but keep the gate locked (established by commit `8cfb1b5`, 2026-07-02).
 - **Media sync — ORIGINAL submissions only**: On upload while the submission is still a DRAFT, portfolio/intro-video media syncs to `db.talents` via `sync_media_to_global_talent()`. Audition takes never sync. **Any post-finalize workflow (resubmit / update / replace media / edit / admin-reopen → submit again) does NOT sync to the global talent profile.** The gate is a helper `has_been_submitted_once(sub)` in `backend/routers/submissions.py`, keyed on the monotonic `submitted_at` flag (never cleared by any edit flow) with a status fallback. Also enforced in the async Cloudinary webhook intro-video replace path (established by commit `8cfb1b5`).
 - **Direct upload**: When `DIRECT_VIDEO_UPLOAD=true`, video uploads go direct browser-to-Cloudinary (Architecture C)
+- **Upload progress overlay**: Shares the same `FloatingUploadManager` singleton as the Application flow; it dynamically floats clear of the sticky submit-CTA footer regardless of upload state — see D24 in [08_DECISION_LOG.md](08_DECISION_LOG.md).
 
 ## Review Center Flow
 

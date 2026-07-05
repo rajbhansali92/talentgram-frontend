@@ -290,3 +290,44 @@ update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
 **Implementation**: Railway service `talentgram-railway` (service ID `b3242fe8-67b3-4d5d-9fce-a875d05b58ce`) in project `pacific-art`. Source: `rajbhansali92/talentgram-frontend`, branch `main`, root `/backend`. Public URL: `https://talentgram-app-production.up.railway.app`. Start command: `uvicorn server:app --host 0.0.0.0 --port $PORT`. Health: `GET /health`.
 
 **Trade-off**: See open issue #0 -- GitHub → Railway auto-deploy status is uncertain (may have reconnected as of 2026-07-04; verify on next push).
+
+---
+
+## D23: Talent Invite Thank-You Screen Has No Edit Path
+
+**Decision**: The "Edit Profile" button is removed from the Talent Invite finalized/Thank-You screen. Once finalize succeeds, the flow is terminal; there is no in-app path back into editing that draft.
+
+**Rationale**: Per D17, only two workflows may ever write to the Global Talent Profile — the Talent Invite flow and a talent's first project submission (pre-finalize). Once Talent Invite finalize succeeds, that write is complete; there's no data-integrity reason to route the user back into editing immediately, and doing so encouraged unnecessary re-edits. A recruiter who wants a talent to update their profile can send a new invite link.
+
+**Implementation**: `frontend/src/pages-components/ApplicationPage.jsx` — removed the button (previously called `enableEditing()`, which POSTed `/public/apply/{aid}/edit` to reset the application to `draft` status) and the now-orphaned handler. The backend `/edit` endpoint is untouched (still reachable, just unreferenced by this UI path). `isEditMode` state and the "Profile Updated"/"Saved" text variants remain — they're still reachable via the separate returning-talent resume paths (hydrating a `status: "submitted"` draft), which is unrelated to this button.
+
+**Established by**: Commit `ac0ce31` (2026-07-05) "fix(application): remove Edit Profile button from Talent Invite Thank You screen".
+
+---
+
+## D24: Prevent Upload-Manager/CTA Overlap By Repositioning, Not Z-Index
+
+**Decision**: When the floating upload-progress overlay (`FloatingUploadManager`) and a flow's sticky submit-CTA footer would otherwise occupy the same screen region, the overlay is repositioned to float clear of the footer's actual rendered height — not simply painted on top or below it via a z-index change.
+
+**Rationale**: `FloatingUploadManager` (`fixed`, `z-50`, bottom-anchored) and each flow's sticky CTA footer (`sticky bottom-0`) were built independently and collide on narrow (mobile) viewports whenever an upload is active, visually covering the submit button. A z-index change only decides which element wins the overlap — it doesn't stop them from occupying the same space, and would just move the same bug onto whichever element loses. The fix must also not hardcode a pixel offset, since the footer's height varies by device safe-area inset, conditional warning text, and iOS toolbar-driven reflows.
+
+**Implementation**: New hook `frontend/src/hooks/useStickyFooterHeightVar.js` observes the sticky footer element via `ResizeObserver` and publishes its live rendered height to a CSS custom property (`--tg-sticky-cta-h`) on `<html>` — consistent with this codebase's existing `--tg-*` design-token convention (see `index.css`). `FloatingUploadManager`'s `bottom` offset became `calc(var(--tg-sticky-cta-h,0px) + 1rem)` (`+1.5rem` on `sm:`) instead of the static `bottom-4`/`bottom-6`, so it always floats above the CTA regardless of the CTA's actual height. Falls back to the original fixed gap on any page without a sticky footer (the variable is simply unset there — no regression). Applies to both `ApplicationPage.jsx` and `SubmissionPage.jsx`, since both share the same `UploadManagerContext`/`FloatingUploadManager` singleton.
+
+**Established by**: Commit `e2a2cd2` (2026-07-05) "fix(upload): prevent floating upload manager from covering the sticky submit CTA".
+
+---
+
+## D25: Talent Invite Draft Ownership By Resolved Identity (Email-Scoped Storage)
+
+**Decision**: The Talent Invite local draft cache is namespaced by the talent's normalized email — not a single global slot. On mount, the *intended identity* is resolved first (explicit `?email=` invite → verified portal session → Google session → otherwise the newest local draft, only when none of those exist), and only that identity's slot is ever read. A stale draft belonging to a different email can never override the invite/session context the talent is actually in. The backend document remains authoritative; local storage is a convenience cache, never an overriding session.
+
+**Rationale**: Reported symptom: refreshing a Talent Invite link could restore an older draft created under a different email, because the single global key `tg_application` was restored unconditionally on mount with no identity check — a direct precedence inversion (stale local cache > invite context > backend truth). `SubmissionPage` already avoided this class of bug by namespacing its draft/session keys per project `slug` (see D20) and never letting a global cross-project session unlock a new project's gate; this decision applies the same principle to Talent Invite using the identity that's actually available there (email, since there's no project slug) instead of retrofitting an unrelated namespace.
+
+**Implementation**:
+- Ownership model: the application id (`aid`) remains the backend record identifier and the JWT remains the credential — both live *inside* the per-email value, never in the key, exactly mirroring how `SubmissionPage` keeps `id`/token inside its per-slug value.
+- Key scheme extracted to `frontend/src/lib/applyDraft.js` (single source of truth): `normEmail()` matches backend `core.normalize_email()` exactly (`strip().lower()`, no plus/dot folding); `emailDigest()` is a deterministic FNV-1a → 8-hex digest (key hygiene, not a security boundary — the value still holds PII under the existing 30-day TTL); `appDraftKey(email)` = `tg_application_<digest>`.
+- Mount precedence (`ApplicationPage.jsx`): identity resolution order is `?email=` invite → verified portal session (`talentgram_portal_token` + `talentgram_portal_email`) → Google session (returns earlier in the same effect) → newest local draft across all per-email slots, consulted *only* when none of the above exist. The resolved identity's slot is the only one ever read; a legacy `tg_application` slot is migrated into a per-email slot on first load **only if its stored email matches the resolved identity** (TTL/`savedAt` preserved via a verbatim copy), otherwise left untouched and TTL-bounded.
+- `GoogleCallback.jsx`'s apply-resume branch writes `appDraftKey(data.email)` directly (imports the same shared key scheme) rather than the legacy key — storage destination only; the OAuth exchange, `portal_token` persistence, and redirect are unchanged. No live code path writes the legacy key anymore, so the migration only needs to survive a deprecation window for drafts already in users' browsers before it can be removed (tracked in [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md)).
+- Project Submission's per-`slug` storage (`tg_submission_{slug}`, `tg_draft_{slug}`, `tg_atk_{slug}`) is untouched.
+
+**Established by**: Commit `c80a3c9` (2026-07-05) "fix(apply): namespace Talent Invite draft cache by identity, not one global slot".

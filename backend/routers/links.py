@@ -1652,6 +1652,25 @@ def _get_link_label(url: str) -> str:
         return "Google Drive"
     return "Work Link"
 
+def _format_location(loc) -> str:
+    """Safe display string for a talent location, tolerant of every stored
+    shape. Location can be a plain string, a list (of strings and/or
+    ``{"city","country"}`` objects), or a bare object — see Open Issue #4
+    ("Mixed Location Formats"). Mirrors the frontend ``formatTalentLocation``
+    rules and, unlike the previous inline ``", ".join(loc)``, never raises on
+    a list that contains objects. Backwards compatible: a plain string and a
+    list of plain strings render exactly as before (comma-joined)."""
+    if not loc:
+        return ""
+    if isinstance(loc, str):
+        return loc.strip()
+    if isinstance(loc, dict):
+        parts = [str(loc.get("city") or "").strip(), str(loc.get("country") or "").strip()]
+        return ", ".join(p for p in parts if p)
+    if isinstance(loc, list):
+        return ", ".join(p for p in (_format_location(item) for item in loc) if p)
+    return str(loc).strip()
+
 def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], client_status: Optional[str]) -> bytes:
     from fpdf import FPDF
     pdf = FPDF()
@@ -1689,11 +1708,7 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
     
     loc = talent_doc.get("location")
     if loc is not None:
-        if isinstance(loc, list):
-            loc_val = ", ".join(loc)
-        else:
-            loc_val = str(loc)
-        fields.append(("Location", loc_val))
+        fields.append(("Location", _format_location(loc)))
         
     if talent_doc.get("ethnicity") is not None:
         fields.append(("Ethnicity", str(talent_doc["ethnicity"])))

@@ -2026,7 +2026,7 @@ function TalentDetail({
             const linkElement = document.createElement("a");
             linkElement.href = url;
 
-            const cleanName = (talent.name || "Talent").trim().replace(/\./g, "").replace(/\s+/g, "_");
+            const cleanName = privatizeName(talent.name || "Talent").trim().replace(/\./g, "").replace(/\s+/g, "_");
             linkElement.setAttribute("download", `${cleanName}_Package.zip`);
             document.body.appendChild(linkElement);
             linkElement.click();

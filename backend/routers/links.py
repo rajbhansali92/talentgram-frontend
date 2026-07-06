@@ -3,7 +3,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 
 class LinkTrackIn(BaseModel):
@@ -1624,6 +1624,46 @@ async def _resolve_video_download_url(client, raw_media: Optional[dict], filtere
     return src or None
 
 
+def _stream_uid_for(raw_media: Optional[dict], filtered_url: Optional[str]) -> Optional[str]:
+    """Cloudflare Stream UID for a video asset, or None if it is not a
+    Stream-hosted video. Mirrors the Stream detection in
+    `_resolve_video_download_url` — kept as a separate read-only helper so the
+    pre-warm path never alters that function's behaviour."""
+    raw_media = raw_media or {}
+    provider = raw_media.get("provider")
+    stream_uid = raw_media.get("stream_uid")
+    raw_url = raw_media.get("url") or ""
+    is_stream = (
+        provider == "stream"
+        or bool(stream_uid)
+        or "cloudflarestream.com" in raw_url
+        or "cloudflarestream.com" in (filtered_url or "")
+    )
+    if not is_stream:
+        return None
+    return stream_uid or _extract_stream_uid(raw_url) or _extract_stream_uid(filtered_url)
+
+
+async def _kickoff_stream_mp4_generation(client, uid: str) -> None:
+    """Best-effort pre-warm: fire the idempotent Cloudflare Stream "enable
+    download" POST to START MP4 rendition generation, then return WITHOUT
+    polling for readiness and WITHOUT downloading any bytes. The real
+    share-time proxy fetch (`_enable_and_get_stream_mp4`) still resolves and
+    serves the rendition exactly as before — this only lets that fetch find the
+    MP4 already ready, so `navigator.share()` is reached before the browser's
+    transient user activation expires. Never raises."""
+    import os
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    api_token = os.environ.get("CLOUDFLARE_STREAM_API_TOKEN")
+    if not (account_id and api_token and uid):
+        return
+    endpoint = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/stream/{uid}/downloads"
+    try:
+        await client.post(endpoint, headers={"Authorization": f"Bearer {api_token}"}, timeout=15.0)
+    except Exception as e:
+        logger.warning(f"[stream-prewarm] uid={uid} kickoff failed (non-fatal): {e}")
+
+
 def _safe_text(s: str, max_len: int = 50) -> str:
     if not s:
         return "-"
@@ -2039,6 +2079,7 @@ async def proxy_media(
     request: Request,
     authorization: Optional[str] = Header(None),
     token: Optional[str] = None,
+    prewarm: bool = False,
 ):
     """Authenticated, same-backend media proxy.
 
@@ -2128,6 +2169,25 @@ async def proxy_media(
         raw_m = next((rm for rm in ((_raw_t or {}).get("media") or []) if rm.get("id") == media_id), m)
 
     is_video = (m.get("category") in ("video", "take")) or (m.get("resource_type") == "video")
+
+    # ── Option C: pre-warm ONLY ──────────────────────────────────────────────
+    # On genuine user intent (selecting/opening a video, or touching Share), the
+    # client calls this same endpoint with ?prewarm=1 to START the Cloudflare
+    # Stream MP4 rendition so it is ready by the time the user taps Share. We
+    # fire the idempotent enable POST and return 204 immediately — NO polling,
+    # NO bytes streamed, NO File created. Auth and the download-permission gate
+    # above already applied, so security is identical to a real fetch. Only
+    # Stream-hosted videos need warming; anything else is a no-op 204.
+    if prewarm:
+        if is_video:
+            pw_client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(15.0, connect=10.0))
+            try:
+                uid = _stream_uid_for(raw_m, m.get("url"))
+                if uid:
+                    await _kickoff_stream_mp4_generation(pw_client, uid)
+            finally:
+                await pw_client.aclose()
+        return Response(status_code=204)
 
     # ── Resolve the real upstream URL (never returned to the client) ─────────
     client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0, connect=10.0))

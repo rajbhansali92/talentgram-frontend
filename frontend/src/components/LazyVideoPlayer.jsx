@@ -7,7 +7,7 @@ import { API } from "@/lib/api";
  * Replaces the poster with an interactive video player only upon user interaction (click),
  * preventing unnecessary heavy video preloads or bandwidth waste.
  */
-export default function LazyVideoPlayer({ src, poster, label, className = "", mediaId, slug, talentId }) {
+export default function LazyVideoPlayer({ src, poster, label, className = "", mediaId, slug, talentId, onActivate }) {
     const [isPlaying, setIsPlaying] = useState(false);
     const videoRef = useRef(null);
     const lastTrackedTimeRef = useRef(0);
@@ -148,7 +148,7 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
 
     return (
         <div
-            onClick={() => setIsPlaying(true)}
+            onClick={() => { setIsPlaying(true); if (onActivate) onActivate(); }}
             className={`group relative w-full h-full aspect-video rounded-xl overflow-hidden cursor-pointer bg-gradient-to-br from-neutral-900 to-black select-none ${className}`}
             style={{ minHeight: "180px" }}
         >

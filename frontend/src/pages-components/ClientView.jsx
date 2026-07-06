@@ -1789,6 +1789,33 @@ function TalentDetail({
     const [sharing, setSharing] = useState(false);
     const [shareMode, setShareMode] = useState(false);
     const [shareSel, setShareSel] = useState(() => new Set());
+
+    // Option C — best-effort pre-warm of a video's Cloudflare Stream MP4
+    // rendition on genuine user intent (selecting a video for bulk share, or
+    // touching the individual Send button). By share time the rendition is
+    // ready, so the real proxy fetch returns fast and navigator.share() is
+    // reached before iOS Safari's transient user activation expires — fixing
+    // the first-tap failure. Fire-and-forget: NO media bytes are fetched and NO
+    // blob/File is created or held. It only asks the backend to START the
+    // server-side rendition, under the SAME auth + download-permission gate as
+    // the real share fetch. `prewarmedRef` is a trigger-dedup guard holding only
+    // media IDs (never media/blobs) so one interaction can't spam the backend.
+    const prewarmedRef = useRef(new Set());
+    const prewarmVideoShare = useCallback((m) => {
+        if (!vis.download || !m || !m.id) return;          // only when file-share is possible
+        const isVideo =
+            m.category === "video" || m.category === "take" ||
+            m.resource_type === "video" || (m.category || "").startsWith("take");
+        if (!isVideo) return;                              // Stream renditions apply to videos only
+        if (prewarmedRef.current.has(m.id)) return;        // already warmed this session
+        prewarmedRef.current.add(m.id);
+        try {
+            axios.get(`${API}/public/links/${slug}/media/${talent.id}/${m.id}`, {
+                params: { prewarm: 1 },
+                headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
+            }).catch(() => { /* best-effort — the share pipeline still resolves the rendition at share time */ });
+        } catch { /* ignore */ }
+    }, [vis.download, slug, talent.id]);
     // On-device share diagnostics — panel appears only with ?sharedebug=1.
     const [shareDiag, setShareDiag] = useState(null);
     const shareDebug = useMemo(() => {
@@ -1825,13 +1852,26 @@ function TalentDetail({
         [shareableMedia],
     );
 
+    // Trigger: opening a talent detail — pre-warm this talent's shareable
+    // videos. TalentDetail is only mounted when a talent is explicitly opened
+    // (never on page load / scroll / card render), and re-keying on talent.id
+    // covers modal prev/next navigation. Dedup-guarded, so it never re-requests.
+    useEffect(() => {
+        shareableMedia.forEach((s) => { if (s.type === "video") prewarmVideoShare(s.m); });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [talent.id]);
+
     const toggleShareSel = useCallback((id) => {
         setShareSel((prev) => {
             const n = new Set(prev);
             if (n.has(id)) n.delete(id); else n.add(id);
             return n;
         });
-    }, []);
+        // Genuine intent: interacting with a video in select-mode pre-warms its
+        // Stream rendition (dedup-guarded, so a later toggle is a harmless no-op).
+        const entry = shareableMedia.find((s) => s.m.id === id);
+        if (entry) prewarmVideoShare(entry.m);
+    }, [shareableMedia, prewarmVideoShare]);
 
     const exitShareMode = useCallback(() => {
         setShareMode(false);
@@ -2328,6 +2368,7 @@ function TalentDetail({
         !isSharePreview && !shareMode ? (
             <button
                 type="button"
+                onPointerDown={() => prewarmVideoShare(m)}
                 onClick={(e) => { e.stopPropagation(); e.preventDefault(); shareOne(m); }}
                 disabled={sharing}
                 title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
@@ -2621,6 +2662,7 @@ function TalentDetail({
                                                         mediaId={t.id}
                                                         slug={slug}
                                                         talentId={talent.id}
+                                                        onActivate={() => prewarmVideoShare(t)}
                                                     />
                                                     <SelectCheck id={t.id} />
                                                     <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
@@ -2655,6 +2697,7 @@ function TalentDetail({
                                              mediaId={intro.id}
                                              slug={slug}
                                              talentId={talent.id}
+                                             onActivate={() => prewarmVideoShare(intro)}
                                          />
                                          <SelectCheck id={intro.id} />
                                          <div className="absolute top-3 right-3 z-10 flex items-center gap-2">

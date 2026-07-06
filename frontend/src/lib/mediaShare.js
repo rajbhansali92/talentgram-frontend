@@ -110,6 +110,28 @@ async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
     }
 }
 
+/**
+ * Prepare a single share-ready `File` on genuine user intent, ahead of the tap.
+ *
+ * Reuses the exact same `urlToFileTraced` flow (same authenticated media proxy,
+ * viewer token, and Download-permission gate) as the share-time fetch — no
+ * second download implementation. Returns a `File` on success or `null` on
+ * failure (never throws). The caller holds the result in transient memory only
+ * and passes it back via `shareMediaViaWhatsApp({ preparedFiles })` so that
+ * `navigator.share()` can run synchronously inside the tap's user activation
+ * (the fix for iOS Safari's first-tap `NotAllowedError`).
+ */
+export async function prepareShareFile({ slug, talentId, item }) {
+    if (!slug || !talentId || !item || !item.id) return null;
+    return urlToFileTraced(
+        `${API}/public/links/${slug}/media/${talentId}/${item.id}`,
+        item.filename || item.name,
+        item.type === "video" ? "video/mp4" : "image/jpeg",
+        { name: item.name, type: item.type },
+        { headers: { Authorization: `Bearer ${getViewerToken(slug)}` } },
+    );
+}
+
 /** Mint (or reuse) a secure, viewer-scoped Talentgram share link for one media item. */
 async function mintShareUrl(slug, talentId, mediaId) {
     const { data } = await axios.post(
@@ -186,6 +208,7 @@ export async function shareMediaViaWhatsApp({
     allowFiles = true,
     sessionId,
     caption,
+    preparedFiles,
 }) {
     if (!items || items.length === 0) return { aborted: true };
 
@@ -235,25 +258,43 @@ export async function shareMediaViaWhatsApp({
         const recs = items.map((it) => ({ name: it.name, type: it.type }));
         trace.perItem = recs;
 
-        // Fetch through Talentgram's own authenticated media proxy (same backend,
-        // CORS-enabled) instead of the raw Cloudflare Stream / R2 URL, which sends
-        // no CORS headers and fails the browser fetch. The proxy resolves the real
-        // storage URL server-side (never exposed) and enforces the same viewer
-        // auth + Download permission. urlToFileTraced never throws (records the
-        // failure in its rec), so every item is reported. Parallel keeps total
-        // time short so the transient user-activation for navigator.share holds.
-        const authHeader = { Authorization: `Bearer ${getViewerToken(slug)}` };
-        const files = await Promise.all(
-            items.map((it, i) =>
-                urlToFileTraced(
-                    `${API}/public/links/${slug}/media/${talentId}/${it.id}`,
-                    it.filename || it.name,
-                    it.type === "video" ? "video/mp4" : "image/jpeg",
-                    recs[i],
-                    { headers: authHeader },
+        // ── iOS Safari fast path (SYNCHRONOUS) ───────────────────────────────
+        // If the caller pre-prepared a real File for EVERY item (on genuine
+        // intent, via prepareShareFile), use them WITHOUT any fetch/await so
+        // navigator.share() runs inside the tap's transient user activation —
+        // which WebKit invalidates across an await. When any File is missing we
+        // fall through to the exact same fetch path as before (never regresses
+        // Android; still works via the manual second tap on iOS).
+        let files;
+        const allPrepared =
+            preparedFiles &&
+            items.length > 0 &&
+            items.every((it) => preparedFiles.get(it.id) instanceof File);
+        if (allPrepared) {
+            files = items.map((it) => preparedFiles.get(it.id));
+            recs.forEach((r) => { r.fetchOk = true; r.httpStatus = 200; r.blobOk = true; r.fileOk = true; r.step = "ok"; });
+            trace.preparedFastPath = true;
+        } else {
+            // Fetch through Talentgram's own authenticated media proxy (same backend,
+            // CORS-enabled) instead of the raw Cloudflare Stream / R2 URL, which sends
+            // no CORS headers and fails the browser fetch. The proxy resolves the real
+            // storage URL server-side (never exposed) and enforces the same viewer
+            // auth + Download permission. urlToFileTraced never throws (records the
+            // failure in its rec), so every item is reported. Parallel keeps total
+            // time short so the transient user-activation for navigator.share holds.
+            const authHeader = { Authorization: `Bearer ${getViewerToken(slug)}` };
+            files = await Promise.all(
+                items.map((it, i) =>
+                    urlToFileTraced(
+                        `${API}/public/links/${slug}/media/${talentId}/${it.id}`,
+                        it.filename || it.name,
+                        it.type === "video" ? "video/mp4" : "image/jpeg",
+                        recs[i],
+                        { headers: authHeader },
+                    ),
                 ),
-            ),
-        );
+            );
+        }
 
         trace.q4_allFetched = recs.every((r) => r.fetchOk === true);
         trace.q5_allHttp200 = recs.every((r) => r.httpStatus === 200);

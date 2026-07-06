@@ -38,7 +38,7 @@ import {
     Copy,
     CheckSquare,
 } from "lucide-react";
-import { shareMediaViaWhatsApp } from "@/lib/mediaShare";
+import { shareMediaViaWhatsApp, prepareShareFile } from "@/lib/mediaShare";
 
 // API is imported from @/lib/api above — single source of truth across all pages.
 // parseStoredWorkLink and WorkLinksDisplay are imported from @/components/WorkLinksDisplay.
@@ -1852,12 +1852,63 @@ function TalentDetail({
         [shareableMedia],
     );
 
-    // Trigger: opening a talent detail — pre-warm this talent's shareable
-    // videos. TalentDetail is only mounted when a talent is explicitly opened
-    // (never on page load / scroll / card render), and re-keying on talent.id
-    // covers modal prev/next navigation. Dedup-guarded, so it never re-requests.
+    // ── Transient, intent-based File preparation (iOS Safari first-tap fix) ──
+    // On genuine PER-MEDIA intent we build the actual share File AHEAD of the
+    // tap — reusing prepareShareFile → urlToFileTraced (same proxy, token, and
+    // download gate; no second implementation) — and hold it in memory ONLY for
+    // the current sharing session. runShare then hands these Files to
+    // navigator.share() SYNCHRONOUSLY (mediaShare.js fast path), so the sheet
+    // opens on the first tap on iOS Safari. Files are released after every
+    // share and whenever the talent/selection changes (lifecycle effect below +
+    // exitShareMode + runShare's finally), so memory stays bounded to the media
+    // the user is actively engaging with on THIS talent.
+    const preparedFilesRef = useRef(new Map());   // media id -> File (or null while in-flight)
+    const prepGenRef = useRef(0);                 // invalidates in-flight prepares on talent change
+    const prepareFileForShare = useCallback((m) => {
+        if (!vis.download || !m || !m.id) return;             // file sharing only when downloads allowed
+        if (preparedFilesRef.current.has(m.id)) return;       // already prepared / in-flight (dedup)
+        const entry = shareableMedia.find((s) => s.m.id === m.id);
+        const type = entry
+            ? entry.type
+            : ((m.category === "video" || m.category === "take" || m.resource_type === "video" || (m.category || "").startsWith("take")) ? "video" : "image");
+        const label = entry ? entry.label : (shareLabelById[m.id] || "Media");
+        const filename = m.original_filename || `${privatizeName(talent.name)} - ${label}`;
+        const gen = prepGenRef.current;
+        preparedFilesRef.current.set(m.id, null);             // in-flight marker (blocks duplicate fetches)
+        prepareShareFile({ slug, talentId: talent.id, item: { id: m.id, name: label, type, filename } })
+            .then((file) => {
+                if (gen !== prepGenRef.current) return;        // talent changed — drop (keeps memory bounded)
+                if (file) preparedFilesRef.current.set(m.id, file);
+                else preparedFilesRef.current.delete(m.id);    // failed — allow re-prepare / graceful fallback
+            })
+            .catch(() => { if (gen === prepGenRef.current) preparedFilesRef.current.delete(m.id); });
+    }, [vis.download, slug, talent.id, talent.name, shareableMedia, shareLabelById]);
+
+    // Combined genuine-intent handler: warm the Stream rendition (existing) AND
+    // prepare the share File (new). Used by every per-media intent signal.
+    const onShareIntent = useCallback((m) => {
+        prewarmVideoShare(m);
+        prepareFileForShare(m);
+    }, [prewarmVideoShare, prepareFileForShare]);
+
+    // Trigger: opening a talent detail. This is the earliest genuine intent in
+    // the normal workflow (open → select → Send) and the strongest lead-time
+    // signal for individual share (no video-play or Send-pointerdown required).
+    // We warm every shareable video's Stream rendition AND begin preparing its
+    // File right away, so by the time the user selects items or taps Send the
+    // File is already prepared and navigator.share() runs synchronously (the iOS
+    // first-tap fix). Videos are the size-sensitive assets that pointerdown/
+    // select timing can't cover in time; images stay on the select/pointerdown
+    // triggers (small, prepared fast). TalentDetail mounts only on an explicit
+    // open (never on page load / scroll / card render); re-keying on talent.id
+    // covers modal prev/next. Everything is dedup-guarded. The cleanup releases
+    // every prepared File on talent change / modal close (memory stays bounded
+    // to the CURRENTLY OPENED talent), and the generation bump invalidates any
+    // in-flight preparation from the previous talent.
     useEffect(() => {
-        shareableMedia.forEach((s) => { if (s.type === "video") prewarmVideoShare(s.m); });
+        prepGenRef.current += 1;
+        shareableMedia.forEach((s) => { if (s.type === "video") onShareIntent(s.m); });
+        return () => { preparedFilesRef.current.clear(); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [talent.id]);
 
@@ -1867,20 +1918,32 @@ function TalentDetail({
             if (n.has(id)) n.delete(id); else n.add(id);
             return n;
         });
-        // Genuine intent: interacting with a video in select-mode pre-warms its
-        // Stream rendition (dedup-guarded, so a later toggle is a harmless no-op).
+        // Genuine intent: selecting media for bulk share warms its Stream
+        // rendition and prepares its File (dedup-guarded — a later toggle is a
+        // harmless no-op; the File is released on share / exit / talent change).
         const entry = shareableMedia.find((s) => s.m.id === id);
-        if (entry) prewarmVideoShare(entry.m);
-    }, [shareableMedia, prewarmVideoShare]);
+        if (entry) onShareIntent(entry.m);
+    }, [shareableMedia, onShareIntent]);
 
     const exitShareMode = useCallback(() => {
         setShareMode(false);
         setShareSel(new Set());
+        // Release any Files prepared for the (now-cleared) bulk selection.
+        preparedFilesRef.current.clear();
     }, []);
 
     // entries: [{ m, label, caption, type }]
     const runShare = useCallback(async (entries) => {
         if (sharing || !entries || entries.length === 0) return;
+        // Collect any already-prepared Files for these exact items (real Files
+        // only; an absent/in-flight entry is skipped so mediaShare falls back to
+        // the fetch path). Built SYNCHRONOUSLY so, on the prepared path,
+        // navigator.share() runs inside this tap's user activation.
+        const preparedFiles = new Map();
+        entries.forEach(({ m }) => {
+            const f = preparedFilesRef.current.get(m.id);
+            if (f instanceof File) preparedFiles.set(m.id, f);
+        });
         setSharing(true);
         try {
             const items = entries.map(({ m, label, type }) => {
@@ -1909,6 +1972,7 @@ function TalentDetail({
                 // so sharing can't bypass the restriction. See lib/mediaShare.js.
                 allowFiles: !!vis.download,
                 sessionId: getSessionId(),
+                preparedFiles,
             });
             // Capture the full runtime trace for the on-device diagnostic panel.
             if (res?.trace) {
@@ -1937,6 +2001,9 @@ function TalentDetail({
             toast.error("Couldn't share this media. Please try again.");
         } finally {
             setSharing(false);
+            // Transient: release the Files for the shared items after the share
+            // resolves / is cancelled / fails. They never persist beyond this.
+            entries.forEach(({ m }) => preparedFilesRef.current.delete(m.id));
         }
     }, [sharing, slug, talent.id, talent.name, link.brand_name, link.title, vis.download, exitShareMode]);
 
@@ -2368,7 +2435,7 @@ function TalentDetail({
         !isSharePreview && !shareMode ? (
             <button
                 type="button"
-                onPointerDown={() => prewarmVideoShare(m)}
+                onPointerDown={() => onShareIntent(m)}
                 onClick={(e) => { e.stopPropagation(); e.preventDefault(); shareOne(m); }}
                 disabled={sharing}
                 title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
@@ -2662,7 +2729,7 @@ function TalentDetail({
                                                         mediaId={t.id}
                                                         slug={slug}
                                                         talentId={talent.id}
-                                                        onActivate={() => prewarmVideoShare(t)}
+                                                        onActivate={() => onShareIntent(t)}
                                                     />
                                                     <SelectCheck id={t.id} />
                                                     <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
@@ -2697,7 +2764,7 @@ function TalentDetail({
                                              mediaId={intro.id}
                                              slug={slug}
                                              talentId={talent.id}
-                                             onActivate={() => prewarmVideoShare(intro)}
+                                             onActivate={() => onShareIntent(intro)}
                                          />
                                          <SelectCheck id={intro.id} />
                                          <div className="absolute top-3 right-3 z-10 flex items-center gap-2">

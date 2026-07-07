@@ -1306,9 +1306,11 @@ function WEHistoryPanel() {
         <div className="space-y-3">
           {batches.map((b) => {
             const isSelected = selectedBatchId === b.id;
-            const completed = b.processed_jobs || 0;
+            const sent = b.sent_count || 0;
+            const failed = b.failed_count || 0;
+            const unconfirmed = b.unconfirmed_count || 0;
             const total = b.total_jobs || 0;
-            const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+            const percent = total > 0 ? Math.round((sent / total) * 100) : 0;
             return (
               <div
                 key={b.id}
@@ -1337,7 +1339,7 @@ function WEHistoryPanel() {
                 {/* Progress bar */}
                 <div className="space-y-1">
                   <div className="flex justify-between text-[10px] text-[#6B7280]">
-                    <span>Delivered: {completed}/{total}</span>
+                    <span>Sent: {sent}/{total}{failed > 0 ? ` · ${failed} failed` : ""}{unconfirmed > 0 ? ` · ${unconfirmed} unverified` : ""}</span>
                     <span>{percent}%</span>
                   </div>
                   <div className="w-full bg-black/[0.04] h-1.5 rounded-full overflow-hidden">
@@ -1416,19 +1418,20 @@ function WEHistoryPanel() {
                         <td className="py-2.5">
                           <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
                             job.status === "sent" ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
+                            job.status === "sent_unverified" ? "bg-amber-500/10 text-amber-700" :
                             job.status === "failed" ? "bg-red-500/10 text-red-600" :
                             job.status === "skipped" ? "bg-amber-500/10 text-amber-700" :
                             "bg-black/5 text-[#6B7280]"
                           }`}>
-                            {job.status}
+                            {job.status === "sent_unverified" ? "unverified" : job.status}
                           </span>
                         </td>
-                        <td className="py-2.5 font-mono text-[#6B7280]">{job.retry_count || 0}</td>
-                        <td className="py-2.5 max-w-xs truncate text-[11px] text-red-600 font-mono" title={job.error_message}>
-                          {job.error_message || "—"}
+                        <td className="py-2.5 font-mono text-[#6B7280]">{job.attempt_count || 0}</td>
+                        <td className="py-2.5 max-w-xs truncate text-[11px] text-red-600 font-mono" title={job.error_message || job.outcome_state || ""}>
+                          {job.error_message || job.outcome_state || "—"}
                         </td>
                         <td className="py-2.5 text-right select-none">
-                          {(job.status === "failed" || job.status === "skipped") && (
+                          {(job.status === "failed" || job.status === "skipped" || job.status === "sent_unverified") && (
                             <button
                               onClick={() => handleRetryJob(job)}
                               className="text-[9px] font-bold text-black uppercase tracking-widest hover:underline border border-black/10 px-2 py-1 rounded-lg bg-white active:scale-95 duration-100"

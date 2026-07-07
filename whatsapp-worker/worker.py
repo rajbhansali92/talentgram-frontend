@@ -202,6 +202,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     # (TASK 4); only genuinely-unsent states are retried (TASK 3 — no duplicates).
     state = None
     error_msg = None
+    is_retry = job["attempt_count"] > 0
 
     try:
         state = await send_whatsapp_message(
@@ -210,6 +211,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             destination=job["destination"],
             message_body=job["message_body"],
             media_url=job.get("media_url"),
+            is_retry=is_retry,
         )
     except ValueError as exc:
         # Bad number / group not found — permanent, never retry.
@@ -287,13 +289,28 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         else:
             new_status = "failed"             # INVALID_DESTINATION, or retries exhausted
 
+        error_code_map = {
+            "CHAT_NOT_OPENED": "FAILED_CHAT_NOT_OPENED",
+            "MESSAGE_NOT_SENT": "FAILED_MESSAGE_NOT_SENT",
+            "MESSAGE_SENT_BUT_NOT_VERIFIED": "FAILED_MESSAGE_NOT_VERIFIED",
+            "INVALID_DESTINATION": "FAILED_INVALID_DESTINATION",
+        }
+        worker_stage_map = {
+            "CHAT_NOT_OPENED": "chat_open",
+            "MESSAGE_NOT_SENT": "send",
+            "MESSAGE_SENT_BUT_NOT_VERIFIED": "verify",
+            "INVALID_DESTINATION": "chat_open",
+        }
+
         await db.whatsapp_jobs.update_one(
             {"id": job_id},
             {
                 "$set": {
                     "status": new_status,
                     "outcome_state": state,
+                    "error_code": error_code_map.get(state, "FAILED_UNKNOWN"),
                     "error_message": err,
+                    "worker_stage": worker_stage_map.get(state, "unknown"),
                     "attempt_count": attempt_count,
                     "last_attempted_at": finish_now,
                     "worker_picked_at": None,  # clear claim so a retryable job can be re-picked

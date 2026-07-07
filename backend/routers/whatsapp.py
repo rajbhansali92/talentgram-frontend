@@ -1207,6 +1207,7 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
         "project_id": params.project_id,
         "project_name": source_label if source_type == "PROJECT" else "",
         "template_id": payload.template_id,
+        "template_name": template.get("name") or template.get("slug") or "",
         "template_slug": template.get("slug", ""),
         "pipeline_stages": params.pipeline_stages,
         "variable_data": payload.variable_data,

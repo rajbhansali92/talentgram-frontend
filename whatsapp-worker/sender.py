@@ -386,15 +386,68 @@ async def _msg_timestamp(page: Page, full_selector: str) -> str:
         return ""
 
 
-async def _find_outgoing_with_text(page: Page, needle: str) -> Tuple[Optional[str], str]:
-    """Find a message element in the ACTIVE conversation whose text contains the
-    exact first-30-char needle. Walks the registry chain (primary then fallback),
-    logging the exact selector chain used, and returns (matched_full_selector,
-    text) or (None, '')."""
+async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optional[bool]:
+    """Best-effort directional check on a matched message element.
+    Returns True (outgoing), False (incoming), or None (can't determine).
+    Uses multiple heuristics — class names, data-id prefix, check-mark icons —
+    and walks up to 6 ancestors. None means the DOM changed and we can't tell;
+    callers should accept-with-warning rather than reject."""
+    try:
+        return await page.evaluate("""([sel, idx]) => {
+            const els = document.querySelectorAll(sel);
+            if (idx >= els.length) return null;
+            const el = els[idx];
+            let node = el;
+            for (let i = 0; i < 6 && node && node !== document; i++) {
+                const cls = typeof node.className === 'string' ? node.className : '';
+                if (cls.includes('message-out')) return true;
+                if (cls.includes('message-in')) return false;
+                const did = node.getAttribute ? node.getAttribute('data-id') : null;
+                if (did) {
+                    if (did.startsWith('true_')) return true;
+                    if (did.startsWith('false_')) return false;
+                }
+                node = node.parentElement;
+            }
+            const checks = el.querySelectorAll(
+                '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
+                + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
+            );
+            if (checks.length > 0) return true;
+            return null;
+        }""", [css_selector, index])
+    except Exception as exc:
+        logger.info("sender: direction check error: %s", exc)
+        return None
+
+
+async def _snapshot_msg_baselines(page: Page) -> dict:
+    """Snapshot message element counts for every registry selector BEFORE typing.
+    Verification uses these baselines to only check NEW messages that appeared
+    after the send action, preventing false positives from old campaign messages."""
     scope = await _resolve_scope(page)
     chain = (SELECTOR_REGISTRY["message_element"]["primary"]
              + SELECTOR_REGISTRY["message_element"]["fallback"])
-    logger.info("sender: verify — SELECTOR CHAIN scope=%r message_element=%s", scope, chain)
+    baselines = {}
+    for sel in chain:
+        full = f"{scope} {sel}"
+        try:
+            baselines[full] = await page.locator(full).count()
+        except Exception:
+            baselines[full] = 0
+    logger.info("sender: baseline snapshot: %s", baselines)
+    return baselines
+
+
+async def _find_outgoing_with_text(page: Page, needle: str, baselines: Optional[dict] = None) -> Tuple[Optional[str], str]:
+    """Find a message element in the ACTIVE conversation whose text contains the
+    exact first-30-char needle. When baselines is provided, only checks elements
+    that appeared AFTER the baseline snapshot (new messages only)."""
+    scope = await _resolve_scope(page)
+    chain = (SELECTOR_REGISTRY["message_element"]["primary"]
+             + SELECTOR_REGISTRY["message_element"]["fallback"])
+    logger.info("sender: verify — SELECTOR CHAIN scope=%r message_element=%s baselines=%s",
+                scope, chain, "provided" if baselines else "none")
     norm_needle = _norm(needle)
     for sel in chain:
         full = f"{scope} {sel}"
@@ -407,27 +460,29 @@ async def _find_outgoing_with_text(page: Page, needle: str) -> Tuple[Optional[st
         logger.info("sender: verify — chain[%s] count=%d", full, n)
         if not n:
             continue
-        # Newest messages are last; check the tail for the needle.
-        check = min(n, 8)
-        for i in range(n - check, n):
+        if baselines is not None and full in baselines:
+            start = baselines[full]
+        else:
+            start = max(0, n - 8)
+        logger.info("sender: verify — chain[%s] checking elements [%d..%d)", full, start, n)
+        for i in range(start, n):
             try:
                 t = (await loc.nth(i).inner_text()).strip()
             except Exception:
                 continue
             if needle and (needle in t or (norm_needle and norm_needle in _norm(t))):
-                logger.info("sender: verify — ✅ MATCHED layer=%r element#%d text[:60]=%r",
-                            full, i, t[:60])
+                direction = await _is_outgoing_msg(page, full, i)
+                if direction is False:
+                    logger.info("sender: verify — text matched at element#%d but message is "
+                                "INCOMING — skipping", i)
+                    continue
+                if direction is None:
+                    logger.warning("sender: verify — text matched at element#%d but direction "
+                                   "UNKNOWN — accepting (DOM may have changed)", i)
+                logger.info("sender: verify — ✅ MATCHED layer=%r element#%d text[:60]=%r "
+                            "outgoing=%s", full, i, t[:60], direction)
                 return full, t
 
-    # TASK 6: final fallback — if the exact text exists ANYWHERE in the active
-    # conversation, treat as VERIFIED even when no message_element layer matched.
-    try:
-        scope_text = await page.locator(scope).first.inner_text()
-        if needle and (needle in scope_text or (norm_needle and norm_needle in _norm(scope_text))):
-            logger.info("sender: verify — ✅ MATCHED via active-conversation TEXT FALLBACK (scope=%r)", scope)
-            return f"{scope} ::text-fallback", needle
-    except Exception as exc:
-        logger.info("sender: verify — text fallback error=%s", exc)
     return None, ""
 
 
@@ -505,11 +560,11 @@ async def _store_dom_snapshot(page: Page, reason: str, extra: Optional[dict] = N
         logger.info("sender: snapshot store error=%s (screenshot still at %s)", exc, shot)
 
 
-async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, bool]:
-    """VERIFIED iff a message element in the active conversation contains the
-    exact first 30 characters of the sent payload. A cleared compose box is NOT
-    proof (logged for diagnosis only). On failure, a DOM snapshot is stored.
-    Returns (verified, composer_cleared, verified)."""
+async def _verify_delivery(page: Page, message_body: str, baselines: Optional[dict] = None) -> Tuple[bool, bool, bool]:
+    """VERIFIED iff a NEW message element (appeared after baselines snapshot)
+    contains the exact first 30 characters of the sent payload. A cleared compose
+    box is NOT proof (logged for diagnosis only). On failure, a DOM snapshot is
+    stored. Returns (verified, composer_cleared, verified)."""
     composer_cleared = False
     try:
         txt = (await page.locator(SEL["msg_box"]).first.inner_text()).strip()
@@ -523,7 +578,7 @@ async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, b
     await _dump_conv_msgs(page)
 
     needle = _needle(message_body)
-    matched_sel, matched_text = await _find_outgoing_with_text(page, needle)
+    matched_sel, matched_text = await _find_outgoing_with_text(page, needle, baselines=baselines)
     verified = matched_sel is not None
 
     if verified:
@@ -538,10 +593,12 @@ async def _verify_delivery(page: Page, message_body: str) -> Tuple[bool, bool, b
     return verified, composer_cleared, verified
 
 
-async def _already_delivered(page: Page, message_body: str) -> bool:
-    """Duplicate guard: on a retry the active conversation may already contain
-    this exact message from a prior attempt. Uses the same registry chain as
-    verification (first-30-char match) — if present, do NOT type again."""
+async def _already_delivered(page: Page, message_body: str, is_retry: bool = False) -> bool:
+    """Duplicate guard: ONLY active on retries (attempt_count > 0). On first
+    attempt, never skip — old messages from prior campaigns must not prevent
+    delivery. On retry, checks last 8 messages for the prior attempt's bubble."""
+    if not is_retry:
+        return False
     needle = _needle(message_body)
     if not needle:
         return False
@@ -662,10 +719,11 @@ async def send_whatsapp_message(
     destination: str,
     message_body: str,
     media_url: Optional[str] = None,
+    is_retry: bool = False,
 ) -> str:
     """
     Core automation logic for sending a single WhatsApp message.
-    
+
     If destination_type is "group", searches the group name in the search box.
     If destination_type is "number", navigates directly using the wa.me URL.
     """
@@ -736,6 +794,11 @@ async def send_whatsapp_message(
         logger.warning("sender: conversation NOT open -> CHAT_NOT_OPENED (refusing to type)")
         return CHAT_NOT_OPENED
 
+    # Snapshot message counts BEFORE typing — verification will only check NEW
+    # messages that appear after this point, preventing false positives from old
+    # campaign messages with the same template text.
+    baselines = await _snapshot_msg_baselines(page)
+
     # Instrumentation: send-button DOM + the exact message string (PROBLEM #3 trace).
     await _dump_send_dom(page)
     logger.info(
@@ -743,12 +806,12 @@ async def send_whatsapp_message(
         len(message_body or ""), len((message_body or "").splitlines()), message_body,
     )
 
-    # TASK 3 (duplicate prevention): if this exact message is already a recent
-    # outgoing bubble (delivered on a prior attempt), do NOT send again.
-    if await _already_delivered(page, message_body):
+    # Duplicate prevention: ONLY on retries (attempt_count > 0). On first attempt
+    # old messages from prior campaigns must never suppress a new send.
+    if await _already_delivered(page, message_body, is_retry=is_retry):
         logger.warning(
-            "sender: message already present as a recent outgoing bubble — NOT resending "
-            "(treating as already delivered / verified)"
+            "sender: RETRY — message already present as a recent outgoing bubble — "
+            "NOT resending (treating as already delivered / verified)"
         )
         return MESSAGE_SENT_AND_VERIFIED
 
@@ -864,8 +927,8 @@ async def send_whatsapp_message(
 
     # PROBLEM #2 / TASK 4: classify the outcome — never collapse to one FAILED.
     await asyncio.sleep(1.5)
-    logger.info("sender: verification started")
-    verified, composer_cleared, bubble_match = await _verify_delivery(page, message_body)
+    logger.info("sender: verification started (baselines=%s)", "provided" if baselines else "none")
+    verified, composer_cleared, bubble_match = await _verify_delivery(page, message_body, baselines=baselines)
 
     if verified:
         logger.info("sender: MESSAGE_SENT_AND_VERIFIED — outgoing bubble confirmed")

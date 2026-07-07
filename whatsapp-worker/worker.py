@@ -152,12 +152,11 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             )
             if pending_count == 0 and sending_count == 0:
                 # Update batch to completed
-                total = await db.whatsapp_jobs.count_documents({"batch_id": batch_id})
                 sent = await db.whatsapp_jobs.count_documents({"batch_id": batch_id, "status": "sent"})
-                failed = await db.whatsapp_jobs.count_documents({"batch_id": batch_id, "status": "failed"})
-                unconfirmed = await db.whatsapp_jobs.count_documents(
-                    {"batch_id": batch_id, "status": "sent_unverified"}
+                verified = await db.whatsapp_jobs.count_documents(
+                    {"batch_id": batch_id, "status": "sent", "verification_status": "verified"}
                 )
+                failed = await db.whatsapp_jobs.count_documents({"batch_id": batch_id, "status": "failed"})
 
                 await db.whatsapp_batches.update_one(
                     {"id": batch_id},
@@ -165,13 +164,14 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
                         "$set": {
                             "status": "completed",
                             "completed_at": now_str,
-                            "sent_count": sent,          # VERIFIED only
+                            "sent_count": sent,
+                            "verified_count": verified,
                             "failed_count": failed,
-                            "unconfirmed_count": unconfirmed,  # DELIVERY_UNCONFIRMED — NOT counted as verified
                         }
                     }
                 )
-                logger.info("batch: marked batch %s as completed (sent=%d, failed=%d)", batch_id, sent, failed)
+                logger.info("batch: marked batch %s as completed (sent=%d, verified=%d, failed=%d)",
+                            batch_id, sent, verified, failed)
         return
 
     batch_id = job["batch_id"]
@@ -244,6 +244,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             {
                 "$set": {
                     "status": "sent",
+                    "verification_status": "verified",
                     "sent_at": finish_now,
                     "attempt_count": job["attempt_count"] + 1,
                     "last_attempted_at": finish_now,
@@ -253,7 +254,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         # Increment batch counters
         await db.whatsapp_batches.update_one(
             {"id": batch_id},
-            {"$inc": {"sent_count": 1}}
+            {"$inc": {"sent_count": 1, "verified_count": 1}}
         )
         # Log audit entry
         await write_audit_log(
@@ -265,6 +266,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             destination=job["destination"],
             destination_type=job["destination_type"],
             message_preview=job["message_body"],
+            metadata={"verification": "verified"},
         )
         # Slice 4: unified comm timeline (talent / CRM profile).
         await _write_timeline(job, "sent")
@@ -285,14 +287,13 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         if is_retryable:
             new_status = "pending"            # safe to re-send (message never left)
         elif state == "MESSAGE_SENT_BUT_NOT_VERIFIED":
-            new_status = "sent_unverified"    # TERMINAL — do NOT resend (no duplicate)
+            new_status = "sent"               # message WAS delivered — do NOT resend
         else:
             new_status = "failed"             # INVALID_DESTINATION, or retries exhausted
 
         error_code_map = {
             "CHAT_NOT_OPENED": "FAILED_CHAT_NOT_OPENED",
             "MESSAGE_NOT_SENT": "FAILED_MESSAGE_NOT_SENT",
-            "MESSAGE_SENT_BUT_NOT_VERIFIED": "FAILED_MESSAGE_NOT_VERIFIED",
             "INVALID_DESTINATION": "FAILED_INVALID_DESTINATION",
         }
         worker_stage_map = {
@@ -301,21 +302,25 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             "MESSAGE_SENT_BUT_NOT_VERIFIED": "verify",
             "INVALID_DESTINATION": "chat_open",
         }
+        verification = "unverified" if state == "MESSAGE_SENT_BUT_NOT_VERIFIED" else "not_attempted"
+
+        update_fields = {
+            "status": new_status,
+            "verification_status": verification,
+            "outcome_state": state,
+            "error_message": err,
+            "worker_stage": worker_stage_map.get(state, "unknown"),
+            "attempt_count": attempt_count,
+            "last_attempted_at": finish_now,
+            "worker_picked_at": None,
+        }
+        if new_status == "failed":
+            update_fields["error_code"] = error_code_map.get(state, "FAILED_UNKNOWN")
+        if new_status == "sent":
+            update_fields["sent_at"] = finish_now
 
         await db.whatsapp_jobs.update_one(
-            {"id": job_id},
-            {
-                "$set": {
-                    "status": new_status,
-                    "outcome_state": state,
-                    "error_code": error_code_map.get(state, "FAILED_UNKNOWN"),
-                    "error_message": err,
-                    "worker_stage": worker_stage_map.get(state, "unknown"),
-                    "attempt_count": attempt_count,
-                    "last_attempted_at": finish_now,
-                    "worker_picked_at": None,  # clear claim so a retryable job can be re-picked
-                }
-            }
+            {"id": job_id}, {"$set": update_fields}
         )
 
         if new_status == "failed":
@@ -323,26 +328,40 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
                 {"id": batch_id},
                 {"$inc": {"failed_count": 1}}
             )
-        elif new_status == "sent_unverified":
-            # DELIVERY_UNCONFIRMED — counted separately, never as verified/sent.
+        elif new_status == "sent":
             await db.whatsapp_batches.update_one(
                 {"id": batch_id},
-                {"$inc": {"unconfirmed_count": 1}}
+                {"$inc": {"sent_count": 1}}
             )
 
-        await write_audit_log(
-            "message_sent_unverified" if new_status == "sent_unverified" else "message_failed",
-            batch_id=batch_id,
-            job_id=job_id,
-            talent_id=job["talent_id"],
-            talent_name=job["talent_name"],
-            destination=job["destination"],
-            destination_type=job["destination_type"],
-            message_preview=job["message_body"],
-            metadata={"state": state, "error": err, "attempt": attempt_count, "will_retry": is_retryable},
-        )
+        if new_status == "sent":
+            await write_audit_log(
+                "message_sent",
+                batch_id=batch_id,
+                job_id=job_id,
+                talent_id=job["talent_id"],
+                talent_name=job["talent_name"],
+                destination=job["destination"],
+                destination_type=job["destination_type"],
+                message_preview=job["message_body"],
+                metadata={"verification": "unverified", "state": state,
+                          "attempt": attempt_count},
+            )
+        else:
+            await write_audit_log(
+                "message_failed",
+                batch_id=batch_id,
+                job_id=job_id,
+                talent_id=job["talent_id"],
+                talent_name=job["talent_name"],
+                destination=job["destination"],
+                destination_type=job["destination_type"],
+                message_preview=job["message_body"],
+                metadata={"state": state, "error": err, "attempt": attempt_count,
+                          "will_retry": is_retryable},
+            )
         # Slice 4: record terminal outcomes on the timeline (not retryable 'pending').
-        if new_status in ("sent_unverified", "failed"):
+        if new_status in ("sent", "failed"):
             await _write_timeline(job, new_status)
 
         # Circuit Breaker check

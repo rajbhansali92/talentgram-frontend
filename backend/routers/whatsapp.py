@@ -1218,8 +1218,8 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
         "max_delay_sec": payload.max_delay_sec,
         "total_jobs": len(jobs),
         "sent_count": 0,
+        "verified_count": 0,
         "failed_count": 0,
-        "unconfirmed_count": 0,
         "excluded_count": resolved["counts"]["excluded"],
         "skipped_recipients": skipped,
         "created_by": admin["id"],
@@ -1362,10 +1362,8 @@ async def retry_job(
     job = await db.whatsapp_jobs.find_one({"id": job_id, "batch_id": batch_id})
     if not job:
         raise HTTPException(404, "Job not found")
-    # Operators may also manually re-send a DELIVERY_UNCONFIRMED job (sent_unverified) —
-    # the worker never auto-retries it (avoids duplicates), but a human can choose to.
-    if job.get("status") not in ("failed", "skipped", "sent_unverified"):
-        raise HTTPException(400, "Only failed, skipped, or delivery-unconfirmed jobs can be retried")
+    if job.get("status") not in ("failed", "skipped"):
+        raise HTTPException(400, "Only failed or skipped jobs can be retried")
 
     await db.whatsapp_jobs.update_one(
         {"id": job_id},

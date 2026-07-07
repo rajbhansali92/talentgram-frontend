@@ -220,14 +220,16 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     circuit_threshold = int(config_dict.get("circuit_breaker_threshold", 5))
     max_retries = int(config_dict.get("max_retries", 3))
 
-    # Perform actual send. send_whatsapp_message returns a DISTINCT outcome state
-    # (TASK 4); only genuinely-unsent states are retried (TASK 3 — no duplicates).
+    # Perform actual send. send_whatsapp_message returns a dict:
+    #   {"state": str, "evidence": dict}
+    # Only genuinely-unsent states are retried — sent+unverified is NOT retried.
     state = None
     error_msg = None
+    evidence = {}
     is_retry = job["attempt_count"] > 0
 
     try:
-        state = await send_whatsapp_message(
+        result = await send_whatsapp_message(
             page=session.page,
             destination_type=job["destination_type"],
             destination=job["destination"],
@@ -235,6 +237,8 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
             media_url=job.get("media_url"),
             is_retry=is_retry,
         )
+        state = result["state"]
+        evidence = result.get("evidence", {})
     except ValueError as exc:
         # Bad number / group not found — permanent, never retry.
         state = "INVALID_DESTINATION"
@@ -243,30 +247,31 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     except PlaywrightTimeoutError as exc:
         # A Playwright action timed out (e.g. a selector never resolved). These are
         # PRE-SEND failures — nothing was delivered — so classify as retryable
-        # MESSAGE_NOT_SENT and NEVER as sent_unverified.
+        # MESSAGE_NOT_SENT and NEVER as sent+unverified.
         state = "MESSAGE_NOT_SENT"
         error_msg = str(exc)
         logger.error("worker: pre-send Playwright timeout for job %s (retryable, not sent): %s",
                      job_id, error_msg)
     except Exception as exc:
-        # Unknown error after we may have already typed/sent — treat conservatively
-        # as sent-but-unverified so we DO NOT retry and risk a duplicate delivery.
+        # Unknown error after we may have already typed/sent — treat as
+        # sent+unverified so we DO NOT retry and risk a duplicate delivery.
         state = "MESSAGE_SENT_BUT_NOT_VERIFIED"
         error_msg = str(exc)
-        logger.error("worker: unexpected send error for job %s (no retry, avoid dup): %s",
+        logger.error("worker: unexpected send error for job %s (sent+unverified, no retry): %s",
                      job_id, error_msg)
 
     logger.info("worker: job %s outcome state=%s", job_id, state)
     finish_now = _utcnow()
 
     if state == "MESSAGE_SENT_AND_VERIFIED":
-        # Update job to sent
+        # Update job to sent (delivery confirmed via DOM verification)
         await db.whatsapp_jobs.update_one(
             {"id": job_id},
             {
                 "$set": {
                     "status": "sent",
                     "verification_status": "verified",
+                    "evidence": evidence,
                     "sent_at": finish_now,
                     "attempt_count": job["attempt_count"] + 1,
                     "last_attempted_at": finish_now,
@@ -298,9 +303,9 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         await asyncio.sleep(delay)
         
     else:
-        # TASK 3/4: retry ONLY states we are confident were NOT delivered.
-        # MESSAGE_SENT_BUT_NOT_VERIFIED and INVALID_DESTINATION are TERMINAL —
-        # retrying a possibly-delivered message is exactly what duplicated Sahal.
+        # Retry ONLY states we are confident were NOT delivered.
+        # MESSAGE_SENT_BUT_NOT_VERIFIED → "sent" (no retry — message likely delivered).
+        # INVALID_DESTINATION → "failed" (terminal).
         attempt_count = job["attempt_count"] + 1
         retryable_state = state in ("CHAT_NOT_OPENED", "MESSAGE_NOT_SENT")
         is_retryable = retryable_state and attempt_count < max_retries
@@ -309,7 +314,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         if is_retryable:
             new_status = "pending"            # safe to re-send (message never left)
         elif state == "MESSAGE_SENT_BUT_NOT_VERIFIED":
-            new_status = "sent"               # message WAS delivered — do NOT resend
+            new_status = "sent"               # delivered but unverified — no retry
         else:
             new_status = "failed"             # INVALID_DESTINATION, or retries exhausted
 
@@ -329,6 +334,7 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
         update_fields = {
             "status": new_status,
             "verification_status": verification,
+            "evidence": evidence,
             "outcome_state": state,
             "error_message": err,
             "worker_stage": worker_stage_map.get(state, "unknown"),

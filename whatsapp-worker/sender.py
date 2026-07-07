@@ -563,11 +563,11 @@ async def _store_dom_snapshot(page: Page, reason: str, extra: Optional[dict] = N
         logger.info("sender: snapshot store error=%s (screenshot still at %s)", exc, shot)
 
 
-async def _verify_delivery(page: Page, message_body: str, baselines: Optional[dict] = None) -> Tuple[bool, bool, bool]:
+async def _verify_delivery(page: Page, message_body: str, baselines: Optional[dict] = None) -> Tuple[bool, bool, Optional[str]]:
     """VERIFIED iff a NEW message element (appeared after baselines snapshot)
     contains the exact first 30 characters of the sent payload. A cleared compose
     box is NOT proof (logged for diagnosis only). On failure, a DOM snapshot is
-    stored. Returns (verified, composer_cleared, verified)."""
+    stored. Returns (verified, composer_cleared, matched_selector)."""
     composer_cleared = False
     try:
         txt = (await page.locator(SEL["msg_box"]).first.inner_text()).strip()
@@ -593,7 +593,7 @@ async def _verify_delivery(page: Page, message_body: str, baselines: Optional[di
                        "needle=%r — storing DOM snapshot", needle)
         await _store_dom_snapshot(page, "verify_failed", {"needle": needle})
 
-    return verified, composer_cleared, verified
+    return verified, composer_cleared, matched_sel
 
 
 async def _already_delivered(page: Page, message_body: str, is_retry: bool = False) -> bool:
@@ -1005,20 +1005,27 @@ async def send_whatsapp_message(
     message_body: str,
     media_url: Optional[str] = None,
     is_retry: bool = False,
-) -> str:
+) -> dict:
     """
     Core automation logic for sending a single WhatsApp message.
-
-    If destination_type is "group", searches the group name in the search box.
-    If destination_type is "number", navigates directly using the wa.me URL.
+    Returns {"state": str, "evidence": dict} with structured decision evidence.
     """
+    evidence = {
+        "chat_opened": False,
+        "header_verified": False,
+        "compose_found": False,
+        "send_clicked": False,
+        "dom_verified": False,
+        "verification_method": None,
+        "verification_selector": None,
+    }
     logger.info("sender: preparing to send to %s (%s)", destination, destination_type)
 
     # Clear any blocking dialog BEFORE any interaction (login nags, feature
     # announcements). Unknown/undismissable dialogs -> retryable, nothing sent.
     if not await dismiss_blocking_dialogs(page, "pre-open"):
         logger.warning("sender: blocking dialog could not be handled -> CHAT_NOT_OPENED")
-        return CHAT_NOT_OPENED
+        return {"state": CHAT_NOT_OPENED, "evidence": evidence}
 
     if destination_type == "number":
         # Format clean phone number (digits only, e.g. 919876543210)
@@ -1045,7 +1052,9 @@ async def send_whatsapp_message(
                     pass
                 raise ValueError(f"Phone number {phone} is invalid on WhatsApp")
             raise RuntimeError("Timed out waiting for chat window to load via wa.me link")
-            
+
+        evidence["chat_opened"] = True
+
     elif destination_type == "group":
         logger.info("sender: searching for group name '%s'", destination)
         result = await _open_group_chat(page, destination)
@@ -1055,11 +1064,12 @@ async def send_whatsapp_message(
             await _store_dom_snapshot(page, "group_search_failed", {"group": destination})
             logger.warning("sender: group open SEARCH_FAILED for %r -> CHAT_NOT_OPENED (retryable)",
                            destination)
-            return CHAT_NOT_OPENED
+            return {"state": CHAT_NOT_OPENED, "evidence": evidence}
         if result == "NOT_FOUND":
             # Group genuinely absent — terminal (do not retry).
             raise ValueError(f"WhatsApp group '{destination}' not found in chat list")
         # result == "OPENED" -> fall through to chat-ready + typing + verify (unchanged)
+        evidence["chat_opened"] = True
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")
 
@@ -1067,12 +1077,13 @@ async def send_whatsapp_message(
     logger.info("sender: STEP 7 waiting for chat ready (composer interactive)...")
     try:
         await _wait_for_chat_ready(page)
+        evidence["compose_found"] = True
         logger.info("sender: STEP 11 composer found and interactive")
     except Exception as exc:
         logger.warning("sender: STEP 7/11 FAILED — chat not ready (%s) -> CHAT_NOT_OPENED", exc)
         await _capture_open_failure(page, "chat_not_ready",
                                     {"destination": destination, "error": str(exc)})
-        return CHAT_NOT_OPENED
+        return {"state": CHAT_NOT_OPENED, "evidence": evidence}
 
     # STEP 8-10, 12-13: the compose box is NOT sufficient — confirm a real
     # conversation is open (panel + header + recipient) before typing. For groups
@@ -1095,7 +1106,8 @@ async def send_whatsapp_message(
                                     {"destination": destination, "expected": expected_name,
                                      "header_found": hdr_found, "recipient_found": rcp_found,
                                      "recipient_text": rcp_text, "body_present": body_present})
-        return CHAT_NOT_OPENED
+        return {"state": CHAT_NOT_OPENED, "evidence": evidence}
+    evidence["header_verified"] = True
     logger.info("sender: STEP 14 ready to send")
 
     # Snapshot message counts BEFORE typing — verification will only check NEW
@@ -1117,7 +1129,9 @@ async def send_whatsapp_message(
             "sender: RETRY — message already present as a recent outgoing bubble — "
             "NOT resending (treating as already delivered / verified)"
         )
-        return MESSAGE_SENT_AND_VERIFIED
+        evidence["dom_verified"] = True
+        evidence["verification_method"] = "already_delivered"
+        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence}
 
     # Handle media attachment if present
     if media_url:
@@ -1176,9 +1190,10 @@ async def send_whatsapp_message(
             if not await dismiss_blocking_dialogs(page, "send"):
                 logger.warning("sender: blocking dialog before media send — not pressing "
                                "anything -> MESSAGE_NOT_SENT")
-                return MESSAGE_NOT_SENT
+                return {"state": MESSAGE_NOT_SENT, "evidence": evidence}
             await _safe_screenshot(page, "/tmp/pre_send.png")
             sent_via = await _find_and_click_send(page)
+            evidence["send_clicked"] = True
             logger.info("sender: media send click executed via %s", sent_via)
             await asyncio.sleep(3.0)  # Wait for media upload and send to complete
             await _safe_screenshot(page, "/tmp/post_send.png")
@@ -1218,9 +1233,10 @@ async def send_whatsapp_message(
         if not await dismiss_blocking_dialogs(page, "send"):
             logger.warning("sender: blocking dialog before send — not pressing anything "
                            "-> MESSAGE_NOT_SENT")
-            return MESSAGE_NOT_SENT
+            return {"state": MESSAGE_NOT_SENT, "evidence": evidence}
         await _safe_screenshot(page, "/tmp/pre_send.png")
         sent_via = await _find_and_click_send(page)
+        evidence["send_clicked"] = True
         logger.info("sender: text send click executed via %s", sent_via)
         await asyncio.sleep(1.0)
         await _safe_screenshot(page, "/tmp/post_send.png")
@@ -1232,25 +1248,28 @@ async def send_whatsapp_message(
     # PROBLEM #2 / TASK 4: classify the outcome — never collapse to one FAILED.
     await asyncio.sleep(1.5)
     logger.info("sender: verification started (baselines=%s)", "provided" if baselines else "none")
-    verified, composer_cleared, bubble_match = await _verify_delivery(page, message_body, baselines=baselines)
+    verified, composer_cleared, matched_sel = await _verify_delivery(page, message_body, baselines=baselines)
 
     if verified:
+        evidence["dom_verified"] = True
+        evidence["verification_method"] = "outgoing_bubble_match"
+        evidence["verification_selector"] = matched_sel
         logger.info("sender: MESSAGE_SENT_AND_VERIFIED — outgoing bubble confirmed")
-        return MESSAGE_SENT_AND_VERIFIED
+        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence}
 
     await _safe_screenshot(page, "/tmp/verify_failed.png")
     # No outgoing bubble. The composer state distinguishes "never sent" (safe to
-    # retry) from "left the composer but unconfirmed" (must NOT retry — retrying
-    # is exactly what duplicated Sahal's message).
+    # retry) from "left the composer but unconfirmed" (must NOT auto-retry —
+    # retrying could duplicate a delivered message).
     if composer_cleared:
         logger.warning(
             "sender: MESSAGE_SENT_BUT_NOT_VERIFIED — composer cleared but no outgoing bubble "
-            "matched. Will NOT retry (prevents duplicate delivery)."
+            "matched. Marking as sent+unverified (no retry — message likely delivered)."
         )
-        return MESSAGE_SENT_BUT_NOT_VERIFIED
+        return {"state": MESSAGE_SENT_BUT_NOT_VERIFIED, "evidence": evidence}
 
     logger.warning(
         "sender: MESSAGE_NOT_SENT — composer still holds text and no outgoing bubble. "
         "Safe to retry."
     )
-    return MESSAGE_NOT_SENT
+    return {"state": MESSAGE_NOT_SENT, "evidence": evidence}

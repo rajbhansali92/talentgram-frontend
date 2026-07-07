@@ -1304,7 +1304,7 @@ function WEHistoryPanel() {
 
   const handleRetryJob = async (job) => {
     try {
-      await retryJob(job.id);
+      await retryJob(job.batch_id, job.id);
       toast.success("Job re-queued successfully");
       if (selectedBatchId) {
         const jobList = await getJobs(selectedBatchId);
@@ -1498,15 +1498,21 @@ function WEHistoryPanel() {
                         <td className="py-2.5 font-mono text-[11px] text-[#6B7280]">{job.destination}</td>
                         <td className="py-2.5">
                           <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
-                            job.status === "sent" ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
+                            (job.status === "sent" || job.status === "sent_unverified") ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
                             job.status === "failed" ? "bg-red-500/10 text-red-600" :
                             job.status === "skipped" ? "bg-amber-500/10 text-amber-700" :
                             "bg-black/5 text-[#6B7280]"
                           }`}>
-                            {job.status}
+                            {(job.status === "sent" || job.status === "sent_unverified") ? "✓ Sent" :
+                             job.status === "failed" ? "✗ Failed" :
+                             job.status}
                           </span>
-                          {job.status === "sent" && job.verification_status === "unverified" && (
-                            <span className="ml-1 text-[8px] text-amber-600 font-medium">Not Verified</span>
+                          {(job.status === "sent" || job.status === "sent_unverified") && (
+                            <span className={`ml-1 text-[8px] font-medium ${
+                              job.verification_status === "verified" ? "text-[#0D8A5F]" : "text-amber-600"
+                            }`}>
+                              {job.verification_status === "verified" ? "Verified" : "Not Verified"}
+                            </span>
                           )}
                         </td>
                         <td className="py-2.5 font-mono text-[#6B7280]">{job.attempt_count || 0}</td>

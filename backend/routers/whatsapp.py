@@ -1220,6 +1220,11 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
         "sent_count": 0,
         "verified_count": 0,
         "failed_count": 0,
+        # Circuit-breaker window start: the breaker only counts consecutive
+        # failures with last_attempted_at >= this. Resume re-stamps it so a
+        # resumed batch gets a fresh window (breaker stays enabled, history kept).
+        "breaker_window_start": now,
+        "pause_reason": None,
         "excluded_count": resolved["counts"]["excluded"],
         "skipped_recipients": skipped,
         "created_by": admin["id"],
@@ -1296,15 +1301,23 @@ async def batch_action(
 
     action = payload.action
     current_status = batch.get("status")
+    extra_set: Dict[str, Any] = {}
 
     if action == "pause":
         if current_status != "running":
             raise HTTPException(400, f"Cannot pause a batch with status '{current_status}'")
         new_status = "paused"
+        extra_set["pause_reason"] = "Paused by admin"
+        extra_set["paused_at"] = _utcnow()
     elif action == "resume":
         if current_status != "paused":
             raise HTTPException(400, f"Cannot resume a batch with status '{current_status}'")
         new_status = "running"
+        # Fresh circuit-breaker window so the pre-pause failures no longer count.
+        # History is preserved; the breaker still fires after N NEW failures.
+        extra_set["breaker_window_start"] = _utcnow()
+        extra_set["pause_reason"] = None
+        extra_set["resumed_at"] = _utcnow()
     elif action == "cancel":
         if current_status in ("completed", "failed"):
             raise HTTPException(400, "Batch is already finished")
@@ -1318,7 +1331,7 @@ async def batch_action(
         raise HTTPException(400, f"Unknown action '{action}'")
 
     await db.whatsapp_batches.update_one(
-        {"id": batch_id}, {"$set": {"status": new_status}}
+        {"id": batch_id}, {"$set": {"status": new_status, **extra_set}}
     )
 
     await _write_audit(

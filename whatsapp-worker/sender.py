@@ -9,6 +9,7 @@ import logging
 import os
 import tempfile
 import time
+import unicodedata
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -210,7 +211,9 @@ async def _first_present(page: Page, selectors: list) -> Tuple[bool, Optional[st
 
 
 def _norm_title(text: str) -> str:
-    return " ".join((text or "").split()).casefold()
+    # Same deterministic key as group resolution (NFKC + whitespace + casefold)
+    # so the post-open wrong-chat guard agrees with how the group was matched.
+    return _norm_group(text)
 
 
 async def _verify_chat_open(page: Page, expected_name: Optional[str] = None) -> Tuple[bool, bool, bool, str]:
@@ -606,108 +609,299 @@ async def _already_delivered(page: Page, message_body: str, is_retry: bool = Fal
     return matched_sel is not None
 
 
-# Resilient chat-search box selectors. The legacy [data-testid="chat-list-search"]
-# no longer exists in the live DOM (production timeout). Current builds expose a
-# contenteditable search box (data-tab="3") / aria-labelled textbox. Discovered
-# at runtime; legacy kept last as a fallback.
+# ==========================================================================
+# GROUP RESOLUTION — sidebar-scoped, focus-verified, deterministically matched.
+#
+# BACKGROUND (Railway log 2026-07-07, batch f324ff84): once a chat was open,
+# the sidebar-specific search selectors returned count=0 and the previous chain
+# fell through to a page-global 'div[role="textbox"][contenteditable="true"]'
+# fallback. That generic selector could resolve to unintended editable elements
+# (such as the #main conversation composer), after which the group query never
+# reached the sidebar search and the exact-title match timed out -> repeated
+# NOT_FOUND -> circuit breaker. The separate exact case-sensitive title match
+# also rejected titles differing only in case/whitespace/Unicode form.
+#
+# FIX: every search-box selector is structurally scoped under #side so it
+# cannot resolve outside the sidebar; focus is verified to be inside the
+# sidebar before typing; the typed value is read back; and results are matched
+# by deterministic normalized (NFKC + casefold + whitespace) equality — no
+# fuzzy matching. Diagnostics below log every attempt so future failures are
+# provable from the logs rather than inferred.
+# ==========================================================================
+
+# Sidebar container. #side is the left column (chat list + search); #main is the
+# open conversation. Scoping to #side structurally excludes the composer.
+SIDEBAR_SCOPE = "#side"
+
+# Search-box selectors — ALL scoped under #side so the conversation composer in
+# #main can never be selected. Ordered most-specific first.
 SEARCH_BOX_SELECTORS = [
-    'div[contenteditable="true"][data-tab="3"]',
-    '[aria-label="Search input textbox"]',
-    '[aria-label="Search or start a new chat"]',
-    'div[role="textbox"][contenteditable="true"]',
-    '[data-testid="chat-list-search"]',
+    '#side div[contenteditable="true"][data-tab="3"]',
+    '#side [aria-label="Search input textbox"]',
+    '#side [aria-label="Search or start a new chat"]',
+    '#side div[role="textbox"][contenteditable="true"]',
+    '#side [data-testid="chat-list-search"]',
+]
+
+# Search-result title cells inside the sidebar results pane.
+RESULT_TITLE_SELECTORS = [
+    '#pane-side [data-testid="cell-frame-title"]',
+    '#pane-side span[title]',
+    '#side [data-testid="cell-frame-title"]',
 ]
 
 
-async def _find_search_box(page: Page) -> Optional[str]:
-    """Runtime discovery of the chat-search box. Logs every probe and returns
-    the first present+visible selector, or None if none resolve."""
+def _norm_group(text: str) -> str:
+    """Deterministic group-name key: Unicode NFKC + whitespace-collapse + casefold.
+    This is the ONLY matching key used for group resolution. It is exact-equality
+    on normalized strings — NOT fuzzy. It folds case and compatibility characters
+    and collapses whitespace, but does not treat distinct characters (e.g. 'x' vs
+    the multiplication sign '×') as equal; the diagnostics expose any such
+    mismatch so a future decision can be made from evidence, not assumption."""
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", text)
+    t = " ".join(t.split())
+    return t.casefold()
+
+
+async def _focus_report(page: Page) -> dict:
+    """Structured report on document.activeElement — records where focus landed
+    (#side vs #main) so mistargeted typing is observable in the logs instead of
+    being an assumption."""
+    try:
+        return await page.evaluate(
+            """() => {
+                const a = document.activeElement;
+                if (!a) return {tag: null, in_side: false, in_main: false, path: '<none>'};
+                const side = document.querySelector('#side');
+                const main = document.querySelector('#main');
+                const parts = [];
+                let n = a;
+                for (let i = 0; i < 6 && n && n !== document; i++) {
+                    const tid = n.getAttribute ? n.getAttribute('data-testid') : null;
+                    parts.push(n.id ? ('#' + n.id) : (tid ? ('@' + tid) : (n.tagName || '?').toLowerCase()));
+                    n = n.parentElement;
+                }
+                return {
+                    tag: a.tagName ? a.tagName.toLowerCase() : null,
+                    id: a.id || null,
+                    testid: a.getAttribute ? a.getAttribute('data-testid') : null,
+                    role: a.getAttribute ? a.getAttribute('role') : null,
+                    editable: a.getAttribute ? a.getAttribute('contenteditable') : null,
+                    in_side: !!(side && side.contains(a)),
+                    in_main: !!(main && main.contains(a)),
+                    path: parts.join(' < '),
+                };
+            }"""
+        )
+    except Exception as exc:
+        return {"tag": None, "in_side": False, "in_main": False, "path": f"<err:{exc}>"}
+
+
+async def _read_search_value(page: Page, sel: str) -> str:
+    """Read back the search box's current text (contenteditable) — never type blind."""
+    try:
+        return (await page.locator(sel).first.inner_text()).strip()
+    except Exception:
+        try:
+            return (await page.locator(sel).first.text_content() or "").strip()
+        except Exception:
+            return "<unreadable>"
+
+
+async def _collect_search_candidates(page: Page):
+    """Return the visible sidebar result rows as Playwright locators + titles.
+    Reads the title attribute (full, untruncated name) with innerText fallback."""
+    for sel in RESULT_TITLE_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            n = await loc.count()
+        except Exception:
+            continue
+        if not n:
+            continue
+        candidates = []
+        for i in range(min(n, 30)):
+            el = loc.nth(i)
+            try:
+                raw = (await el.inner_text()).strip()
+            except Exception:
+                raw = ""
+            title_attr = None
+            try:
+                title_attr = await el.get_attribute("title")
+                if not title_attr:
+                    child = el.locator("span[title]")
+                    if await child.count():
+                        title_attr = await child.first.get_attribute("title")
+            except Exception:
+                pass
+            value = (title_attr or raw).strip()
+            if value:
+                candidates.append({"index": i, "locator": el, "title": value,
+                                   "raw": raw, "norm": _norm_group(value)})
+        if candidates:
+            return sel, candidates
+    return None, []
+
+
+async def _reset_to_chat_list(page: Page) -> None:
+    """Return WhatsApp to a neutral chat-list state before every search so we are
+    never operating relative to a previously-opened conversation. Escape clears an
+    open search / closes an open chat; we then confirm the sidebar is present."""
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+    except Exception as exc:
+        logger.info("sender: reset-to-chat-list escape error=%s", exc)
+
+
+async def _open_group_chat(page: Page, group_name: str) -> str:
+    """Open a group conversation deterministically. Returns:
+      'OPENED'        — group chat opened
+      'NOT_FOUND'     — searched correctly, group genuinely absent (terminal)
+      'SEARCH_FAILED' — could not focus/operate the sidebar search (retryable)
+
+    Every attempt emits a structured diagnostic record (Investigation 6). On
+    NOT_FOUND a DOM snapshot is stored. The search box is ALWAYS inside #side, so
+    typing can never land in the conversation composer.
+    """
+    diag = {
+        "requested_group": group_name,
+        "requested_norm": _norm_group(group_name),
+        "selector_chosen": None,
+        "focus": None,
+        "value_after_clear": None,
+        "value_after_type": None,
+        "candidates": [],
+        "candidates_norm": [],
+        "selected": None,
+        "rejection_reason": None,
+        "worker_stage": "reset",
+    }
+
+    def _emit(stage: str) -> None:
+        diag["worker_stage"] = stage
+        logger.info("sender: GROUP-RESOLVE DIAG %s", diag)
+
+    # Neutral state first — never search relative to a previously-open chat.
+    await _reset_to_chat_list(page)
+    if not await dismiss_blocking_dialogs(page, "search"):
+        diag["rejection_reason"] = "blocking dialog before search"
+        _emit("reset")
+        return "SEARCH_FAILED"
+
+    # 1) Resolve a sidebar-scoped search box (probes logged; composer excluded).
+    diag["worker_stage"] = "focus_search"
+    search_sel = None
     for sel in SEARCH_BOX_SELECTORS:
         try:
             loc = page.locator(sel)
             n = await loc.count()
             vis = (await loc.first.is_visible()) if n else False
-            logger.info("sender: search-box probe %-48s count=%d visible=%s", sel, n, vis)
-            if vis:
-                return sel
+            logger.info("sender: search-box probe %-52s count=%d visible=%s", sel, n, vis)
+            if vis and search_sel is None:
+                search_sel = sel
         except Exception as exc:
-            logger.info("sender: search-box probe %-48s error=%s", sel, exc)
-    return None
-
-
-async def _open_group_chat(page: Page, group_name: str) -> str:
-    """Open a group conversation. Returns:
-      'OPENED'        — group chat opened
-      'NOT_FOUND'     — group does not exist (terminal)
-      'SEARCH_FAILED' — could not locate/operate the search box (retryable)
-    Strategy: click the group row directly if already visible, else use a
-    resilient search box and click the matching title.
-    """
-    title = group_name.replace("'", "\\'")
-    title_xpath = f"xpath=//span[@title='{title}']"
-
-    # Strategy 1: the group is already visible in the chat list — click directly.
-    # Fast-fail (5s, not the 30s default): a blocking dialog surfaces quickly,
-    # gets dismissed via the modal framework, and the click is retried ONCE.
-    direct_visible = False
-    loc = page.locator(title_xpath)
-    try:
-        direct_visible = bool(await loc.count()) and await loc.first.is_visible()
-    except Exception as exc:
-        logger.info("sender: direct group-open probe error=%s", exc)
-    if direct_visible:
-        logger.info("sender: group %r already visible — opening directly", group_name)
-        try:
-            await loc.first.click(timeout=5_000)
-            await asyncio.sleep(1.0)
-            return "OPENED"
-        except Exception as exc:
-            logger.warning("sender: direct group-open click blocked (%s) — "
-                           "dismissing dialogs and retrying once", exc)
-            if not await dismiss_blocking_dialogs(page, "open-chat"):
-                return "SEARCH_FAILED"  # blocked by unhandled dialog — retryable, nothing sent
-            try:
-                await loc.first.click(timeout=5_000)
-                await asyncio.sleep(1.0)
-                return "OPENED"
-            except Exception as exc2:
-                logger.warning("sender: retry after dialog dismissal also failed (%s) — "
-                               "falling back to search", exc2)
-
-    # Strategy 2: resilient search box → type → click result.
-    if not await dismiss_blocking_dialogs(page, "search"):
-        return "SEARCH_FAILED"
-    search_sel = await _find_search_box(page)
+            logger.info("sender: search-box probe %-52s error=%s", sel, exc)
+    diag["selector_chosen"] = search_sel
     if not search_sel:
-        logger.warning("sender: NO search-box selector resolved — cannot search for group")
+        diag["rejection_reason"] = "no sidebar search box resolved"
+        _emit("focus_search")
         return "SEARCH_FAILED"
-    logger.info("sender: using search box via %s", search_sel)
+
+    # 2) Focus it and PROVE focus is inside the sidebar before typing.
     try:
-        await page.click(search_sel)
+        await page.click(search_sel, timeout=5_000)
+        await asyncio.sleep(0.2)
+    except Exception as exc:
+        diag["rejection_reason"] = f"search click failed: {exc}"
+        _emit("focus_search")
+        return "SEARCH_FAILED"
+    focus = await _focus_report(page)
+    diag["focus"] = focus
+    if not focus.get("in_side") or focus.get("in_main"):
+        # Never type unless focus is verifiably in the sidebar (guards against the
+        # composer-targeting regression). One re-click, then bail as retryable.
+        logger.warning("sender: focus NOT in sidebar after click (focus=%s) — re-clicking", focus)
+        try:
+            await page.click(search_sel, timeout=5_000)
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+        focus = await _focus_report(page)
+        diag["focus"] = focus
+        if not focus.get("in_side") or focus.get("in_main"):
+            diag["rejection_reason"] = "focus not in sidebar (would type into composer)"
+            _emit("focus_search")
+            return "SEARCH_FAILED"
+
+    # 3) Clear, then read back to confirm empty (never type blind).
+    try:
         await page.keyboard.press("Control+A")   # Linux worker — NOT macOS Meta+A
         await page.keyboard.press("Backspace")
         await asyncio.sleep(0.4)
+    except Exception as exc:
+        diag["rejection_reason"] = f"clear failed: {exc}"
+        _emit("type_query")
+        return "SEARCH_FAILED"
+    diag["value_after_clear"] = await _read_search_value(page, search_sel)
+
+    # 4) Type the group name and read the value back — verify it landed exactly.
+    try:
         await page.type(search_sel, group_name, delay=40)
         await asyncio.sleep(1.5)
     except Exception as exc:
-        logger.warning("sender: search-box interaction failed: %s", exc)
+        diag["rejection_reason"] = f"type failed: {exc}"
+        _emit("type_query")
+        return "SEARCH_FAILED"
+    typed = await _read_search_value(page, search_sel)
+    diag["value_after_type"] = typed
+    if _norm_group(typed) != _norm_group(group_name):
+        # What we see in the box is not what we asked for — do NOT trust results.
+        diag["rejection_reason"] = (f"search value mismatch: typed={typed!r} "
+                                    f"expected={group_name!r}")
+        _emit("type_query")
         return "SEARCH_FAILED"
 
-    try:
-        await page.wait_for_selector(title_xpath, timeout=10_000)
-    except PlaywrightTimeoutError:
+    # 5) Collect candidates, log them (raw + normalized), match deterministically.
+    diag["worker_stage"] = "await_results"
+    result_sel, candidates = await _collect_search_candidates(page)
+    diag["candidates"] = [c["title"] for c in candidates]
+    diag["candidates_norm"] = [c["norm"] for c in candidates]
+    target = _norm_group(group_name)
+    match = next((c for c in candidates if c["norm"] == target), None)
+
+    if not match:
+        diag["rejection_reason"] = (
+            "no candidate title equals the normalized requested name"
+            if candidates else "no visible search-result rows"
+        )
+        _emit("match")
+        await _store_dom_snapshot(page, "group_not_found", {
+            "group": group_name, "requested_norm": target,
+            "candidates": diag["candidates"], "candidates_norm": diag["candidates_norm"],
+            "result_selector": result_sel, "search_selector": search_sel,
+        })
         return "NOT_FOUND"
+
+    # 6) Open the matched row.
+    diag["selected"] = match["title"]
+    diag["worker_stage"] = "open"
+    _emit("open")
     try:
-        await page.click(title_xpath, timeout=5_000)
+        await match["locator"].click(timeout=5_000)
     except Exception as exc:
-        logger.warning("sender: search-result click blocked (%s) — "
-                       "dismissing dialogs and retrying once", exc)
+        logger.warning("sender: matched-row click blocked (%s) — dismissing dialogs, retry once", exc)
         if not await dismiss_blocking_dialogs(page, "open-chat"):
             return "SEARCH_FAILED"
         try:
-            await page.click(title_xpath, timeout=5_000)
+            await match["locator"].click(timeout=5_000)
         except Exception as exc2:
-            logger.warning("sender: search-result click retry also failed: %s", exc2)
+            logger.warning("sender: matched-row click retry failed: %s", exc2)
             return "SEARCH_FAILED"
     await asyncio.sleep(1.0)
     return "OPENED"

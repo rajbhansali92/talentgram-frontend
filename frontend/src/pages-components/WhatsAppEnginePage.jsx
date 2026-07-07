@@ -1226,6 +1226,7 @@ function WEHistoryPanel() {
   const [selectedBatchId, setSelectedBatchId] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [loadingJobs, setLoadingJobs] = useState(false);
+  const [sessionOnline, setSessionOnline] = useState(false);
 
   const fetchHistory = async () => {
     try {
@@ -1241,6 +1242,32 @@ function WEHistoryPanel() {
   useEffect(() => {
     fetchHistory();
   }, []);
+
+  // Live progress: while any batch is actively running, poll batches + the open
+  // batch's jobs + the worker session so Resume shows real movement (and a
+  // re-pause surfaces its reason) instead of appearing to do nothing.
+  const anyRunning = batches.some((b) => b.status === "running" || b.status === "processing");
+  useEffect(() => {
+    if (!anyRunning) return;
+    let active = true;
+    const tick = async () => {
+      try {
+        const [list, sess] = await Promise.all([
+          getBatches(),
+          getSessionStatus().catch(() => null),
+        ]);
+        if (!active) return;
+        setBatches(list);
+        if (sess) setSessionOnline(sess.status === "authenticated");
+        if (selectedBatchId) {
+          const jobList = await getJobs(selectedBatchId);
+          if (active) setJobs(jobList);
+        }
+      } catch { /* transient poll error — keep polling */ }
+    };
+    const timer = setInterval(tick, 3000);
+    return () => { active = false; clearInterval(timer); };
+  }, [anyRunning, selectedBatchId]);
 
   const handleBatchClick = async (batchId) => {
     setSelectedBatchId(batchId);
@@ -1258,10 +1285,17 @@ function WEHistoryPanel() {
   const handleAction = async (batchId, action) => {
     try {
       await runBatchAction(batchId, action);
-      toast.success(`Action: '${action}' executed successfully.`);
-      fetchHistory();
-      if (selectedBatchId === batchId) {
+      if (action === "resume") {
+        toast.success("Resuming… worker will pick up the remaining jobs");
+        // Select the batch so the live-progress banner tracks it immediately.
         handleBatchClick(batchId);
+        fetchHistory();
+      } else {
+        toast.success(`Action: '${action}' executed successfully.`);
+        fetchHistory();
+        if (selectedBatchId === batchId) {
+          handleBatchClick(batchId);
+        }
       }
     } catch (err) {
       toast.error(formatErrorDetail(err, "Execution failed"));
@@ -1323,7 +1357,7 @@ function WEHistoryPanel() {
                 <div className="flex justify-between items-start gap-2">
                   <h4 className="font-semibold text-sm text-[#111111]">{b.template_name}</h4>
                   <span className={`text-[9px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
-                    b.status === "processing" ? "bg-indigo-500/10 text-indigo-700 animate-pulse" :
+                    (b.status === "running" || b.status === "processing") ? "bg-indigo-500/10 text-indigo-700 animate-pulse" :
                     b.status === "completed" ? "bg-[#0D8A5F]/10 text-[#0D8A5F]" :
                     b.status === "paused" ? "bg-amber-500/10 text-amber-700" :
                     "bg-black/5 text-[#6B7280]"
@@ -1331,6 +1365,13 @@ function WEHistoryPanel() {
                     {b.status}
                   </span>
                 </div>
+
+                {/* Pause reason — never leave a paused batch unexplained */}
+                {b.status === "paused" && b.pause_reason && (
+                  <div className="text-[10px] leading-snug bg-amber-500/5 border border-amber-500/20 text-amber-800 rounded-lg px-2.5 py-1.5">
+                    <span className="font-bold uppercase tracking-wider">Reason:</span> {b.pause_reason}
+                  </div>
+                )}
 
                 <div className="text-[10px] text-[#6B7280] font-mono flex justify-between">
                   <span>Source: {b.source_type}</span>
@@ -1358,7 +1399,7 @@ function WEHistoryPanel() {
                       Resume
                     </button>
                   )}
-                  {b.status === "processing" && (
+                  {(b.status === "running" || b.status === "processing") && (
                     <button
                       onClick={(e) => { e.stopPropagation(); handleAction(b.id, "pause"); }}
                       className="text-[9px] font-bold uppercase tracking-wider border border-amber-200 text-amber-700 hover:bg-amber-500/10 px-2 py-1 rounded-lg"
@@ -1398,6 +1439,45 @@ function WEHistoryPanel() {
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-black/60">Jobs Audit tracker</h3>
                 <p className="text-xs text-[#6B7280] mt-0.5">Execution logs for batch: <code className="text-xs font-mono">{selectedBatchId.slice(0, 8)}</code></p>
               </div>
+
+              {/* Live progress banner — Resume never silently appears to do nothing */}
+              {(() => {
+                const sb = batches.find((b) => b.id === selectedBatchId);
+                if (!sb) return null;
+                const running = sb.status === "running" || sb.status === "processing";
+                const inFlight = jobs.find((j) => j.status === "sending");
+                const done = (sb.sent_count || 0) + (sb.failed_count || 0);
+                if (running) {
+                  return (
+                    <div className="flex items-center gap-2 text-[11px] bg-indigo-500/5 border border-indigo-500/20 text-indigo-800 rounded-lg px-3 py-2">
+                      <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+                      <span className="font-bold uppercase tracking-wider">Live</span>
+                      <span className="text-indigo-700/70">·</span>
+                      <span>{sessionOnline ? "Worker connected" : "Connecting to worker…"}</span>
+                      <span className="text-indigo-700/70">·</span>
+                      <span>{inFlight ? `Sending to ${inFlight.talent_name || inFlight.destination}…` : "Searching for next chat…"}</span>
+                      <span className="ml-auto font-mono">{done}/{sb.total_jobs || 0}</span>
+                    </div>
+                  );
+                }
+                if (sb.status === "paused") {
+                  return (
+                    <div className="text-[11px] bg-amber-500/5 border border-amber-500/20 text-amber-800 rounded-lg px-3 py-2">
+                      <span className="font-bold uppercase tracking-wider">Paused</span>
+                      {sb.pause_reason ? <span> · {sb.pause_reason}</span> : null}
+                    </div>
+                  );
+                }
+                if (sb.status === "completed") {
+                  return (
+                    <div className="flex items-center gap-2 text-[11px] bg-[#0D8A5F]/5 border border-[#0D8A5F]/20 text-[#0D8A5F] rounded-lg px-3 py-2">
+                      <span className="font-bold uppercase tracking-wider">Completed</span>
+                      <span className="ml-auto font-mono">{(sb.sent_count || 0)}/{sb.total_jobs || 0} sent</span>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
 
               <div className="overflow-x-auto max-h-[500px] overflow-y-auto pr-1">
                 <table className="w-full text-left border-collapse text-xs">

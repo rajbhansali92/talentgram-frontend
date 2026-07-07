@@ -106,19 +106,41 @@ async def _write_timeline(job: dict, status: str) -> None:
         logger.warning("worker: timeline write failed for job %s: %s", job.get("id"), exc)
 
 
+async def _reclaim_orphaned_jobs(db) -> None:
+    """Reset jobs stuck in 'sending' past ORPHAN_TIMEOUT_SEC back to 'pending'.
+
+    A worker crash / container restart between claim and completion leaves a job
+    in 'sending' forever: it is never re-claimed (only 'pending' is claimed) and
+    it blocks batch auto-completion (which requires sending_count == 0). This
+    reaper (using the already-defined config.ORPHAN_TIMEOUT_SEC) recovers it."""
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=config.ORPHAN_TIMEOUT_SEC)).isoformat()
+    res = await db.whatsapp_jobs.update_many(
+        {"status": "sending", "worker_picked_at": {"$lt": cutoff}},
+        {"$set": {"status": "pending", "worker_picked_at": None,
+                  "error_message": "Reclaimed after worker stall (orphaned send)"}},
+    )
+    if res.modified_count:
+        logger.warning("worker: reclaimed %d orphaned 'sending' job(s) older than %ds",
+                       res.modified_count, config.ORPHAN_TIMEOUT_SEC)
+
+
 async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     """Poll for a single pending job, claim it, send the message, update status."""
     db = get_db()
-    
+
+    # 0. Recover orphaned 'sending' jobs before claiming new work.
+    await _reclaim_orphaned_jobs(db)
+
     # 1. Look for a batch in 'running' or 'pending' state
     # We only process jobs for active batches
     active_batches = await db.whatsapp_batches.find(
         {"status": {"$in": ["running", "pending"]}, "is_dry_run": False}
     ).to_list(100)
-    
+
     if not active_batches:
         return
-        
+
     batch_ids = [b["id"] for b in active_batches]
     batch_map = {b["id"]: b for b in active_batches}
     
@@ -360,36 +382,56 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
                 metadata={"state": state, "error": err, "attempt": attempt_count,
                           "will_retry": is_retryable},
             )
-        # Slice 4: record terminal outcomes on the timeline (not retryable 'pending').
+        # Record terminal outcomes on the timeline (not retryable 'pending').
         if new_status in ("sent", "failed"):
             await _write_timeline(job, new_status)
 
-        # Circuit Breaker check
-        # Count consecutive failures in the last 10 jobs of this batch
+        # Circuit Breaker check.
+        # The breaker counts CONSECUTIVE recent failures, but only within the
+        # CURRENT window: failures with last_attempted_at >= breaker_window_start.
+        # Resume stamps a fresh breaker_window_start, so a resumed batch gets a
+        # clean consecutive-failure window WITHOUT erasing history and WITHOUT
+        # disabling the breaker — it still pauses after `circuit_threshold` NEW
+        # failures. (Previously the window was unbounded in time, so the pre-pause
+        # failures re-tripped the breaker on the very first post-resume failure,
+        # which is exactly why Resume appeared to do nothing.)
+        window_start = (batch or {}).get("breaker_window_start")
+        breaker_filter = {"batch_id": batch_id}
+        if window_start:
+            breaker_filter["last_attempted_at"] = {"$gte": window_start}
         recent_jobs = await db.whatsapp_jobs.find(
-            {"batch_id": batch_id},
+            breaker_filter,
             sort=[("last_attempted_at", -1)],
         ).limit(circuit_threshold).to_list(circuit_threshold)
-        
+
         consecutive_failures = 0
         for r_job in recent_jobs:
             if r_job.get("status") == "failed" or (r_job.get("status") == "pending" and r_job.get("error_message")):
                 consecutive_failures += 1
             else:
                 break
-                
+
         if consecutive_failures >= circuit_threshold:
-            logger.warning("worker: CIRCUIT BREAKER TRIGGERED for batch %s. Pausing batch.", batch_id)
+            pause_reason = (
+                f"Circuit breaker: {consecutive_failures} consecutive failures. "
+                f"Last error: {err}"
+            )
+            logger.warning("worker: CIRCUIT BREAKER TRIGGERED for batch %s (%s). Pausing.",
+                           batch_id, pause_reason)
             await db.whatsapp_batches.update_one(
                 {"id": batch_id},
-                {"$set": {"status": "paused"}}
+                {"$set": {"status": "paused",
+                          "pause_reason": pause_reason,
+                          "paused_at": finish_now}}
             )
             await write_audit_log(
                 "batch_paused",
                 batch_id=batch_id,
-                metadata={"reason": f"Circuit breaker: {consecutive_failures} consecutive failures"},
+                metadata={"reason": pause_reason,
+                          "consecutive_failures": consecutive_failures,
+                          "window_start": window_start},
             )
-            
+
         # Standard safety delay even after failure
         await asyncio.sleep(5)
 

@@ -190,3 +190,24 @@ export async function deleteContactList(id) {
   const res = await adminApi.delete(`/whatsapp/contact-lists/${id}`);
   return res.data;
 }
+
+// --- GROUP LISTS ---
+export async function getGroupLists() {
+  const res = await adminApi.get("/whatsapp/group-lists");
+  return res.data;
+}
+
+export async function createGroupList(payload) {
+  const res = await adminApi.post("/whatsapp/group-lists", payload);
+  return res.data;
+}
+
+export async function updateGroupList(id, payload) {
+  const res = await adminApi.put(`/whatsapp/group-lists/${id}`, payload);
+  return res.data;
+}
+
+export async function deleteGroupList(id) {
+  const res = await adminApi.delete(`/whatsapp/group-lists/${id}`);
+  return res.data;
+}

@@ -321,6 +321,7 @@ class SourceParams(BaseModel):
     contacts: List[ManualContact] = Field(default_factory=list)
     # SAVED LISTS
     contact_list_ids: List[str] = Field(default_factory=list)
+    group_list_ids: List[str] = Field(default_factory=list)
 
 
 class ResolveIn(BaseModel):
@@ -909,12 +910,14 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
                 name=mc.name or "", phone=phone, group_name="",
                 source="MANUAL", source_id=None, kind="MANUAL", recipient_id=rid))
     elif source_type == "SAVED_LISTS":
-        if not params.contact_list_ids:
-            raise HTTPException(400, "contact_list_ids required for SAVED_LISTS source")
+        if not params.contact_list_ids and not params.group_list_ids:
+            raise HTTPException(400, "contact_list_ids or group_list_ids required for SAVED_LISTS source")
         lists = await db.whatsapp_contact_lists.find(
             {"id": {"$in": params.contact_list_ids}, "deleted": {"$ne": True}},
             {"_id": 0, "id": 1, "name": 1, "contacts": 1}
         ).to_list(1000)
+        _cl_order = {lid: i for i, lid in enumerate(params.contact_list_ids)}
+        lists.sort(key=lambda d: _cl_order.get(d["id"], len(_cl_order)))
         for lst in lists:
             list_id = lst["id"]
             for c in lst.get("contacts") or []:
@@ -934,6 +937,26 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
                 _add(*_make_recipient(
                     name=c.get("name") or "", phone=phone, group_name="",
                     source="SAVED_LISTS", source_id=list_id, kind="SAVED_LIST", recipient_id=rid))
+        if params.group_list_ids:
+            glists = await db.whatsapp_group_lists.find(
+                {"id": {"$in": params.group_list_ids}, "deleted": {"$ne": True}},
+                {"_id": 0, "id": 1, "name": 1, "groups": 1}
+            ).to_list(1000)
+            _gl_order = {lid: i for i, lid in enumerate(params.group_list_ids)}
+            glists.sort(key=lambda d: _gl_order.get(d["id"], len(_gl_order)))
+            for glst in glists:
+                glist_id = glst["id"]
+                for g in glst.get("groups") or []:
+                    gname = (g.get("group_name") or "").strip()
+                    if not gname:
+                        continue
+                    rid = "saved_group:" + gname.casefold()
+                    if rid in seen:
+                        continue
+                    _add(*_make_recipient(
+                        name="", phone="", group_name=gname,
+                        source="SAVED_LISTS", source_id=glist_id,
+                        kind="SAVED_GROUP", recipient_id=rid))
     else:
         raise HTTPException(400, f"Unknown source_type {source_type!r}")
 
@@ -1625,4 +1648,130 @@ async def delete_contact_list(list_id: str, admin: dict = Depends(current_team_o
         raise HTTPException(404, "Contact list not found")
 
     await _write_audit("contact_list_deleted", admin.get("id", "admin"), metadata={"list_id": list_id})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# ── GROUP LISTS ───────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+class GroupEntryIn(BaseModel):
+    group_name: str
+
+class GroupListIn(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    groups: List[GroupEntryIn] = Field(default_factory=list)
+
+
+@router.get("/group-lists")
+async def list_group_lists(admin: dict = Depends(current_team_or_admin)):
+    docs = await db.whatsapp_group_lists.find(
+        {"deleted": {"$ne": True}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(1000)
+    return docs
+
+
+@router.post("/group-lists")
+async def create_group_list(payload: GroupListIn, admin: dict = Depends(current_team_or_admin)):
+    if not payload.name.strip():
+        raise HTTPException(400, "Group list name cannot be empty")
+
+    seen_names = set()
+    normalized_groups = []
+    for g in payload.groups:
+        gname = g.group_name.strip()
+        if not gname:
+            continue
+        key = gname.casefold()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        normalized_groups.append({"group_name": gname})
+
+    list_id = _new_id()
+    now = _utcnow()
+    doc = {
+        "id": list_id,
+        "name": payload.name.strip(),
+        "description": (payload.description or "").strip(),
+        "groups": normalized_groups,
+        "deleted": False,
+        "created_at": now,
+        "updated_at": now,
+        "created_by": admin.get("email") or "admin"
+    }
+
+    await db.whatsapp_group_lists.insert_one(doc)
+    await _write_audit("group_list_created", admin.get("id", "admin"),
+                       metadata={"list_id": list_id, "name": payload.name})
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/group-lists/{list_id}")
+async def get_group_list(list_id: str, admin: dict = Depends(current_team_or_admin)):
+    doc = await db.whatsapp_group_lists.find_one(
+        {"id": list_id, "deleted": {"$ne": True}},
+        {"_id": 0}
+    )
+    if not doc:
+        raise HTTPException(404, "Group list not found")
+    return doc
+
+
+@router.put("/group-lists/{list_id}")
+async def update_group_list(list_id: str, payload: GroupListIn, admin: dict = Depends(current_team_or_admin)):
+    if not payload.name.strip():
+        raise HTTPException(400, "Group list name cannot be empty")
+
+    doc = await db.whatsapp_group_lists.find_one(
+        {"id": list_id, "deleted": {"$ne": True}}
+    )
+    if not doc:
+        raise HTTPException(404, "Group list not found")
+
+    seen_names = set()
+    normalized_groups = []
+    for g in payload.groups:
+        gname = g.group_name.strip()
+        if not gname:
+            continue
+        key = gname.casefold()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        normalized_groups.append({"group_name": gname})
+
+    now = _utcnow()
+    update_data = {
+        "name": payload.name.strip(),
+        "description": (payload.description or "").strip(),
+        "groups": normalized_groups,
+        "updated_at": now
+    }
+
+    await db.whatsapp_group_lists.update_one(
+        {"id": list_id},
+        {"$set": update_data}
+    )
+    await _write_audit("group_list_updated", admin.get("id", "admin"),
+                       metadata={"list_id": list_id, "name": payload.name})
+    doc.update(update_data)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.delete("/group-lists/{list_id}")
+async def delete_group_list(list_id: str, admin: dict = Depends(current_team_or_admin)):
+    res = await db.whatsapp_group_lists.update_one(
+        {"id": list_id, "deleted": {"$ne": True}},
+        {"$set": {"deleted": True, "updated_at": _utcnow()}}
+    )
+    if not res.matched_count:
+        raise HTTPException(404, "Group list not found")
+
+    await _write_audit("group_list_deleted", admin.get("id", "admin"),
+                       metadata={"list_id": list_id})
     return {"ok": True}

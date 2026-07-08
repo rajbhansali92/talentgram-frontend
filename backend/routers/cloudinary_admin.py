@@ -574,29 +574,25 @@ async def delete_project_voice_notes(project_id: str, admin: dict = Depends(requ
 
 @router.delete("/projects/{project_id}")
 async def delete_project_assets(project_id: str, admin: dict = Depends(require_role("admin"))):
-    """Removes the entire project folder and all sub-audition assets and voice notes, updating project status to purged."""
+    """Delete project-specific ephemeral media only: audition takes + voice notes.
+
+    MEDIA-LIFECYCLE POLICY: this endpoint must NEVER delete introduction videos,
+    profile media, portfolio/look media, or project images (admin uploads). It
+    therefore no longer removes `admin_upload` / `admin_added` media — that media
+    has an arbitrary category (it can be an image = "project image", or a video)
+    and is protected until dedicated per-type manual deletion exists. Talent
+    master assets were never touched here. Net effect: takes + voice notes only.
+    """
     await assert_providers_healthy()
-    # 1. Delete audition videos and voice notes
+    # Delete ONLY audition takes and voice-note feedback (both are already
+    # category-scoped in their own endpoints). Nothing else is removed.
     await delete_project_audition_videos(project_id, admin)
     await delete_project_voice_notes(project_id, admin)
-    
-    # 2. Delete admin uploads for this project
-    admin_assets = await db.asset_metadata.find({"project_id": project_id, "asset_type": "admin_upload"}).to_list(length=1000)
-    for aa in admin_assets:
-        await cleanup_media_storage(aa, scope="submission", parent_id=aa.get("submission_id"))
-        
-    await db.asset_metadata.delete_many({"project_id": project_id, "asset_type": "admin_upload"})
-    
-    # 3. Pull admin added media from submission docs
-    await db.submissions.update_many(
-        {"project_id": project_id},
-        {"$pull": {"media": {"scope": "admin_added"}}}
-    )
-    
-    # 4. Set project to purged
+
+    # Mark the project's ephemeral media as purged (takes + voice removed).
     await db.projects.update_one({"id": project_id}, {"$set": {"status": "purged"}})
     await log_storage_action(user_id=admin.get("id"), action_type="DELETE", project_id=project_id)
-    return {"status": "success", "message": f"Project {project_id} assets purged successfully."}
+    return {"status": "success", "message": f"Project {project_id} audition takes and voice notes deleted."}
 
 @router.get("/health")
 async def get_storage_health(admin: dict = Depends(require_role("admin"))):

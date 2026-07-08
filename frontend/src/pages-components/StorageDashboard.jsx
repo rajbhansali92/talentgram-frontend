@@ -543,7 +543,7 @@ export default function StorageDashboard() {
  
                     {proj.status !== "purged" && (
                       <>
-                        <button 
+                        <button
                           onClick={() => setConfirmDialog({
                             type: "auditions",
                             id: proj.project_id,
@@ -557,8 +557,8 @@ export default function StorageDashboard() {
                           <FileVideo className="w-3.5 h-3.5" />
                           Delete Videos
                         </button>
- 
-                        <button 
+
+                        <button
                           onClick={() => setConfirmDialog({
                             type: "voicenotes",
                             id: proj.project_id,
@@ -572,14 +572,14 @@ export default function StorageDashboard() {
                           <Volume2 className="w-3.5 h-3.5" />
                           Delete Voice Notes
                         </button>
- 
-                        <button 
+
+                        <button
                           onClick={() => setConfirmDialog({
                             type: "purge",
                             id: proj.project_id,
                             data: proj,
                             title: "Delete Project Assets?",
-                            description: `Are you sure you want to delete all assets for project ${proj.name}? This permanently deletes all project-specific media. Talent master assets will not be affected.`,
+                            description: `Are you sure you want to delete the audition takes and voice notes for project ${proj.name}? Introduction videos, profile/portfolio/look images, admin uploads, and project images are NOT affected.`,
                             action: () => handleDeleteProject(proj.project_id)
                           })}
                           className="h-9 px-2.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded inline-flex items-center gap-1 transition-colors"
@@ -622,9 +622,8 @@ export default function StorageDashboard() {
                 <div className="space-y-1.5">
                   <span className="text-[10px] uppercase font-bold tracking-wider text-red-500 block">Permanently Deletes:</span>
                   <ul className="text-xs text-slate-600 space-y-1 list-disc pl-4 font-semibold">
-                    {(confirmDialog.type === "purge" || confirmDialog.type === "auditions") && <li>Audition Videos</li>}
+                    {(confirmDialog.type === "purge" || confirmDialog.type === "auditions") && <li>Audition Takes</li>}
                     {(confirmDialog.type === "purge" || confirmDialog.type === "voicenotes") && <li>Voice Notes</li>}
-                    {confirmDialog.type === "purge" && <li>Admin Uploaded Media</li>}
                   </ul>
                 </div>
                 <div className="space-y-1.5">
@@ -635,6 +634,8 @@ export default function StorageDashboard() {
                     <li className="flex items-center gap-1.5 text-slate-500">✓ Portfolio Images</li>
                     <li className="flex items-center gap-1.5 text-slate-500">✓ Indian Look Images</li>
                     <li className="flex items-center gap-1.5 text-slate-500">✓ Western Look Images</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Admin Uploaded Media</li>
+                    <li className="flex items-center gap-1.5 text-slate-500">✓ Project Images</li>
                     <li className="flex items-center gap-1.5 text-slate-500">✓ Global Talent Records</li>
                   </ul>
                 </div>

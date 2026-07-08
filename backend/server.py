@@ -420,9 +420,14 @@ async def on_startup():
         logger.info("Starting Talentgram backend...")
         validate_talent_fields_classification()
 
-        await run_media_duplicate_cleanup_migration()
-        await run_draft_talent_migration()
-        await run_draft_expiration_and_backfill()
+        # MEDIA-LIFECYCLE POLICY: no media is ever deleted automatically.
+        # The former startup cleanup jobs — run_media_duplicate_cleanup_migration,
+        # run_draft_talent_migration, and run_draft_expiration_and_backfill (the
+        # 30-day draft purge) — deleted DB records on every boot and orphaned the
+        # referenced media. They are intentionally NO LONGER invoked. Uploaded
+        # media now remains until an administrator explicitly deletes it via the
+        # Storage Console. The functions are retained (uncalled) so draft/metrics
+        # maintenance can later be exposed as a manual, admin-initiated action.
 
         await seed_admin()
         logger.info("Admin seed complete")

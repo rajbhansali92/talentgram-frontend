@@ -34,13 +34,15 @@ async def _fast_sleep(*a, **k):
 
 sender.dismiss_blocking_dialogs = _true          # never blocked in tests
 sender._store_dom_snapshot = _noop               # no DB / screenshot
+sender._capture_open_failure = _noop             # no DB / screenshot on failure
 sender.asyncio.sleep = _fast_sleep               # don't actually wait
 
 
 class _Loc:
     """Minimal locator: a search box, a result row, or an empty match."""
-    def __init__(self, n, *, visible=True, text="", title=None):
+    def __init__(self, n, *, visible=True, text="", title=None, raise_eval=False):
         self._n, self._visible, self._text, self._title = n, visible, text, title
+        self._raise_eval = raise_eval
 
     async def count(self):
         return self._n
@@ -57,6 +59,12 @@ class _Loc:
 
     async def click(self, **k):
         return None
+
+    async def evaluate(self, expr, *a, **k):
+        # Simulates reading el.value on the search <input>; raise => unreadable.
+        if self._raise_eval:
+            raise RuntimeError("element not readable")
+        return self._text
 
     async def inner_text(self):
         return self._text
@@ -84,19 +92,20 @@ class FakePage:
     url = "https://web.whatsapp.com/"
 
     def __init__(self, *, search_box_sel=None, candidates=(), focus_in_side=True,
-                 focus_in_main=False, search_value=None):
+                 focus_in_main=False, search_value=None, search_readable=True):
         self.search_box_sel = search_box_sel
         self.candidates = list(candidates)
         self.focus_in_side = focus_in_side
         self.focus_in_main = focus_in_main
         self.search_value = search_value
+        self.search_readable = search_readable
         self.typed = []
         self.clicked_titles = []
 
     def locator(self, sel):
         if sel == self.search_box_sel:
             val = self.search_value if self.search_value is not None else "".join(self.typed)
-            return _Loc(1, visible=True, text=val)
+            return _Loc(1, visible=True, text=val, raise_eval=not self.search_readable)
         if sel in sender.RESULT_TITLE_SELECTORS and self.candidates:
             page = self
 
@@ -191,11 +200,20 @@ def main():
     assert r == "SEARCH_FAILED" and p.typed == [], (r, p.typed)
     print("5. focus in #main (composer)           -> SEARCH_FAILED, nothing typed")
 
-    # 6. value read-back mismatch -> don't trust results, retryable
+    # 6. READ_OK_MISMATCH: readable but wrong value -> retryable SEARCH_FAILED
     p = FakePage(search_box_sel=SB, candidates=[G], search_value="totally different")
     r = run(sender._open_group_chat(p, G))
     assert r == "SEARCH_FAILED", r
-    print("6. search value read-back mismatch     -> SEARCH_FAILED")
+    print("6. read-back READ_OK_MISMATCH          -> SEARCH_FAILED")
+
+    # 6b. READ_UNREADABLE (native <input>, value not readable): read-back is
+    #     advisory only — must PROCEED to candidate collection and open, NOT
+    #     abort. This is the exact hotfix regression (the ~60s <input> stall
+    #     that surfaced as CHAT_NOT_OPENED).
+    p = FakePage(search_box_sel=SB, candidates=[G], search_readable=False)
+    r = run(sender._open_group_chat(p, G))
+    assert r == "OPENED" and p.clicked_titles == [G], (r, p.clicked_titles)
+    print("6b. read-back READ_UNREADABLE          -> proceeds -> OPENED")
 
     # 7. _norm_group: NFKC + casefold + whitespace collapse
     assert sender._norm_group("  Jon   X  Talentgram ") == sender._norm_group("jon x talentgram")

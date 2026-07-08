@@ -689,6 +689,7 @@ async def _focus_report(page: Page) -> dict:
                     testid: a.getAttribute ? a.getAttribute('data-testid') : null,
                     role: a.getAttribute ? a.getAttribute('role') : null,
                     editable: a.getAttribute ? a.getAttribute('contenteditable') : null,
+                    value: (a.value !== undefined ? a.value : null),
                     in_side: !!(side && side.contains(a)),
                     in_main: !!(main && main.contains(a)),
                     path: parts.join(' < '),
@@ -699,15 +700,21 @@ async def _focus_report(page: Page) -> dict:
         return {"tag": None, "in_side": False, "in_main": False, "path": f"<err:{exc}>"}
 
 
-async def _read_search_value(page: Page, sel: str) -> str:
-    """Read back the search box's current text (contenteditable) — never type blind."""
+async def _read_search_value(page: Page, sel: str) -> Tuple[bool, str]:
+    """Read the search box's current text for BOTH a native <input> (.value) and a
+    contenteditable (innerText). Uses ONE fast evaluate() with a short timeout so
+    it never incurs Playwright's ~30s actionability wait — the previous
+    inner_text()/text_content() path stalled ~60s on the current <input>-based
+    box and produced a false '<unreadable>' mismatch. Returns (readable, value)."""
     try:
-        return (await page.locator(sel).first.inner_text()).strip()
-    except Exception:
-        try:
-            return (await page.locator(sel).first.text_content() or "").strip()
-        except Exception:
-            return "<unreadable>"
+        val = await page.locator(sel).first.evaluate(
+            "el => (el.value != null ? el.value : (el.innerText != null ? el.innerText : (el.textContent || '')))",
+            timeout=2_000,
+        )
+        return True, (val or "").strip()
+    except Exception as exc:
+        logger.info("sender: search value read error (advisory): %s", exc)
+        return False, ""
 
 
 async def _collect_search_candidates(page: Page):
@@ -757,6 +764,57 @@ async def _reset_to_chat_list(page: Page) -> None:
         await asyncio.sleep(0.3)
     except Exception as exc:
         logger.info("sender: reset-to-chat-list escape error=%s", exc)
+
+
+async def _capture_open_failure(page: Page, reason: str, extra: Optional[dict] = None) -> None:
+    """On any group-open / chat-open failure, save chat_not_opened.png and dump
+    URL, page title, activeElement, and #side / #main / header / composer HTML to
+    the logs + whatsapp_dom_snapshots so the exact live DOM is inspectable
+    offline (never guess which selector drifted)."""
+    await _safe_screenshot(page, "/tmp/chat_not_opened.png")
+    try:
+        url, title = page.url, await page.title()
+    except Exception as exc:
+        url, title = f"<err:{exc}>", ""
+    focus = await _focus_report(page)
+    try:
+        html = await page.evaluate(
+            """() => {
+                const grab = (sel) => { const el = document.querySelector(sel);
+                    return el ? el.outerHTML.slice(0, 12000) : null; };
+                return {
+                    side: grab('#side'),
+                    main: grab('#main'),
+                    header: grab('#main header') || grab('header[role="banner"]'),
+                    composer: grab('[contenteditable="true"][data-tab="10"]')
+                              || grab('footer [contenteditable="true"]') || grab('footer'),
+                };
+            }"""
+        )
+    except Exception as exc:
+        html = {"error": str(exc)}
+    logger.info("sender: OPEN-FAILURE reason=%s url=%s title=%r activeElement=%s",
+                reason, url, title, focus)
+    logger.info("sender: OPEN-FAILURE present: #side=%s #main=%s header=%s composer=%s",
+                bool(html.get("side")), bool(html.get("main")),
+                bool(html.get("header")), bool(html.get("composer")))
+    try:
+        await get_db().whatsapp_dom_snapshots.insert_one({
+            "id": str(uuid.uuid4()),
+            "reason": f"open_failure:{reason}",
+            "url": url,
+            "page_title": title,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "active_element": focus,
+            "side_html": html.get("side"),
+            "main_html": html.get("main"),
+            "header_html": html.get("header"),
+            "composer_html": html.get("composer"),
+            "extra": extra or {},
+        })
+        logger.info("sender: OPEN-FAILURE DOM snapshot stored (reason=%s)", reason)
+    except Exception as exc:
+        logger.info("sender: OPEN-FAILURE snapshot store error=%s", exc)
 
 
 async def _open_group_chat(page: Page, group_name: str) -> str:
@@ -811,7 +869,10 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     if not search_sel:
         diag["rejection_reason"] = "no sidebar search box resolved"
         _emit("focus_search")
+        await _capture_open_failure(page, "search_box_absent", diag)
         return "SEARCH_FAILED"
+    logger.info("sender: STEP 1 search textbox located via %s", search_sel)
+    await _safe_screenshot(page, "/tmp/before_search.png")
 
     # 2) Focus it and PROVE focus is inside the sidebar before typing.
     try:
@@ -848,30 +909,57 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
         diag["rejection_reason"] = f"clear failed: {exc}"
         _emit("type_query")
         return "SEARCH_FAILED"
-    diag["value_after_clear"] = await _read_search_value(page, search_sel)
+    _, diag["value_after_clear"] = await _read_search_value(page, search_sel)
 
-    # 4) Type the group name and read the value back — verify it landed exactly.
+    # 4) Type the group name; read the value back (fast, input-aware).
     try:
         await page.type(search_sel, group_name, delay=40)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)
     except Exception as exc:
         diag["rejection_reason"] = f"type failed: {exc}"
         _emit("type_query")
+        await _capture_open_failure(page, "type_failed", diag)
         return "SEARCH_FAILED"
-    typed = await _read_search_value(page, search_sel)
-    diag["value_after_type"] = typed
-    if _norm_group(typed) != _norm_group(group_name):
-        # What we see in the box is not what we asked for — do NOT trust results.
+    logger.info("sender: STEP 2 search text entered (%r)", group_name)
+
+    # Prove whether React replaced the input after typing (activeElement value).
+    post = await _focus_report(page)
+    logger.info("sender: STEP 2b activeElement after type: tag=%s id=%s value=%r in_side=%s",
+                post.get("tag"), post.get("id"), post.get("value"), post.get("in_side"))
+    await _safe_screenshot(page, "/tmp/after_search.png")
+
+    # STEP 3 — read-back classification: READ_OK_MATCH / READ_OK_MISMATCH /
+    # READ_UNREADABLE. The read-back is DEFENCE-IN-DEPTH only: an unreadable box
+    # must NOT abort (focus-in-sidebar is already verified and the normalized
+    # candidate match still gates the click). Only a readable, genuinely
+    # different value means we typed the wrong thing -> SEARCH_FAILED.
+    readable, typed = await _read_search_value(page, search_sel)
+    diag["value_after_type"] = typed if readable else "<unreadable>"
+    if not readable:
+        readback = "READ_UNREADABLE"
+    elif _norm_group(typed) == _norm_group(group_name):
+        readback = "READ_OK_MATCH"
+    else:
+        readback = "READ_OK_MISMATCH"
+    diag["readback"] = readback
+    logger.info("sender: STEP 3 read-back classification=%s (value=%r)", readback, typed)
+    if readback == "READ_OK_MISMATCH":
         diag["rejection_reason"] = (f"search value mismatch: typed={typed!r} "
                                     f"expected={group_name!r}")
         _emit("type_query")
+        await _capture_open_failure(page, "search_value_mismatch", diag)
         return "SEARCH_FAILED"
+    if readback == "READ_UNREADABLE":
+        logger.warning("sender: search value UNREADABLE — proceeding to candidate "
+                       "collection (sidebar focus verified; candidate match still gates click)")
 
     # 5) Collect candidates, log them (raw + normalized), match deterministically.
     diag["worker_stage"] = "await_results"
     result_sel, candidates = await _collect_search_candidates(page)
     diag["candidates"] = [c["title"] for c in candidates]
     diag["candidates_norm"] = [c["norm"] for c in candidates]
+    logger.info("sender: STEP 4 candidate rows collected count=%d via %s",
+                len(candidates), result_sel)
     target = _norm_group(group_name)
     match = next((c for c in candidates if c["norm"] == target), None)
 
@@ -892,6 +980,7 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     diag["selected"] = match["title"]
     diag["worker_stage"] = "open"
     _emit("open")
+    logger.info("sender: STEP 5 candidate selected %r", match["title"])
     try:
         await match["locator"].click(timeout=5_000)
     except Exception as exc:
@@ -903,6 +992,8 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
         except Exception as exc2:
             logger.warning("sender: matched-row click retry failed: %s", exc2)
             return "SEARCH_FAILED"
+    logger.info("sender: STEP 6 candidate clicked")
+    await _safe_screenshot(page, "/tmp/after_click.png")
     await asyncio.sleep(1.0)
     return "OPENED"
 
@@ -972,21 +1063,40 @@ async def send_whatsapp_message(
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")
 
-    # PROBLEM #1: wait for the composer to be interactive.
+    # STEP 7 / STEP 11: wait for the composer to be interactive.
+    logger.info("sender: STEP 7 waiting for chat ready (composer interactive)...")
     try:
         await _wait_for_chat_ready(page)
+        logger.info("sender: STEP 11 composer found and interactive")
     except Exception as exc:
-        logger.warning("sender: chat not ready (%s) -> CHAT_NOT_OPENED", exc)
+        logger.warning("sender: STEP 7/11 FAILED — chat not ready (%s) -> CHAT_NOT_OPENED", exc)
+        await _capture_open_failure(page, "chat_not_ready",
+                                    {"destination": destination, "error": str(exc)})
         return CHAT_NOT_OPENED
 
-    # TASK 1: the compose box is NOT sufficient — confirm a real conversation is
-    # open (panel + header + recipient) before typing anything. For groups the
-    # header title must equal the target group name (wrong-chat guard).
+    # STEP 8-10, 12-13: the compose box is NOT sufficient — confirm a real
+    # conversation is open (panel + header + recipient) before typing. For groups
+    # the header title must equal the target group name (wrong-chat guard).
     expected_name = destination if destination_type == "group" else None
-    conversation_ready, _hdr, _rcp, _rtext = await _verify_chat_open(page, expected_name)
+    conversation_ready, hdr_found, rcp_found, rcp_text = await _verify_chat_open(page, expected_name)
+    logger.info("sender: STEP 8 conversation header found=%s", hdr_found)
+    logger.info("sender: STEP 9 header title=%r", rcp_text)
+    logger.info("sender: STEP 10 expected title=%r", expected_name)
+    try:
+        body_scope = await _resolve_scope(page)
+        body_present = bool(await page.locator(body_scope).count())
+    except Exception:
+        body_present = False
+    logger.info("sender: STEP 12 conversation body present=%s", body_present)
+    logger.info("sender: STEP 13 verification passed=%s", conversation_ready)
     if not conversation_ready:
         logger.warning("sender: conversation NOT open -> CHAT_NOT_OPENED (refusing to type)")
+        await _capture_open_failure(page, "conversation_not_open",
+                                    {"destination": destination, "expected": expected_name,
+                                     "header_found": hdr_found, "recipient_found": rcp_found,
+                                     "recipient_text": rcp_text, "body_present": body_present})
         return CHAT_NOT_OPENED
+    logger.info("sender: STEP 14 ready to send")
 
     # Snapshot message counts BEFORE typing — verification will only check NEW
     # messages that appear after this point, preventing false positives from old

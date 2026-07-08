@@ -86,16 +86,42 @@ def _log_event(
     )
 
 
+# WhatsApp's own in-chat "Group description" info panel is marked role="dialog"
+# but is NOT a blocking overlay — its content is dynamic per-conversation data
+# (the open group's own description/links) and it has its own Close affordance.
+# It must never be treated as a blocking dialog: not whitelisted, not dismissed,
+# not clicked — simply excluded from detection entirely.
+CONVERSATION_SUBHEADER_SELECTOR = '[data-testid="conversation-subheader"]'
+
+
+async def _is_conversation_subheader(item) -> bool:
+    try:
+        if await item.get_attribute("data-testid") == "conversation-subheader":
+            return True
+    except Exception:
+        pass
+    try:
+        if await item.locator(CONVERSATION_SUBHEADER_SELECTOR).count():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _visible_dialog(page):
-    """First VISIBLE role=dialog element, or None."""
+    """First VISIBLE role=dialog element, or None. Skips WhatsApp's own
+    in-chat conversation-subheader info panel (not a blocking overlay)."""
     try:
         loc = page.locator(DIALOG_SELECTOR)
         n = await loc.count()
         for i in range(min(n, 5)):
             item = loc.nth(i)
             try:
-                if await item.is_visible():
-                    return item
+                if not await item.is_visible():
+                    continue
+                if await _is_conversation_subheader(item):
+                    continue
+                return item
             except Exception:
                 continue
     except Exception:
@@ -127,8 +153,65 @@ async def _dialog_title_and_body(dialog) -> Tuple[str, str]:
     return title[:120], body[:300]
 
 
+_UNKNOWN_DIALOG_DIAGNOSTICS_JS = """
+el => {
+    const ancestry = [];
+    let node = el;
+    while (node && node !== document.body && node.nodeType === 1) {
+        const tid = node.getAttribute ? node.getAttribute('data-testid') : null;
+        ancestry.push({
+            tag: node.tagName.toLowerCase(),
+            id: node.id || null,
+            testid: tid,
+            cls: (node.className || '').toString().slice(0, 80),
+        });
+        node = node.parentElement;
+    }
+    ancestry.push({tag: 'body', id: null, testid: null, cls: null});
+
+    const rect = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+
+    const composer = document.querySelector('[data-testid="conversation-compose-box-input"]');
+    const searchBox = document.querySelector('#side [aria-label="Search or start a new chat"]')
+        || document.querySelector('[data-testid="chat-list-search"]');
+    const titleEl = document.querySelector('[data-testid="conversation-info-header-chat-title"]');
+
+    return {
+        ancestry_path: ancestry.map(a => a.testid ? ('@' + a.testid) : (a.id ? ('#' + a.id) : a.tag)).join(' < '),
+        ancestry_detail: ancestry,
+        bounding_rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+        computed_position: cs.position,
+        computed_z_index: cs.zIndex,
+        computed_pointer_events: cs.pointerEvents,
+        computed_visibility: cs.visibility,
+        composer_exists: !!composer,
+        composer_enabled: composer ? (composer.getAttribute('contenteditable') === 'true') : false,
+        search_box_exists: !!searchBox,
+        conversation_title: titleEl ? (titleEl.innerText || titleEl.textContent || '').trim() : null,
+    };
+}
+"""
+
+
+async def _unknown_dialog_diagnostics(dialog) -> Optional[dict]:
+    """DIAGNOSTIC ONLY — never affects control flow. Captures DOM ancestry to
+    <body>, bounding rect, computed position/z-index/pointer-events/visibility,
+    and page-level context (composer present/enabled, search box present,
+    current conversation title) at the moment an UNKNOWN_DIALOG is captured, so
+    future investigations don't require a follow-up production data pull."""
+    try:
+        return await dialog.evaluate(_UNKNOWN_DIALOG_DIAGNOSTICS_JS)
+    except Exception as exc:
+        logger.info("modals: unknown-dialog diagnostics capture failed: %s", exc)
+        return None
+
+
 async def _capture_dialog(page, dialog, context, title, body, reason) -> None:
-    """Screenshot + dialog HTML + text -> whatsapp_dom_snapshots (forensics)."""
+    """Screenshot + dialog HTML + text -> whatsapp_dom_snapshots (forensics).
+    For reason="unknown_dialog" only, also captures DIAGNOSTIC-ONLY ancestry/
+    geometry/context data (see _unknown_dialog_diagnostics) — never affects
+    detection or dismissal behavior."""
     shot = f"/tmp/dialog_{reason}.png"
     try:
         await page.screenshot(path=shot)
@@ -140,6 +223,13 @@ async def _capture_dialog(page, dialog, context, title, body, reason) -> None:
         html = await dialog.evaluate("el => el.outerHTML")
     except Exception as exc:
         logger.info("modals: dialog HTML capture failed: %s", exc)
+
+    diagnostics = None
+    if reason == "unknown_dialog":
+        diagnostics = await _unknown_dialog_diagnostics(dialog)
+        if diagnostics:
+            logger.info("modals: UNKNOWN_DIALOG diagnostics %s", json.dumps(diagnostics, ensure_ascii=False))
+
     doc = {
         "id": str(uuid.uuid4()),
         "reason": reason,
@@ -149,6 +239,7 @@ async def _capture_dialog(page, dialog, context, title, body, reason) -> None:
         "url": getattr(page, "url", ""),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "html_excerpt": (html or "")[:40000],
+        "diagnostics": diagnostics,
     }
     try:
         await get_db().whatsapp_dom_snapshots.insert_one(doc)

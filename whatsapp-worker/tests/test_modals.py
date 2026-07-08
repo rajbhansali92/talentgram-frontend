@@ -44,20 +44,34 @@ class FakeButton:
 
 class FakeDialog:
     """A role=dialog element with configurable body text and controls."""
-    def __init__(self, page, body, has_close=True, safe_labels=("Continue",)):
+    def __init__(self, page, body, has_close=True, safe_labels=("Continue",), testid=None):
         self._page, self._body = page, body
         self._has_close, self._safe = has_close, set(safe_labels)
+        self._testid = testid  # e.g. "conversation-subheader" to simulate the excluded panel
     async def is_visible(self):
         return self._page.dialog_open
     async def inner_text(self):
         return self._body
+    async def get_attribute(self, name):
+        return self._testid if name == "data-testid" else None
     def locator(self, sel):
         if "aria-label=\"Close\"" in sel:
             return FakeButton(self._page, "click:close", visible=self._has_close)
+        if sel == modals.CONVERSATION_SUBHEADER_SELECTOR:
+            return FakeButton(self._page, "none", visible=(self._testid == "conversation-subheader"))
         return FakeButton(self._page, "none", visible=False)  # no headings in fake
     def get_by_role(self, role, name=None, exact=False):
         return FakeButton(self._page, f"click:{name}", visible=(name in self._safe))
     async def evaluate(self, script):
+        if "getBoundingClientRect" in script:
+            return {
+                "ancestry_path": "body", "ancestry_detail": [],
+                "bounding_rect": {"x": 0, "y": 0, "width": 100, "height": 40},
+                "computed_position": "static", "computed_z_index": "auto",
+                "computed_pointer_events": "auto", "computed_visibility": "visible",
+                "composer_exists": True, "composer_enabled": True,
+                "search_box_exists": True, "conversation_title": "Test Group",
+            }
         return f"<div role=\"dialog\">{self._body}</div>"
 
 
@@ -82,9 +96,9 @@ class FakeKeyboard:
 class FakePage:
     url = "https://web.whatsapp.com/"
 
-    def __init__(self, body=None, dismisses_on=(), has_close=True, safe_labels=("Continue",)):
+    def __init__(self, body=None, dismisses_on=(), has_close=True, safe_labels=("Continue",), testid=None):
         self.dialog_open = body is not None
-        self.dialog = FakeDialog(self, body or "", has_close, safe_labels) if body else None
+        self.dialog = FakeDialog(self, body or "", has_close, safe_labels, testid) if body else None
         self.dismisses_on = set(dismisses_on)
         self.actions = []
         self.keyboard = FakeKeyboard(self)
@@ -165,6 +179,53 @@ def main():
     assert modals._is_recognized("", WHATS_NEW_BODY) is True
     assert modals._is_recognized("Delete this chat?", "This cannot be undone") is False
     print("7. recognition registry         -> whats-new matches, dangerous text does not")
+
+    # 8. WhatsApp's own "Group description" conversation-subheader panel is
+    #    role="dialog" but must be excluded from detection ENTIRELY — not
+    #    recognized, not dismissed, not clicked, not captured. Proves the P0
+    #    false-CHAT_NOT_OPENED fix: dismiss_blocking_dialogs must return True
+    #    (nothing blocking) with zero interactions and zero snapshots.
+    n_before = len(fake_db.docs)
+    p = FakePage(body="Group description\nWork links\n...\nRead more", dismisses_on=set(),
+                 testid="conversation-subheader")
+    assert run(modals.dismiss_blocking_dialogs(p, "test")) is True
+    assert p.actions == [], p.actions
+    assert len(fake_db.docs) == n_before  # never treated as a dialog -> nothing stored
+    print("8. conversation-subheader panel -> excluded entirely, True, zero interactions")
+
+    # 8b. _is_conversation_subheader matches both the self-attribute case and
+    #     the descendant case (WhatsApp nests the testid one level inside the
+    #     role="dialog" wrapper in production — confirmed from captured HTML).
+    class _SelfAttr:
+        def __init__(self, val):
+            self._val = val
+        async def get_attribute(self, name):
+            return self._val if name == "data-testid" else None
+        def locator(self, sel):
+            return FakeButton(p, "none", visible=False)
+
+    class _DescendantOnly:
+        async def get_attribute(self, name):
+            return None
+        def locator(self, sel):
+            return FakeButton(p, "none", visible=(sel == modals.CONVERSATION_SUBHEADER_SELECTOR))
+
+    assert run(modals._is_conversation_subheader(_SelfAttr("conversation-subheader"))) is True
+    assert run(modals._is_conversation_subheader(_SelfAttr("some-other-testid"))) is False
+    assert run(modals._is_conversation_subheader(_DescendantOnly())) is True
+    print("8b. _is_conversation_subheader  -> matches self-attribute and descendant cases")
+
+    # 9. A genuine UNKNOWN dialog still stores diagnostics (ancestry/rect/
+    #    computed-style/composer/search/title) alongside the existing capture —
+    #    additive only, does not change the False/zero-interaction outcome.
+    n_before = len(fake_db.docs)
+    p = FakePage(body="Log out of all devices?\nCancel\nOK", dismisses_on=set(), safe_labels=("OK",))
+    assert run(modals.dismiss_blocking_dialogs(p, "test")) is False
+    assert p.actions == []
+    diag = fake_db.docs[-1].get("diagnostics")
+    assert diag is not None and diag["composer_exists"] is True
+    assert "bounding_rect" in diag and "computed_position" in diag
+    print("9. UNKNOWN dialog diagnostics   -> ancestry/rect/style/context captured, behavior unchanged")
 
     print("\nALL MODAL-FRAMEWORK REGRESSION TESTS PASSED")
 

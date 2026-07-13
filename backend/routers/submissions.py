@@ -3102,7 +3102,8 @@ async def create_public_diagnostics(
         raise HTTPException(429, "Too many diagnostics reports — please slow down")
     
     # 5-minute duplicate suppression check
-    cutoff = _now() - timedelta(minutes=5)
+    from datetime import datetime, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     existing = await db.submission_diagnostics.find_one({
         "device_id": payload.device_id,
         "project_slug": payload.project_slug,

@@ -66,7 +66,9 @@ function shouldBypassCache(request) {
     'res.cloudinary.com',
     'r2.cloudflarestorage.com',
     'cloudflarestream.com',
-    'api.cloudinary.com'
+    'api.cloudinary.com',
+    'fonts.googleapis.com',
+    'fonts.gstatic.com'
   ];
   if (bypassHosts.some(host => url.hostname.includes(host))) {
     return true;
@@ -136,6 +138,7 @@ self.addEventListener('fetch', (event) => {
         return networkResponse;
       }).catch((err) => {
         console.warn('[Service Worker] Fetch failed for static asset:', request.url, err);
+        throw err;
       });
 
       return cachedResponse || fetchPromise;

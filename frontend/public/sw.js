@@ -1,4 +1,4 @@
-const CACHE_NAME = 'talentgram-pwa-v2';
+const CACHE_NAME = 'talentgram-pwa-v3';
 const OFFLINE_URL = '/offline';
 
 // Static assets to cache immediately during installation
@@ -101,14 +101,30 @@ function shouldBypassCache(request) {
 // Fetch Event: Cache strategy & offline fallback
 self.addEventListener('fetch', (event) => {
   const request = event.request;
+  const url = new URL(request.url);
+  const isSubmitPath = url.pathname.includes('/submit/');
+
+  if (isSubmitPath) {
+    console.log(`[SW-Audit] Intercepted request: ${request.url}, mode: ${request.mode}, destination: ${request.destination}`);
+  }
 
   if (shouldBypassCache(request)) {
+    if (isSubmitPath) {
+      console.log(`[SW-Audit] Request bypassed cache (shouldBypassCache: true)`);
+    }
     // Network only (bypass cache)
     return;
   }
 
+  if (isSubmitPath) {
+    console.log(`[SW-Audit] shouldBypassCache: false`);
+  }
+
   // Navigation requests: Network first with offline fallback
   if (request.mode === 'navigate') {
+    if (isSubmitPath) {
+      console.log(`[SW-Audit] Entering navigation handler (Network First)`);
+    }
     event.respondWith(
       fetch(request)
         .catch(() => {
@@ -117,6 +133,10 @@ self.addEventListener('fetch', (event) => {
         })
     );
     return;
+  }
+
+  if (isSubmitPath) {
+    console.log(`[SW-Audit] Entering static assets handler (Stale-While-Revalidate)`);
   }
 
   // Static assets (JS, CSS, images, webmanifest, fonts): Stale-While-Revalidate

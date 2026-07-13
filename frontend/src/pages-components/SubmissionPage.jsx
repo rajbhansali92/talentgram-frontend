@@ -53,6 +53,53 @@ import {
     calcAge,
 } from "@/lib/talentSchema";
 
+// --- Public project-load resilience -----------------------------------------
+// P0 fix: the loader previously rendered "Project not found." for EVERY fetch
+// failure (timeout, offline, CORS, 5xx, aborted), not just a genuine 404. These
+// helpers classify the failure, drive bounded retry with backoff for transient
+// errors, and emit structured diagnostics (no sensitive data).
+const PROJECT_LOAD_TIMEOUT_MS = 12_000;
+const PROJECT_LOAD_MAX_ATTEMPTS = 3;
+
+function classifyLoadError(err) {
+    if (err && err.response) {
+        const status = err.response.status;
+        if (status === 404) return { kind: "not_found", status, retry: false };
+        if (status >= 500) return { kind: "server_error", status, retry: true };
+        return { kind: "http_error", status, retry: false };
+    }
+    if (err && (err.code === "ECONNABORTED" || /timeout/i.test(err.message || ""))) {
+        return { kind: "timeout", status: null, retry: true };
+    }
+    if (err && (err.code === "ERR_CANCELED" || err.name === "CanceledError")) {
+        return { kind: "aborted", status: null, retry: false };
+    }
+    // Request made but no response: network / CORS / DNS / offline / conn reset.
+    return { kind: "network", status: null, retry: true };
+}
+
+function logProjectLoadFailure(info) {
+    try {
+        const nav = typeof navigator !== "undefined" ? navigator : {};
+        // eslint-disable-next-line no-console
+        console.error("[submit] project_load_failed", {
+            slug: info.slug,
+            requestUrl: info.requestUrl,
+            errorType: info.kind,
+            httpStatus: info.status ?? null,
+            timeout: info.kind === "timeout",
+            networkError: info.kind === "network",
+            attempt: info.attempt,
+            userAgent: nav.userAgent || null,
+            platform: nav.platform || null,
+        });
+    } catch (_) {
+        /* diagnostics must never throw */
+    }
+}
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const MAX_IMAGES = 8;
 // Phase 3: per-category portfolio image cap. Each of `image`/`indian`/
 // `western` is independently capped at this value, NOT combined.
@@ -132,6 +179,8 @@ function SubmissionPage() {
     const { slug } = useParams();
     const [project, setProject] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);   // {kind,status} — drives retryable vs not-found
+    const [reloadNonce, setReloadNonce] = useState(0);  // bumped by the Retry button
     const [saved, setSaved] = useState(() => readSaved(slug));
     const [showMaterial, setShowMaterial] = useState(false);
     const [activeLightboxImage, setActiveLightboxImage] = useState(null);
@@ -248,26 +297,58 @@ function SubmissionPage() {
     const westernImagesRef = useRef();
     const uploadsSectionRef = useRef();
 
-    // Load project
+    // Load project — classify failures, retry transient errors with backoff,
+    // and only ever surface "Project not found." on a genuine 404 (see render).
     useEffect(() => {
+        let cancelled = false;
+        const controller = new AbortController();
+        const requestUrl = `/public/projects/${slug}`;
+
         (async () => {
-            try {
-                const { data } = await axios.get(
-                    `/public/projects/${slug}`,
-                );
-                setProject(data);
-                // Snapshot commission on the form so it's preserved at submission time
-                setForm((f) => ({
-                    ...f,
-                    commission: f.commission || data.commission_percent || "",
-                }));
-            } catch {
-                toast.error("Project not found");
-            } finally {
-                setLoading(false);
+            setLoadError(null);
+            setLoading(true);
+            for (let attempt = 1; attempt <= PROJECT_LOAD_MAX_ATTEMPTS; attempt++) {
+                try {
+                    const { data } = await axios.get(requestUrl, {
+                        timeout: PROJECT_LOAD_TIMEOUT_MS,
+                        signal: controller.signal,
+                    });
+                    if (cancelled) return;
+                    setProject(data);
+                    // Snapshot commission on the form so it's preserved at submission time
+                    setForm((f) => ({
+                        ...f,
+                        commission: f.commission || data.commission_percent || "",
+                    }));
+                    setLoading(false);
+                    return;
+                } catch (err) {
+                    if (cancelled) return;
+                    const cls = classifyLoadError(err);
+                    logProjectLoadFailure({ ...cls, slug, requestUrl, attempt });
+                    if (cls.kind === "aborted") return;           // navigated away — stop silently
+                    if (!cls.retry) {                             // genuine 404 / other 4xx — terminal
+                        setLoadError(cls);
+                        setLoading(false);
+                        return;
+                    }
+                    if (attempt < PROJECT_LOAD_MAX_ATTEMPTS) {    // transient — backoff + retry
+                        await _sleep(400 * 2 ** (attempt - 1));   // 400ms, then 800ms
+                        if (cancelled) return;
+                        continue;
+                    }
+                    setLoadError(cls);                            // transient, retries exhausted
+                    setLoading(false);
+                    return;
+                }
             }
         })();
-    }, [slug]);
+
+        return () => {
+            cancelled = true;
+            controller.abort();
+        };
+    }, [slug, reloadNonce]);
 
     // Dismiss the portfolio-thumbnail action overlay when the user taps/clicks
     // anywhere outside of the active tile. Uses a deferred document listener
@@ -1619,9 +1700,29 @@ function SubmissionPage() {
         );
     }
     if (!project) {
+        // Only a genuine backend 404 is "Project not found." Every transient
+        // failure (network / timeout / offline / CORS / 5xx) shows a retryable
+        // message instead of misreporting the project as missing.
+        const isNotFound = loadError?.kind === "not_found";
         return (
-            <div className="min-h-dvh flex items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center">
-                <p>Project not found.</p>
+            <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center gap-4">
+                {isNotFound ? (
+                    <p>Project not found.</p>
+                ) : (
+                    <>
+                        <p className="max-w-sm">
+                            We couldn&apos;t load this project. Please check your internet
+                            connection and try again.
+                        </p>
+                        <button
+                            type="button"
+                            onClick={() => setReloadNonce((n) => n + 1)}
+                            className="px-4 py-2 rounded-lg bg-[#333333] text-white text-sm font-medium hover:opacity-90 active:scale-95 transition"
+                        >
+                            Try again
+                        </button>
+                    </>
+                )}
             </div>
         );
     }

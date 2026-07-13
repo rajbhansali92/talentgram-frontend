@@ -96,6 +96,7 @@ export const NAV_ITEMS = {
   adminOnly: [
     { to: "/admin/users", label: "Users", icon: Shield, adminOnly: true },
     { to: "/admin/storage", label: "Storage", icon: Cloud, adminOnly: true },
+    { to: "/admin/diagnostics", label: "Diagnostics", icon: AlertCircle, adminOnly: true },
   ],
 };
 

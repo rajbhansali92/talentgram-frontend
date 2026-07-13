@@ -453,6 +453,17 @@ async def on_startup():
         await db.feedback.create_index([("project_id", 1), ("status", 1)])
         await db.feedback.create_index([("created_at", -1)])
 
+        # Submission diagnostics indexes
+        try:
+            await db.submission_diagnostics.create_index("created_at", expireAfterSeconds=30 * 24 * 3600)
+            await db.submission_diagnostics.create_index([("project_slug", 1)])
+            await db.submission_diagnostics.create_index([("failure_type", 1)])
+            await db.submission_diagnostics.create_index([("response_status", 1)])
+            await db.submission_diagnostics.create_index([("user_agent", 1)])
+            logger.info("Submission diagnostics indexes ready")
+        except Exception as _e:
+            logger.warning("Submission diagnostics indexes creation failed: %s", _e)
+
         # Marketing Hub / CRM indexes
         await db.clients.create_index([("last_contacted_date", -1)])
         # WhatsApp CRM targeting (Slice 2): filter by contact_type / tags at scale.

@@ -3015,3 +3015,265 @@ async def test_internal_notification_endpoint(admin: dict = Depends(current_admi
         "group_name": group_name,
     }
 
+
+# ============================================================================
+# Submission Diagnostics & Telemetry Pipeline
+# ============================================================================
+
+class SubmissionDiagnosticIn(BaseModel):
+    device_id: str
+    project_slug: str
+    request_url: str
+    page_url: str
+    axios_code: Optional[str] = None
+    axios_message: Optional[str] = None
+    response_status: Optional[int] = None
+    response_headers: Optional[Dict[str, str]] = None
+    is_timeout: bool
+    is_network: bool
+    is_cancellation: bool
+    user_agent: str
+    platform: Optional[str] = None
+    language: Optional[str] = None
+    is_online: Optional[bool] = None
+    connection_info: Optional[Dict[str, Any]] = None
+    viewport_width: int
+    viewport_height: int
+    device_pixel_ratio: float
+    referrer: Optional[str] = None
+    is_whatsapp: bool
+    is_instagram: bool
+    is_facebook: bool
+    is_safari: bool
+    is_chrome: bool
+    is_in_app: bool
+    sw_controller_present: bool
+    sw_registration_status: str
+    sw_version: Optional[str] = None
+    sw_script_url: Optional[str] = None
+    sw_waiting_present: bool
+    sw_installing_present: bool
+    app_version: Optional[str] = None
+    build_timestamp: Optional[str] = None
+    frontend_build_id: Optional[str] = None
+    commit_sha: Optional[str] = None
+    environment: str
+    time_taken_ms: int
+    retry_attempt_count: int
+    retry_succeeded: bool
+    failure_type: str
+    browser: Optional[str] = None
+    browser_version: Optional[str] = None
+    os: Optional[str] = None
+    os_version: Optional[str] = None
+    device_type: Optional[str] = None
+    x_railway_request_id: Optional[str] = None
+    x_request_id: Optional[str] = None
+    traceparent: Optional[str] = None
+
+
+_DIAGNOSTICS_BUCKET: Dict[str, List[float]] = {}
+_DIAGNOSTICS_WINDOW = 3600.0  # 1 hour
+_DIAGNOSTICS_LIMIT = 10     # max 10 requests per IP per hour
+
+
+def _diagnostics_rate_limit_ok(request: Request) -> bool:
+    now = time.monotonic()
+    ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+    bucket = _DIAGNOSTICS_BUCKET.setdefault(ip, [])
+    cutoff = now - _DIAGNOSTICS_WINDOW
+    bucket[:] = [t for t in bucket if t > cutoff]
+    if len(bucket) >= _DIAGNOSTICS_LIMIT:
+        return False
+    bucket.append(now)
+    return True
+
+
+@router.post("/public/diagnostics")
+async def create_public_diagnostics(
+    payload: SubmissionDiagnosticIn,
+    request: Request
+):
+    if not _diagnostics_rate_limit_ok(request):
+        raise HTTPException(429, "Too many diagnostics reports — please slow down")
+    
+    # 5-minute duplicate suppression check
+    cutoff = _now() - timedelta(minutes=5)
+    existing = await db.submission_diagnostics.find_one({
+        "device_id": payload.device_id,
+        "project_slug": payload.project_slug,
+        "failure_type": payload.failure_type,
+        "axios_message": payload.axios_message,
+        "created_at": {"$gte": cutoff}
+    })
+    if existing:
+        return {"ok": True, "suppressed": True}
+
+    doc = payload.model_dump()
+    doc["created_at"] = _now()  # timestamp
+    
+    # Store in MongoDB
+    await db.submission_diagnostics.insert_one(doc)
+    return {"ok": True}
+
+
+@router.get("/admin/diagnostics")
+async def list_admin_diagnostics(
+    project_slug: Optional[str] = None,
+    failure_type: Optional[str] = None,
+    response_status: Optional[int] = None,
+    retry_succeeded: Optional[bool] = None,
+    device: Optional[str] = None,  # whatsapp, instagram, facebook, in_app
+    browser: Optional[str] = None,  # safari, chrome
+    date_from: Optional[str] = None, # ISO string
+    date_to: Optional[str] = None,   # ISO string
+    page: int = 1,
+    size: int = 50,
+    admin: dict = Depends(current_team_or_admin)
+):
+    query = {}
+    if project_slug:
+        query["project_slug"] = project_slug
+    if failure_type:
+        query["failure_type"] = failure_type
+    if response_status is not None:
+        query["response_status"] = response_status
+    if retry_succeeded is not None:
+        query["retry_succeeded"] = retry_succeeded
+    
+    if device:
+        if device == "whatsapp":
+            query["is_whatsapp"] = True
+        elif device == "instagram":
+            query["is_instagram"] = True
+        elif device == "facebook":
+            query["is_facebook"] = True
+        elif device == "in_app":
+            query["is_in_app"] = True
+            
+    if browser:
+        if browser == "safari":
+            query["is_safari"] = True
+        elif browser == "chrome":
+            query["is_chrome"] = True
+
+    if date_from or date_to:
+        date_q = {}
+        if date_from:
+            date_q["$gte"] = date_from
+        if date_to:
+            date_q["$lte"] = date_to
+        query["created_at"] = date_q
+
+    cursor = db.submission_diagnostics.find(query, {"_id": 0}).sort("created_at", -1)
+    skip = (page - 1) * size
+    total = await db.submission_diagnostics.count_documents(query)
+    docs = await cursor.skip(skip).limit(size).to_list(length=size)
+    return {"total": total, "results": docs, "page": page, "size": size}
+
+
+@router.get("/admin/diagnostics/summary")
+async def get_diagnostics_summary(
+    admin: dict = Depends(current_team_or_admin)
+):
+    pipeline = [
+        {
+            "$group": {
+                "_id": {
+                    "failure_type": "$failure_type",
+                    "axios_message": "$axios_message",
+                    "response_status": "$response_status",
+                },
+                "occurrences": {"$sum": 1},
+                "first_seen": {"$min": "$created_at"},
+                "last_seen": {"$max": "$created_at"},
+                "projects": {"$addToSet": "$project_slug"},
+                "devices": {
+                    "$push": {
+                        "is_whatsapp": "$is_whatsapp",
+                        "is_instagram": "$is_instagram",
+                        "is_facebook": "$is_facebook",
+                        "is_safari": "$is_safari",
+                        "is_chrome": "$is_chrome",
+                        "is_in_app": "$is_in_app",
+                        "user_agent": "$user_agent"
+                    }
+                }
+            }
+        },
+        {"$sort": {"occurrences": -1}}
+    ]
+    raw_results = await db.submission_diagnostics.aggregate(pipeline).to_list(length=200)
+    
+    formatted = []
+    for r in raw_results:
+        devices_set = set()
+        for d in r.get("devices", []):
+            if d.get("is_whatsapp"):
+                devices_set.add("WhatsApp WebView")
+            elif d.get("is_instagram"):
+                devices_set.add("Instagram WebView")
+            elif d.get("is_facebook"):
+                devices_set.add("Facebook WebView")
+            elif d.get("is_in_app"):
+                devices_set.add("In-App Browser")
+            elif d.get("is_safari"):
+                devices_set.add("Safari")
+            elif d.get("is_chrome"):
+                devices_set.add("Chrome")
+            else:
+                devices_set.add("Unknown Browser")
+        
+        formatted.append({
+            "failure_type": r["_id"].get("failure_type"),
+            "axios_message": r["_id"].get("axios_message"),
+            "response_status": r["_id"].get("response_status"),
+            "occurrences": r["occurrences"],
+            "first_seen": r["first_seen"],
+            "last_seen": r["last_seen"],
+            "projects": r["projects"],
+            "affected_devices": list(devices_set)
+        })
+    return formatted
+
+
+@router.get("/admin/diagnostics/metrics")
+async def get_diagnostics_metrics(
+    admin: dict = Depends(current_team_or_admin)
+):
+    total = await db.submission_diagnostics.count_documents({})
+    recovered = await db.submission_diagnostics.count_documents({"retry_succeeded": True})
+    
+    pipeline_types = [
+        {"$group": {"_id": "$failure_type", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}
+    ]
+    type_counts = await db.submission_diagnostics.aggregate(pipeline_types).to_list(length=100)
+    
+    pipeline_daily = [
+        {
+            "$project": {
+                "date": {"$substr": ["$created_at", 0, 10]}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$date",
+                "count": {"$sum": 1}
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
+    daily_counts = await db.submission_diagnostics.aggregate(pipeline_daily).to_list(length=30)
+    
+    return {
+        "total_failures": total,
+        "recovered_failures": recovered,
+        "failure_types": [{"type": item["_id"] or "unknown", "count": item["count"]} for item in type_counts],
+        "daily_failures": [{"date": item["_id"] or "unknown", "count": item["count"]} for item in daily_counts]
+    }
+
+

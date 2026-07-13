@@ -78,6 +78,204 @@ function classifyLoadError(err) {
     return { kind: "network", status: null, retry: true };
 }
 
+function getDeviceId() {
+    try {
+        let did = localStorage.getItem("tg_device_id");
+        if (!did) {
+            did = "dev_" + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+            localStorage.setItem("tg_device_id", did);
+        }
+        return did;
+    } catch (_) {
+        return "unknown_device";
+    }
+}
+
+function parseUserAgent(ua) {
+    let browser = "Unknown Browser";
+    let browserVersion = "unknown";
+    let os = "Unknown OS";
+    let osVersion = "unknown";
+    let deviceType = "Desktop";
+
+    if (/mobi|android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua)) {
+        deviceType = "Mobile";
+        if (/ipad|tablet/i.test(ua)) {
+            deviceType = "Tablet";
+        }
+    }
+
+    if (/whatsapp/i.test(ua)) {
+        browser = "WhatsApp WebView";
+    } else if (/instagram/i.test(ua)) {
+        browser = "Instagram WebView";
+    } else if (/fb_iab|fbav/i.test(ua)) {
+        browser = "Facebook WebView";
+    } else if (/messenger/i.test(ua)) {
+        browser = "Messenger WebView";
+    } else if (/telegram/i.test(ua)) {
+        browser = "Telegram WebView";
+    } else if (/chrome|crios/i.test(ua)) {
+        browser = "Chrome";
+        const match = ua.match(/(?:chrome|crios)\/([0-9.]+)/i);
+        if (match) browserVersion = match[1];
+    } else if (/safari/i.test(ua) && !/chrome|crios/i.test(ua)) {
+        browser = "Safari";
+        const match = ua.match(/version\/([0-9.]+)/i);
+        if (match) browserVersion = match[1];
+    } else if (/firefox|fxios/i.test(ua)) {
+        browser = "Firefox";
+        const match = ua.match(/(?:firefox|fxios)\/([0-9.]+)/i);
+        if (match) browserVersion = match[1];
+    }
+
+    if (/iphone|ipad|ipod/i.test(ua)) {
+        os = "iOS";
+        const match = ua.match(/os\s+([0-9_]+)/i);
+        if (match) osVersion = match[1].replace(/_/g, ".");
+    } else if (/android/i.test(ua)) {
+        os = "Android";
+        const match = ua.match(/android\s+([0-9.]+)/i);
+        if (match) osVersion = match[1];
+    } else if (/windows/i.test(ua)) {
+        os = "Windows";
+        const match = ua.match(/phone\s+([0-9.]+)/i) || ua.match(/nt\s+([0-9.]+)/i);
+        if (match) osVersion = match[1];
+    } else if (/macintosh/i.test(ua)) {
+        os = "macOS";
+        const match = ua.match(/os\s+x\s+([0-9_]+)/i);
+        if (match) osVersion = match[1].replace(/_/g, ".");
+    }
+
+    return { browser, browserVersion, os, osVersion, deviceType };
+}
+
+async function sendDiagnostics({ attempt, retry_succeeded, kind, status, time_taken_ms, err, slug, requestUrl }) {
+    try {
+        const nav = typeof navigator !== "undefined" ? navigator : {};
+        const conn = nav.connection || nav.mozConnection || nav.webkitConnection || {};
+        const scr = typeof screen !== "undefined" ? screen : {};
+        const win = typeof window !== "undefined" ? window : {};
+        
+        const ua = nav.userAgent || "";
+        const parsedUA = parseUserAgent(ua);
+
+        const isWhatsApp = /whatsapp/i.test(ua);
+        const isInstagram = /instagram/i.test(ua);
+        const isFacebook = /fb_iab|fbav/i.test(ua);
+        const isMessenger = /messenger/i.test(ua);
+        const isTelegram = /telegram/i.test(ua);
+        const isChrome = parsedUA.browser === "Chrome";
+        const isSafari = parsedUA.browser === "Safari";
+        const isInApp = isWhatsApp || isInstagram || isFacebook || isMessenger || isTelegram;
+
+        let xRailwayRequestId = null;
+        let xRequestId = null;
+        let traceparent = null;
+        let safeHeaders = {};
+
+        if (err && err.response) {
+            const h = err.response.headers || {};
+            const whitelist = ["content-type", "server", "x-railway-request-id", "x-request-id", "traceparent", "cache-control"];
+            whitelist.forEach(key => {
+                if (h[key]) safeHeaders[key] = h[key];
+            });
+            xRailwayRequestId = h["x-railway-request-id"] || null;
+            xRequestId = h["x-request-id"] || null;
+            traceparent = h["traceparent"] || null;
+        }
+
+        let swControllerPresent = false;
+        let swRegistrationStatus = "unsupported";
+        let swScriptUrl = null;
+        let swWaitingPresent = false;
+        let swInstallingPresent = false;
+
+        if (typeof navigator !== "undefined" && navigator.serviceWorker) {
+            swControllerPresent = !!navigator.serviceWorker.controller;
+            if (navigator.serviceWorker.controller) {
+                swScriptUrl = navigator.serviceWorker.controller.scriptURL || null;
+            }
+            try {
+                const regs = await navigator.serviceWorker.getRegistrations();
+                swRegistrationStatus = regs.length > 0 ? "active" : "inactive";
+                if (regs.length > 0) {
+                    swWaitingPresent = !!regs[0].waiting;
+                    swInstallingPresent = !!regs[0].installing;
+                }
+            } catch (_) {
+                swRegistrationStatus = "error";
+            }
+        }
+
+        const payload = {
+            device_id: getDeviceId(),
+            project_slug: slug,
+            request_url: requestUrl,
+            page_url: win.location?.href || "",
+            axios_code: err?.code || null,
+            axios_message: err?.message || null,
+            response_status: status ?? null,
+            response_headers: safeHeaders,
+            is_timeout: kind === "timeout",
+            is_network: kind === "network",
+            is_cancellation: kind === "aborted" || (err && (err.code === "ERR_CANCELED" || err.name === "CanceledError")),
+            user_agent: ua,
+            platform: nav.platform || null,
+            language: nav.language || null,
+            is_online: nav.onLine ?? null,
+            connection_info: {
+                effectiveType: conn.effectiveType || null,
+                downlink: conn.downlink || null,
+                rtt: conn.rtt || null,
+                saveData: conn.saveData || null,
+            },
+            viewport_width: win.innerWidth || 0,
+            viewport_height: win.innerHeight || 0,
+            device_pixel_ratio: win.devicePixelRatio || 1,
+            referrer: document.referrer || null,
+            is_whatsapp: isWhatsApp,
+            is_instagram: isInstagram,
+            is_facebook: isFacebook,
+            is_safari: isSafari,
+            is_chrome: isChrome,
+            is_in_app: isInApp,
+            sw_controller_present: swControllerPresent,
+            sw_registration_status: swRegistrationStatus,
+            sw_version: "talentgram-pwa-v4",
+            sw_script_url: swScriptUrl,
+            sw_waiting_present: swWaitingPresent,
+            sw_installing_present: swInstallingPresent,
+            app_version: "1.0.0",
+            build_timestamp: new Date().toISOString(),
+            frontend_build_id: "production-build",
+            commit_sha: process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA || null,
+            environment: process.env.NODE_ENV || "production",
+            time_taken_ms: time_taken_ms,
+            retry_attempt_count: attempt,
+            retry_succeeded: retry_succeeded,
+            failure_type: kind,
+            browser: parsedUA.browser,
+            browser_version: parsedUA.browserVersion,
+            os: parsedUA.os,
+            os_version: parsedUA.osVersion,
+            device_type: parsedUA.deviceType,
+            x_railway_request_id: xRailwayRequestId,
+            x_request_id: xRequestId,
+            traceparent: traceparent
+        };
+
+        fetch("/api/public/diagnostics", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).catch(() => { /* silent ignore */ });
+
+    } catch (_) {
+        // diagnostics must never crash the page
+    }
+}
+
 function logProjectLoadFailure(info) {
     try {
         const nav = typeof navigator !== "undefined" ? navigator : {};
@@ -303,6 +501,7 @@ function SubmissionPage() {
         let cancelled = false;
         const controller = new AbortController();
         const requestUrl = `/public/projects/${slug}`;
+        const startTime = Date.now();
 
         (async () => {
             setLoadError(null);
@@ -321,15 +520,39 @@ function SubmissionPage() {
                         commission: f.commission || data.commission_percent || "",
                     }));
                     setLoading(false);
+                    if (attempt > 1) {
+                        // Log recovery diagnostics (attempt > 1 eventually succeeded)
+                        sendDiagnostics({
+                            attempt,
+                            retry_succeeded: true,
+                            kind: "success",
+                            status: 200,
+                            time_taken_ms: Date.now() - startTime,
+                            err: null,
+                            slug,
+                            requestUrl
+                        });
+                    }
                     return;
                 } catch (err) {
                     if (cancelled) return;
                     const cls = classifyLoadError(err);
                     logProjectLoadFailure({ ...cls, slug, requestUrl, attempt });
                     if (cls.kind === "aborted") return;           // navigated away — stop silently
+                    
                     if (!cls.retry) {                             // genuine 404 / other 4xx — terminal
                         setLoadError(cls);
                         setLoading(false);
+                        sendDiagnostics({
+                            attempt,
+                            retry_succeeded: false,
+                            kind: cls.kind,
+                            status: cls.status,
+                            time_taken_ms: Date.now() - startTime,
+                            err,
+                            slug,
+                            requestUrl
+                        });
                         return;
                     }
                     if (attempt < PROJECT_LOAD_MAX_ATTEMPTS) {    // transient — backoff + retry
@@ -339,6 +562,16 @@ function SubmissionPage() {
                     }
                     setLoadError(cls);                            // transient, retries exhausted
                     setLoading(false);
+                    sendDiagnostics({
+                        attempt,
+                        retry_succeeded: false,
+                        kind: cls.kind,
+                        status: cls.status,
+                        time_taken_ms: Date.now() - startTime,
+                        err,
+                        slug,
+                        requestUrl
+                    });
                     return;
                 }
             }

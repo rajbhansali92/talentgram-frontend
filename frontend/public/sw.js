@@ -1,4 +1,4 @@
-const CACHE_NAME = 'talentgram-pwa-v1';
+const CACHE_NAME = 'talentgram-pwa-v2';
 const OFFLINE_URL = '/offline';
 
 // Static assets to cache immediately during installation

@@ -2,6 +2,7 @@ import axios from "axios";
 
 // ✅ STEP 1: Backend URL with fallback (CRITICAL FIX)
 const BACKEND_URL =
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
     process.env.REACT_APP_BACKEND_URL ||
     "https://talentgram-app-production.up.railway.app";
 

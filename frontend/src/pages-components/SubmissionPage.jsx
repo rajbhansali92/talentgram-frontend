@@ -1704,24 +1704,38 @@ function SubmissionPage() {
         // failure (network / timeout / offline / CORS / 5xx) shows a retryable
         // message instead of misreporting the project as missing.
         const isNotFound = loadError?.kind === "not_found";
+        
+        const getErrorMessage = () => {
+            if (!loadError) return "We couldn't load this project. Please try again.";
+            switch (loadError.kind) {
+                case "not_found":
+                    return "Project not found.";
+                case "timeout":
+                    return "Request timed out. Please check your connection and try again.";
+                case "server_error":
+                    return "The server encountered an error (5xx). Please try again later.";
+                case "http_error":
+                    return `HTTP error loading project (Status: ${loadError.status}).`;
+                case "network":
+                    return "Network connection failed. Please check if you are online and try again.";
+                case "aborted":
+                    return "Request was cancelled.";
+                default:
+                    return "We couldn't load this project. Please check your connection and try again.";
+            }
+        };
+
         return (
             <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center gap-4">
-                {isNotFound ? (
-                    <p>Project not found.</p>
-                ) : (
-                    <>
-                        <p className="max-w-sm">
-                            We couldn&apos;t load this project. Please check your internet
-                            connection and try again.
-                        </p>
-                        <button
-                            type="button"
-                            onClick={() => setReloadNonce((n) => n + 1)}
-                            className="px-4 py-2 rounded-lg bg-[#333333] text-white text-sm font-medium hover:opacity-90 active:scale-95 transition"
-                        >
-                            Try again
-                        </button>
-                    </>
+                <p className="max-w-sm font-medium">{getErrorMessage()}</p>
+                {!isNotFound && (
+                    <button
+                        type="button"
+                        onClick={() => setReloadNonce((n) => n + 1)}
+                        className="px-4 py-2 rounded-lg bg-[#333333] text-white text-sm font-medium hover:opacity-90 active:scale-95 transition"
+                    >
+                        Try again
+                    </button>
                 )}
             </div>
         );

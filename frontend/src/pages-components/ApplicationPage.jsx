@@ -483,14 +483,20 @@ export default function ApplicationPage() {
 
             if (data.existing) {
                 if (data.token && data.application_id) {
+                    // Restore identity fields with priority:
+                    // 1. Talent Profile (canonical, db.talents)
+                    // 2. Draft Application form_data (set when the draft was
+                    //    first created — present even with no talent profile)
+                    // 3. Empty string (recovery section below will surface).
+                    const draftFd = data.application?.form_data || {};
                     const ref = {
                         aid: data.application_id,
                         token: data.token,
                         basics: {
-                            first_name: data.talent?.first_name || "",
-                            last_name: data.talent?.last_name || "",
+                            first_name: data.talent?.first_name || draftFd.first_name || "",
+                            last_name: data.talent?.last_name || draftFd.last_name || "",
                             email: data.email,
-                            phone: data.talent?.phone || ""
+                            phone: data.talent?.phone || draftFd.phone || ""
                         },
                         savedAt: Date.now()
                     };

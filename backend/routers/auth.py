@@ -794,6 +794,13 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "application_id": application["id"],
                 "status": application.get("status", "draft"),
                 "talent": (await _get_talent_profile_response(talent)) if talent else None,
+                # Draft identity fallback: the applicant's own in-progress
+                # application already has form_data.first_name/last_name (set
+                # when the draft was first created) even when no canonical
+                # talent profile exists yet. Included so the frontend can
+                # restore identity from the draft before falling back to an
+                # empty value.
+                "application": {"form_data": application.get("form_data") or {}},
                 "portal_token": (await _grant_portal_session(talent)) if talent else None,
             }
         elif talent:

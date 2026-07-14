@@ -406,7 +406,13 @@ export default function SubmissionReviewCenter() {
     const [fv, setFv] = useState({});
     const [mediaList, setMediaList] = useState([]);
     const [talentPortfolioMedia, setTalentPortfolioMedia] = useState([]);
-    const [isPreviewMode, setIsPreviewMode] = useState(false);
+    // View tabs: "recruiter" (editable, default) | "client" (preview) |
+    // "original" (read-only view of the talent's original submission).
+    // `isPreviewMode` is derived so all existing Recruiter/Client rendering
+    // continues to behave exactly as before.
+    const [viewMode, setViewMode] = useState("recruiter");
+    const isPreviewMode = viewMode === "client";
+    const isOriginalMode = viewMode === "original";
     const [saving, setSaving] = useState(false);
     // Persistence fix: auto-save visibility changes. `autoSaveStatus` drives a
     // subtle indicator; `curationBaselineRef` holds the signature of the
@@ -1239,7 +1245,7 @@ export default function SubmissionReviewCenter() {
 
                         {/* Mode selectors */}
                         <div className="flex items-center gap-3">
-                            {!isPreviewMode && (
+                            {viewMode === "recruiter" && (
                                 <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[10px] font-mono uppercase tracking-wider select-none">
                                                                     <button
                                         type="button"
@@ -1281,17 +1287,25 @@ export default function SubmissionReviewCenter() {
                             <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02]">
                                 <button
                                     type="button"
-                                    onClick={() => setIsPreviewMode(false)}
-                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${!isPreviewMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                    onClick={() => setViewMode("original")}
+                                    title="Read-only: the talent's original submission"
+                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${isOriginalMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
                                 >
-                                    Recruiter view
+                                    Talent Submission
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => setIsPreviewMode(true)}
+                                    onClick={() => setViewMode("recruiter")}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${viewMode === "recruiter" ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                >
+                                    Recruiter
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setViewMode("client")}
                                     className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${isPreviewMode ? "bg-amber-50 text-white shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
                                 >
-                                    Client view
+                                    Client Preview
                                 </button>
                             </div>
                         </div>
@@ -1397,6 +1411,88 @@ export default function SubmissionReviewCenter() {
                                         </div>
                                     )}
                                 </div>
+
+                                {/* ── ORIGINAL VIEW (read-only) ──
+                                    Shows the talent's ORIGINAL submission. Prefers
+                                    `original_form_data` (saved on the recruiter's first
+                                    edit); falls back to `form_data` for legacy submissions
+                                    that have never been edited. No edit controls, no save. */}
+                                {isOriginalMode ? (
+                                    (() => {
+                                        const od = normalize(detail?.original_form_data ?? detail?.form_data ?? {});
+                                        const isFallback = detail?.original_form_data === undefined || detail?.original_form_data === null;
+                                        const fmt = (key, val) => {
+                                            if (key === "location") return formatLocation(val);
+                                            if (Array.isArray(val)) return val.join(", ");
+                                            return (val ?? "") === "" ? "—" : String(val);
+                                        };
+                                        const readCell = (label, value) => (
+                                            <div key={label} className="min-w-0">
+                                                <p className="text-[10px] text-black/45 tracking-widest uppercase mb-1">{label}</p>
+                                                <p className="text-sm font-medium text-black/85 break-words">{value || "—"}</p>
+                                            </div>
+                                        );
+                                        const availText = od.availability?.status
+                                            ? `${od.availability.status === "yes" ? "Available" : "Unavailable"}${od.availability.note ? ` — ${od.availability.note}` : ""}`
+                                            : "—";
+                                        const budgetText = od.budget?.status
+                                            ? `${od.budget.status === "accept" ? "Accepts Day Rate" : "Expected Day Rate"}${od.budget.value ? ` — ${od.budget.value}` : ""}`
+                                            : "—";
+                                        return (
+                                            <div className="space-y-8">
+                                                <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-black/45 bg-[#fafaf9] border border-black/[0.06] rounded-lg px-3 py-2">
+                                                    <Lock className="w-3.5 h-3.5" />
+                                                    Read-only — the talent's original submission{isFallback ? " (no edits yet; showing current submission)" : ""}.
+                                                </div>
+
+                                                {/* Personal Information */}
+                                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
+                                                    <div className="border-b border-black/[0.05] pb-3">
+                                                        <p className="eyebrow">Personal Information</p>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-1">
+                                                        {PERSONAL_FIELDS.map((f) => readCell(f.label, fmt(f.key, od[f.key])))}
+                                                    </div>
+                                                </section>
+
+                                                {/* Professional Information */}
+                                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
+                                                    <div className="border-b border-black/[0.05] pb-3">
+                                                        <p className="eyebrow">Professional Information</p>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-6 py-1">
+                                                        {PROFESSIONAL_FIELDS.map((f) => readCell(f.label, fmt(f.key, od[f.key])))}
+                                                    </div>
+                                                </section>
+
+                                                {/* Project Information */}
+                                                <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm space-y-4">
+                                                    <div className="border-b border-black/[0.05] pb-3">
+                                                        <p className="eyebrow">Project Information</p>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 py-1">
+                                                        {readCell("Availability", availText)}
+                                                        {readCell("Budget", budgetText)}
+                                                    </div>
+                                                    {Array.isArray(project?.custom_questions) && project.custom_questions.length > 0 && (
+                                                        <div className="border-t border-black/[0.08] pt-4 space-y-3">
+                                                            <p className="eyebrow text-black/75">Application Answers</p>
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                                {project.custom_questions.map((q) => (
+                                                                    <div key={q.id} className="text-sm p-3 rounded-lg border bg-[#fafaf9] border-black/[0.03]">
+                                                                        <div className="text-black/45 text-[10px] uppercase tracking-wider font-semibold mb-1.5">{q.question}</div>
+                                                                        <div className="text-black/85 font-medium break-words">{(od.custom_answers || {})[q.id] || "—"}</div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </section>
+                                            </div>
+                                        );
+                                    })()
+                                ) : (
+                                <>
 
                                 {/* Issue #9 / #1: the Google Drive folder link and the
                                     Refresh Client Snapshot action were removed. Media is
@@ -2160,12 +2256,14 @@ export default function SubmissionReviewCenter() {
                                         )}
                                     </section>
                                 )}
+                                </>
+                                )}
                             </div>
                         )}
                     </div>
 
-                    {/* Sticky Decision Footer */}
-                    {detail && !isPreviewMode && (
+                    {/* Sticky Decision Footer — hidden in read-only Original view */}
+                    {detail && !isPreviewMode && !isOriginalMode && (
                         <footer className="px-6 py-5 bg-white border-t-2 border-black/[0.08] shrink-0 flex flex-col gap-4 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-20">
                             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
                                 <div className="flex-1">

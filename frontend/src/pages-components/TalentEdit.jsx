@@ -795,21 +795,25 @@ export default function TalentEdit() {
                     </label>
                     <div data-testid="field-age-auto">
                         <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
-                            Age (auto)
+                            Age
                         </span>
-                        <div className="mt-2 border-b border-[#eaeaea] py-2.5 text-sm flex items-center justify-between">
-                            <span
-                                data-testid="computed-age"
-                                className="font-display text-base text-black/85"
-                            >
-                                {computedAge ?? "—"}
-                            </span>
-                            <span className="text-[10px] text-neutral-500 font-medium">
-                                {talent.dob
-                                    ? "auto-computed"
-                                    : "set DOB to auto-calc"}
-                            </span>
-                        </div>
+                        <input
+                            type="number"
+                            min="0"
+                            max="120"
+                            value={talent.dob ? (calcAge(talent.dob) ?? "") : (talent.age ?? "")}
+                            onChange={(e) => {
+                                const val = e.target.value;
+                                updateTalent({ age: val === "" ? null : Math.min(120, Math.max(0, parseInt(val, 10) || 0)) });
+                            }}
+                            disabled={!isEditing || !!talent.dob}
+                            placeholder="e.g. 24"
+                            data-testid="talent-age-input"
+                            className="mt-2 w-full bg-transparent border-b border-[#eaeaea] focus:border-black/40 outline-none py-2.5 text-sm text-black/85 disabled:opacity-70"
+                        />
+                        <p className="mt-1 text-[10px] text-neutral-500 font-mono">
+                            {talent.dob ? "Auto-calculated from Date of Birth." : "Enter age if Date of Birth is unknown."}
+                        </p>
                     </div>
 
                     <div data-testid="field-gender">

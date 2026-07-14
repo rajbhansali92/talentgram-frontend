@@ -42,6 +42,18 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
     create email-less talents (e.g. legacy) — those bypass the dedup.
     """
     doc = payload.model_dump()
+    # Sanitize and validate age / dob
+    dob = doc.get("dob")
+    if dob:
+        from core import compute_age
+        doc["age"] = compute_age(dob)
+    else:
+        # Validate manual age
+        age = doc.get("age")
+        if age is not None:
+            if not (0 <= age <= 120):
+                raise HTTPException(400, "Age must be between 0 and 120")
+
     # FEATURE 1: whatsapp_group_name is admin-only — non-admins cannot set it.
     if admin.get("role") != "admin":
         doc["whatsapp_group_name"] = None
@@ -434,6 +446,18 @@ async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
 @router.put("/talents/{tid}", response_model=TalentOut)
 async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
     update = payload.model_dump()
+    # Sanitize and validate age / dob
+    dob = update.get("dob")
+    if dob:
+        from core import compute_age
+        update["age"] = compute_age(dob)
+    else:
+        # Validate manual age
+        age = update.get("age")
+        if age is not None:
+            if not (0 <= age <= 120):
+                raise HTTPException(400, "Age must be between 0 and 120")
+
     # FEATURE 1: whatsapp_group_name is admin-only. Drop it for non-admins so the
     # existing value is preserved (not overwritten).
     if admin.get("role") != "admin":

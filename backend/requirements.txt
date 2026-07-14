@@ -136,3 +136,5 @@ cloudinary==1.44.2
 fpdf2==2.8.7
 fonttools==4.63.0
 defusedxml==0.7.1
+openpyxl==3.1.5
+et-xmlfile==2.0.0

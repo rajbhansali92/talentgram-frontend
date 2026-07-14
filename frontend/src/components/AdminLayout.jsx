@@ -21,6 +21,7 @@ import {
   ListTodo,
   Cloud,
   MessageCircle,
+  FileSpreadsheet,
 } from "lucide-react";
 
 // ============================================================================
@@ -97,6 +98,7 @@ export const NAV_ITEMS = {
     { to: "/admin/users", label: "Users", icon: Shield, adminOnly: true },
     { to: "/admin/storage", label: "Storage", icon: Cloud, adminOnly: true },
     { to: "/admin/diagnostics", label: "Diagnostics", icon: AlertCircle, adminOnly: true },
+    { to: "/admin/imports", label: "Data Center", icon: FileSpreadsheet, adminOnly: true },
   ],
 };
 

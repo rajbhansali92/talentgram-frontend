@@ -21,6 +21,7 @@ import WorkflowPage from "@/pages/WorkflowPage";
 import StorageDashboard from "@/pages/StorageDashboard";
 import WhatsAppEnginePage from "@/pages/WhatsAppEnginePage";
 import SubmissionDiagnostics from "@/pages/SubmissionDiagnostics";
+import ImportWizard from "@/pages/ImportWizard";
 
 
 export default function AdminApp() {
@@ -57,6 +58,7 @@ export default function AdminApp() {
                     <Route path="storage" element={<StorageDashboard />} />
                     <Route path="whatsapp" element={<WhatsAppEnginePage />} />
                     <Route path="diagnostics" element={<SubmissionDiagnostics />} />
+                    <Route path="imports" element={<ImportWizard />} />
                 </Route>
                 <Route path="*" element={<Navigate to="/admin" replace />} />
             </Routes>

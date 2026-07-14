@@ -11,6 +11,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from core import db, mongo_client, seed_admin, update_talent_cover_cache, validate_talent_fields_classification
 from drive_backup import attach_db, drive_enabled, start_drive_worker
+from services.import_worker import start_import_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from routers import (
     applications,
@@ -32,6 +33,7 @@ from routers import (
     whatsapp,
     workflow,
     cloudflare_stream,
+    imports,
 )
 import scout_capture
 
@@ -123,6 +125,7 @@ app.include_router(cloudinary_admin.router)
 app.include_router(whatsapp.router)
 app.include_router(webhooks.router)
 app.include_router(cloudflare_stream.router)
+app.include_router(imports.router)
 
 
 
@@ -432,6 +435,11 @@ async def on_startup():
         await seed_admin()
         logger.info("Admin seed complete")
 
+        # Seed Data Hub config rules
+        from services.import_seed import seed_data_hub_config
+        await seed_data_hub_config()
+
+
         await ensure_notifications_indexes(db)
         logger.info("Notification indexes ready")
 
@@ -527,6 +535,9 @@ async def on_startup():
             # "pending" data sitting on Emergent OS waiting to be backed up.
         else:
             logger.info("Google Drive backup DISABLED")
+
+        # Start persistent Ingestion Data Center Worker queue
+        start_import_worker()
 
         logger.info("Backend startup completed successfully")
 

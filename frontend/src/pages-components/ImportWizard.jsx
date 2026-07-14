@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import { 
@@ -28,6 +28,7 @@ const MONGO_FIELDS = [
 ];
 
 export default function ImportWizard() {
+    const isMounted = useRef(false);
     // Navigation/Tab state: "ingest" or "rules" or "media_config"
     const [activeTab, setActiveTab] = useState("ingest");
     
@@ -93,13 +94,16 @@ export default function ImportWizard() {
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
-                // Guard against a stale/out-of-range persisted step (e.g. from
-                // an earlier iteration of this wizard). An invalid value here
-                // matches none of the `step === N` render blocks below, which
-                // leaves the stepper header visible but the entire step body
-                // blank — clamp to the valid 1-5 range, defaulting to Step 1.
+                // Only steps 1-4 are resumable UI states. Step 5 (Ingest
+                // Summary) depends on `sessionProgress`, which is transient and
+                // never persisted, so it can never be faithfully reconstructed
+                // after a refresh. Any value outside the resumable
+                // 1-4 range (a legacy persisted 5, out-of-range, or NaN) safely
+                // returns to Step 1, where the completed import remains
+                // available (with rollback) in the history table.
                 const restoredStep = Number(parsed.step);
-                setStep(restoredStep >= 1 && restoredStep <= 5 ? restoredStep : 1);
+                const safeStep = restoredStep >= 1 && restoredStep <= 4 ? restoredStep : 1;
+                setStep(safeStep);
                 setFileMeta(parsed.fileMeta || null);
                 setRawRows(parsed.rawRows || []);
                 setHeaders(parsed.headers || []);
@@ -113,13 +117,24 @@ export default function ImportWizard() {
                 console.error("Failed to load import wizard state", e);
             }
         }
+        isMounted.current = true;
     }, []);
 
     // Save state to localStorage on changes
     useEffect(() => {
+        if (!isMounted.current) return;
+        const persistedStep = step === 5 ? 1 : step;
         const state = {
-            step, fileMeta, rawRows, headers, fieldMapping, 
-            previewData, validationReport, dupActions, globalDupAction, activeSessionId
+            step: persistedStep, 
+            fileMeta, 
+            rawRows, 
+            headers, 
+            fieldMapping, 
+            previewData, 
+            validationReport, 
+            dupActions, 
+            globalDupAction, 
+            activeSessionId: step === 5 ? null : activeSessionId
         };
         localStorage.setItem("talentgram_import_wizard_state", JSON.stringify(state));
     }, [step, fileMeta, rawRows, headers, fieldMapping, previewData, validationReport, dupActions, globalDupAction, activeSessionId]);

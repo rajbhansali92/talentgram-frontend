@@ -948,7 +948,7 @@ export default function ImportWizard() {
                             <label className="block text-[10px] font-bold text-neutral-400 uppercase mb-1.5">Rule Value</label>
                             <input 
                                 type="text" 
-                                placeholder="E.g. Mumbai or 5'8\""
+                                placeholder={"E.g. Mumbai or 5'8\""}
                                 value={newRuleVal}
                                 onChange={(e) => setNewRuleVal(e.target.value)}
                                 className="text-xs border border-black/[0.08] rounded-md px-3 py-1.5 w-full outline-none focus:border-black/40"

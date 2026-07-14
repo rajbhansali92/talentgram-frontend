@@ -108,6 +108,7 @@ export default function ApplicationPage() {
     const igHandleRef = useRef();
     const igFollowersRef = useRef();
     const mediaRef = useRef();
+    const identityRef = useRef();
     const clearError = (key) =>
         setErrors((prev) => (prev[key] ? { ...prev, [key]: undefined } : prev));
 
@@ -335,13 +336,39 @@ export default function ApplicationPage() {
                         // name empty and finalize blocks on a field that is not
                         // visible on the resumed form.
                         const rfd = data.form_data || {};
-                        setBasics((b) => ({
-                            ...b,
-                            first_name: b.first_name || rfd.first_name || (data.talent_name || "").split(" ")[0] || "",
-                            last_name: b.last_name || rfd.last_name || (data.talent_name || "").split(" ").slice(1).join(" ") || "",
-                            phone: b.phone || data.talent_phone || rfd.phone || "",
-                            alternate_contact_number: b.alternate_contact_number || data.alternate_contact_number || rfd.alternate_contact_number || "",
-                        }));
+                        setBasics((b) => {
+                            const talentFirst = data.talent?.first_name || b.first_name || "";
+                            const talentLast = data.talent?.last_name || b.last_name || "";
+                            const talentPhone = data.talent?.phone || b.phone || "";
+
+                            const first = talentFirst || rfd.first_name || (data.talent_name || "").split(" ")[0] || "";
+                            const last = talentLast || rfd.last_name || (data.talent_name || "").split(" ").slice(1).join(" ") || "";
+                            const ph = talentPhone || rfd.phone || data.talent_phone || "";
+                            const altPh = b.alternate_contact_number || rfd.alternate_contact_number || data.alternate_contact_number || "";
+
+                            const updatedBasics = {
+                                ...b,
+                                first_name: first.trim(),
+                                last_name: last.trim(),
+                                phone: ph.trim(),
+                                alternate_contact_number: altPh.trim(),
+                            };
+
+                            // Save to local storage right here to ensure they persist!
+                            const email = normEmail(updatedBasics.email);
+                            if (email) {
+                                const localVal = {
+                                    aid: saved.aid,
+                                    token: saved.token,
+                                    basics: updatedBasics,
+                                    form: { ...((saved && saved.form) || {}), ...rfd },
+                                    savedAt: Date.now()
+                                };
+                                localStorage.setItem(appDraftKey(email), JSON.stringify(localVal));
+                            }
+
+                            return updatedBasics;
+                        });
                         setMedia(data.media || []);
                         if (data.status === "submitted") {
                             setFinalized(true);
@@ -907,14 +934,15 @@ export default function ApplicationPage() {
         setErrors(next);
 
         if (Object.keys(next).length > 0) {
-            // First/last name are off this screen — surface a specific (not vague)
-            // message at the top via the top-positioned toast.
+            // First/last name normally live off this screen (the identity
+            // gate), but the recovery section above renders whenever either
+            // is missing, so scroll/focus there like any other on-screen
+            // field instead of dead-ending on a toast with nothing to fix.
             if (next.first_name || next.last_name) {
                 toast.error(next.first_name || next.last_name);
-                return;
             }
-            // On-screen fields: scroll to + focus the first invalid one.
             const order = [
+                [next.first_name || next.last_name, identityRef],
                 [next.location, locationRef],
                 [next.instagram_handle, igHandleRef],
                 [next.instagram_followers, igFollowersRef],
@@ -933,10 +961,15 @@ export default function ApplicationPage() {
 
         setSaving(true);
         try {
-            // Final sync of form_data
+            // Final sync of form_data. Includes first_name/last_name from
+            // `basics` so a correction made in the recovery section above
+            // reaches the backend record the finalize validator reads —
+            // `PUT /public/apply/{aid}` already merges these two keys into
+            // form_data and re-derives talent_name (existing backend
+            // behavior, unchanged here).
             await axios.put(
                 `/public/apply/${aid}`,
-                { form_data: form },
+                { form_data: { ...form, first_name: basics.first_name, last_name: basics.last_name } },
                 { headers: { Authorization: `Bearer ${token}` } },
             );
             await axios.post(
@@ -1376,6 +1409,42 @@ export default function ApplicationPage() {
                         <span>Draft Auto-Saved</span>
                     </div>
                 </div>
+
+                {/* Recovery section — the identity gate (the only place First
+                    Name / Last Name / Phone are normally editable) is skipped
+                    on some resume paths (e.g. returning via OTP before a
+                    canonical talent profile exists). If any of these ended up
+                    missing, surface them here so the talent isn't stuck at a
+                    "First Name is required" dead end with no field to fix.
+                    Hidden entirely once all three are present — no change to
+                    the existing experience for a normal, fully-filled draft. */}
+                {(!basics.first_name?.trim() || !basics.last_name?.trim() || !basics.phone?.trim()) && (
+                    <div ref={identityRef}>
+                        <Section title="Contact Details" index="!">
+                            <div className="space-y-5">
+                                <Row
+                                    label={`First Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
+                                    value={basics.first_name}
+                                    onChange={(v) => { setBasics({ ...basics, first_name: v }); clearError("first_name"); }}
+                                    testid="apply-first-name-recovery"
+                                />
+                                <Row
+                                    label={`Last Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
+                                    value={basics.last_name}
+                                    onChange={(v) => { setBasics({ ...basics, last_name: v }); clearError("last_name"); }}
+                                    testid="apply-last-name-recovery"
+                                />
+                                <Row
+                                    label="Phone Number (WhatsApp)"
+                                    value={basics.phone}
+                                    onChange={(v) => setBasics({ ...basics, phone: v })}
+                                    testid="apply-phone-recovery"
+                                    hint="Please enter the number that is active on WhatsApp. This will be used for casting communication and project updates."
+                                />
+                            </div>
+                        </Section>
+                    </div>
+                )}
 
                 {/* Section 2 — Profile Details */}
                 <Section title="Profile Details" index="01">

@@ -561,8 +561,8 @@ async def get_application(aid: str, authorization: Optional[str] = Header(None))
     # Lazy reconciliation: the localStorage resume path skips POST /apply
     # entirely, so reconciliation from startApplication never runs.
     # Guard: only attempt on non-submitted drafts.
+    email = (app_doc.get("talent_email") or "").lower().strip()
     if app_doc.get("status") != "submitted":
-        email = (app_doc.get("talent_email") or "").lower().strip()
         if email:
             talent = await _find_talent_by_email(email)
             if talent:
@@ -570,7 +570,20 @@ async def get_application(aid: str, authorization: Optional[str] = Header(None))
                 # Re-fetch so we return the freshly hydrated document
                 app_doc = await db.applications.find_one({"id": aid}, {"_id": 0}) or app_doc
 
-    return sign_r2_media_if_needed(app_doc)
+    response_data = dict(app_doc)
+    if email:
+        talent = await _find_talent_by_email(email)
+        if talent:
+            name_parts = talent.get("name", "").strip().split(" ", 1)
+            first_name = name_parts[0] if name_parts else ""
+            last_name = name_parts[1] if len(name_parts) > 1 else ""
+            response_data["talent"] = {
+                "first_name": first_name,
+                "last_name": last_name,
+                "phone": talent.get("phone") or "",
+            }
+
+    return sign_r2_media_if_needed(response_data)
 
 
 @router.put("/public/apply/{aid}")

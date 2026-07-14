@@ -1458,7 +1458,7 @@ export default function ApplicationPage() {
                 </div>
 
                 {/* Section 2 — Profile Details */}
-                <Section title="Profile Details" index="02">
+                <Section title="Profile Details" index="01">
                     <div className="grid md:grid-cols-2 gap-6">
                         <Row
                             label="Date of Birth *"
@@ -1548,7 +1548,7 @@ export default function ApplicationPage() {
                 </Section>
 
                 {/* Section 3 — Professional */}
-                <Section title="Professional Details" index="03">
+                <Section title="Professional Details" index="02">
                     <div className="grid md:grid-cols-2 gap-6">
                         <div ref={igHandleRef}>
                             <Label>Instagram Handle{requirements?.profile_requirements?.instagram_handle === "required" ? " *" : ""}</Label>
@@ -1680,7 +1680,7 @@ export default function ApplicationPage() {
                 </Section>
 
                 {/* Section 3b — Interested In */}
-                <Section title="What are you interested in?" index="04">
+                <Section title="What are you interested in?" index="03">
                     <p className="text-xs text-[#6b6b6b] mb-5 leading-relaxed">
                         Select all categories that apply. This helps us match you to the right campaigns.
                     </p>
@@ -1692,7 +1692,7 @@ export default function ApplicationPage() {
 
                 {/* Section 4 — Media */}
                 <div ref={mediaRef}>
-                <Section title="Media" index="05">
+                <Section title="Media" index="04">
                     {errors.media && (
                         <p role="alert" className="text-xs text-[#d03a2a] mb-4" data-testid="error-media">
                             {errors.media}

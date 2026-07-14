@@ -93,7 +93,13 @@ export default function ImportWizard() {
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
-                setStep(parsed.step || 1);
+                // Guard against a stale/out-of-range persisted step (e.g. from
+                // an earlier iteration of this wizard). An invalid value here
+                // matches none of the `step === N` render blocks below, which
+                // leaves the stepper header visible but the entire step body
+                // blank — clamp to the valid 1-5 range, defaulting to Step 1.
+                const restoredStep = Number(parsed.step);
+                setStep(restoredStep >= 1 && restoredStep <= 5 ? restoredStep : 1);
                 setFileMeta(parsed.fileMeta || null);
                 setRawRows(parsed.rawRows || []);
                 setHeaders(parsed.headers || []);

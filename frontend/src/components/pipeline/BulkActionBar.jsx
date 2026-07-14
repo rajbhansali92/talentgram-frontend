@@ -1,134 +1,294 @@
-import React, { memo, useState } from "react";
-import { BULK_MOVE_TARGETS, STAGE_LABELS, getStageLabel } from "./constants";
+import React, { memo, useState, useRef, useEffect } from "react";
+import { STAGE_LABELS, getStageLabel } from "./constants";
+import { 
+    ChevronDown, 
+    Tag, 
+    FileText, 
+    MessageCircle, 
+    Mail, 
+    Download, 
+    Archive, 
+    Trash2, 
+    X,
+    FolderOpen,
+    Check
+} from "lucide-react";
 
 /**
- * BulkActionBar (PATCH 4C)
+ * BulkActionBar
  *
- * Floating cinematic action bar anchored to the bottom-center of the
- * viewport. Surfaces only when `count > 0`. Slides up via CSS transform
- * + opacity (no animation library). ESC clears at the page level.
- *
- * Layout: [count badge] [Move to →] [pill, pill, pill, ...] [× clear]
- *
- * Pills are horizontally scrollable on mobile so any number of stages
- * fits on a single line without breaking the bar's visual rhythm.
+ * Rich floating cinematic action bar anchored to the bottom-center of the viewport.
+ * Disappears when selection is empty.
  */
-const BulkActionBar = memo(function BulkActionBar({ count, onClear, onMove }) {
+const BulkActionBar = memo(function BulkActionBar({ 
+    count, 
+    onClear, 
+    onMove, 
+    onLabel,
+    onNote,
+    onDelete,
+    onExport,
+    onWhatsApp,
+    onEmail,
+    onArchive
+}) {
     const visible = count > 0;
-
-    // Local "in-flight" state prevents double-click duplicates. Parent's
-    // loading state doesn't surface mid-mutation state for bulk ops.
     const [busy, setBusy] = useState(false);
+    const [showMoveDropdown, setShowMoveDropdown] = useState(false);
+    const dropdownRef = useRef(null);
+
+    // Click outside to close stage dropdown
+    useEffect(() => {
+        if (!showMoveDropdown) return;
+        const handleClickOutside = (e) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+                setShowMoveDropdown(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, [showMoveDropdown]);
 
     const handleMove = async (stage) => {
         if (busy) return;
         setBusy(true);
         try {
             await onMove(stage);
+            setShowMoveDropdown(false);
         } finally {
             setBusy(false);
         }
     };
 
+    if (!visible) return null;
+
+    const stagesToMove = [
+        "ask_to_test",
+        "approved",
+        "hold",
+        "shortlisted",
+        "already_tested",
+        "locked",
+        "rejected",
+        "not_available",
+        "not_interested"
+    ];
+
     return (
         <div
-            aria-hidden={!visible}
             data-testid="pipeline-bulk-bar"
-            className={`
-                fixed z-40 left-1/2 -translate-x-1/2
-                bottom-4 sm:bottom-6
-                w-[min(94vw,720px)]
-                transition-all duration-300 ease-out
-                ${visible
-                    ? "opacity-100 translate-y-0 pointer-events-auto"
-                    : "opacity-0 translate-y-3 pointer-events-none"}
-            `}
+            className="fixed z-40 left-1/2 -translate-x-1/2 bottom-5 w-[min(94vw,880px)] animate-in fade-in slide-in-from-bottom-4 duration-200"
         >
             <div
                 className="
                     flex items-center gap-2 sm:gap-3
-                    px-3 py-2 sm:px-4 sm:py-2.5
-                    rounded-full
-                    bg-black/70 backdrop-blur-xl
+                    px-4 py-3 sm:px-5 sm:py-3
+                    rounded-2xl
+                    bg-black/90 backdrop-blur-2xl
                     border border-white/10
-                    shadow-[0_18px_48px_-12px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.05)]
+                    shadow-[0_24px_64px_-16px_rgba(0,0,0,0.85),inset_0_1px_0_0_rgba(255,255,255,0.05)]
                 "
             >
-                {/* Count badge — anchors the eye to the selection size */}
-                <div
-                    className="
-                        shrink-0 flex items-center gap-1.5
-                        px-2.5 py-1 rounded-full
-                        bg-white text-black
-                        text-[11px] tracking-[0.16em] uppercase font-medium
-                    "
-                    data-testid="pipeline-bulk-bar-count"
-                >
-                    <span className="tg-mono">{count}</span>
-                    <span className="opacity-60">selected</span>
+                {/* Count indicator */}
+                <div className="shrink-0 flex flex-col justify-center">
+                    <span className="text-[14px] font-bold text-white tracking-tight tg-mono">
+                        {count} Selected
+                    </span>
+                    <span className="text-[9px] text-white/40 tracking-wider uppercase font-semibold">
+                        Casting Pool
+                    </span>
                 </div>
 
-                <div className="hidden sm:block w-px h-5 bg-white/10" />
+                <div className="w-px h-8 bg-white/15 mx-1" />
 
-                <span className="hidden sm:inline text-[10px] tracking-[0.18em] uppercase text-white/40 shrink-0">
-                    Move to
-                </span>
-
-                <div
-                    className="
-                        flex-1 min-w-0 flex items-center gap-1.5
-                        overflow-x-auto tg-pipeline-scroll
-                        scroll-smooth
-                    "
-                >
-                    {BULK_MOVE_TARGETS.map((stage) => (
+                {/* Actions group - scrollable on small viewports */}
+                <div className="flex-1 flex items-center gap-2 overflow-x-auto scrollbar-none py-0.5">
+                    {/* Stage quick moves */}
+                    <div className="relative" ref={dropdownRef}>
                         <button
-                            key={stage}
                             type="button"
-                            onClick={() => handleMove(stage)}
+                            onClick={() => setShowMoveDropdown(prev => !prev)}
                             disabled={busy}
-                            data-testid={`pipeline-bulk-move-${stage}`}
-                            title={`Move ${count} to ${getStageLabel(stage)}`}
                             className="
-                                shrink-0
-                                px-3 py-1.5 rounded-full
-                                text-[10.5px] tracking-[0.12em] uppercase
-                                text-white/75 hover:text-white
-                                bg-white/[0.05] hover:bg-white/[0.10]
-                                border border-white/[0.08] hover:border-white/20
-                                transition-all duration-200
-                                disabled:opacity-40 disabled:cursor-not-allowed
-                                hover:shadow-[0_0_0_3px_rgba(255,255,255,0.04)]
+                                flex items-center gap-1.5 shrink-0
+                                px-3 py-2 rounded-lg
+                                text-[10.5px] tracking-wide uppercase font-semibold
+                                text-white bg-white/10 hover:bg-white/15
+                                border border-white/10 hover:border-white/20
+                                transition-all duration-200 disabled:opacity-40
                             "
                         >
-                            {STAGE_LABELS[stage] || getStageLabel(stage)}
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            <span>Move Stage</span>
+                            <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showMoveDropdown ? "rotate-180" : ""}`} />
                         </button>
-                    ))}
+                        {showMoveDropdown && (
+                            <div className="absolute bottom-full left-0 mb-2 z-50 bg-[#121212] border border-white/10 shadow-2xl rounded-xl py-1.5 min-w-[160px] flex flex-col gap-0.5">
+                                <div className="px-3 py-1 text-[9px] font-bold text-white/45 tracking-wider uppercase border-b border-white/5 mb-1.5">
+                                    Move {count} talents to
+                                </div>
+                                {stagesToMove.map((stage) => (
+                                    <button
+                                        key={stage}
+                                        type="button"
+                                        onClick={() => handleMove(stage)}
+                                        className="w-full text-left px-3 py-2 text-[10.5px] text-white/75 hover:bg-white/10 hover:text-white transition-colors"
+                                    >
+                                        {STAGE_LABELS[stage] || getStageLabel(stage)}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Labels */}
+                    <button
+                        type="button"
+                        onClick={onLabel}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-white bg-white/5 hover:bg-white/10
+                            border border-white/5 hover:border-white/10
+                            transition-all duration-200
+                        "
+                    >
+                        <Tag className="w-3.5 h-3.5 opacity-60" />
+                        <span>Labels</span>
+                    </button>
+
+                    {/* Notes */}
+                    <button
+                        type="button"
+                        onClick={onNote}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-white bg-white/5 hover:bg-white/10
+                            border border-white/5 hover:border-white/10
+                            transition-all duration-200
+                        "
+                    >
+                        <FileText className="w-3.5 h-3.5 opacity-60" />
+                        <span>Note</span>
+                    </button>
+
+                    {/* WhatsApp */}
+                    <button
+                        type="button"
+                        onClick={onWhatsApp}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-white bg-white/5 hover:bg-[#25D366]/10 hover:text-[#25D366]
+                            border border-white/5 hover:border-[#25D366]/20
+                            transition-all duration-200
+                        "
+                    >
+                        <MessageCircle className="w-3.5 h-3.5 text-[#25D366]" />
+                        <span>WhatsApp</span>
+                    </button>
+
+                    {/* Email */}
+                    <button
+                        type="button"
+                        onClick={onEmail}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-white bg-white/5 hover:bg-sky-500/10 hover:text-sky-400
+                            border border-white/5 hover:border-sky-500/20
+                            transition-all duration-200
+                        "
+                    >
+                        <Mail className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Email</span>
+                    </button>
+
+                    {/* Export */}
+                    <button
+                        type="button"
+                        onClick={onExport}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-white bg-white/5 hover:bg-white/10
+                            border border-white/5 hover:border-white/10
+                            transition-all duration-200
+                        "
+                    >
+                        <Download className="w-3.5 h-3.5 opacity-60" />
+                        <span>Export</span>
+                    </button>
+
+                    <div className="w-px h-5 bg-white/10 mx-1 shrink-0" />
+
+                    {/* Archive */}
+                    <button
+                        type="button"
+                        onClick={onArchive}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/15
+                            border border-amber-500/20
+                            transition-all duration-200
+                        "
+                    >
+                        <Archive className="w-3.5 h-3.5" />
+                        <span>Archive</span>
+                    </button>
+
+                    {/* Delete */}
+                    <button
+                        type="button"
+                        onClick={onDelete}
+                        disabled={busy}
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/15
+                            border border-rose-500/20
+                            transition-all duration-200
+                        "
+                    >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete</span>
+                    </button>
                 </div>
 
+                <div className="w-px h-8 bg-white/15 mx-1" />
+
+                {/* Close selection */}
                 <button
                     type="button"
                     onClick={onClear}
-                    data-testid="pipeline-bulk-bar-clear"
-                    title="Clear selection · ESC"
+                    title="Clear selection (ESC)"
                     className="
                         shrink-0
-                        w-8 h-8 rounded-full
+                        w-8 h-8 rounded-lg
                         flex items-center justify-center
-                        text-white/55 hover:text-rose-200
-                        bg-white/[0.03] hover:bg-rose-300/10
-                        border border-white/[0.08] hover:border-rose-300/20
+                        text-white/55 hover:text-white hover:bg-white/10
+                        border border-white/10
                         transition-all duration-200
-                        text-base leading-none
                     "
                 >
-                    ×
+                    <X className="w-4 h-4" />
                 </button>
             </div>
-
-            <p className="text-center mt-2 text-[9px] tracking-[0.22em] uppercase text-white/25 hidden sm:block">
-                Press ESC to clear
-            </p>
         </div>
     );
 });

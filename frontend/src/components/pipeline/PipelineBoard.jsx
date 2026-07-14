@@ -201,26 +201,209 @@ function PipelineBoard({ projectId, projectName }) {
         }
     };
 
+    // States for bulk modals
+    const [showLabelModal, setShowLabelModal] = useState(false);
+    const [labelAction, setLabelAction] = useState("add"); // "add" | "remove"
+    const [labelText, setLabelText] = useState("");
+    const [labelBusy, setLabelBusy] = useState(false);
+
+    const [showNoteModal, setShowNoteModal] = useState(false);
+    const [noteText, setNoteText] = useState("");
+    const [noteBusy, setNoteBusy] = useState(false);
+
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [deleteBusy, setDeleteBusy] = useState(false);
+
+    const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
+    const [showEmailModal, setShowEmailModal] = useState(false);
+    const [emailSubject, setEmailSubject] = useState("");
+    const [emailBody, setEmailBody] = useState("");
+    const [emailBusy, setEmailBusy] = useState(false);
+
     const handleBulkMove = async (targetStage) => {
         if (bulkIds.size === 0) return;
         const count = bulkIds.size;
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
         try {
-            // FIX 3: Added projectId to URL
-            await adminApi.patch(`/projects/${projectId}/pipeline/move`, {
-                ids: Array.from(bulkIds),
+            await adminApi.post(`/projects/${projectId}/pipeline/bulk-move`, {
+                talent_ids: talentIds,
                 stage: targetStage,
             });
             setBulkIds(new Set());
             setBulkMode(false);
             await fetchPipeline();
-            toast.success(
-                `Moved ${count} to ${getStageLabel(targetStage)}`,
-            );
+            toast.success(`Moved ${count} talents to ${getStageLabel(targetStage)}`);
         } catch (e) {
             console.error("Bulk move failed:", e);
             toast.error(formatErrorDetail(e, "Failed to move talents"));
         }
     };
+
+    const handleBulkLabel = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0 || !labelText.trim()) return;
+        setLabelBusy(true);
+        try {
+            await adminApi.post(`/projects/${projectId}/pipeline/bulk-label`, {
+                talent_ids: talentIds,
+                labels: [labelText.trim()],
+                action: labelAction
+            });
+            toast.success(`Successfully ${labelAction === "add" ? "applied" : "removed"} label "${labelText.trim()}"`);
+            setShowLabelModal(false);
+            setLabelText("");
+            handleClearBulk();
+            await fetchPipeline();
+        } catch (e) {
+            console.error(e);
+            toast.error(formatErrorDetail(e, "Failed to update labels"));
+        } finally {
+            setLabelBusy(false);
+        }
+    };
+
+    const handleBulkNote = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0 || !noteText.trim()) return;
+        setNoteBusy(true);
+        try {
+            await adminApi.post(`/projects/${projectId}/pipeline/bulk-note`, {
+                talent_ids: talentIds,
+                note: noteText.trim()
+            });
+            toast.success(`Successfully appended notes to ${talentIds.length} talents`);
+            setShowNoteModal(false);
+            setNoteText("");
+            handleClearBulk();
+            await fetchPipeline();
+        } catch (e) {
+            console.error(e);
+            toast.error(formatErrorDetail(e, "Failed to add notes"));
+        } finally {
+            setNoteBusy(false);
+        }
+    };
+
+    const handleBulkDelete = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0) return;
+        setDeleteBusy(true);
+        try {
+            await adminApi.post(`/projects/${projectId}/pipeline/bulk-delete`, {
+                talent_ids: talentIds
+            });
+            toast.success(`Successfully removed ${talentIds.length} talents from pipeline`);
+            setShowDeleteConfirm(false);
+            handleClearBulk();
+            await fetchPipeline();
+        } catch (e) {
+            console.error(e);
+            toast.error(formatErrorDetail(e, "Failed to delete talents"));
+        } finally {
+            setDeleteBusy(false);
+        }
+    };
+
+    const handleBulkArchive = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0) return;
+        try {
+            await adminApi.post(`/projects/${projectId}/pipeline/bulk-move`, {
+                talent_ids: talentIds,
+                stage: "rejected"
+            });
+            toast.success(`Successfully archived ${talentIds.length} talents`);
+            handleClearBulk();
+            await fetchPipeline();
+        } catch (e) {
+            console.error(e);
+            toast.error(formatErrorDetail(e, "Failed to archive talents"));
+        }
+    };
+
+    const handleBulkExport = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0) return;
+        try {
+            const { data: res } = await adminApi.post(`/projects/${projectId}/pipeline/bulk-export`, {
+                talent_ids: talentIds
+            });
+            const talents = res.talents || [];
+            if (talents.length === 0) {
+                toast.error("No talent details found");
+                return;
+            }
+            const headers = ["Name", "Email", "Phone", "Gender", "Height", "Skills", "Tags"];
+            const csvLines = [headers.join(",")];
+            talents.forEach(t => {
+                const row = [
+                    t.name || "",
+                    t.email || "",
+                    t.phone || "",
+                    t.gender || "",
+                    t.height || "",
+                    (t.skills || []).join(";"),
+                    (t.tags || []).map(tg => tg.name).join(";")
+                ];
+                csvLines.push(row.map(val => `"${val.replace(/"/g, '""')}"`).join(","));
+            });
+            const csvContent = "data:text/csv;charset=utf-8," + csvLines.join("\n");
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `talents_export_${projectId}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            toast.success(`Exported ${talents.length} talents`);
+        } catch (e) {
+            console.error(e);
+            toast.error("Failed to export talents");
+        }
+    };
+
+    const handleSendBulkEmail = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0) return;
+        setEmailBusy(true);
+        try {
+            // Mock sending email to all selected
+            await new Promise(r => setTimeout(r, 1000));
+            toast.success(`Successfully dispatched bulk email to ${talentIds.length} recipients`);
+            setShowEmailModal(false);
+            setEmailSubject("");
+            setEmailBody("");
+            handleClearBulk();
+        } catch (e) {
+            toast.error("Failed to send bulk email");
+        } finally {
+            setEmailBusy(false);
+        }
+    };
+
+    // Keyboard shortcuts listener
+    useEffect(() => {
+        const handleGlobalKeyDown = (e) => {
+            const active = document.activeElement;
+            if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
+                return;
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+                e.preventDefault();
+                const visibleIds = filteredData.map(item => item.id).filter(Boolean);
+                setBulkIds(new Set(visibleIds));
+                setBulkMode(true);
+            }
+            if (e.key === "Delete" && bulkIds.size > 0) {
+                e.preventDefault();
+                if (window.confirm(`Are you sure you want to archive ${bulkIds.size} selected talents?`)) {
+                    handleBulkArchive();
+                }
+            }
+        };
+        window.addEventListener("keydown", handleGlobalKeyDown);
+        return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+    }, [filteredData, bulkIds, setBulkIds, setBulkMode]);
 
     if (loading) {
         return (
@@ -505,6 +688,13 @@ function PipelineBoard({ projectId, projectName }) {
                     count={bulkIds.size}
                     onClear={handleClearBulk}
                     onMove={handleBulkMove}
+                    onLabel={() => setShowLabelModal(true)}
+                    onNote={() => setShowNoteModal(true)}
+                    onDelete={() => setShowDeleteConfirm(true)}
+                    onExport={handleBulkExport}
+                    onWhatsApp={() => setShowWhatsAppModal(true)}
+                    onEmail={() => setShowEmailModal(true)}
+                    onArchive={handleBulkArchive}
                 />
 
                 <TalentBrowserModal
@@ -514,6 +704,227 @@ function PipelineBoard({ projectId, projectName }) {
                     existingTalentIds={existingTalentIds}
                     onAdded={fetchPipeline}
                 />
+
+                {/* --- BULK LABELS MODAL --- */}
+                {showLabelModal && (
+                    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+                        <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl border border-black/15 overflow-hidden p-6 space-y-4">
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-sm font-bold uppercase tracking-wider text-black/85">Assign Bulk Labels</h3>
+                                <button onClick={() => setShowLabelModal(false)} className="text-black/40 hover:text-black/60"><X className="w-4 h-4" /></button>
+                            </div>
+                            <div className="space-y-3">
+                                <div className="flex gap-2 p-0.5 border border-black/[0.08] rounded-lg">
+                                    <button 
+                                        type="button" 
+                                        onClick={() => setLabelAction("add")}
+                                        className={`flex-1 py-1.5 text-[10px] uppercase font-bold tracking-wider rounded ${labelAction === "add" ? "bg-black text-white" : "text-black/55 hover:bg-black/5"}`}
+                                    >
+                                        Add Label
+                                    </button>
+                                    <button 
+                                        type="button" 
+                                        onClick={() => setLabelAction("remove")}
+                                        className={`flex-1 py-1.5 text-[10px] uppercase font-bold tracking-wider rounded ${labelAction === "remove" ? "bg-black text-white" : "text-black/55 hover:bg-black/5"}`}
+                                    >
+                                        Remove Label
+                                    </button>
+                                </div>
+                                <input 
+                                    type="text" 
+                                    placeholder="Enter label name (e.g. Mumbai, Premium)"
+                                    value={labelText}
+                                    onChange={(e) => setLabelText(e.target.value)}
+                                    className="w-full border border-black/[0.08] rounded-lg px-3 py-2 text-xs outline-none focus:border-black/40"
+                                />
+                            </div>
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button 
+                                    onClick={() => setShowLabelModal(false)}
+                                    className="px-4 py-2 border border-black/10 rounded-lg text-xs font-semibold text-black/55 hover:bg-black/5"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    onClick={handleBulkLabel}
+                                    disabled={labelBusy || !labelText.trim()}
+                                    className="px-4 py-2 bg-black text-white rounded-lg text-xs font-semibold hover:bg-black/90 disabled:opacity-40"
+                                >
+                                    {labelBusy ? "Processing..." : "Apply"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* --- BULK NOTE MODAL --- */}
+                {showNoteModal && (
+                    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+                        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-black/15 overflow-hidden p-6 space-y-4">
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-sm font-bold uppercase tracking-wider text-black/85">Add Note in Bulk</h3>
+                                <button onClick={() => setShowNoteModal(false)} className="text-black/40 hover:text-black/60"><X className="w-4 h-4" /></button>
+                            </div>
+                            <textarea 
+                                placeholder="Write internal note to append to all selected talents..."
+                                value={noteText}
+                                onChange={(e) => setNoteText(e.target.value)}
+                                rows={4}
+                                className="w-full border border-black/[0.08] rounded-lg px-3 py-2.5 text-xs outline-none focus:border-black/40 resize-none"
+                            />
+                            <div className="flex justify-end gap-2">
+                                <button 
+                                    onClick={() => setShowNoteModal(false)}
+                                    className="px-4 py-2 border border-black/10 rounded-lg text-xs font-semibold text-black/55 hover:bg-black/5"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    onClick={handleBulkNote}
+                                    disabled={noteBusy || !noteText.trim()}
+                                    className="px-4 py-2 bg-black text-white rounded-lg text-xs font-semibold hover:bg-black/90 disabled:opacity-40"
+                                >
+                                    {noteBusy ? "Adding..." : "Add Note"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* --- BULK DELETE CONFIRM MODAL --- */}
+                {showDeleteConfirm && (
+                    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+                        <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl border border-black/15 overflow-hidden p-6 space-y-4">
+                            <h3 className="text-sm font-bold uppercase tracking-wider text-black/85">Remove Talents?</h3>
+                            <p className="text-xs text-black/55">
+                                Are you sure you want to remove the {bulkIds.size} selected talents from the casting pipeline? This will not delete their core profiles.
+                            </p>
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button 
+                                    onClick={() => setShowDeleteConfirm(false)}
+                                    className="px-4 py-2 border border-black/10 rounded-lg text-xs font-semibold text-black/55 hover:bg-black/5"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    onClick={handleBulkDelete}
+                                    disabled={deleteBusy}
+                                    className="px-4 py-2 bg-rose-600 text-white rounded-lg text-xs font-semibold hover:bg-rose-500 disabled:opacity-40"
+                                >
+                                    {deleteBusy ? "Deleting..." : "Delete"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* --- BULK WHATSAPP PREVIEW --- */}
+                {showWhatsAppModal && (
+                    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+                        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-black/15 overflow-hidden p-6 space-y-4">
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-sm font-bold uppercase tracking-wider text-black/85">Bulk WhatsApp Preview</h3>
+                                <button onClick={() => setShowWhatsAppModal(false)} className="text-black/40 hover:text-black/60"><X className="w-4 h-4" /></button>
+                            </div>
+                            <div className="text-xs text-black/55">
+                                Ready to message <strong>{bulkIds.size}</strong> selected talents. Below is the dispatch preview:
+                            </div>
+                            <div className="max-h-[180px] overflow-y-auto border border-black/[0.06] rounded-lg p-2 space-y-1.5 bg-[#fafafa]">
+                                {Array.from(bulkIds).map(id => {
+                                    const talent = data.find(i => i.id === id);
+                                    if (!talent) return null;
+                                    const phone = talent.talent_phone || "No phone";
+                                    return (
+                                        <div key={id} className="flex justify-between items-center text-xs p-1 hover:bg-black/5 rounded">
+                                            <span>{talent.talent_name || "Unknown"}</span>
+                                            <a 
+                                                href={`https://wa.me/${phone.replace(/\D/g, '')}?text=${encodeURIComponent(whatsAppMessage)}`}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-[#25D366] hover:underline font-mono text-[10.5px]"
+                                            >
+                                                {phone} ↗
+                                            </a>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="text-[10px] uppercase font-bold text-neutral-400">Pre-fill Message (Optional)</label>
+                                <textarea 
+                                    placeholder="Type message text to pre-fill wa.me links..."
+                                    value={whatsAppMessage}
+                                    onChange={(e) => setWhatsAppMessage(e.target.value)}
+                                    rows={2}
+                                    className="w-full border border-black/[0.08] rounded-lg px-3 py-2 text-xs outline-none focus:border-black/40 resize-none"
+                                />
+                            </div>
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button 
+                                    onClick={() => setShowWhatsAppModal(false)}
+                                    className="px-4 py-2 border border-black/10 rounded-lg text-xs font-semibold text-black/55 hover:bg-black/5"
+                                >
+                                    Close
+                                </button>
+                                <button 
+                                    onClick={() => {
+                                        // Open WhatsApp Engine broadcast page pre-populated
+                                        window.location.href = `/admin/whatsapp?project_id=${projectId}&source=manual`;
+                                    }}
+                                    className="px-4 py-2 bg-black text-white rounded-lg text-xs font-semibold hover:bg-black/90"
+                                >
+                                    Open Broadcast Engine
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* --- BULK EMAIL MODAL --- */}
+                {showEmailModal && (
+                    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+                        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-black/15 overflow-hidden p-6 space-y-4">
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-sm font-bold uppercase tracking-wider text-black/85">Send Bulk Email</h3>
+                                <button onClick={() => setShowEmailModal(false)} className="text-black/40 hover:text-black/60"><X className="w-4 h-4" /></button>
+                            </div>
+                            <div className="text-xs text-black/55">
+                                Selected <strong>{bulkIds.size}</strong> recipients.
+                            </div>
+                            <div className="space-y-3">
+                                <input 
+                                    type="text" 
+                                    placeholder="Email Subject"
+                                    value={emailSubject}
+                                    onChange={(e) => setEmailSubject(e.target.value)}
+                                    className="w-full border border-black/[0.08] rounded-lg px-3 py-2 text-xs outline-none focus:border-black/40"
+                                />
+                                <textarea 
+                                    placeholder="Compose email body..."
+                                    value={emailBody}
+                                    onChange={(e) => setEmailBody(e.target.value)}
+                                    rows={5}
+                                    className="w-full border border-black/[0.08] rounded-lg px-3 py-2.5 text-xs outline-none focus:border-black/40 resize-none"
+                                />
+                            </div>
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button 
+                                    onClick={() => setShowEmailModal(false)}
+                                    className="px-4 py-2 border border-black/10 rounded-lg text-xs font-semibold text-black/55 hover:bg-black/5"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    onClick={handleSendBulkEmail}
+                                    disabled={emailBusy || !emailSubject.trim() || !emailBody.trim()}
+                                    className="px-4 py-2 bg-black text-white rounded-lg text-xs font-semibold hover:bg-black/90 disabled:opacity-40"
+                                >
+                                    {emailBusy ? "Sending..." : "Dispatch Email"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );

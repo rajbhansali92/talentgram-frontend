@@ -2,42 +2,53 @@ import { useCallback, useEffect, useState } from "react";
 
 /**
  * useBulkSelection — owns the bulk-mode toggle + selection Set.
- *
- * Behaviour preserved bit-for-bit from ProjectPipeline:
- *   • toggleBulkSelect adds/removes a single id via functional setter.
- *   • clearBulkSelection wipes the Set AND exits bulk mode.
- *   • selectAllInColumn intelligently toggles: if every visible row in
- *     the column is selected, deselect just those; otherwise add them.
- *     Auto-enters bulk mode so it's a single click.
- *   • ESC is only listened for while there's an active selection, so
- *     it doesn't fight other shortcuts when bulk-mode is idle.
  */
 export function useBulkSelection() {
     const [bulkIds, setBulkIds] = useState(new Set());
     const [bulkMode, setBulkMode] = useState(false);
+    const [lastSelectedId, setLastSelectedId] = useState(null);
 
-    const toggleBulkSelect = useCallback((id) => {
+    const toggleBulkSelect = useCallback((id, shiftKey = false, items = []) => {
+        setBulkMode(true);
         setBulkIds((prev) => {
             const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
+            if (shiftKey && lastSelectedId && items && items.length > 0) {
+                const ids = items.map((i) => i.id).filter(Boolean);
+                const idx1 = ids.indexOf(lastSelectedId);
+                const idx2 = ids.indexOf(id);
+                if (idx1 !== -1 && idx2 !== -1) {
+                    const start = Math.min(idx1, idx2);
+                    const end = Math.max(idx1, idx2);
+                    const rangeIds = ids.slice(start, end + 1);
+                    const shouldSelect = !prev.has(id);
+                    rangeIds.forEach((rid) => {
+                        if (shouldSelect) next.add(rid);
+                        else next.delete(rid);
+                    });
+                    setLastSelectedId(id);
+                    return next;
+                }
+            }
+            if (next.has(id)) {
+                next.delete(id);
+            } else {
+                next.add(id);
+            }
+            setLastSelectedId(id);
             return next;
         });
-    }, []);
+    }, [lastSelectedId]);
 
     const clearBulkSelection = useCallback(() => {
         setBulkIds(new Set());
         setBulkMode(false);
+        setLastSelectedId(null);
     }, []);
 
-    // Select-all-in-column — passed down to Column header. The function is
-    // pure (no closure over column items) — Column passes its own items in.
+    // Select-all-in-column — passed down to Column header.
     const selectAllInColumn = useCallback((items) => {
-        // Filter defensively — Column already filters out readOnly lanes
-        // before invoking, but a defensive check keeps the contract robust.
         const visibleIds = (items || []).map((i) => i.id).filter(Boolean);
         if (visibleIds.length === 0) return;
-        // Enter bulk mode automatically — saves a click.
         setBulkMode(true);
         setBulkIds((prev) => {
             const next = new Set(prev);
@@ -58,6 +69,7 @@ export function useBulkSelection() {
             if (e.key === "Escape") {
                 setBulkIds(new Set());
                 setBulkMode(false);
+                setLastSelectedId(null);
             }
         };
         window.addEventListener("keydown", onKey);
@@ -72,5 +84,7 @@ export function useBulkSelection() {
         toggleBulkSelect,
         clearBulkSelection,
         selectAllInColumn,
+        lastSelectedId,
+        setLastSelectedId,
     };
 }

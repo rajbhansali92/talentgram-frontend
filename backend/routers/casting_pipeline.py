@@ -108,6 +108,30 @@ class PipelineMoveIn(BaseModel):
     stage: str
 
 
+class PipelineBulkMoveIn(BaseModel):
+    talent_ids: List[str] = Field(default_factory=list)
+    stage: str
+
+
+class PipelineBulkLabelIn(BaseModel):
+    talent_ids: List[str] = Field(default_factory=list)
+    labels: List[str] = Field(default_factory=list)
+    action: str  # "add" or "remove"
+
+
+class PipelineBulkNoteIn(BaseModel):
+    talent_ids: List[str] = Field(default_factory=list)
+    note: str
+
+
+class PipelineBulkDeleteIn(BaseModel):
+    talent_ids: List[str] = Field(default_factory=list)
+
+
+class PipelineBulkExportIn(BaseModel):
+    talent_ids: List[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -589,3 +613,170 @@ async def delete_pipeline_entry(
     if not res.deleted_count:
         raise HTTPException(status_code=404, detail="Pipeline entry not found")
     return {"success": True, "deleted": entry_id}
+
+
+# ---------------------------------------------------------------------------
+# Bulk Actions Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/{project_id}/pipeline/bulk-move")
+async def bulk_move_pipeline(
+    project_id: str,
+    payload: PipelineBulkMoveIn,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk move selected talents by talent_ids inside the project to a target stage."""
+    target_stage = _normalise_stage(payload.stage)
+    if target_stage not in PIPELINE_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stage. Must be one of: {PIPELINE_STAGE_ORDER}",
+        )
+    talent_ids = [tid.strip() for tid in payload.talent_ids if isinstance(tid, str) and tid.strip()]
+    if not talent_ids:
+        return {"success": True, "moved": 0, "matched": 0}
+
+    res = await db.casting_pipeline.update_many(
+        {"project_id": project_id, "talent_id": {"$in": talent_ids}},
+        {"$set": {"stage": target_stage, "updated_at": _now()}},
+    )
+    logger.info(
+        "pipeline.bulk-move project=%s stage=%s requested=%d matched=%d modified=%d",
+        project_id, target_stage, len(talent_ids), res.matched_count, res.modified_count,
+    )
+    return {
+        "success": True,
+        "moved": res.modified_count,
+        "matched": res.matched_count,
+    }
+
+
+@router.post("/{project_id}/pipeline/bulk-label")
+async def bulk_label_pipeline(
+    project_id: str,
+    payload: PipelineBulkLabelIn,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk add/remove labels (tags) on talents' profiles directly."""
+    talent_ids = [tid.strip() for tid in payload.talent_ids if isinstance(tid, str) and tid.strip()]
+    if not talent_ids or not payload.labels:
+        return {"success": True, "updated": 0}
+
+    updated_count = 0
+    if payload.action == "add":
+        for label in payload.labels:
+            label = label.strip()
+            if not label:
+                continue
+            normalized = label.lower().strip()
+            tag_doc = await db.tags.find_one({"normalized_name": normalized})
+            if not tag_doc:
+                tag_id = str(uuid.uuid4())
+                tag_doc = {
+                    "id": tag_id,
+                    "name": label,
+                    "normalized_name": normalized,
+                    "created_at": _now(),
+                }
+                await db.tags.insert_one(tag_doc)
+            else:
+                tag_id = tag_doc["id"]
+            
+            tag_obj = {"id": tag_id, "name": label}
+            
+            res = await db.talents.update_many(
+                {"id": {"$in": talent_ids}, "tags.id": {"$ne": tag_id}},
+                {"$push": {"tags": tag_obj}}
+            )
+            updated_count += res.modified_count
+            
+    elif payload.action == "remove":
+        for label in payload.labels:
+            normalized = label.lower().strip()
+            tag_doc = await db.tags.find_one({"normalized_name": normalized})
+            if tag_doc:
+                tag_id = tag_doc["id"]
+                res = await db.talents.update_many(
+                    {"id": {"$in": talent_ids}},
+                    {"$pull": {"tags": {"id": tag_id}}}
+                )
+                updated_count += res.modified_count
+                
+    return {"success": True, "updated": updated_count}
+
+
+@router.post("/{project_id}/pipeline/bulk-note")
+async def bulk_note_pipeline(
+    project_id: str,
+    payload: PipelineBulkNoteIn,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk append an internal note to the talents' documents."""
+    talent_ids = [tid.strip() for tid in payload.talent_ids if isinstance(tid, str) and tid.strip()]
+    note = payload.note.strip()
+    if not talent_ids or not note:
+        return {"success": True, "updated": 0}
+
+    updated_count = 0
+    cursor = db.talents.find({"id": {"$in": talent_ids}}, {"id": 1, "notes": 1})
+    async for t in cursor:
+        existing = t.get("notes") or ""
+        if existing:
+            new_note = f"{existing}\n\n{note}"
+        else:
+            new_note = note
+            
+        res = await db.talents.update_one(
+            {"id": t["id"]},
+            {"$set": {"notes": new_note, "updated_at": _now()}}
+        )
+        updated_count += res.modified_count
+        
+    return {"success": True, "updated": updated_count}
+
+
+@router.post("/{project_id}/pipeline/bulk-delete")
+async def bulk_delete_pipeline(
+    project_id: str,
+    payload: PipelineBulkDeleteIn,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk remove selected pipeline entries from the project."""
+    talent_ids = [tid.strip() for tid in payload.talent_ids if isinstance(tid, str) and tid.strip()]
+    if not talent_ids:
+        return {"success": True, "deleted": 0}
+
+    res = await db.casting_pipeline.delete_many(
+        {"project_id": project_id, "talent_id": {"$in": talent_ids}}
+    )
+    return {"success": True, "deleted": res.deleted_count}
+
+
+@router.post("/{project_id}/pipeline/bulk-export")
+async def bulk_export_pipeline(
+    project_id: str,
+    payload: PipelineBulkExportIn,
+    _admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk export selected talents' profile details."""
+    talent_ids = [tid.strip() for tid in payload.talent_ids if isinstance(tid, str) and tid.strip()]
+    if not talent_ids:
+        return {"success": True, "talents": []}
+
+    talents_cursor = db.talents.find(
+        {"id": {"$in": talent_ids}},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "email": 1,
+            "phone": 1,
+            "gender": 1,
+            "height": 1,
+            "location": 1,
+            "skills": 1,
+            "tags": 1,
+        }
+    )
+    talents_list = await talents_cursor.to_list(len(talent_ids))
+    return {"success": True, "talents": talents_list}

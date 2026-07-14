@@ -6,6 +6,7 @@ import React, {
     useCallback,
     useMemo,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
@@ -125,7 +126,20 @@ const PipelineCard = memo(function PipelineCard({
     onDragEnd,
     compact = false,
 }) {
+    const navigate = useNavigate();
     const [moving, setMoving] = useState(false);
+    
+    const handleCardClick = useCallback((e) => {
+        // If clicking input, buttons, or links, do not navigate to profile
+        if (e.target.closest('button') || e.target.closest('a') || e.target.closest('input')) {
+            return;
+        }
+        if (readOnly) return;
+        if (item.talent_id) {
+            navigate(`/admin/talents/${item.talent_id}/edit`);
+        }
+    }, [item.talent_id, readOnly, navigate]);
+
     const [showMoreActions, setShowMoreActions] = useState(false);
     const [showActionRail, setShowActionRail] = useState(false);
     const [showQuickMoveMenu, setShowQuickMoveMenu] = useState(false);
@@ -405,78 +419,15 @@ const PipelineCard = memo(function PipelineCard({
     // ============================================================================
     
     const shellClass = [
-        "group relative rounded-lg overflow-hidden",
-        "transition-all duration-150 ease-out",
-        "bg-white",
-        "shadow-[0_1px_2px_rgba(0,0,0,0.04)]",
-        "border",
+        "group relative rounded-lg overflow-hidden transition-all duration-150 ease-out bg-white shadow-[0_1px_2px_rgba(0,0,0,0.04)] border cursor-pointer",
         isSelected
-            ? "border-black/20 ring-1 ring-black/10"
-            : "border-black/[0.08]",
-        readOnly
-            ? ""
-            : "hover:border-black/[0.12] hover:shadow-[0_2px_4px_rgba(0,0,0,0.04)]",
+            ? "border-emerald-500 bg-emerald-50/[0.08] ring-1 ring-emerald-500/25"
+            : "border-black/[0.08] hover:border-black/[0.12] hover:shadow-[0_2px_4px_rgba(0,0,0,0.04)]",
         moving ? "opacity-40 pointer-events-none" : "",
         isDragging ? "opacity-75 scale-[0.995]" : "",
         draggable ? "cursor-grab active:cursor-grabbing" : "",
     ].join(" ");
-    
-    // ============================================================================
-    // BULK MODE RENDER
-    // ============================================================================
-    
-    if (bulkMode) {
-        return (
-            <div
-                data-testid={`pipeline-card-${item.id}`}
-                onClick={() => onToggleSelect(item.id)}
-                onKeyDown={handleKeyDown}
-                draggable={draggable}
-                onDragStart={handleDragStart}
-                onDragEnd={handleDragEnd}
-                className="group relative rounded-lg overflow-hidden transition-all duration-150 bg-[#fafafa] border border-black/[0.08] min-h-[108px] px-3 py-2.5 cursor-pointer hover:border-black/[0.12]"
-                role="checkbox"
-                aria-checked={isSelected}
-                tabIndex={0}
-            >
-                <div className="flex items-center gap-2.5">
-                    <div className="relative flex-shrink-0">
-                        <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => onToggleSelect(item.id)}
-                            onClick={(e) => e.stopPropagation()}
-                            className="
-                                w-4 h-4 rounded-[3px]
-                                border border-black/30 bg-white
-                                checked:bg-black checked:border-black
-                                transition-all duration-100
-                                cursor-pointer
-                                focus:outline-none focus:ring-1 focus:ring-black/20
-                            "
-                            aria-label={`Select ${displayName}`}
-                        />
-                    </div>
-                    <TalentAvatar
-                        src={item.image_url}
-                        name={displayName}
-                        size="md"
-                    />
-                    <div className="flex-1 min-w-0">
-                        <p className="text-[13px] text-black/85 font-medium leading-[1.25] truncate">
-                            {displayName}
-                        </p>
-                        {displayEmail && (
-                            <p className="text-[9px] text-black/45 truncate mt-1">
-                                {displayEmail}
-                            </p>
-                        )}
-                    </div>
-                </div>
-            </div>
-        );
-    }
-    
+
     // ============================================================================
     // MAIN RENDER
     // ============================================================================
@@ -491,14 +442,43 @@ const PipelineCard = memo(function PipelineCard({
             onMouseEnter={handleMouseEnter}
             onMouseLeave={handleMouseLeave}
             onTouchStart={handleTouchStart}
+            onClick={handleCardClick}
             className={shellClass}
             aria-label={`Talent: ${displayName}`}
         >
-                <div className="p-3 md:p-4 space-y-2 md:space-y-2.5">
+            {/* Selection Checkbox Overlay - visible on hover or when selected/bulkMode active */}
+            {!readOnly && (
+                <div 
+                    className={`absolute top-2 left-2 z-30 transition-opacity duration-150 ${
+                        isSelected || bulkMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    }`}
+                >
+                    <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={(e) => {
+                            // Column/stage items array can be passed via hook or parent context.
+                            // For simplicity, range-selects will check the shift key.
+                            onToggleSelect(item.id, e.nativeEvent.shiftKey);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-4 h-4 rounded border border-black/30 bg-white checked:bg-black checked:border-black cursor-pointer focus:outline-none focus:ring-1 focus:ring-black/20"
+                        aria-label={`Select ${displayName}`}
+                    />
+                </div>
+            )}
+
+            <div className="p-3 md:p-4 space-y-2 md:space-y-2.5">
                 {/* Row 1: Identity block — Avatar + Name/Handle + workflow chips inline */}
                 <div className="flex items-start gap-3">
                     {/* Avatar — full opacity anchors identity */}
-                    <div className="flex-shrink-0">
+                    <div className="flex-shrink-0 relative">
+                        {/* Selected Indicator - small overlay tag on avatar if selected */}
+                        {isSelected && (
+                            <div className="absolute -top-1 -right-1 z-10 bg-emerald-500 text-white rounded-full p-0.5 shadow-sm border border-white">
+                                <Check className="w-2.5 h-2.5 stroke-[3]" />
+                            </div>
+                        )}
                         <TalentAvatar
                             src={item.image_url}
                             name={displayName}

@@ -224,9 +224,9 @@ const PipelineColumn = memo(function PipelineColumn({
     const columnLabel = `${getStageLabel(stage)} column with ${displayMetrics.count} items${displayMetrics.stale ? `, ${displayMetrics.stale} stale candidates` : ""}`;
 
     // 4. useCallback hooks (depend on isDroppable, isCollapsed, etc.)
-    const handleToggleSelect = useCallback((id) => {
-        onToggleBulkSelect?.(id);
-    }, [onToggleBulkSelect]);
+    const handleToggleSelect = useCallback((id, shiftKey) => {
+        onToggleBulkSelect?.(id, shiftKey, items);
+    }, [onToggleBulkSelect, items]);
 
     const handleDragStart = useCallback((id) => {
         onCardDragStart?.(id);

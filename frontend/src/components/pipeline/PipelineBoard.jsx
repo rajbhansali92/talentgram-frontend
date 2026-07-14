@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useState, useMemo } from "react";
+import React, { memo, useCallback, useState, useMemo, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
@@ -19,7 +19,7 @@ import QuickAddTalents from "./QuickAddTalents";
 import BulkAddModal from "./BulkAddModal";
 import TalentBrowserModal from "./TalentBrowserModal";
 
-import { ChevronDown, Eye, EyeOff } from "lucide-react";
+import { ChevronDown, Eye, EyeOff, X } from "lucide-react";
 
 import {
     INDEPENDENT_STAGES,

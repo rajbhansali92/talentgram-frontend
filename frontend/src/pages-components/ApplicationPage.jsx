@@ -855,7 +855,15 @@ export default function ApplicationPage() {
             try {
                 await axios.put(
                     `/public/apply/${aid}`,
-                    { form_data: form },
+                    { 
+                        form_data: { 
+                            ...form, 
+                            first_name: basics.first_name, 
+                            last_name: basics.last_name, 
+                            phone: basics.phone, 
+                            alternate_contact_number: basics.alternate_contact_number 
+                        } 
+                    },
                     { headers: { Authorization: `Bearer ${token}` } },
                 );
                 saveLocal();
@@ -866,7 +874,7 @@ export default function ApplicationPage() {
         }, 800);
         return () => clearTimeout(id);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [form, started, aid, token, finalized, hydrating]);
+    }, [form, basics, started, aid, token, finalized, hydrating]);
 
     const upload = async (files, category) => {
         if (!files || !files.length) return;
@@ -1416,44 +1424,41 @@ export default function ApplicationPage() {
                     </div>
                 </div>
 
-                {/* Recovery section — the identity gate (the only place First
-                    Name / Last Name / Phone are normally editable) is skipped
-                    on some resume paths (e.g. returning via OTP before a
-                    canonical talent profile exists). If any of these ended up
-                    missing, surface them here so the talent isn't stuck at a
-                    "First Name is required" dead end with no field to fix.
-                    Hidden entirely once all three are present — no change to
-                    the existing experience for a normal, fully-filled draft. */}
-                {(!basics.first_name?.trim() || !basics.last_name?.trim() || !basics.phone?.trim()) && (
-                    <div ref={identityRef}>
-                        <Section title="Contact Details" index="!">
-                            <div className="space-y-5">
-                                <Row
-                                    label={`First Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
-                                    value={basics.first_name}
-                                    onChange={(v) => { setBasics({ ...basics, first_name: v }); clearError("first_name"); }}
-                                    testid="apply-first-name-recovery"
-                                />
-                                <Row
-                                    label={`Last Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
-                                    value={basics.last_name}
-                                    onChange={(v) => { setBasics({ ...basics, last_name: v }); clearError("last_name"); }}
-                                    testid="apply-last-name-recovery"
-                                />
-                                <Row
-                                    label="Phone Number (WhatsApp)"
-                                    value={basics.phone}
-                                    onChange={(v) => setBasics({ ...basics, phone: v })}
-                                    testid="apply-phone-recovery"
-                                    hint="Please enter the number that is active on WhatsApp. This will be used for casting communication and project updates."
-                                />
-                            </div>
-                        </Section>
-                    </div>
-                )}
+                <div ref={identityRef}>
+                    <Section title="Contact Details" index="01">
+                        <div className="space-y-5">
+                            <Row
+                                label={`First Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
+                                value={basics.first_name}
+                                onChange={(v) => { setBasics({ ...basics, first_name: v }); clearError("first_name"); }}
+                                testid="apply-first-name-recovery"
+                            />
+                            <Row
+                                label={`Last Name${requirements?.profile_requirements?.name === "required" ? " *" : ""}`}
+                                value={basics.last_name}
+                                onChange={(v) => { setBasics({ ...basics, last_name: v }); clearError("last_name"); }}
+                                testid="apply-last-name-recovery"
+                            />
+                            <Row
+                                label="Phone Number (WhatsApp) *"
+                                value={basics.phone}
+                                onChange={(v) => { setBasics({ ...basics, phone: v }); clearError("phone"); }}
+                                testid="apply-phone-recovery"
+                                hint="Please enter the number that is active on WhatsApp. This will be used for casting communication and project updates."
+                            />
+                            <Row
+                                label="Alternate Contact Number (optional)"
+                                value={basics.alternate_contact_number}
+                                onChange={(v) => setBasics({ ...basics, alternate_contact_number: v })}
+                                testid="apply-alt-phone-recovery"
+                                hint="Optional backup contact number."
+                            />
+                        </div>
+                    </Section>
+                </div>
 
                 {/* Section 2 — Profile Details */}
-                <Section title="Profile Details" index="01">
+                <Section title="Profile Details" index="02">
                     <div className="grid md:grid-cols-2 gap-6">
                         <Row
                             label="Date of Birth *"
@@ -1543,7 +1548,7 @@ export default function ApplicationPage() {
                 </Section>
 
                 {/* Section 3 — Professional */}
-                <Section title="Professional Details" index="02">
+                <Section title="Professional Details" index="03">
                     <div className="grid md:grid-cols-2 gap-6">
                         <div ref={igHandleRef}>
                             <Label>Instagram Handle{requirements?.profile_requirements?.instagram_handle === "required" ? " *" : ""}</Label>
@@ -1675,7 +1680,7 @@ export default function ApplicationPage() {
                 </Section>
 
                 {/* Section 3b — Interested In */}
-                <Section title="What are you interested in?" index="03">
+                <Section title="What are you interested in?" index="04">
                     <p className="text-xs text-[#6b6b6b] mb-5 leading-relaxed">
                         Select all categories that apply. This helps us match you to the right campaigns.
                     </p>
@@ -1687,7 +1692,7 @@ export default function ApplicationPage() {
 
                 {/* Section 4 — Media */}
                 <div ref={mediaRef}>
-                <Section title="Media" index="04">
+                <Section title="Media" index="05">
                     {errors.media && (
                         <p role="alert" className="text-xs text-[#d03a2a] mb-4" data-testid="error-media">
                             {errors.media}

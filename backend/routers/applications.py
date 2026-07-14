@@ -606,6 +606,12 @@ async def update_application(
         ln = merged.get("last_name")
         if fn or ln:
             update["talent_name"] = f"{fn or ''} {ln or ''}".strip() or app_doc.get("talent_name")
+        ph = merged.get("phone")
+        if ph:
+            update["talent_phone"] = ph
+        alt_ph = merged.get("alternate_contact_number")
+        if alt_ph:
+            update["alternate_contact_number"] = alt_ph
 
         # Effective age resolves strictly from DOB — no override fields.
         dob = merged.get("dob")

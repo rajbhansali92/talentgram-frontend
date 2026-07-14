@@ -1666,10 +1666,10 @@ class TokenOut(BaseModel):
 class MediaItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     category: str
-    url: str
+    url: Optional[str] = None
     public_id: Optional[str] = None
     resource_type: Optional[str] = None
-    content_type: str
+    content_type: Optional[str] = None
     original_filename: Optional[str] = None
     size: int = 0
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

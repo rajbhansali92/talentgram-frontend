@@ -408,6 +408,25 @@ body {
   animation: tgShimmer 1.4s infinite ease-in-out;
 }
 
+/* -------------------------------------------------------------------------
+ * Readiness panel — jump-to-requirement highlight flash
+ * ------------------------------------------------------------------------- */
+@keyframes tgHighlightFlash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(11, 31, 58, 0);
+  }
+  15%,
+  60% {
+    box-shadow: 0 0 0 4px rgba(11, 31, 58, 0.18);
+  }
+}
+
+.tg-highlight-flash {
+  animation: tgHighlightFlash 1.6s ease-out 1;
+  border-radius: var(--tg-radius-lg);
+}
+
 /* Glass progressive enhancement fallback */
 .tg-glass {
   background-color: rgba(255, 255, 255, 0.85);

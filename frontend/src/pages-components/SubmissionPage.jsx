@@ -6,6 +6,10 @@ import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
+import { jumpToRequirementItem } from "@/lib/scrollHighlight";
+import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS } from "@/lib/readinessStatus";
+import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
+import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -1409,36 +1413,6 @@ function SubmissionPage() {
     const westernImages = media.filter((m) => m.category === "western");
     const allImages = [...images, ...indianImages, ...westernImages];
 
-    // Sprint 2 — single source of truth for submission progress, consumed by
-    // BOTH the in-page tracker and the sticky mobile progress bar so the two can
-    // never drift. Same completion rules as Sprint 1; nothing hardcoded.
-    const progressSteps = useMemo(() => {
-        const steps = [
-            {
-                label: "Profile",
-                fullLabel: "Your Profile",
-                completed: !!(form.first_name?.trim() && form.last_name?.trim() && form.height && form.location && form.location.length > 0),
-            },
-            {
-                label: "Questions",
-                fullLabel: "Project Questions",
-                completed: !!(form.availability?.status && (form.availability.status !== "no" || form.availability.note?.trim()) && form.budget?.status && (form.budget.status !== "custom" || form.budget.value?.trim())),
-            },
-            {
-                label: "Uploads",
-                fullLabel: "Uploads (Optional)",
-                completed: media.length > 0,
-            },
-        ];
-        const currentIndex = steps.findIndex((s) => !s.completed);
-        return {
-            steps,
-            currentIndex,
-            allDone: currentIndex === -1,
-            stepNumber: currentIndex === -1 ? steps.length : currentIndex + 1,
-        };
-    }, [form.first_name, form.last_name, form.height, form.location, form.availability, form.budget, media.length]);
-
     const intro = media.find((m) => m.category === "intro_video");
     const takes = media
         .filter(
@@ -1454,7 +1428,7 @@ function SubmissionPage() {
             return { ...m, _legacy: true, label: m.label || `Take ${n}` };
         });
 
-    const showImagesSection = (requirements.portfolio_image_visibility !== "hidden") || (requirements.portfolio_indian_visibility !== "hidden") || (requirements.portfolio_western_visibility !== "hidden");
+    const showImagesSection = (requirements.portfolio_image_visibility !== REQUIREMENT_TIERS.HIDDEN) || (requirements.portfolio_indian_visibility !== REQUIREMENT_TIERS.HIDDEN) || (requirements.portfolio_western_visibility !== REQUIREMENT_TIERS.HIDDEN);
 
     const activeConditionalVideoRules = useMemo(() => {
         if (!project || !Array.isArray(project.conditional_video_rules)) return [];
@@ -1545,7 +1519,10 @@ function SubmissionPage() {
 
     const finalize = async () => {
         // ── Guided validation: run inline before network call ──────────────
-        const missing = getMissingRequirements();
+        // `experience` (useSubmissionExperienceModel) was computed during the
+        // render that's already happened by the time this click handler runs
+        // — no need to recompute anything here, just read the model.
+        const missing = experience.missingRequirements;
         if (missing.length > 0) {
             // Build error map
             const errors = {};
@@ -1571,36 +1548,30 @@ function SubmissionPage() {
                 setCollapsedSections((prev) => ({ ...prev, ...sectionsToOpen }));
             }
 
-            // Scroll + focus the first error after a brief paint
+            // A failed upload isn't "missing" — it's a distinct situation the
+            // talent needs to act on. Prioritize telling them that instead of
+            // the generic "please fill in" message (same readinessSummary the
+            // footer reads, so this can't drift from what's shown there).
+            const firstFailed = experience.readinessSummary.failed[0];
+            const jumpTarget = firstFailed || missing[0];
+
+            // Scroll + focus the relevant item after a brief paint (shared with
+            // the readiness panel's click-to-jump — see scrollHighlight.js).
             setTimeout(() => {
-                const first = missing[0];
-                // Try fieldRefs first (most precise — actual input element)
-                const refEl = fieldRefs.current[first.id];
-                if (refEl) {
-                    refEl.scrollIntoView({ behavior: "smooth", block: "center" });
-                    try { refEl.focus(); } catch (_) {}
-                    return;
-                }
-                // Fallback: CSS selector on the data-testid attribute
-                if (first.selector) {
-                    const domEl = document.querySelector(first.selector);
-                    if (domEl) {
-                        domEl.scrollIntoView({ behavior: "smooth", block: "center" });
-                        const focusable = domEl.querySelector(
-                            "input, select, textarea, button"
-                        );
-                        if (focusable) {
-                            try { focusable.focus(); } catch (_) {}
-                        }
-                    }
-                }
+                jumpToRequirementItem(jumpTarget, fieldRefs);
             }, 120);
 
-            toast.error(
-                `Please fill in: ${missing[0].label}${
-                    missing.length > 1 ? ` (+${missing.length - 1} more)` : ""
-                }`
-            );
+            if (experience.readinessSummary.failed.length === 1) {
+                toast.error(`Your ${firstFailed.label} failed to upload. Please retry before submitting.`);
+            } else if (experience.readinessSummary.failed.length > 1) {
+                toast.error(`${experience.readinessSummary.failed.length} uploads need attention.`);
+            } else {
+                toast.error(
+                    `Please fill in: ${missing[0].label}${
+                        missing.length > 1 ? ` (+${missing.length - 1} more)` : ""
+                    }`
+                );
+            }
             return;
         }
 
@@ -1659,265 +1630,48 @@ function SubmissionPage() {
         }
     };
 
-    const getMissingRequirements = useCallback(() => {
-        const missingList = [];
-        const requirements = project?.submission_requirements;
-        if (!requirements) {
-            // Fallback legacy validation rules
-            if (!form.first_name?.trim()) {
-                missingList.push({ id: "first_name", label: "First name", section: "profile", selector: '[data-testid="form-first-name"]' });
-            }
-            if (!form.last_name?.trim()) {
-                missingList.push({ id: "last_name", label: "Last name", section: "profile", selector: '[data-testid="form-last-name"]' });
-            }
-            if (!form.height?.trim()) {
-                missingList.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]' });
-            }
-            if (!form.location || form.location.length === 0) {
-                missingList.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]' });
-            }
-            
-            const avail = form.availability || {};
-            const status = (avail.status || "").trim();
-            if (status !== "yes" && status !== "no") {
-                missingList.push({ id: "availability", label: "Availability (Yes / No)", section: "profile", selector: '[data-testid="availability-block"]' });
-            } else if (status === "no" && !(avail.note || "").trim()) {
-                missingList.push({ id: "availability_note", label: "Availability note", section: "profile", selector: '[data-testid="availability-note-input"]' });
-            }
+    // The Submission Experience Model — single presentation model for this
+    // page (hooks/useSubmissionExperienceModel.js). It aggregates the
+    // Requirement Engine (lib/requirementEngine.js), the Operational Engine,
+    // and the Readiness Engine (both lib/readinessStatus.js) into one object:
+    // checklist, readinessSummary, uploadSummary, blockingReason, submitCta,
+    // sectionStatus, overallProgress. Every derived value the page or its
+    // children need — the readiness panel, the Submit button, the footer
+    // messaging, and (later) the Upload Manager and section headers — comes
+    // from THIS, not from a locally re-derived variable.
+    const experience = useSubmissionExperienceModel({
+        project,
+        form,
+        submission,
+        activeUploads,
+        finalizing,
+        saveStatus,
+        readyLabel: "Submit Audition",
+    });
 
-            const budget = form.budget || {};
-            const bstatus = (budget.status || "").trim();
-            if (bstatus !== "accept" && bstatus !== "custom") {
-                missingList.push({ id: "budget", label: "Budget (Accept / Custom)", section: "profile", selector: '[data-testid="budget-block"]' });
-            } else if (bstatus === "custom" && !(budget.value || "").trim()) {
-                missingList.push({ id: "budget_value", label: "Expected budget details", section: "profile", selector: '[data-testid="budget-value-input"]' });
-            }
-            return missingList;
+    const focusRequirementItem = useCallback((item) => {
+        if (item.section && collapsedSections[item.section]) {
+            setCollapsedSections((prev) => ({ ...prev, [item.section]: false }));
         }
+        window.setTimeout(() => {
+            jumpToRequirementItem(item, fieldRefs);
+        }, item.section && collapsedSections[item.section] ? 120 : 0);
+    }, [collapsedSections]);
 
-        if (requirements.strictness !== "strict") {
-            return [];
+    // Pure renderer trigger for the Submit button: reads `experience.submitCta`
+    // (already-resolved label/disabled/action) and dispatches — it contains
+    // no readiness logic of its own. Plain function, not useCallback:
+    // `experience` already changes reference whenever anything relevant does
+    // (useSubmissionExperienceModel's own useMemo), so wrapping this would buy
+    // no extra referential stability.
+    const handleSubmitCtaClick = () => {
+        const { submitCta } = experience;
+        if (submitCta.buttonAction === CTA_ACTIONS.SCROLL_TO_MISSING) {
+            if (submitCta.scrollTarget) focusRequirementItem(submitCta.scrollTarget);
+            return;
         }
-
-        const fieldsConfig = requirements.fields || {};
-
-        // 1. Standard Profile Fields
-        if (fieldsConfig.name === "required") {
-            if (!form.first_name?.trim()) {
-                missingList.push({ id: "first_name", label: "First name", section: "profile", selector: '[data-testid="form-first-name"]' });
-            }
-            if (!form.last_name?.trim()) {
-                missingList.push({ id: "last_name", label: "Last name", section: "profile", selector: '[data-testid="form-last-name"]' });
-            }
-        }
-        if (fieldsConfig.email === "required" && !(submission?.talent_email || form.email)?.trim()) {
-            missingList.push({ id: "email", label: "Email", section: "profile", selector: '[data-testid="form-email"]' });
-        }
-        if (fieldsConfig.phone === "required" && !form.phone?.trim()) {
-            missingList.push({ id: "phone", label: "Phone", section: "profile", selector: '[data-testid="form-phone"]' });
-        }
-        if (fieldsConfig.dob === "required" && !form.dob?.trim()) {
-            missingList.push({ id: "dob", label: "Date of Birth", section: "profile", selector: '[data-testid="form-dob"]' });
-        }
-        if (fieldsConfig.age === "required" && (form.age === undefined || form.age === null || String(form.age).trim() === "")) {
-            missingList.push({ id: "age", label: "Age", section: "profile", selector: '[data-testid="form-age-field"]' });
-        }
-        if (fieldsConfig.height === "required" && !form.height?.trim()) {
-            missingList.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]' });
-        }
-        if (fieldsConfig.location === "required" && (!form.location || form.location.length === 0)) {
-            missingList.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]' });
-        }
-        if (fieldsConfig.gender === "required" && !form.gender?.trim()) {
-            missingList.push({ id: "gender", label: "Gender", section: "profile", selector: '[data-testid="form-gender-field"]' });
-        }
-        if (fieldsConfig.ethnicity === "required" && !form.ethnicity?.trim()) {
-            missingList.push({ id: "ethnicity", label: "Ethnicity", section: "profile", selector: '[data-testid="form-ethnicity-field"]' });
-        }
-        if (fieldsConfig.instagram_handle === "required" && !form.instagram_handle?.trim()) {
-            missingList.push({ id: "instagram_handle", label: "Instagram Handle", section: "profile", selector: '[data-testid="form-instagram-handle"]' });
-        }
-        if (fieldsConfig.instagram_followers === "required" && !form.instagram_followers?.trim()) {
-            missingList.push({ id: "instagram_followers", label: "Instagram Followers", section: "profile", selector: '[data-testid="form-instagram-followers-field"]' });
-        }
-        if (fieldsConfig.bio === "required" && !form.bio?.trim()) {
-            missingList.push({ id: "bio", label: "Bio", section: "profile", selector: '[data-testid="form-bio-field"]' });
-        }
-        if (fieldsConfig.competitive_brand === "required" && !form.competitive_brand?.trim()) {
-            missingList.push({ id: "competitive_brand", label: "Competitive Brand details", section: "projectQuestions", selector: '[data-testid="form-competitive-brand"]' });
-        }
-
-        if (fieldsConfig.availability === "required") {
-            const avail = form.availability || {};
-            const status = (avail.status || "").trim();
-            if (status !== "yes" && status !== "no") {
-                missingList.push({ id: "availability", label: "Availability (Yes / No)", section: "projectQuestions", selector: '[data-testid="availability-block"]' });
-            } else if (status === "no" && !(avail.note || "").trim()) {
-                missingList.push({ id: "availability_note", label: "Availability note", section: "projectQuestions", selector: '[data-testid="availability-note-input"]' });
-            }
-        }
-
-        if (fieldsConfig.budget_expectation === "required") {
-            const budget = form.budget || {};
-            const bstatus = (budget.status || "").trim();
-            if (bstatus !== "accept" && bstatus !== "custom") {
-                missingList.push({ id: "budget", label: "Budget (Accept / Custom)", section: "projectQuestions", selector: '[data-testid="budget-block"]' });
-            } else if (bstatus === "custom" && !(budget.value || "").trim()) {
-                missingList.push({ id: "budget_value", label: "Expected budget details", section: "projectQuestions", selector: '[data-testid="budget-value-input"]' });
-            }
-        }
-
-        if (requirements.interested_in === "required") {
-            if (!form.interested_in || form.interested_in.length === 0) {
-                missingList.push({ id: "interested_in", label: "Casting Interests", section: "profile", selector: '[data-testid="interested-in-section"]' });
-            }
-        }
-
-        // 2. Custom Questions
-        const customReqs = requirements.custom_questions || {};
-        const customAnswers = form.custom_answers || {};
-        (project?.custom_questions || []).forEach(cq => {
-            if (cq.id && customReqs[cq.id] === "required") {
-                if (!String(customAnswers[cq.id] || "").trim()) {
-                    missingList.push({
-                        id: `cq_${cq.id}`,
-                        label: `"${cq.question}" answers`,
-                        section: "projectQuestions",
-                        selector: `[data-testid="form-cq-${cq.id}"]`
-                    });
-                }
-            }
-        });
-
-        // 3. Media Uploads
-        const mediaList = submission?.media || [];
-        if (requirements.intro_video === "required") {
-            const hasIntro = mediaList.some(m => m.category === "intro_video");
-            if (!hasIntro) {
-                missingList.push({ id: "intro_video", label: "Introduction Video", section: "uploads", selector: '[data-testid="uploads-section"]' });
-            }
-        }
-
-        const minTakes = parseInt(requirements.min_audition_takes || 0, 10);
-        const takesVis = requirements.audition_takes_visibility || (minTakes > 0 ? "required" : "optional");
-        if (takesVis === "required") {
-            const takesCount = mediaList.filter(m => ["take", "take_1", "take_2", "take_3"].includes(m.category)).length;
-            if (takesCount < minTakes) {
-                missingList.push({ id: "takes", label: `Audition Takes (minimum ${minTakes})`, section: "uploads", selector: '[data-testid="takes-section"]' });
-            }
-        }
-
-        const portfolioReqs = requirements.portfolio || {};
-        const portfolioCats = [
-            { category: "image", label: "Portfolio (General)", selector: '[data-testid="portfolio-group-generic"]', visKey: "portfolio_image_visibility" },
-            { category: "indian", label: "Indian Look", selector: '[data-testid="portfolio-group-indian"]', visKey: "portfolio_indian_visibility" },
-            { category: "western", label: "Western Look", selector: '[data-testid="portfolio-group-western"]', visKey: "portfolio_western_visibility" }
-        ];
-        portfolioCats.forEach(cat => {
-            const minCount = parseInt(portfolioReqs[cat.category] || 0, 10);
-            const pVis = requirements[cat.visKey] || (minCount > 0 ? "required" : "optional");
-            if (pVis === "required") {
-                const count = mediaList.filter(m => m.category === cat.category).length;
-                if (count < minCount) {
-                    missingList.push({
-                        id: `portfolio_${cat.category}`,
-                        label: `${cat.label} (minimum ${minCount})`,
-                        section: "uploads",
-                        selector: cat.selector
-                    });
-                }
-            }
-        });
-
-        // 4. Work Links
-        const minLinks = parseInt(requirements.min_work_links || 0, 10);
-        const linksVis = requirements.work_links_visibility || (minLinks > 0 ? "required" : "optional");
-        if (linksVis === "required") {
-            const linksCount = (form.work_links || []).length;
-            if (linksCount < minLinks) {
-                missingList.push({ id: "work_links", label: `Work Links (minimum ${minLinks})`, section: "profile", selector: '[data-testid="form-work-links-field"]' });
-            }
-        }
-
-        // 5. Skills & Special Abilities
-        const skillsReqs = requirements.skills || {};
-        const userSkills = form.skills || [];
-        const SKILLS_CATEGORIES = {
-            "language": ["English", "Hindi", "Spanish", "French", "Mandarin Chinese", "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Urdu", "Other"],
-            "languages": ["English", "Hindi", "Spanish", "French", "Mandarin Chinese", "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Urdu", "Other"],
-            "performance": ["Actor", "Voice Artist", "Dancer", "Singer", "Host", "Anchor", "Model", "Theatre Artist", "Improvisation", "Stand-up Comedy"],
-            "sports": ["Athlete", "Gymnastics", "Yoga", "Swimming", "Cycling", "Boxing", "Kickboxing", "Wrestling", "CrossFit", "Calisthenics", "Cricket", "Football", "Basketball", "Tennis", "Badminton"],
-            "sports & fitness": ["Athlete", "Gymnastics", "Yoga", "Swimming", "Cycling", "Boxing", "Kickboxing", "Wrestling", "CrossFit", "Calisthenics", "Cricket", "Football", "Basketball", "Tennis", "Badminton"],
-            "action": ["Martial Arts", "Karate", "Taekwondo", "Judo", "Kung Fu", "Fight Choreography", "Horse Riding", "Rock Climbing", "Parkour", "Sword Fighting"],
-            "action & stunts": ["Martial Arts", "Karate", "Taekwondo", "Judo", "Kung Fu", "Fight Choreography", "Horse Riding", "Rock Climbing", "Parkour", "Sword Fighting"],
-            "vehicle": ["Drive Manual Car", "Drive Automatic Car", "Ride Motorcycle", "Ride Scooter", "Ride Bicycle", "Drive Truck", "Operate Boat", "Ride Jet Ski"],
-            "vehicle skills": ["Drive Manual Car", "Drive Automatic Car", "Ride Motorcycle", "Ride Scooter", "Ride Bicycle", "Drive Truck", "Operate Boat", "Ride Jet Ski"],
-            "special": ["Skateboarding", "Roller Skating", "Ice Skating", "Surfing", "Scuba Diving", "Fire Performance", "Juggling"],
-            "special skills": ["Skateboarding", "Roller Skating", "Ice Skating", "Surfing", "Scuba Diving", "Fire Performance", "Juggling"],
-            "dance": ["Hip Hop", "Contemporary", "Bollywood", "Bharatanatyam", "Kathak", "Salsa", "Ballet"],
-            "music": ["Singer", "Piano", "Keyboard", "Guitar", "Violin", "Drums", "Flute", "Ukulele", "DJ", "Beatboxing", "Rapper", "Composer", "Music Producer"]
-        };
-        Object.keys(skillsReqs).forEach(cat => {
-            if (skillsReqs[cat]) {
-                const validSkills = SKILLS_CATEGORIES[cat.toLowerCase()] || [];
-                const hasSkill = userSkills.some(s => validSkills.includes(s));
-                if (!hasSkill) {
-                    missingList.push({
-                        id: `skills_${cat}`,
-                        label: `At least one skill from category "${cat}"`,
-                        section: "profile",
-                        selector: '[data-testid="form-skills-field"]'
-                    });
-                }
-            }
-        });
-
-        // 6. Conditional Rules
-        const getMediaLabel = (m) => {
-            if (m.label) return m.label;
-            if (m.category === "intro_video") return "Introduction Video";
-            if (m.category === "take_1") return "Take 1";
-            if (m.category === "take_2") return "Take 2";
-            if (m.category === "take_3") return "Take 3";
-            return "";
-        };
-        const conditionalRules = requirements.conditional_rules || [];
-        conditionalRules.forEach(rule => {
-            const qid = rule.question_id;
-            const trigger = rule.trigger_value;
-            const videoLabel = rule.video_label;
-            if (qid && trigger && videoLabel) {
-                const ans = String(customAnswers[qid] || "").trim().toLowerCase();
-                if (ans === String(trigger).trim().toLowerCase()) {
-                    const hasCondVideo = mediaList.some(m =>
-                        ["take", "intro_video", "take_1", "take_2", "take_3"].includes(m.category) &&
-                        getMediaLabel(m).trim().toLowerCase() === videoLabel.trim().toLowerCase()
-                    );
-                    if (!hasCondVideo) {
-                        const cqObj = (project?.custom_questions || []).find(q => q.id === qid);
-                        const questionText = cqObj ? cqObj.question : "additional question";
-                        missingList.push({
-                            id: `conditional_${qid}_${videoLabel}`,
-                            label: `"${videoLabel}" required (Because you answered "${trigger}" to "${questionText}")`,
-                            section: "uploads",
-                            selector: '[data-testid="uploads-section"]'
-                        });
-                    }
-                }
-            }
-        });
-
-        return missingList;
-    }, [project, form, submission]);
-
-    const missingRequirements = getMissingRequirements();
-    const readyToSubmit = missingRequirements.length === 0;
-    const missing = missingRequirements.map(req => req.label);
-    // Block Submit while any upload is still uploading/processing so the talent
-    // never hits a confusing "required" failure for media that is mid-upload.
-    const uploadsInProgress = Object.values(activeUploads).some(
-        (u) => u.status === "uploading" || u.status === "processing"
-    );
+        finalize();
+    };
 
     const MAX_TAKES = 5;
     const canAddTake = takes.length < MAX_TAKES;
@@ -2210,83 +1964,21 @@ function SubmissionPage() {
                     )}
                 </section>
 
-                {/* SUBMISSION PROGRESS CHECKLIST */}
-                {emailGateUnlocked && (() => {
-                    // Sprint 2 — now reads the shared `progressSteps` memo so the
-                    // in-page tracker and the sticky mobile bar stay in lockstep.
-                    const { currentIndex, allDone, stepNumber } = progressSteps;
-                    const steps = progressSteps.steps.map((s) => ({ label: s.fullLabel, completed: s.completed }));
-                    return (
-                    <section className="mb-10 bg-white rounded-3xl p-6 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.03)]" data-testid="submission-progress-card">
-                        <div className="flex items-center justify-between mb-3 gap-3">
-                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-black font-semibold">Submission Progress</p>
-                            <p className="uppercase tracking-[0.18em] text-[10px] font-mono text-[#333333] font-semibold shrink-0" data-testid="submission-progress-step">
-                                {allDone ? "All steps complete" : `Step ${stepNumber} of ${steps.length}`}
-                            </p>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            {steps.map((item, idx) => {
-                                const state = item.completed ? "completed" : idx === currentIndex ? "current" : "upcoming";
-                                return (
-                                <div
-                                    key={idx}
-                                    data-testid={`submission-progress-step-${idx}`}
-                                    data-state={state}
-                                    className={`flex items-center gap-2.5 px-3 py-2.5 rounded-2xl border transition-all duration-300 ${
-                                        state === "completed"
-                                            ? "bg-emerald-50/40 border-emerald-100/50 text-emerald-900 font-semibold"
-                                            : state === "current"
-                                                ? "bg-[#0c2340]/[0.04] border-[#0c2340]/20 text-[#0c2340] font-semibold"
-                                                : "bg-slate-50/50 border-slate-100 text-[#333333] font-semibold"
-                                    }`}
-                                >
-                                    <span className="shrink-0">
-                                        {state === "completed" ? (
-                                            <div className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-sm">
-                                                <Check className="w-3 h-3 stroke-[3]" />
-                                            </div>
-                                        ) : state === "current" ? (
-                                            <div className="w-5 h-5 rounded-full bg-[#0c2340] flex items-center justify-center shadow-sm">
-                                                <div className="w-1.5 h-1.5 rounded-full bg-white" />
-                                            </div>
-                                        ) : (
-                                            <div className="w-5 h-5 rounded-full border-2 border-[#eaeaea] bg-white" />
-                                        )}
-                                    </span>
-                                    <span className="text-[12px] font-medium tracking-tight truncate">
-                                        {item.label}
-                                    </span>
-                                </div>
-                                );
-                            })}
-                        </div>
-                        {/* Sprint 1 — autosave reassurance + live indicator */}
-                        <div className="mt-4 pt-3 border-t border-[#eaeaea]/60 flex items-start justify-between gap-3">
-                            <p className="text-[11px] leading-relaxed text-[#333333] font-mono">
-                                Your progress is automatically saved.<br className="hidden sm:block" />
-                                {" "}You can continue later using the same email.
-                            </p>
-                            <span
-                                data-testid="autosave-indicator"
-                                aria-live="polite"
-                                className="shrink-0 inline-flex items-center gap-1.5 text-[11px] font-mono font-semibold tracking-tight"
-                            >
-                                {saveStatus === "saving" ? (
-                                    <>
-                                        <span className="w-1.5 h-1.5 rounded-full bg-[#0c2340]/50 animate-pulse" />
-                                        <span className="text-[#333333]">Saving…</span>
-                                    </>
-                                ) : saveStatus === "saved" ? (
-                                    <>
-                                        <Check className="w-3 h-3 stroke-[3] text-emerald-500" />
-                                        <span className="text-emerald-700">Saved</span>
-                                    </>
-                                ) : null}
-                            </span>
-                        </div>
-                    </section>
-                    );
-                })()}
+                {/* SUBMISSION READINESS — config-driven, live-updating checklist.
+                    Replaces the old fixed 3-step tracker (Profile/Questions/
+                    Uploads), which didn't reflect the project's actual
+                    submission_requirements config. `experience.checklist` comes
+                    from the same Submission Experience Model that gates the
+                    Submit button, so this panel can never show something as
+                    complete/missing that disagrees with the actual validation
+                    gate — it's a pure renderer, no derivation happens here. */}
+                {emailGateUnlocked && (
+                    <SubmissionReadinessPanel
+                        items={experience.checklist}
+                        onItemClick={focusRequirementItem}
+                        saveStatus={experience.saveStatus}
+                    />
+                )}
 
                 {/* SECTION 2 — TALENT DETAILS FORM */}
                 <section
@@ -2917,7 +2609,7 @@ function SubmissionPage() {
                                                 </Select>
                                             </div>
                                         </div>
-                                        <div className="md:col-span-2">
+                                        <div className="md:col-span-2" data-testid="form-skills-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono block mb-2">
                                                 Skills & Special Abilities
                                             </span>
@@ -3264,7 +2956,7 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 3: Work Links & Additional Material */}
-                        {requirements.work_links_visibility !== "hidden" && (
+                        {requirements.work_links_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                             <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
                                 <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                     <div>
@@ -3365,7 +3057,7 @@ function SubmissionPage() {
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
 
-                                {requirements.intro_video !== "hidden" && (
+                                {requirements.intro_video !== REQUIREMENT_TIERS.HIDDEN && (
                                     <PremiumUploadSlot
                                         title="Introduction Video"
                                         note="Upload your recent professional introduction video (no contact info)."
@@ -3384,7 +3076,7 @@ function SubmissionPage() {
                                     />
                                 )}
 
-                                {requirements.audition_takes_visibility !== "hidden" && (
+                                {requirements.audition_takes_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                                     <div className="mb-10" data-testid="takes-section">
                                         <div className="flex items-center justify-between mb-4">
                                             <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
@@ -3489,7 +3181,7 @@ function SubmissionPage() {
                                     </p>
 
                                     {/* Phase 2 — optional Indian look images */}
-                                    {requirements.portfolio_indian_visibility !== "hidden" && (
+                                    {requirements.portfolio_indian_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                                         <PremiumPortfolioGroup
                                             label="Indian Look (optional)"
                                             hint="Saree, lehenga, sherwani, or any traditional/Indian-look references."
@@ -3511,7 +3203,7 @@ function SubmissionPage() {
                                     )}
 
                                     {/* Phase 2 — optional Western look images */}
-                                    {requirements.portfolio_western_visibility !== "hidden" && (
+                                    {requirements.portfolio_western_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                                         <PremiumPortfolioGroup
                                             label="Western Look (optional)"
                                             hint="Casual, formal or western-styled references."
@@ -3533,7 +3225,7 @@ function SubmissionPage() {
                                     )}
 
                                     {/* Generic Portfolio collapsible group */}
-                                    {requirements.portfolio_image_visibility !== "hidden" && (
+                                    {requirements.portfolio_image_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                                         <div className="mb-6 bg-slate-50/50 border border-[#eaeaea]/60 rounded-2xl p-4" data-testid="portfolio-group-generic">
                                             <div
                                                 className="flex items-center justify-between cursor-pointer select-none"
@@ -3748,10 +3440,14 @@ function SubmissionPage() {
                             <p className="text-[12px] text-[#333333] text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
                                 Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
                             </p>
+                            {/* Pure renderer of `experience.submitCta` (Submission Experience
+                                Model) — this button makes no readiness decisions of its own.
+                                Label, disabled state, and click behavior all come from the model. */}
                             <button
-                                onClick={finalize}
-                                disabled={finalizing || uploadsInProgress}
+                                onClick={handleSubmitCtaClick}
+                                disabled={experience.submitCta.disabled}
                                 data-testid="finalize-submission-btn"
+                                data-cta-action={experience.submitCta.buttonAction}
                                 className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                                 style={{ WebkitTapHighlightColor: "transparent" }}
                             >
@@ -3761,15 +3457,35 @@ function SubmissionPage() {
                                     <Sparkles className="w-4 h-4" />
                                 )
                                 }
-                                Submit Audition
+                                {experience.submitCta.buttonLabel}
                             </button>
-                            {uploadsInProgress && (
-                                <p className="text-[11px] text-[#333333] text-center mt-3 font-mono" data-testid="uploads-in-progress-msg">
-                                    Uploads are still in progress. Please wait until all uploads finish.
+                            {/* Live, mutually-exclusive submit-blocked reasons — Missing, Waiting
+                                for uploads, and Upload failed are three different situations for
+                                the talent and never render at once. Driven entirely by
+                                `experience.blockingReason` (Submission Experience Model) — no
+                                special-case scanning of activeUploads happens here. */}
+                            {experience.blockingReason === SUBMIT_BLOCKING_REASONS.FAILED ? (
+                                experience.readinessSummary.failed.length === 1 ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => focusRequirementItem(experience.readinessSummary.failed[0])}
+                                        className="w-full text-[11px] text-rose-700 text-center mt-3 font-mono underline decoration-rose-300 underline-offset-2"
+                                        data-testid="upload-failed-msg"
+                                        aria-live="assertive"
+                                    >
+                                        Your {experience.readinessSummary.failed[0].label} failed to upload. Please retry before submitting.
+                                    </button>
+                                ) : (
+                                    <p className="text-[11px] text-rose-700 text-center mt-3 font-mono" data-testid="upload-failed-msg" aria-live="assertive">
+                                        {experience.readinessSummary.failed.length} uploads need attention.
+                                    </p>
+                                )
+                            ) : experience.blockingReason === SUBMIT_BLOCKING_REASONS.WAITING ? (
+                                <p className="text-[11px] text-[#333333] text-center mt-3 font-mono" data-testid="uploads-in-progress-msg" aria-live="polite">
+                                    Waiting for uploads… hang tight, this updates automatically.
                                 </p>
-                            )}
-                            {!readyToSubmit && (
-                                <p className="text-[11px] text-[#333333] text-center mt-3 font-mono">
+                            ) : experience.blockingReason === SUBMIT_BLOCKING_REASONS.MISSING && (
+                                <p className="text-[11px] text-[#333333] text-center mt-3 font-mono" data-testid="missing-requirements-msg" aria-live="polite">
                                     Need: First+Last name · Height · Location ·
                                     Availability · Budget
                                 </p>
@@ -3807,51 +3523,17 @@ function SubmissionPage() {
                 </div>
             )}
 
-            {/* Sprint 2 — sticky MOBILE-ONLY progress bar. Hidden ≥sm, respects the
-                bottom safe-area inset, and is slim so it never blocks inputs. Reads
-                the shared `progressSteps` memo, so it always matches the in-page
-                tracker. Suppressed once the submission is finalized. */}
+            {/* Sticky MOBILE-ONLY readiness bar. Hidden ≥sm, respects the bottom
+                safe-area inset. Reads `experience.checklist` — the same
+                Submission Experience Model as the in-page panel above (single
+                source of truth) — tap-to-expand reveals the full checklist.
+                Suppressed once the submission is finalized. */}
             {emailGateUnlocked && !finalizing && submission?.status !== "submitted" && (
-                <div
-                    data-testid="sticky-mobile-progress"
-                    className="sm:hidden fixed inset-x-0 bottom-0 z-40 border-t border-[#eaeaea] bg-white/95 backdrop-blur-md shadow-[0_-2px_12px_rgba(15,23,42,0.06)]"
-                    style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
-                    role="group"
-                    aria-label="Submission progress"
-                >
-                    <div className="px-4 py-2.5 flex items-center gap-3">
-                        <span className="text-[11px] font-mono font-semibold tracking-tight text-[#0c2340] shrink-0" aria-live="polite">
-                            {progressSteps.allDone ? "All done" : `Step ${progressSteps.stepNumber} of ${progressSteps.steps.length}`}
-                        </span>
-                        <div className="flex-1 flex items-center justify-end gap-3 min-w-0">
-                            {progressSteps.steps.map((s, idx) => {
-                                const state = s.completed ? "completed" : idx === progressSteps.currentIndex ? "current" : "upcoming";
-                                return (
-                                    <span key={s.label} className="inline-flex items-center gap-1 min-w-0" data-state={state} data-testid={`sticky-step-${idx}`}>
-                                        <span className="shrink-0">
-                                            {state === "completed" ? (
-                                                <span className="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center">
-                                                    <Check className="w-2.5 h-2.5 stroke-[3]" />
-                                                </span>
-                                            ) : state === "current" ? (
-                                                <span className="w-4 h-4 rounded-full bg-[#0c2340] flex items-center justify-center">
-                                                    <span className="w-1 h-1 rounded-full bg-white" />
-                                                </span>
-                                            ) : (
-                                                <span className="w-4 h-4 rounded-full border-2 border-[#d4d4d4] bg-white block" />
-                                            )}
-                                        </span>
-                                        <span className={`text-[11px] font-medium tracking-tight truncate ${
-                                            state === "completed" ? "text-emerald-700" : state === "current" ? "text-[#0c2340] font-semibold" : "text-[#999]"
-                                        }`}>
-                                            {s.label}
-                                        </span>
-                                    </span>
-                                );
-                            })}
-                        </div>
-                    </div>
-                </div>
+                <SubmissionReadinessPanel
+                    items={experience.checklist}
+                    onItemClick={focusRequirementItem}
+                    mode="sticky"
+                />
             )}
         </div>
     );

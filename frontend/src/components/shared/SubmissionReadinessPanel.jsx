@@ -149,6 +149,7 @@ export default function SubmissionReadinessPanel({
     onItemClick,
     mode = "full",
     saveStatus,
+    progress,
     testId = "submission-readiness-panel",
 }) {
     const [stickyExpanded, setStickyExpanded] = useState(false);
@@ -164,6 +165,14 @@ export default function SubmissionReadinessPanel({
                 role="group"
                 aria-label="Submission readiness"
             >
+                {progress && progress.totalCount > 0 && (
+                    <div className="h-[3px] w-full bg-slate-100" data-testid="sticky-readiness-progress">
+                        <div
+                            className={`h-full transition-all duration-300 ${summary.allDone ? "bg-emerald-500" : "bg-[#0c2340]"}`}
+                            style={{ width: `${progress.percent}%` }}
+                        />
+                    </div>
+                )}
                 <button
                     type="button"
                     onClick={() => setStickyExpanded((v) => !v)}
@@ -211,6 +220,19 @@ export default function SubmissionReadinessPanel({
                     {summary.label}
                 </p>
             </div>
+            {progress && progress.totalCount > 0 && (
+                <div className="mb-4" data-testid="submission-readiness-progress">
+                    <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                        <div
+                            className={`h-full rounded-full transition-all duration-300 ${summary.allDone ? "bg-emerald-500" : "bg-[#0c2340]"}`}
+                            style={{ width: `${progress.percent}%` }}
+                        />
+                    </div>
+                    <p className="mt-1.5 text-[10px] font-mono text-[#999] tracking-wide">
+                        {progress.completedCount} of {progress.totalCount} required items complete ({progress.percent}%)
+                    </p>
+                </div>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" role="list">
                 {items.map((item) => (
                     <ReadinessRow key={item.id} item={item} onItemClick={onItemClick} />

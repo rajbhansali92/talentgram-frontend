@@ -146,6 +146,7 @@ Browser --> POST /video-complete --> FastAPI (confirms, stores metadata)
 - Retry: 3 attempts with exponential backoff
 - Dismiss controls per upload
 - **Never covers the sticky submit CTA**: the overlay's `bottom` offset is computed from the current page's sticky submit-CTA footer's live rendered height (via `useStickyFooterHeightVar` + a `--tg-sticky-cta-h` CSS custom property), so it always floats clear of the button instead of overlapping it — adapts automatically to footer height, safe-area insets, and iOS toolbar reflows (see D24 in [08_DECISION_LOG.md](08_DECISION_LOG.md)). On pages without a sticky footer, it falls back to its original fixed bottom-right position.
+- **Client-side video compression** (`lib/videoCompress.js`, ffmpeg.wasm): concurrency gating, the shared FFmpeg singleton's lifecycle, idle-timeout recycling, versioned `/ffmpeg/v1` asset caching, and telemetry hooks are documented in full in [10_FFMPEG_LIFECYCLE.md](10_FFMPEG_LIFECYCLE.md).
 
 ## CRITICAL: Media Sync Rules
 

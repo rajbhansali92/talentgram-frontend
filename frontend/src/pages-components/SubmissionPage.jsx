@@ -6,8 +6,8 @@ import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
-import { jumpToRequirementItem } from "@/lib/scrollHighlight";
-import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS } from "@/lib/readinessStatus";
+import { revealAndJumpToRequirementItem } from "@/lib/scrollHighlight";
+import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS, OPERATIONAL_STATES } from "@/lib/readinessStatus";
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import MaterialModal from "@/components/MaterialModal";
@@ -311,6 +311,17 @@ const LS_DRAFT_KEY = (slug) => `tg_draft_${slug}`;
 // Long-lived opaque access token (stored in DB). Survives JWT expiry and
 // cross-browser / cross-device scenarios where only the URL slug is known.
 const LS_ATK_KEY = (slug) => `tg_atk_${slug}`;
+
+// Whole-section scroll targets for SectionStatusBadge clicks on a section
+// that has nothing unresolved (already complete, or has no required items).
+// Mirrors the CSS-selector fallback `resolveRequirementElement` already uses
+// in lib/scrollHighlight.js — same mechanism, just anchored to the section
+// wrapper instead of one field.
+const SECTION_WRAPPER_SELECTOR = {
+    profile: '[data-testid="profile-section"]',
+    projectQuestions: '[data-testid="project-questions-section"]',
+    uploads: '[data-testid="uploads-section"]',
+};
 
 
 function readSaved(slug) {
@@ -1531,23 +1542,6 @@ function SubmissionPage() {
             });
             setValidationErrors(errors);
 
-            // Expand collapsed sections that contain errors
-            const sectionsToOpen = {};
-            missing.forEach((req) => {
-                if (req.section === "profile" && collapsedSections.profile) {
-                    sectionsToOpen.profile = false;
-                }
-                if (req.section === "uploads" && collapsedSections.uploads) {
-                    sectionsToOpen.uploads = false;
-                }
-                if (req.section === "projectQuestions" && collapsedSections.projectQuestions) {
-                    sectionsToOpen.projectQuestions = false;
-                }
-            });
-            if (Object.keys(sectionsToOpen).length > 0) {
-                setCollapsedSections((prev) => ({ ...prev, ...sectionsToOpen }));
-            }
-
             // A failed upload isn't "missing" — it's a distinct situation the
             // talent needs to act on. Prioritize telling them that instead of
             // the generic "please fill in" message (same readinessSummary the
@@ -1555,11 +1549,11 @@ function SubmissionPage() {
             const firstFailed = experience.readinessSummary.failed[0];
             const jumpTarget = firstFailed || missing[0];
 
-            // Scroll + focus the relevant item after a brief paint (shared with
-            // the readiness panel's click-to-jump — see scrollHighlight.js).
-            setTimeout(() => {
-                jumpToRequirementItem(jumpTarget, fieldRefs);
-            }, 120);
+            // Make the item visible (however that's achieved — no
+            // per-section hardcoding here) and scroll/focus it, retrying as
+            // more of the page reveals itself. Shared with the readiness
+            // panel's click-to-jump — see lib/scrollHighlight.js.
+            revealAndJumpToRequirementItem(jumpTarget, fieldRefs, ensureRequirementVisible);
 
             if (experience.readinessSummary.failed.length === 1) {
                 toast.error(`Your ${firstFailed.label} failed to upload. Please retry before submitting.`);
@@ -1649,14 +1643,67 @@ function SubmissionPage() {
         readyLabel: "Submit Audition",
     });
 
-    const focusRequirementItem = useCallback((item) => {
-        if (item.section && collapsedSections[item.section]) {
-            setCollapsedSections((prev) => ({ ...prev, [item.section]: false }));
-        }
-        window.setTimeout(() => {
-            jumpToRequirementItem(item, fieldRefs);
-        }, item.section && collapsedSections[item.section] ? 120 : 0);
+    // The page's `ensureVisible` step for every navigation helper below:
+    // makes one more attempt at revealing whatever's hidden and reports
+    // whether it changed anything. Callers (and `revealAndJumpToRequirementItem`
+    // in lib/scrollHighlight.js, which invokes this) only care about that
+    // contract — "make more of the page visible, if you can" — never about
+    // HOW visibility is achieved. Today that means opening every currently
+    // collapsed key in `collapsedSections`, generically, by iterating the
+    // map rather than naming sections; a future page could satisfy the same
+    // contract by switching a tab, opening a drawer, or advancing a wizard
+    // step instead, with zero change to any navigation call site
+    // (SectionStatusBadge, the readiness panel, the Submit CTA, or
+    // finalize-time validation).
+    const ensureRequirementVisible = useCallback(() => {
+        const collapsedKeys = Object.keys(collapsedSections).filter((key) => collapsedSections[key]);
+        if (collapsedKeys.length === 0) return false;
+        setCollapsedSections((prev) => {
+            const next = { ...prev };
+            collapsedKeys.forEach((key) => { next[key] = false; });
+            return next;
+        });
+        return true;
     }, [collapsedSections]);
+
+    const focusRequirementItem = useCallback((item) => {
+        revealAndJumpToRequirementItem(item, fieldRefs, ensureRequirementVisible);
+    }, [ensureRequirementVisible]);
+
+    // SectionStatusBadge click handler — a UI shortcut, not another source of
+    // truth. It picks a target from `experience.checklist` (already-computed
+    // Readiness Engine output, same list the panel renders) and hands off to
+    // the SAME navigation primitive (`revealAndJumpToRequirementItem`) the
+    // readiness panel, the Submit CTA, and finalize-time validation all use,
+    // so there is exactly one way a requirement item or section ever gets
+    // focused in this page:
+    //   - unresolved required item found  → `focusRequirementItem` (identical
+    //     to a readiness-panel row click)
+    //   - nothing unresolved (section already COMPLETE, or has no required
+    //     items at all) → same reveal mechanism, scrolled to the section
+    //     wrapper instead of a field, with `highlight: false` — no flash, no
+    //     stolen focus, since there's nothing to draw attention to.
+    const focusSection = useCallback((sectionEntry) => {
+        if (!sectionEntry) return;
+        const sectionKey = sectionEntry.section;
+        const sectionItems = experience.checklist.filter((item) => item.section === sectionKey);
+        const unresolved =
+            sectionItems.find((item) => item.operational === OPERATIONAL_STATES.FAILED) ||
+            sectionItems.find((item) => item.operational === OPERATIONAL_STATES.MISSING) ||
+            sectionItems.find((item) => item.operational !== OPERATIONAL_STATES.COMPLETED);
+
+        if (unresolved) {
+            focusRequirementItem(unresolved);
+            return;
+        }
+
+        revealAndJumpToRequirementItem(
+            { id: sectionKey, selector: SECTION_WRAPPER_SELECTOR[sectionKey] },
+            fieldRefs,
+            ensureRequirementVisible,
+            { block: "start", highlight: false },
+        );
+    }, [experience.checklist, focusRequirementItem, ensureRequirementVisible]);
 
     // Pure renderer trigger for the Submit button: reads `experience.submitCta`
     // (already-resolved label/disabled/action) and dispatches — it contains
@@ -1977,6 +2024,7 @@ function SubmissionPage() {
                         items={experience.checklist}
                         onItemClick={focusRequirementItem}
                         saveStatus={experience.saveStatus}
+                        progress={experience.overallProgress}
                     />
                 )}
 
@@ -2214,30 +2262,33 @@ function SubmissionPage() {
                         {emailGateUnlocked && (
                         <>
                         {/* Section 1: Your Profile */}
-                        <div className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
+                        <div data-testid="profile-section" className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
                                     <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">Your Profile</h2>
                                     <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Please confirm your personal details exactly as they should appear for casting.</p>
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setCollapsedSections(prev => ({
-                                            ...prev,
-                                            profile: !prev.profile,
-                                        }))
-                                    }
-                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                    title={collapsedSections.profile ? "Expand Profile" : "Collapse Profile"}
-                                >
-                                    <ChevronDown
-                                        className={`h-4 w-4 transform transition-transform duration-200 ${
-                                            collapsedSections.profile ? "-rotate-90" : ""
-                                        }`}
-                                    />
-                                </button>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <SectionStatusBadge section={experience.sectionStatus.find((s) => s.section === "profile")} onClick={focusSection} />
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setCollapsedSections(prev => ({
+                                                ...prev,
+                                                profile: !prev.profile,
+                                            }))
+                                        }
+                                        className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                        title={collapsedSections.profile ? "Expand Profile" : "Collapse Profile"}
+                                    >
+                                        <ChevronDown
+                                            className={`h-4 w-4 transform transition-transform duration-200 ${
+                                                collapsedSections.profile ? "-rotate-90" : ""
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
                             </div>
                             
                             {!collapsedSections.profile && (
@@ -2647,30 +2698,33 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 2: Project Questions */}
-                        <div data-step="2" className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
+                        <div data-step="2" data-testid="project-questions-section" className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Project Questions</p>
                                     <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">Project Questions</h2>
                                     <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Please answer these project-specific questions and confirm your availability.</p>
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setCollapsedSections(prev => ({
-                                            ...prev,
-                                            projectQuestions: !prev.projectQuestions,
-                                        }))
-                                    }
-                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                    title={collapsedSections.projectQuestions ? "Expand Project Questions" : "Collapse Project Questions"}
-                                >
-                                    <ChevronDown
-                                        className={`h-4 w-4 transform transition-transform duration-200 ${
-                                            collapsedSections.projectQuestions ? "-rotate-90" : ""
-                                        }`}
-                                    />
-                                </button>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <SectionStatusBadge section={experience.sectionStatus.find((s) => s.section === "projectQuestions")} onClick={focusSection} />
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setCollapsedSections(prev => ({
+                                                ...prev,
+                                                projectQuestions: !prev.projectQuestions,
+                                            }))
+                                        }
+                                        className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                        title={collapsedSections.projectQuestions ? "Expand Project Questions" : "Collapse Project Questions"}
+                                    >
+                                        <ChevronDown
+                                            className={`h-4 w-4 transform transition-transform duration-200 ${
+                                                collapsedSections.projectQuestions ? "-rotate-90" : ""
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
                             </div>
 
                             {!collapsedSections.projectQuestions && (
@@ -3035,23 +3089,26 @@ function SubmissionPage() {
                                     AUDITION UPLOADS
                                 </h2>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() =>
-                                    setCollapsedSections(prev => ({
-                                        ...prev,
-                                        uploads: !prev.uploads,
-                                    }))
-                                }
-                                className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                title={collapsedSections.uploads ? "Expand Uploads" : "Collapse Uploads"}
-                            >
-                                <ChevronDown
-                                    className={`h-4 w-4 transform transition-transform duration-200 ${
-                                        collapsedSections.uploads ? "-rotate-90" : ""
-                                    }`}
-                                />
-                            </button>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <SectionStatusBadge section={experience.sectionStatus.find((s) => s.section === "uploads")} onClick={focusSection} />
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setCollapsedSections(prev => ({
+                                            ...prev,
+                                            uploads: !prev.uploads,
+                                        }))
+                                    }
+                                    className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                    title={collapsedSections.uploads ? "Expand Uploads" : "Collapse Uploads"}
+                                >
+                                    <ChevronDown
+                                        className={`h-4 w-4 transform transition-transform duration-200 ${
+                                            collapsedSections.uploads ? "-rotate-90" : ""
+                                        }`}
+                                    />
+                                </button>
+                            </div>
                         </div>
 
                         {!collapsedSections.uploads && (
@@ -3533,9 +3590,39 @@ function SubmissionPage() {
                     items={experience.checklist}
                     onItemClick={focusRequirementItem}
                     mode="sticky"
+                    progress={experience.overallProgress}
                 />
             )}
         </div>
+    );
+}
+
+// Pure renderer of one `experience.sectionStatus` entry (see
+// lib/readinessStatus.js's summarizeSections) — a per-section rollup badge
+// for the three collapsible section headers (profile / projectQuestions /
+// uploads). Makes no decisions of its own; SECTION_STATUS is already fully
+// resolved by the Readiness Engine before it reaches here.
+const SECTION_STATUS_BADGE_META = {
+    [SECTION_STATUS.COMPLETE]: { text: () => "Complete", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+    [SECTION_STATUS.IN_PROGRESS]: { text: (s) => `${s.requiredCompleted}/${s.requiredTotal}`, className: "bg-[#0c2340]/5 text-[#0c2340] border-[#0c2340]/15" },
+    [SECTION_STATUS.ATTENTION]: { text: () => "Needs Attention", className: "bg-rose-50 text-rose-700 border-rose-200" },
+    [SECTION_STATUS.INCOMPLETE]: { text: (s) => `${s.requiredCompleted}/${s.requiredTotal}`, className: "bg-slate-50 text-[#666666] border-slate-200" },
+    [SECTION_STATUS.OPTIONAL]: { text: () => "Optional", className: "bg-slate-50 text-[#999999] border-slate-200" },
+};
+
+function SectionStatusBadge({ section, onClick }) {
+    if (!section) return null;
+    const meta = SECTION_STATUS_BADGE_META[section.status] || SECTION_STATUS_BADGE_META[SECTION_STATUS.INCOMPLETE];
+    return (
+        <button
+            type="button"
+            onClick={() => onClick?.(section)}
+            data-testid={`section-status-${section.section}`}
+            data-status={section.status}
+            className={`shrink-0 inline-flex items-center px-2.5 py-1 rounded-full border text-[10px] font-mono font-semibold uppercase tracking-wide transition-all duration-150 hover:brightness-95 active:scale-[0.97] ${meta.className}`}
+        >
+            {meta.text(section)}
+        </button>
     );
 }
 

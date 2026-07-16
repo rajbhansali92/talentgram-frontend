@@ -13,6 +13,58 @@ import { directVideoUpload } from "../lib/directVideoUpload";
 // the apply flow keeps the single-POST path.
 const CHUNKED_VIDEO_ENDPOINT_RE = /\/public\/(submissions|apply)\/([^/]+)\/upload\/?$/;
 
+// Phase 6/7 — bounded concurrency. A minimal FIFO semaphore: `acquire()`
+// resolves immediately if a slot is free, otherwise the caller queues until
+// `release()` is called by whoever is holding a slot. Deliberately simple —
+// no priority, no cancellation. This is Upload Engine plumbing only — it has
+// no idea what "queued" means to the UI; that translation happens entirely
+// in the Operational Engine (lib/readinessStatus.js), which already had a
+// `queued` mapping waiting for this (see its RAW_STATUS_TO_OPERATIONAL
+// table).
+//
+// Phase 7 correctness fix: compression and upload transport are gated by
+// TWO SEPARATE instances of this, not one shared gate. lib/videoCompress.js
+// holds a single module-level FFmpeg instance — one shared Web Worker, one
+// shared virtual filesystem, one shared progress/log event-listener array
+// with no per-job attribution. Two `compressVideoIfNeeded()` calls in
+// flight at once can interleave their writeFile/exec/readFile sequence on
+// that shared filesystem and cross-contaminate each other's progress
+// events — a real data-corruption risk, not just a performance concern (see
+// 08_DECISION_LOG.md / 09_PRESENTATION_MODELS.md context for the Phase 7
+// audit that found this). Capping compression at concurrency 1 makes that
+// interleaving impossible. Keeping it as a SEPARATE gate from upload
+// transport (still concurrency 2) also means a video's compression never
+// ties up a network-transport slot an image upload could be using.
+function createConcurrencyGate(maxConcurrent) {
+    let active = 0;
+    const waiters = [];
+    return {
+        acquire() {
+            return new Promise((resolve) => {
+                if (active < maxConcurrent) {
+                    active += 1;
+                    resolve();
+                } else {
+                    waiters.push(resolve);
+                }
+            });
+        },
+        release() {
+            const next = waiters.shift();
+            if (next) {
+                next(); // hand the freed slot straight to the next waiter — `active` count is unchanged
+            } else {
+                active = Math.max(0, active - 1);
+            }
+        },
+    };
+}
+
+const MAX_CONCURRENT_UPLOADS = 2;
+// Matches the true safe concurrency of the shared FFmpeg singleton in
+// lib/videoCompress.js — see the comment above. Not a performance knob.
+const MAX_CONCURRENT_COMPRESSIONS = 1;
+
 
 const UploadManagerContext = createContext(null);
 
@@ -28,6 +80,49 @@ export function UploadManagerProvider({ children }) {
     const [activeUploads, setActiveUploads] = useState({});
     const [retryQueue, setRetryQueue] = useState({});
     const inFlightUploads = useRef({});
+    // Two independent gates per provider instance (singletons, same lifetime
+    // as activeUploads) — every uploadFile() call across the page shares
+    // both, so a burst of selected files is throttled globally, not per call
+    // site. Kept SEPARATE (Phase 7): a video waiting on the compression gate
+    // never occupies an upload-transport slot, and vice versa.
+    const compressionGate = useRef(createConcurrencyGate(MAX_CONCURRENT_COMPRESSIONS)).current;
+    const uploadGate = useRef(createConcurrencyGate(MAX_CONCURRENT_UPLOADS)).current;
+
+    // Session-lifetime "N Completed" tally for the Upload Activity Panel
+    // (FloatingUploadManager). Purely a UI concern — the upload engine itself
+    // still prunes a completed `activeUploads[slotKey]` entry 3s after
+    // success (unchanged below), so the raw map alone can't answer "how many
+    // uploads has this session completed" once that grace window passes.
+    // This just watches the same state transitions and keeps a running count;
+    // it doesn't feed back into, alter, or duplicate any upload/retry logic.
+    const [completedCount, setCompletedCount] = useState(0);
+    const countedCompletionsRef = useRef({}); // slotKey -> already counted for its current lifecycle
+    useEffect(() => {
+        let newlyCompleted = 0;
+        Object.entries(activeUploads).forEach(([slotKey, upload]) => {
+            if (upload.status === "completed") {
+                if (!countedCompletionsRef.current[slotKey]) {
+                    countedCompletionsRef.current[slotKey] = true;
+                    newlyCompleted += 1;
+                }
+            } else {
+                // Not (or no longer) completed — e.g. a re-upload to the same
+                // slot has started a fresh lifecycle. Clear the flag so its
+                // next completion is counted again.
+                delete countedCompletionsRef.current[slotKey];
+            }
+        });
+        if (newlyCompleted > 0) {
+            setCompletedCount((c) => c + newlyCompleted);
+        }
+        // Forget slots that have been pruned from activeUploads entirely
+        // (the engine's 3s post-success cleanup), so a future re-upload to
+        // the same slot counts as a new completion rather than being seen
+        // as "already counted".
+        Object.keys(countedCompletionsRef.current).forEach((slotKey) => {
+            if (!(slotKey in activeUploads)) delete countedCompletionsRef.current[slotKey];
+        });
+    }, [activeUploads]);
 
     // Guard against accidental navigation/refresh while an upload is in flight.
     // The in-flight File cannot be re-read after a reload, so warn before the
@@ -35,7 +130,7 @@ export function UploadManagerProvider({ children }) {
     // eviction can still occur and is handled by re-upload + finalize reconcile.)
     useEffect(() => {
         const hasActive = Object.values(activeUploads).some(
-            (u) => u.status === "uploading" || u.status === "processing"
+            (u) => ["uploading", "processing", "queued", "waiting", "retrying"].includes(u.status)
         );
         if (!hasActive) return;
         const handler = (e) => {
@@ -132,6 +227,26 @@ export function UploadManagerProvider({ children }) {
         }
         inFlightUploads.current[slotKey] = true;
 
+        // Phase 6/7 — bounded concurrency: mark this slot QUEUED immediately.
+        // It may wait on the COMPRESSION gate below (if it's a video that
+        // needs compression) and/or the UPLOAD gate further down (network
+        // transport) before doing real work — the two are separate pools
+        // (see the gate definitions above), so a burst of selected files
+        // can't spin up dozens of simultaneous FFmpeg/upload jobs on mobile.
+        setActiveUploads((prev) => ({
+            ...prev,
+            [slotKey]: {
+                status: "queued",
+                pct: 0,
+                statusText: "Queued",
+                fileName: file.name,
+                category,
+                label,
+                file,
+                options,
+            },
+        }));
+
         let fileToUpload = file;
         let skipCompression = false;
         let compressedFile = null;
@@ -190,61 +305,93 @@ export function UploadManagerProvider({ children }) {
         }
 
         if (file && isVideoSlot && !skipCompression) {
-            setActiveUploads((prev) => ({
-                ...prev,
-                [slotKey]: {
-                    status: "compressing",
-                    pct: 0,
-                    statusText: "Preparing video...",
-                    fileName: file.name,
-                    category,
-                    label,
-                    file,
-                    options
-                }
-            }));
-
+            // Phase 7 — at most ONE compression job touches the shared
+            // FFmpeg singleton at a time (see lib/videoCompress.js and the
+            // gate comment above). Everything inside this block — the
+            // status writes, the profile/timeout/progress behavior, the
+            // TIMEOUT fallback-to-original — is unchanged from Phase 6;
+            // only the acquire/release around it is new.
+            await compressionGate.acquire();
+            // Stage 2 — a compression job is starting: cancel any pending
+            // idle-recycle timer immediately. The actual timer/teardown logic
+            // lives entirely in lib/videoCompress.js (the compression
+            // infrastructure); this is just notifying it of the gate
+            // transition, at the exact point the gate is acquired.
+            const { cancelIdleRecycle, scheduleIdleRecycle } = await import("../lib/videoCompress");
+            cancelIdleRecycle();
             try {
-                console.log("Compression started");
-                const { compressVideoIfNeeded } = await import("../lib/videoCompress");
-                compressedFile = await compressVideoIfNeeded(file, {
-                    onProgress: (stage, pct, estTimeRemaining) => {
-                        setActiveUploads((prev) => {
-                            if (!prev[slotKey]) return prev;
-                            
-                            let stageText = "Optimizing video...";
-                            if (stage === "load") {
-                                stageText = "Preparing video...";
-                            } else if (stage === "compress") {
-                                stageText = estTimeRemaining 
-                                    ? `Optimizing video... (${estTimeRemaining} remaining)`
-                                    : "Optimizing video...";
-                            }
-                            
-                            return {
-                                ...prev,
-                                [slotKey]: {
-                                    ...prev[slotKey],
-                                    pct: pct,
-                                    statusText: stageText
-                                }
-                            };
-                        });
+                setActiveUploads((prev) => ({
+                    ...prev,
+                    [slotKey]: {
+                        status: "compressing",
+                        pct: 0,
+                        statusText: "Preparing video...",
+                        fileName: file.name,
+                        category,
+                        label,
+                        file,
+                        options
                     }
-                });
-                console.log("Compression finished");
-                if (compressedFile) {
-                    console.log("Compressed size:", compressedFile.size);
-                    fileToUpload = compressedFile;
+                }));
+
+                try {
+                    console.log("Compression started");
+                    const { compressVideoIfNeeded } = await import("../lib/videoCompress");
+                    compressedFile = await compressVideoIfNeeded(file, {
+                        onProgress: (stage, pct, estTimeRemaining) => {
+                            setActiveUploads((prev) => {
+                                if (!prev[slotKey]) return prev;
+
+                                let stageText = "Optimizing video...";
+                                if (stage === "load") {
+                                    stageText = "Preparing video...";
+                                } else if (stage === "compress") {
+                                    stageText = estTimeRemaining
+                                        ? `Optimizing video... (${estTimeRemaining} remaining)`
+                                        : "Optimizing video...";
+                                }
+
+                                return {
+                                    ...prev,
+                                    [slotKey]: {
+                                        ...prev[slotKey],
+                                        pct: pct,
+                                        statusText: stageText
+                                    }
+                                };
+                            });
+                        }
+                    });
+                    console.log("Compression finished");
+                    if (compressedFile) {
+                        console.log("Compressed size:", compressedFile.size);
+                        fileToUpload = compressedFile;
+                    }
+                } catch (err) {
+                    console.warn("[FFMPEG FALLBACK WARNING]", err);
+                    // Purely observational — never let a telemetry failure
+                    // affect the fallback-to-original-file path below.
+                    try {
+                        const { emitFFmpegTelemetry } = await import("../lib/videoCompress");
+                        emitFFmpegTelemetry("compression_fallback", { reason: err?.code || "unknown" });
+                    } catch (telemetryErr) {
+                        console.warn("[FFMPEG TELEMETRY] compression_fallback emit failed (non-fatal):", telemetryErr);
+                    }
+                    if (err?.code === "TIMEOUT") {
+                        toast.warning("Video optimization is taking longer than expected. Uploading original video.");
+                    } else {
+                        toast.info("Optimizing video unavailable. Uploading original file.");
+                    }
+                    fileToUpload = file;
                 }
-            } catch (err) {
-                console.warn("[FFMPEG FALLBACK WARNING]", err);
-                if (err?.code === "TIMEOUT") {
-                    toast.warning("Video optimization is taking longer than expected. Uploading original video.");
-                } else {
-                    toast.info("Optimizing video unavailable. Uploading original file.");
-                }
-                fileToUpload = file;
+            } finally {
+                compressionGate.release();
+                // Stage 2 — the compression gate is now free: start (or
+                // reset) the idle-recycle timer. Only actually tears anything
+                // down after FFMPEG_IDLE_RECYCLE_MS of genuine inactivity —
+                // cancelIdleRecycle() above will cancel it the moment another
+                // compression begins.
+                scheduleIdleRecycle();
             }
         }
 
@@ -252,6 +399,16 @@ export function UploadManagerProvider({ children }) {
         console.log("COMPRESSED", compressedFile?.size);
         console.log("UPLOADED", fileToUpload?.size);
         console.log("Upload starting with:", fileToUpload?.size);
+
+        // Phase 7 — the file may now need to wait for a network-transport
+        // slot (separate pool from compression, still capped at
+        // MAX_CONCURRENT_UPLOADS). For non-video files, or a video that
+        // skipped compression, this is the first gate they ever wait on.
+        setActiveUploads((prev) => {
+            if (!prev[slotKey]) return prev;
+            return { ...prev, [slotKey]: { ...prev[slotKey], status: "queued", statusText: "Queued" } };
+        });
+        await uploadGate.acquire();
 
         // Validate final file size before upload (must be under 500MB R2 limit)
         if (fileToUpload && fileToUpload.size > 500 * 1024 * 1024) {
@@ -276,6 +433,7 @@ export function UploadManagerProvider({ children }) {
             
             // Release synchronization lock
             delete inFlightUploads.current[slotKey];
+            uploadGate.release();
             return;
         }
 
@@ -361,6 +519,7 @@ export function UploadManagerProvider({ children }) {
                     });
                 }, 3000);
                 delete inFlightUploads.current[slotKey]; // release lock on success
+                uploadGate.release();
                 return;
             } catch (err) {
                 const msg = err?.message || err?.response?.data?.detail || "Upload failed";
@@ -374,6 +533,7 @@ export function UploadManagerProvider({ children }) {
                 }));
                 toast.error(`${msg} — tap Retry to try again`);
                 delete inFlightUploads.current[slotKey]; // release lock on failure
+                uploadGate.release();
                 return;
             }
         }
@@ -383,6 +543,25 @@ export function UploadManagerProvider({ children }) {
 
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
+                // Phase 6 — surface that this attempt is an automatic retry
+                // (not a fresh "Uploading" start) before re-attempting the
+                // same sign→upload→complete sequence. Reuses this exact
+                // existing retry loop/backoff — nothing about the retry
+                // mechanism itself changes here, only what's visible.
+                if (attempt > 1) {
+                    setActiveUploads((prev) => {
+                        if (!prev[slotKey]) return prev;
+                        return {
+                            ...prev,
+                            [slotKey]: {
+                                ...prev[slotKey],
+                                status: "retrying",
+                                statusText: `Retrying… (attempt ${attempt} of ${MAX_ATTEMPTS})`,
+                            },
+                        };
+                    });
+                }
+
                 // 1. Get upload signature from backend
                 const headers = {};
                 if (dynamicToken) {
@@ -479,6 +658,7 @@ export function UploadManagerProvider({ children }) {
 
                 if (attempt > 1) toast.success(`Recovered after ${attempt} attempts`);
                 delete inFlightUploads.current[slotKey]; // release lock on success
+                uploadGate.release();
                 return;
             } catch (err) {
                 lastErr = err;
@@ -492,6 +672,23 @@ export function UploadManagerProvider({ children }) {
                     ...q,
                     [slotKey]: { ...(q[slotKey] || {}), attempt }
                 }));
+
+                // Phase 6 — paused during the backoff delay, distinct from
+                // "Retrying" (which means the retry request is actually in
+                // flight right now). Purely a status label around the
+                // existing exponential-backoff sleep — the wait duration and
+                // attempt count are unchanged.
+                setActiveUploads((prev) => {
+                    if (!prev[slotKey]) return prev;
+                    return {
+                        ...prev,
+                        [slotKey]: {
+                            ...prev[slotKey],
+                            status: "waiting",
+                            statusText: `Waiting to retry… (attempt ${attempt} of ${MAX_ATTEMPTS})`,
+                        },
+                    };
+                });
 
                 await new Promise((r) => setTimeout(r, wait));
             }
@@ -515,6 +712,7 @@ export function UploadManagerProvider({ children }) {
 
         toast.error(formattedErr + " — tap Retry to try again");
         delete inFlightUploads.current[slotKey]; // release lock on failure
+        uploadGate.release();
     };
 
     const retryUpload = async (slotKey) => {
@@ -535,10 +733,11 @@ export function UploadManagerProvider({ children }) {
     };
 
     return (
-        <UploadManagerContext.Provider value={{ activeUploads, retryQueue, uploadFile, retryUpload, dismissUpload }}>
+        <UploadManagerContext.Provider value={{ activeUploads, retryQueue, uploadFile, retryUpload, dismissUpload, completedCount }}>
             {children}
             <FloatingUploadManager
                 activeUploads={activeUploads}
+                completedCount={completedCount}
                 onRetry={retryUpload}
                 onDismiss={dismissUpload}
             />

@@ -85,6 +85,27 @@ const nextConfig = {
         source: "/(.*)",
         headers: securityHeaders,
       },
+      {
+        // Versioned FFmpeg WASM/JS assets only (lib/videoCompress.js's
+        // FFMPEG_CORE_ASSET_PATH). Vercel's default for public/ static
+        // assets is `max-age=0, must-revalidate`, which forces a network
+        // round-trip before every load of the 32MB ffmpeg-core.wasm — a
+        // real latency/reliability cost on mobile, since `must-revalidate`
+        // also means a failed revalidation can't fall back to the stale
+        // cached copy. Immutable long-lived caching is safe here ONLY
+        // because the version segment (v1, v2, ...) changes on every future
+        // @ffmpeg/core upgrade instead of overwriting files in place — a
+        // future upgrade MUST add a new /ffmpeg/v2/ directory (and bump
+        // FFMPEG_CORE_ASSET_PATH), never replace the contents of /ffmpeg/v1/.
+        // Scoped to this exact path — no other public asset's caching changes.
+        source: "/ffmpeg/v1/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=31536000, immutable",
+          },
+        ],
+      },
     ];
   },
 };

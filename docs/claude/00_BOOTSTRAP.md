@@ -12,6 +12,8 @@ Read:
 6. [06_RELEASE_HISTORY.md](06_RELEASE_HISTORY.md)
 7. [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md)
 8. [08_DECISION_LOG.md](08_DECISION_LOG.md)
+9. [09_PRESENTATION_MODELS.md](09_PRESENTATION_MODELS.md)
+10. [10_FFMPEG_LIFECYCLE.md](10_FFMPEG_LIFECYCLE.md)
 
 After reading, provide:
 
@@ -22,5 +24,7 @@ After reading, provide:
 - Open Issues Summary
 - Recent Release Summary
 - Key Decisions Summary
+- Presentation Model Architecture Summary
+- FFmpeg Lifecycle Summary
 
 Do not make code changes until this summary is completed.

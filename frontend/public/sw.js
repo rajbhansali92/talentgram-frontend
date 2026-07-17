@@ -86,7 +86,7 @@ function shouldBypassCache(request) {
     url.pathname.startsWith('/portal') ||
     url.pathname.startsWith('/review') ||
     url.pathname.startsWith('/submit') ||
-    url.pathname.startsWith('/links')
+    url.pathname.startsWith('/l/')
   ) {
     return true;
   }

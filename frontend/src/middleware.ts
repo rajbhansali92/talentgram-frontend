@@ -16,12 +16,18 @@ export function middleware(req: NextRequest) {
     }
 
     // Bypass rewrites for common shared pages
-    const isCommonRoute = 
+    const isCommonRoute =
         url.pathname.startsWith('/signup') ||
         url.pathname.startsWith('/forgot-password') ||
         url.pathname.startsWith('/reset-password') ||
         url.pathname.startsWith('/google-callback') ||
-        url.pathname.startsWith('/portal');
+        url.pathname.startsWith('/portal') ||
+        // sw.js caches this at the single path '/offline' and expects it to
+        // resolve identically on every origin — without this bypass it gets
+        // subdomain-rewritten (e.g. apply. -> /apply/offline, submit. ->
+        // /submit/offline) to a route that doesn't exist, breaking the
+        // offline-navigation fallback on those subdomains specifically.
+        url.pathname.startsWith('/offline');
 
     if (isCommonRoute) {
         return NextResponse.next();

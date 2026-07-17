@@ -72,6 +72,24 @@ Two Railway services in the `pacific-art` project:
 - **Auto-deploy**: Pushes to `main` trigger production deploy
 - **Preview deploys**: Every push to any branch gets a preview URL
 
+### KNOWN OPERATIONAL ISSUE: CLI `vercel --prod` deploys require a manual promote
+
+Confirmed 2026-07-17 during a production incident (proxy returning `"Proxy misconfigured"` on `www.talentgramagency.com`).
+
+Because this project is Git-linked, custom production domain aliases (`www.talentgramagency.com`, `talentgramagency.com`, `apply.`, `submit.`, `review.`, `links.`) are managed by the **GitHub integration's auto-promote path**. A deployment created via the GitHub push flow lands with `source: "git"` and `readySubstate: "PROMOTED"`, and Vercel immediately moves the custom domain aliases to it.
+
+A deployment created by running `vercel --prod` from the CLI instead lands with `source: "cli"` and `readySubstate: "STAGED"` — it builds successfully and is marked `Ready`, but Vercel does **not** move the custom domain aliases to it. It only gets the auto-generated `*.vercel.app` URLs. The custom domains keep serving whatever was previously promoted, silently, with no error at deploy time.
+
+**Consequence seen in production**: an env var (`BACKEND_INTERNAL_URL`) was added to Vercel Production, then a CLI deploy was run expecting it to go live. The CLI deploy did pick up the new var correctly, but stayed `STAGED` and never reached the custom domains — the live site kept serving an older, unpromoted-but-still-aliased deployment that predated the env var, causing the reverse proxy to fail closed with `"Proxy misconfigured"`.
+
+**Rule going forward**:
+- Prefer deploying via `git push` to `main` (or the dashboard's "Redeploy" on a git commit) — it auto-promotes and needs no extra step.
+- If a CLI `vercel --prod` deploy is used for any reason, it is **not done** until you explicitly run:
+  ```
+  vercel promote <deployment-id-or-url>
+  ```
+  and then verify the custom domains actually point at the new deployment ID (`vercel inspect https://www.talentgramagency.com`) — do not assume a `Ready` CLI deploy is live.
+
 ### Environment Variables (Build-time)
 | Variable | Purpose |
 |---|---|

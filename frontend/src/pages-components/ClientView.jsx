@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "next/navigation";
-import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL, API } from "@/lib/api";
+import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover, displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
@@ -42,7 +42,10 @@ import {
 } from "lucide-react";
 import { shareMediaViaWhatsApp, prepareShareFile } from "@/lib/mediaShare";
 
-// API is imported from @/lib/api above — single source of truth across all pages.
+// All backend calls use relative paths (e.g. `/public/links/...`) through the
+// `api` client (imported as `axios` above) so every request resolves through
+// publicApiTransport's routing table — the same-origin proxy for standard
+// JSON calls, direct-to-Railway only for the upload/download-classified ones.
 // parseStoredWorkLink and WorkLinksDisplay are imported from @/components/WorkLinksDisplay.
 
 // Official WhatsApp glyph, rendered MONOCHROME (currentColor) to match
@@ -543,7 +546,7 @@ function ClientView() {
         const fetchShare = async () => {
             try {
                 setLoadingShare(true);
-                const { data } = await axios.get(`${API}/public/shares/${shareId}`);
+                const { data } = await axios.get(`/public/shares/${shareId}`);
                 if (!loadDataMountedRef.current) return;
                 // Same shape guard loadData() already applies to its own
                 // response — a malformed/non-JSON payload (e.g. an HTML
@@ -614,7 +617,7 @@ function ClientView() {
         setStartupPhase(isRetry ? "retrying" : "loading");
         setLoadError(null);
         try {
-            const { data } = await axios.get(`${API}/public/links/${slug}`, {
+            const { data } = await axios.get(`/public/links/${slug}`, {
                 headers: {
                     Authorization: `Bearer ${getViewerToken(slug)}`,
                 },
@@ -632,7 +635,7 @@ function ClientView() {
             setReviewedIds(new Set(data?.client_state?.reviewed_talent_ids || []));
             loadRetryCountRef.current = 0;
             setStartupPhase("ready");
-            axios.post(`${API}/public/links/${slug}/track`, {
+            axios.post(`/public/links/${slug}/track`, {
                 event_type: "open",
                 session_id: getSessionId(),
             }).catch(() => {});
@@ -740,7 +743,7 @@ function ClientView() {
             // Prevents duplicate events from the 15s auto-review timer + manual markReviewed calls.
             if (!trackedReviewedRef.current.has(talentId)) {
                 trackedReviewedRef.current.add(talentId);
-                axios.post(`${API}/public/links/${slug}/track`, {
+                axios.post(`/public/links/${slug}/track`, {
                     event_type: "review_talent",
                     session_id: getSessionId(),
                     talent_id: talentId,
@@ -748,7 +751,7 @@ function ClientView() {
             }
             try {
                 await axios.post(
-                    `${API}/public/links/${slug}/reviewed`,
+                    `/public/links/${slug}/reviewed`,
                     { talent_id: talentId },
                     {
                         headers: {
@@ -845,7 +848,7 @@ function ClientView() {
         setLoading(true);
         try {
             const response = await axios.post(
-                `${API}/public/links/${slug}/identify`,
+                `/public/links/${slug}/identify`,
                 {
                     name: activeName,
                     email: activeEmail,
@@ -895,7 +898,7 @@ function ClientView() {
         markReviewed(talentId);
         try {
             await axios.post(
-                `${API}/public/links/${slug}/action`,
+                `/public/links/${slug}/action`,
                 { talent_id: talentId, action, session_id: getSessionId() },
                 {
                     headers: {
@@ -938,7 +941,7 @@ function ClientView() {
 
         try {
             await axios.post(
-                `${API}/public/links/${slug}/bulk-action`,
+                `/public/links/${slug}/bulk-action`,
                 { talent_ids: talentIds, action, session_id: getSessionId() },
                 {
                     headers: {
@@ -996,7 +999,7 @@ function ClientView() {
 
         try {
             await axios.post(
-                `${API}/public/links/${slug}/action`,
+                `/public/links/${slug}/action`,
                 {
                     talent_id: talentId,
                     action: existing?.action || null,
@@ -1022,7 +1025,7 @@ function ClientView() {
     const logDownload = useCallback(async (talentId, mediaId) => {
         try {
             await axios.post(
-                `${API}/public/links/${slug}/download-log`,
+                `/public/links/${slug}/download-log`,
                 { talent_id: talentId, media_id: mediaId, session_id: getSessionId() },
                 {
                     headers: {
@@ -1036,7 +1039,7 @@ function ClientView() {
     const handleShare = useCallback(async (talentId, mediaId = null) => {
         try {
             const { data } = await axios.post(
-                `${API}/public/links/${slug}/share`,
+                `/public/links/${slug}/share`,
                 {
                     talent_id: talentId,
                     media_id: mediaId,
@@ -1091,7 +1094,7 @@ function ClientView() {
 
         try {
             const response = await axios.post(
-                `${API}/public/links/${slug}/feedback/voice`,
+                `/public/links/${slug}/feedback/voice`,
                 formData,
                 {
                     headers: {
@@ -1142,7 +1145,7 @@ function ClientView() {
             // ($addToSet) records the submission as viewed exactly once.
             if (!trackedSeenRef.current.has(talentId)) {
                 trackedSeenRef.current.add(talentId);
-                axios.post(`${API}/public/links/${slug}/track`, {
+                axios.post(`/public/links/${slug}/track`, {
                     event_type: "view_talent",
                     session_id: getSessionId(),
                     talent_id: talentId,
@@ -1156,7 +1159,7 @@ function ClientView() {
             });
             try {
                 await axios.post(
-                    `${API}/public/links/${slug}/seen`,
+                    `/public/links/${slug}/seen`,
                     { talent_id: talentId },
                     {
                         headers: {
@@ -2040,7 +2043,7 @@ function TalentDetail({
         if (prewarmedRef.current.has(m.id)) return;        // already warmed this session
         prewarmedRef.current.add(m.id);
         try {
-            axios.get(`${API}/public/links/${slug}/media/${talent.id}/${m.id}`, {
+            axios.get(`/public/links/${slug}/media/${talent.id}/${m.id}`, {
                 params: { prewarm: 1 },
                 headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
             }).catch(() => { /* best-effort — the share pipeline still resolves the rendition at share time */ });
@@ -2357,7 +2360,7 @@ function TalentDetail({
         try {
             const token = getViewerToken(slug);
             const response = await axios.get(
-                `${API}/public/links/${slug}/download/talent/${talent.id}`,
+                `/public/links/${slug}/download/talent/${talent.id}`,
                 {
                     params: token ? { token, session_id: getSessionId() } : { session_id: getSessionId() },
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -2456,7 +2459,7 @@ function TalentDetail({
         
         let sid = sessionStorage.getItem("client_session_id") || "guest-session";
         axios.post(
-            `${API}/public/links/${slug}/track`,
+            `/public/links/${slug}/track`,
             {
                 event_type: "view_media",
                 session_id: sid,

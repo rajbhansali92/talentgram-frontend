@@ -196,7 +196,14 @@ app.add_middleware(
     allow_origins=cors_origins,
     allow_origin_regex=cors_origins_regex,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    # X-Request-Id: Request Manager (frontend/src/lib/requestManager/RequestManager.js)
+    # attaches this to every request, including the small set of Client View
+    # upload/download flows that go direct-to-Railway by design (voice-feedback
+    # upload, ZIP package download, media share fetch — see
+    # frontend/src/lib/publicApiTransport.js's routing table). Without it here,
+    # the browser's CORS preflight for those direct calls is rejected before the
+    # real request is ever sent.
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-Request-Id"],
 )
 
 # RequestIdMiddleware added last so it wraps everything above, including CORS

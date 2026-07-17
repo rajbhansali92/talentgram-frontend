@@ -9,7 +9,7 @@
 //
 // This module is purely additive — it does not touch download logic.
 // ────────────────────────────────────────────────────────────────────────
-import { api as axios, getViewerToken, PUBLIC_FRONTEND_URL, API } from "@/lib/api";
+import { api as axios, getViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
 
 // Path/diagnostics logging — intentionally always on. WhatsApp sharing is a
 // low-frequency, user-initiated action, and these logs are how we verify on a
@@ -47,42 +47,43 @@ export function deviceSupportsFileShare() {
     }
 }
 
-// Fully instrumented fetch→Blob→File. Writes every step's outcome into `rec`
-// (mutated in place) so the caller can report the exact runtime reason, and
-// returns the File on success or null on failure (never throws).
+// Fully instrumented fetch→Blob→File, via the shared `api` transport (same
+// Request Manager retry/circuit-breaker/dedup/request-ID coverage as every
+// other Client View call — `url` is a relative path; `responseType: "blob"`
+// makes publicApiTransport classify this as a "download" and route it
+// direct-to-Railway, same as it always has). Writes every step's outcome
+// into `rec` (mutated in place) so the caller can report the exact runtime
+// reason, and returns the File on success or null on failure (never throws).
 async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
     rec.url = url;
     // Step 5 — HTTP fetch
     let res;
     try {
-        res = await fetch(url, { mode: "cors", ...init });
+        res = await axios.get(url, { ...init, responseType: "blob" });
     } catch (e) {
-        // A thrown fetch (TypeError "Failed to fetch") is the classic signature
-        // of a CORS block or network failure — the response never arrives.
-        rec.fetchThrew = `${e?.name || "Error"}: ${e?.message || ""}`.trim();
-        rec.fetchOk = false;
-        rec.step = "fetch_threw_cors_or_network";
+        if (e?.response) {
+            // Server responded with a non-2xx status.
+            rec.httpStatus = e.response.status;
+            rec.fetchOk = false;
+            rec.step = `http_${e.response.status}`;
+        } else {
+            // No response reached the app at all — CORS block or network
+            // failure, the same shape axiosShim/RequestManager classify as
+            // "network_error" (frontend/src/lib/requestManager/errorClassifier.js).
+            rec.fetchThrew = `${e?.name || e?.classification || "Error"}: ${e?.message || ""}`.trim();
+            rec.fetchOk = false;
+            rec.step = "fetch_threw_cors_or_network";
+        }
         return null;
     }
     rec.httpStatus = res.status;
-    rec.fetchOk = res.ok;
-    rec.responseType = res.type; // "cors" | "opaque" | "basic" — opaque means no CORS access
-    if (res.type === "opaque") {
-        // Opaque responses (no CORS headers) can't be read into a usable Blob.
-        rec.step = "opaque_response_no_cors";
-        return null;
-    }
-    if (!res.ok) {
-        rec.step = `http_${res.status}`;
-        return null;
-    }
-    // Step 6 — Blob
-    let blob;
-    try {
-        blob = await res.blob();
-    } catch (e) {
+    rec.fetchOk = true;
+    // Step 6 — Blob (axios's `responseType: "blob"` already materializes it —
+    // no separate res.blob() step, so there's no "blob_failed" case distinct
+    // from the fetch itself; the shape check below is the equivalent guard)
+    const blob = res.data;
+    if (!(blob instanceof Blob)) {
         rec.blobOk = false;
-        rec.blobThrew = `${e?.name || "Error"}: ${e?.message || ""}`.trim();
         rec.step = "blob_failed";
         return null;
     }
@@ -124,7 +125,7 @@ async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
 export async function prepareShareFile({ slug, talentId, item }) {
     if (!slug || !talentId || !item || !item.id) return null;
     return urlToFileTraced(
-        `${API}/public/links/${slug}/media/${talentId}/${item.id}`,
+        `/public/links/${slug}/media/${talentId}/${item.id}`,
         item.filename || item.name,
         item.type === "video" ? "video/mp4" : "image/jpeg",
         { name: item.name, type: item.type },
@@ -286,7 +287,7 @@ export async function shareMediaViaWhatsApp({
             files = await Promise.all(
                 items.map((it, i) =>
                     urlToFileTraced(
-                        `${API}/public/links/${slug}/media/${talentId}/${it.id}`,
+                        `/public/links/${slug}/media/${talentId}/${it.id}`,
                         it.filename || it.name,
                         it.type === "video" ? "video/mp4" : "image/jpeg",
                         recs[i],

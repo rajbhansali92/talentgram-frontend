@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { API } from "@/lib/api";
+import { api as axios } from "@/lib/api";
 
 /**
  * Premium Lazy Video Player component.
@@ -21,16 +21,12 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
 
         const trackVideoEvent = (action) => {
             const sid = sessionStorage.getItem("client_session_id") || "guest-session";
-            fetch(`${API}/public/links/${slug}/track`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    event_type: "watch_video",
-                    session_id: sid,
-                    media_id: mediaId,
-                    talent_id: talentId,
-                    video_action: action
-                })
+            axios.post(`/public/links/${slug}/track`, {
+                event_type: "watch_video",
+                session_id: sid,
+                media_id: mediaId,
+                talent_id: talentId,
+                video_action: action
             }).catch(() => {});
         };
 
@@ -43,16 +39,12 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
                 const delta = current - lastTrackedTimeRef.current;
                 if (delta > 0 && !videoRef.current.paused) {
                     let sid = sessionStorage.getItem("client_session_id") || "guest-session";
-                    fetch(`${API}/public/links/${slug}/track`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            event_type: "watch_video",
-                            session_id: sid,
-                            media_id: mediaId,
-                            talent_id: talentId,
-                            watch_time: delta
-                        })
+                    axios.post(`/public/links/${slug}/track`, {
+                        event_type: "watch_video",
+                        session_id: sid,
+                        media_id: mediaId,
+                        talent_id: talentId,
+                        watch_time: delta
                     }).catch(() => {});
                 }
                 lastTrackedTimeRef.current = current;

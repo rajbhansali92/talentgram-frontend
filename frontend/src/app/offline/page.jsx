@@ -1,6 +1,6 @@
 'use client';
 
-import React from "react";
+import React, { useEffect } from "react";
 import { WifiOff, RotateCw } from "lucide-react";
 import Logo from "@/components/Logo";
 
@@ -10,6 +10,18 @@ export default function OfflinePage() {
             window.location.reload();
         }
     };
+
+    // The service worker serves this page in place of whatever the user
+    // was actually navigating to (the address bar still shows the
+    // original URL), so a reload here correctly re-attempts that original
+    // page. Mirrors ClientView.jsx's own `online` reconnect handling —
+    // recover automatically once connectivity returns instead of leaving
+    // the user stuck behind a manual "Retry Connection" click.
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        window.addEventListener("online", handleRetry);
+        return () => window.removeEventListener("online", handleRetry);
+    }, []);
 
     return (
         <div className="min-h-screen bg-[#ffffff] dark:bg-[#0c0c0c] text-black dark:text-[#f5f5f0] flex flex-col justify-between p-6 md:p-12 transition-colors duration-150">

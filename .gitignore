@@ -811,3 +811,8 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Local developer scratch scripts — one-off debugging/verification tools
+# that sometimes hardcode credentials or environment-specific paths and are
+# never meant to ship. Kept on disk locally, excluded from every commit.
+backend/scratch/

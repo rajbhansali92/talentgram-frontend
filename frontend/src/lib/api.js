@@ -1,4 +1,5 @@
 import axios from "axios";
+import { createPublicApiClient } from "@/lib/publicApiTransport";
 
 // ✅ STEP 1: Backend URL with fallback (CRITICAL FIX)
 const BACKEND_URL =
@@ -8,6 +9,12 @@ const BACKEND_URL =
 
 // ✅ STEP 2: API base
 export const API = `${BACKEND_URL}/api`;
+
+// Declared here (rather than down in the "PORTAL API" section below, where
+// it conceptually lives) because the public `api` client, constructed
+// further down, needs the value immediately — not just at request time —
+// to pass into createPublicApiClient().
+export const PORTAL_TOKEN_KEY = "talentgram_portal_token";
 
 // ✅ Centralized Public Frontend URL to prevent Vercel preview auth wall on public links
 export const PUBLIC_FRONTEND_URL = "https://talentgramagency.com";
@@ -43,29 +50,22 @@ export const IMAGE_URL = (media) => {
 
 // ================= PUBLIC CLIENT API =================
 
-export const api = axios.create({ baseURL: API });
-
-// Attach the talent's portal session token (minted only after OTP/Google
-// email-ownership verification) to public calls that need to prove ownership
-// of an email — /public/prefill, /public/apply, and the project submission
-// start endpoint. The backend ignores it where it isn't needed. An explicit
-// per-request Authorization header (e.g. a draft submitter token) always wins
-// because axios only fills headers that are not already set.
-api.interceptors.request.use((cfg) => {
-    try {
-        const hasAuth =
-            cfg.headers?.Authorization ||
-            cfg.headers?.authorization ||
-            cfg.headers?.common?.Authorization;
-        if (!hasAuth && typeof window !== "undefined") {
-            const t = localStorage.getItem(PORTAL_TOKEN_KEY);
-            if (t) cfg.headers.Authorization = `Bearer ${t}`;
-        }
-    } catch (e) {
-        // localStorage unavailable (SSR / privacy mode) — proceed unauthenticated.
-    }
-    return cfg;
-});
+// Backed by Request Manager underneath (retry/timeout/dedup/circuit-breaker/
+// cancellation/logging — see frontend/src/lib/publicApiTransport.js and
+// frontend/src/lib/requestManager/), exposing the identical axios-instance
+// surface (`.get/.post/.put/.patch/.delete`) it always has. Every existing
+// call site (ClientView, SubmissionPage, ApplicationPage, and everything
+// else that imports `api`) requires zero changes — the auth interceptor
+// below (attaching the talent's portal session token, minted only after
+// OTP/Google email-ownership verification, to calls that need to prove
+// ownership of an email — /public/prefill, /public/apply, the project
+// submission start endpoint; the backend ignores it where it isn't needed;
+// an explicit per-request Authorization header always wins because axios
+// only fills headers that are not already set) now lives in
+// publicApiTransport.js so it can be attached to both of that module's
+// underlying axios instances, but is byte-for-byte the same logic that used
+// to be registered directly here.
+export const api = createPublicApiClient({ backendApiUrl: API, portalTokenKey: PORTAL_TOKEN_KEY });
 
 // ================= ADMIN API =================
 
@@ -130,7 +130,8 @@ viewerApi.interceptors.request.use((cfg) => {
 export const DIRECT_VIDEO_UPLOAD =
     String(process.env.NEXT_PUBLIC_DIRECT_VIDEO_UPLOAD || "").toLowerCase() === "true";
 
-export const PORTAL_TOKEN_KEY = "talentgram_portal_token";
+// PORTAL_TOKEN_KEY is declared near the top of this file (needed earlier,
+// by the public `api` client's construction) — see the comment there.
 
 export const portalApi = axios.create({ baseURL: API });
 

@@ -6,8 +6,10 @@ import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL, API } 
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover, displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
+import SectionErrorBoundary from "@/components/SectionErrorBoundary";
 import WorkLinksDisplay, { parseStoredWorkLink } from "@/components/WorkLinksDisplay";
 import { api as axios } from "@/lib/api";
+import { buildDiagnosticsSnapshot } from "@/lib/clientDiagnostics";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { toast } from "sonner";
 import VoiceRecorder from "@/components/VoiceRecorder";
@@ -151,6 +153,33 @@ function formatErrorMessage(error) {
     }
     
     return "Failed to continue. Please try again.";
+}
+
+// Classifies a loadData() failure into a category the startup state machine
+// can act on: whether an automatic retry is worth attempting, and what a
+// client should actually read (never a raw error message or stack trace).
+// A 404/403 (invalid or inactive link) is a real, permanent answer from the
+// backend — retrying it can't change the outcome, so it gets the backend's
+// own message (via formatErrorMessage) instead of a "reconnecting" framing.
+function classifyLoadFailure(error) {
+    const status = error?.response?.status;
+    if (status === 404) {
+        return { retryable: false, category: "not_found", message: formatErrorMessage(error) };
+    }
+    if (status === 403) {
+        return { retryable: false, category: "inactive", message: formatErrorMessage(error) };
+    }
+    if (error?.isMalformed) {
+        return { retryable: true, category: "malformed", message: "Something went wrong loading this portfolio." };
+    }
+    if (!error?.response) {
+        // No HTTP response at all -- network/DNS/timeout/offline-shaped failure.
+        return { retryable: true, category: "network", message: "Temporary network issue." };
+    }
+    if (status >= 500) {
+        return { retryable: true, category: "server", message: "We're reconnecting..." };
+    }
+    return { retryable: true, category: "unknown", message: "Something went wrong. Retrying..." };
 }
 
 function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, vis }) {
@@ -358,10 +387,28 @@ function getVideoDownloadUrl(url) {
     return cleanUrl;
 }
 
-export default function ClientView() {
+function ClientView() {
     const { slug } = useParams();
     const [shareId, setShareId] = useState(null);
     const [loadingShare, setLoadingShare] = useState(false);
+
+    // Support-mode diagnostics (Phase 7) — used both as the getDiagnostics
+    // callback passed into SectionErrorBoundary instances below, and
+    // exposed as window.__talentgramDiagnostics() so a support engineer can
+    // call it from devtools on a live/shared screen. PII-free by
+    // construction — see clientDiagnostics.js.
+    const getDiagnostics = useCallback(
+        () => buildDiagnosticsSnapshot({ requestManager: axios._requestManager, slug }),
+        [slug]
+    );
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        window.__talentgramDiagnostics = getDiagnostics;
+        return () => {
+            if (window.__talentgramDiagnostics === getDiagnostics) delete window.__talentgramDiagnostics;
+        };
+    }, [getDiagnostics]);
 
     useEffect(() => {
         if (typeof window !== "undefined") {
@@ -387,16 +434,44 @@ export default function ClientView() {
     const [email, setEmail] = useState("");
     const [loading, setLoading] = useState(false);
 
-    const [savedReviewer, setSavedReviewer] = useState(() => {
-        if (typeof window === "undefined") return null;
+    // Deterministic on both server and client (matches the `identified`
+    // pattern above) — the browser-only localStorage read is deferred to a
+    // post-mount effect instead of a lazy useState initializer, which used to
+    // diverge between the server render (always null/false) and client
+    // hydration (populated for any returning visitor), producing a real
+    // hydration mismatch (React error #418) since showWelcomeBack branches
+    // the rendered JSX (see the identify-gate render below).
+    const [savedReviewer, setSavedReviewer] = useState(null);
+    const [showWelcomeBack, setShowWelcomeBack] = useState(false);
+    useEffect(() => {
         try {
             const saved = localStorage.getItem(`client_view_${slug}`);
-            return saved ? JSON.parse(saved) : null;
+            const parsed = saved ? JSON.parse(saved) : null;
+            setSavedReviewer(parsed);
+            setShowWelcomeBack(!!parsed);
         } catch (e) {
-            return null;
+            setSavedReviewer(null);
+            setShowWelcomeBack(false);
         }
-    });
-    const [showWelcomeBack, setShowWelcomeBack] = useState(!!savedReviewer);
+    }, [slug]);
+
+    // ── Client View startup state machine ────────────────────────────────────
+    // identifying -> loading -> ready
+    //                  |-> retrying -> ready
+    //                  |-> retrying -> failed (manual retry available)
+    //                  |-> offline  -> retrying (on reconnect) -> ready
+    // Single source of truth for the top-level render branch below —
+    // `identified`/`data` still drive the actual requests, but this is what
+    // decides what the user sees, so no failure path can leave the page on an
+    // indefinite skeleton with no explanation or way forward.
+    const [startupPhase, setStartupPhase] = useState("identifying");
+    const [loadError, setLoadError] = useState(null);
+    const loadRetryCountRef = useRef(0);
+    const autoRetryTimerRef = useRef(null);
+
+    useEffect(() => {
+        if (identified) setStartupPhase((prev) => (prev === "identifying" ? "loading" : prev));
+    }, [identified]);
 
     const [data, setData] = useState(null);
     const [activeTalent, setActiveTalent] = useState(null);
@@ -469,6 +544,15 @@ export default function ClientView() {
             try {
                 setLoadingShare(true);
                 const { data } = await axios.get(`${API}/public/shares/${shareId}`);
+                if (!loadDataMountedRef.current) return;
+                // Same shape guard loadData() already applies to its own
+                // response — a malformed/non-JSON payload (e.g. an HTML
+                // error page) has no `.link`/`.talent`, and setting state
+                // from it would crash rendering downstream instead of
+                // surfacing a clean error here.
+                if (!data || !data.link || !data.talent) {
+                    throw Object.assign(new Error("Malformed shared preview response"), { isMalformed: true });
+                }
                 setShareData(data);
                 setActiveTalent(data.talent);
                 setData({
@@ -480,9 +564,10 @@ export default function ClientView() {
                     viewer: { email: "share@talentgram", name: "Shared Preview" },
                 });
             } catch (e) {
+                if (!loadDataMountedRef.current) return;
                 setShareError(e?.response?.data?.detail || "Failed to load shared preview. It may have expired.");
             } finally {
-                setLoadingShare(false);
+                if (loadDataMountedRef.current) setLoadingShare(false);
             }
         };
         fetchShare();
@@ -514,7 +599,20 @@ export default function ClientView() {
         });
     }, []);
 
-    const loadData = useCallback(async () => {
+    const loadData = useCallback(async (opts = {}) => {
+        const { isRetry = false } = opts;
+        if (autoRetryTimerRef.current) {
+            clearTimeout(autoRetryTimerRef.current);
+            autoRetryTimerRef.current = null;
+        }
+        // Already offline before we even try — don't burn the one automatic
+        // retry attempt on a request that has no chance of succeeding.
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+            setStartupPhase("offline");
+            return;
+        }
+        setStartupPhase(isRetry ? "retrying" : "loading");
+        setLoadError(null);
         try {
             const { data } = await axios.get(`${API}/public/links/${slug}`, {
                 headers: {
@@ -523,9 +621,17 @@ export default function ClientView() {
             });
             // Guard: skip state updates if component unmounted before response arrived
             if (!loadDataMountedRef.current) return;
+            // Malformed/incomplete-but-200 response (e.g. a proxy hiccup) —
+            // treat exactly like any other load failure rather than storing
+            // a shape the render path doesn't expect and crashing later.
+            if (!data || !data.link) {
+                throw Object.assign(new Error("Malformed portfolio response"), { isMalformed: true });
+            }
             setData(data);
             setSeenIds(new Set(data?.client_state?.seen_talent_ids || []));
             setReviewedIds(new Set(data?.client_state?.reviewed_talent_ids || []));
+            loadRetryCountRef.current = 0;
+            setStartupPhase("ready");
             axios.post(`${API}/public/links/${slug}/track`, {
                 event_type: "open",
                 session_id: getSessionId(),
@@ -534,8 +640,33 @@ export default function ClientView() {
             if (!loadDataMountedRef.current) return;
             if (e?.response?.status === 401) {
                 setIdentified(false);
+                setStartupPhase("identifying");
+                return;
+            }
+            const failure = classifyLoadFailure(e);
+            setLoadError(failure);
+            // Structured, PII-free diagnostic for the load failure — e now
+            // carries requestId/classification/attempt (Phase 7, attached
+            // by axiosShim.js) when it came through Request Manager, so
+            // this is traceable against Request Manager's and the proxy's
+            // own logs by request_id without reproducing the issue.
+            console.error("[ClientView] loadData failed", {
+                slug,
+                requestId: e?.requestId,
+                classification: e?.classification || failure?.category,
+                attempt: e?.attempt,
+                status: e?.response?.status ?? e?.status,
+                retryable: failure?.retryable,
+            });
+            const offlineNow = typeof navigator !== "undefined" && navigator.onLine === false;
+            if (!offlineNow && failure.retryable && loadRetryCountRef.current < 1) {
+                loadRetryCountRef.current += 1;
+                setStartupPhase("retrying");
+                autoRetryTimerRef.current = setTimeout(() => {
+                    if (loadDataMountedRef.current) loadData({ isRetry: true });
+                }, 1800);
             } else {
-                toast.error("Failed to load portfolio");
+                setStartupPhase(offlineNow ? "offline" : "failed");
             }
         }
     }, [slug]);
@@ -543,6 +674,40 @@ export default function ClientView() {
     useEffect(() => {
         if (identified) loadData();
     }, [identified, loadData]);
+
+    // Clean up any pending auto-retry timer on unmount so it never fires
+    // (and never calls setState) after the component is gone.
+    useEffect(() => {
+        return () => {
+            if (autoRetryTimerRef.current) clearTimeout(autoRetryTimerRef.current);
+        };
+    }, []);
+
+    // Browser connectivity changes while stuck on the loading/retrying/failed
+    // states — recover automatically on reconnect instead of requiring a
+    // manual refresh; degrade to a clear "Offline" state instead of an
+    // indefinite skeleton or a confusing generic error while genuinely offline.
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const handleOffline = () => {
+            setStartupPhase((prev) =>
+                prev === "loading" || prev === "retrying" || prev === "failed" ? "offline" : prev
+            );
+        };
+        const handleOnline = () => {
+            setStartupPhase((prev) => {
+                if (prev !== "offline") return prev;
+                loadData({ isRetry: true });
+                return "retrying";
+            });
+        };
+        window.addEventListener("offline", handleOffline);
+        window.addEventListener("online", handleOnline);
+        return () => {
+            window.removeEventListener("offline", handleOffline);
+            window.removeEventListener("online", handleOnline);
+        };
+    }, [loadData]);
 
     // Mark component as unmounted so in-flight loadData callbacks safely abort
     useEffect(() => {
@@ -810,7 +975,7 @@ export default function ClientView() {
             content: text.trim()
         };
         setData(prev => {
-            if (!prev) return prev;
+            if (!prev || !prev.talents) return prev;
             const newTalents = prev.talents.map(t => {
                 if (t.id === talentId) {
                     return {
@@ -943,7 +1108,7 @@ export default function ClientView() {
                 content: returnedDoc.content_url
             };
             setData(prev => {
-                if (!prev) return prev;
+                if (!prev || !prev.talents) return prev;
                 const newTalents = prev.talents.map(t => {
                     if (t.id === talentId) {
                         return {
@@ -1170,21 +1335,80 @@ export default function ClientView() {
     }
 
     if (!data) {
+        // Every path through here is one of the explicit startup-phase
+        // states — there is no way to remain on this screen indefinitely
+        // with no explanation or way forward (the fixed "infinite skeleton"
+        // gap identified in the prior audit): loading/retrying show a
+        // skeleton (with a visible "Retrying..." note once a retry is under
+        // way), offline and failed both surface a clear message with a
+        // manual retry affordance, and a non-retryable failure (invalid or
+        // inactive link) shows the backend's own explanation instead of a
+        // retry button that could never succeed.
+        const isOffline = startupPhase === "offline";
+        const isFailed = startupPhase === "failed";
+        const isRetrying = startupPhase === "retrying";
+        const handleManualRetry = () => {
+            loadRetryCountRef.current = 0;
+            loadData({ isRetry: true });
+        };
         return (
-            <div className="min-h-screen flex items-center justify-center bg-white">
-                <div className="animate-pulse space-y-4 w-full max-w-md px-6">
-                    <div className="h-4 bg-black/[0.04] rounded w-3/4 mx-auto"></div>
-                    <div className="h-32 bg-black/[0.04] rounded-xl"></div>
-                    <div className="space-y-2">
-                        <div className="h-3 bg-black/[0.04] rounded"></div>
-                        <div className="h-3 bg-black/[0.04] rounded w-5/6"></div>
+            <div className="min-h-screen bg-white flex items-center justify-center p-6 text-black/85">
+                <div className="w-full max-w-md flex flex-col items-center">
+                    <div className="mb-10 text-center">
+                        <Logo size={120} className="mx-auto" forceVariant="black" />
+                    </div>
+                    <div className="w-full border border-black/[0.06] rounded-2xl p-8 md:p-10 bg-white text-center">
+                        {isOffline ? (
+                            <>
+                                <p className="eyebrow mb-2 tracking-[0.12em] text-[#5C5C5C] uppercase text-[11px]">Offline</p>
+                                <h1 className="font-display text-xl tracking-wide mb-4 text-[#111111]">You're offline</h1>
+                                <p className="text-sm text-black/50 mb-6">We&apos;ll pick this back up the moment your connection returns.</p>
+                                <button
+                                    onClick={handleManualRetry}
+                                    className="w-full bg-[#1A1A1A] text-white py-3.5 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150"
+                                >
+                                    Retry Now
+                                </button>
+                            </>
+                        ) : isFailed ? (
+                            <>
+                                <p className="eyebrow mb-2 tracking-[0.12em] text-[#5C5C5C] uppercase text-[11px]">
+                                    {loadError?.category === "not_found"
+                                        ? "Link Not Found"
+                                        : loadError?.category === "inactive"
+                                        ? "Link Inactive"
+                                        : "Couldn't Load"}
+                                </p>
+                                <h1 className="font-display text-xl tracking-wide mb-4 text-[#111111]">
+                                    {loadError?.message || "Something went wrong."}
+                                </h1>
+                                {loadError?.retryable !== false && (
+                                    <button
+                                        onClick={handleManualRetry}
+                                        className="w-full bg-[#1A1A1A] text-white py-3.5 rounded-xl text-sm font-medium hover:bg-[#111111] transition-colors duration-150"
+                                    >
+                                        Retry Now
+                                    </button>
+                                )}
+                            </>
+                        ) : (
+                            <div className="animate-pulse space-y-4">
+                                <div className="h-4 bg-black/[0.04] rounded w-3/4 mx-auto"></div>
+                                <div className="h-32 bg-black/[0.04] rounded-xl"></div>
+                                <div className="space-y-2">
+                                    <div className="h-3 bg-black/[0.04] rounded"></div>
+                                    <div className="h-3 bg-black/[0.04] rounded w-5/6"></div>
+                                </div>
+                                {isRetrying && <p className="text-xs text-black/40 pt-2">Retrying…</p>}
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
         );
     }
 
-    const { link, talents, viewer } = data;
+    const { link, talents = [], viewer } = data;
     const vis = link.visibility || {};
     const projectBudget = data.project_budget || [];
     const projectShootDates = data.project_shoot_dates || [];
@@ -1689,6 +1913,12 @@ function TalentDetail({
     sendingVoice,
     isSharePreview = false,
 }) {
+    // Same pattern as ClientView's own getDiagnostics (Phase 7) — `axios`
+    // and `buildDiagnosticsSnapshot` are module-level imports already in
+    // scope in this file, so no prop drilling is needed.
+    const getSectionDiagnostics = () =>
+        buildDiagnosticsSnapshot({ requestManager: axios._requestManager, slug, extra: { talentId: talent?.id } });
+
     const renderCommentsHistory = () => {
         if (!talent.comments || talent.comments.length === 0) return null;
         return (
@@ -1818,10 +2048,18 @@ function TalentDetail({
     }, [vis.download, slug, talent.id]);
     // On-device share diagnostics — panel appears only with ?sharedebug=1.
     const [shareDiag, setShareDiag] = useState(null);
-    const shareDebug = useMemo(() => {
-        if (typeof window === "undefined") return false;
-        try { return new URLSearchParams(window.location.search).get("sharedebug") === "1"; }
-        catch { return false; }
+    // Deterministic false on both server and client's first render (matches
+    // the savedReviewer fix above) — this gates rendered JSX (the debug
+    // panel below), so a useMemo that reads window.location on the initial
+    // render would diverge from the server whenever ?sharedebug=1 is present,
+    // the same class of hydration mismatch as savedReviewer/showWelcomeBack.
+    const [shareDebug, setShareDebug] = useState(false);
+    useEffect(() => {
+        try {
+            setShareDebug(new URLSearchParams(window.location.search).get("sharedebug") === "1");
+        } catch {
+            setShareDebug(false);
+        }
     }, []);
 
     // Ordered, visibility-aware list of every shareable media item.
@@ -2635,12 +2873,14 @@ function TalentDetail({
                                         )}
                                     </div>
                                     
-                                    <AvailabilityBudgetSection 
-                                        talent={talent}
-                                        projectShootDates={projectShootDates}
-                                        projectBudget={projectBudget}
-                                        vis={vis}
-                                    />
+                                    <SectionErrorBoundary label="metadata" getDiagnostics={getSectionDiagnostics}>
+                                        <AvailabilityBudgetSection
+                                            talent={talent}
+                                            projectShootDates={projectShootDates}
+                                            projectBudget={projectBudget}
+                                            vis={vis}
+                                        />
+                                    </SectionErrorBoundary>
 
                                     {(talent.custom_answers || []).length > 0 && (
                                         <div className="bg-white p-5 space-y-3 rounded-xl border border-black/[0.04] shadow-sm">
@@ -2916,7 +3156,7 @@ function TalentDetail({
                                         </div>
                                         <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
                                         <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 inline-flex items-center min-h-[44px] text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
-                                        {renderCommentsHistory()}
+                                        <SectionErrorBoundary label="comments" getDiagnostics={getSectionDiagnostics}>{renderCommentsHistory()}</SectionErrorBoundary>
                                     </div>
 
                                     {talent.submission_id && talent.project_id && (
@@ -2926,7 +3166,7 @@ function TalentDetail({
                                                 onSend={(blob) => saveVoiceNote(talent.id, blob)}
                                                 sending={sendingVoice}
                                             />
-                                            {renderVoiceHistory()}
+                                            <SectionErrorBoundary label="feedback" getDiagnostics={getSectionDiagnostics}>{renderVoiceHistory()}</SectionErrorBoundary>
                                         </div>
                                     )}
 
@@ -2991,12 +3231,14 @@ function TalentDetail({
                                 )}
                             </div>
 
-                            <AvailabilityBudgetSection 
-                                talent={talent}
-                                projectShootDates={projectShootDates}
-                                projectBudget={projectBudget}
-                                vis={vis}
-                            />
+                            <SectionErrorBoundary label="metadata" getDiagnostics={getSectionDiagnostics}>
+                                <AvailabilityBudgetSection
+                                    talent={talent}
+                                    projectShootDates={projectShootDates}
+                                    projectBudget={projectBudget}
+                                    vis={vis}
+                                />
+                            </SectionErrorBoundary>
 
                             {(talent.custom_answers || []).length > 0 && (
                                 <div className="mb-8 bg-white p-5 space-y-3 rounded-xl shadow-sm">
@@ -3062,7 +3304,7 @@ function TalentDetail({
                                         </div>
                                         <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
                                         <button onClick={saveComment} data-testid="detail-save-comment-btn" className="mt-3 inline-flex items-center min-h-[44px] text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
-                                        {renderCommentsHistory()}
+                                        <SectionErrorBoundary label="comments" getDiagnostics={getSectionDiagnostics}>{renderCommentsHistory()}</SectionErrorBoundary>
                                     </div>
 
                                     {talent.submission_id && talent.project_id && (
@@ -3072,7 +3314,7 @@ function TalentDetail({
                                                 onSend={(blob) => saveVoiceNote(talent.id, blob)}
                                                 sending={sendingVoice}
                                             />
-                                            {renderVoiceHistory()}
+                                            <SectionErrorBoundary label="feedback" getDiagnostics={getSectionDiagnostics}>{renderVoiceHistory()}</SectionErrorBoundary>
                                         </div>
                                     )}
                                 </div>
@@ -3391,5 +3633,39 @@ function InfoRow({ label, value }) {
             </div>
             <div className="text-sm font-medium text-[#111111]">{value}</div>
         </div>
+    );
+}
+
+// Backstop: catches any render-time crash anywhere in ClientView (or its
+// TalentDetail sub-component) so it never falls through to the app's root
+// error.jsx, which would replace the entire page. Section-level boundaries
+// inside TalentDetail (metadata/comments/feedback) catch those specific
+// failures first; this is the last line of defense for anything else.
+const CLIENT_VIEW_CRASH_FALLBACK = (
+    <div className="min-h-screen flex items-center justify-center bg-white px-6 py-12 text-center">
+        <div className="max-w-sm space-y-4">
+            <h1 className="text-lg font-semibold text-[#111111]">Something went wrong</h1>
+            <p className="text-sm text-black/50">
+                This page hit an unexpected error. Reloading usually fixes it.
+            </p>
+            <button
+                onClick={() => window.location.reload()}
+                className="inline-flex items-center justify-center bg-black text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
+            >
+                Reload
+            </button>
+        </div>
+    </div>
+);
+
+export default function ClientViewWithErrorBoundary(props) {
+    return (
+        <SectionErrorBoundary
+            label="page"
+            fallback={CLIENT_VIEW_CRASH_FALLBACK}
+            getDiagnostics={() => buildDiagnosticsSnapshot({ requestManager: axios._requestManager })}
+        >
+            <ClientView {...props} />
+        </SectionErrorBoundary>
     );
 }

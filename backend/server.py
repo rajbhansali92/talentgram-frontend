@@ -13,6 +13,7 @@ from core import db, mongo_client, seed_admin, update_talent_cover_cache, valida
 from drive_backup import attach_db, drive_enabled, start_drive_worker
 from services.import_worker import start_import_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
+from request_context import generate_request_id, reset_request_id, set_request_id
 from routers import (
     applications,
     auth,
@@ -81,6 +82,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         response.headers.setdefault("X-XSS-Protection", "1; mode=block")
 
+        return response
+
+
+# RequestIdMiddleware
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Assigns a correlation ID to every request — foundation for later
+    observability phases (structured logging, diagnostics, incident IDs).
+    Honors an inbound X-Request-Id if the caller already supplied one,
+    otherwise mints a new one. Available anywhere during request handling
+    via request_context.get_request_id(); nothing reads it yet.
+    """
+    async def dispatch(self, request, call_next):
+        incoming = request.headers.get("x-request-id")
+        request_id = incoming if incoming else generate_request_id()
+        token = set_request_id(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+
+        response.headers["X-Request-Id"] = request_id
         return response
 
 
@@ -176,6 +198,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
 )
+
+# RequestIdMiddleware added last so it wraps everything above, including CORS
+# — every request (preflight included) gets a correlation ID, and the header
+# is set on the way out after CORS/security headers have already run.
+app.add_middleware(RequestIdMiddleware)
 
 
 # Startup

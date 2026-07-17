@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { Download, X, Share, Plus, Sparkles } from "lucide-react";
 import { usePathname } from "next/navigation";
+import { toast } from "sonner";
 
 export default function PWAInitializer() {
     const pathname = usePathname();
@@ -35,18 +36,70 @@ export default function PWAInitializer() {
 
     useEffect(() => {
         if (typeof window === "undefined") return;
+        if (!("serviceWorker" in navigator)) return;
 
         // 1. Register Service Worker globally (always registers for correct app behavior)
-        if ("serviceWorker" in navigator) {
-            navigator.serviceWorker
-                .register("/sw.js")
-                .then((reg) => {
-                    console.log("[PWA] Service Worker registered with scope:", reg.scope);
+        navigator.serviceWorker
+            .register("/sw.js")
+            .then((reg) => {
+                console.log("[PWA] Service Worker registered with scope:", reg.scope);
+            })
+            .catch((err) => {
+                console.error("[PWA] Service Worker registration failed:", err);
+            });
+
+        // 2. Detect a new Service Worker taking control of this tab.
+        // sw.js calls skipWaiting()/clients.claim() unconditionally, so a
+        // fresh deployment can silently swap the active worker under an
+        // already-open tab with zero warning. The FIRST controllerchange
+        // this listener ever sees is just the initial claim (a brand-new
+        // page load going from "no controller" to "controller") and is
+        // benign — every controllerchange AFTER that first one means a
+        // newer worker just took over an existing session, which is what
+        // we actually want to surface. We prompt rather than force-reload:
+        // silently reloading could discard in-progress work (an OTP entry,
+        // an in-flight form, a mid-upload).
+        let seenFirstControllerChange = false;
+        let hasNotifiedUpdate = false;
+        const hadControllerAtMount = !!navigator.serviceWorker.controller;
+
+        const handleControllerChange = () => {
+            const isInitialClaim = !hadControllerAtMount && !seenFirstControllerChange;
+            seenFirstControllerChange = true;
+
+            // Structured log (Phase 7) — JSON-line shape matching Request
+            // Manager's own logger, so this is grep/correlate-able the same
+            // way. Logged for EVERY controllerchange, including the
+            // suppressed initial claim, since "was this the benign first
+            // claim or a real mid-session takeover" is exactly what support
+            // needs to tell a stale-SW report apart from a normal first load.
+            console.log(
+                JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    level: "info",
+                    source: "service_worker",
+                    event: "controllerchange",
+                    is_initial_claim: isInitialClaim,
+                    controller_script_url: navigator.serviceWorker.controller?.scriptURL || null,
                 })
-                .catch((err) => {
-                    console.error("[PWA] Service Worker registration failed:", err);
-                });
-        }
+            );
+
+            if (isInitialClaim || hasNotifiedUpdate) return;
+            hasNotifiedUpdate = true;
+            toast.info("A new version is available", {
+                description: "Refresh to get the latest version of Talentgram.",
+                duration: Infinity,
+                action: {
+                    label: "Refresh",
+                    onClick: () => window.location.reload(),
+                },
+            });
+        };
+
+        navigator.serviceWorker.addEventListener("controllerchange", handleControllerChange);
+        return () => {
+            navigator.serviceWorker.removeEventListener("controllerchange", handleControllerChange);
+        };
     }, []);
 
     useEffect(() => {

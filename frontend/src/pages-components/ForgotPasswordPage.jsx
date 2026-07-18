@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import axios from "axios";
-import { Link } from "react-router-dom";
+import Link from "next/link";
 import { API } from "@/lib/api";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
@@ -109,7 +109,7 @@ export default function ForgotPasswordPage() {
                 )}
 
                 <Link
-                    to="/admin/login"
+                    href="/admin/login"
                     className="mt-6 inline-flex items-center gap-2 text-xs text-white/60 hover:text-white"
                     data-testid="forgot-back-link"
                 >

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { useSearchParams, useNavigate, Link } from "react-router-dom";
+import { useSearchParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { API } from "@/lib/api";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
@@ -13,8 +14,8 @@ import { Loader2, Lock, Check, XCircle, Eye, EyeOff } from "lucide-react";
  * /admin/login to sign in afresh.
  */
 export default function ResetPasswordPage() {
-    const [params] = useSearchParams();
-    const nav = useNavigate();
+    const params = useSearchParams();
+    const router = useRouter();
     const token = params.get("token") || "";
 
     const [state, setState] = useState("validating"); // validating | ready | invalid
@@ -67,7 +68,7 @@ export default function ResetPasswordPage() {
                 new_password: next,
             });
             toast.success("Password updated. Please sign in with your new password.");
-            nav("/admin/login", { replace: true });
+            router.replace("/admin/login");
         } catch (err) {
             toast.error(err?.response?.data?.detail || "Could not reset password");
         } finally {
@@ -184,7 +185,7 @@ export default function ResetPasswordPage() {
                 )}
 
                 <Link
-                    to="/admin/login"
+                    href="/admin/login"
                     className="mt-6 inline-block text-xs text-white/60 hover:text-white"
                     data-testid="reset-back-link"
                 >

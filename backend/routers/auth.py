@@ -81,8 +81,14 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
     ip_bucket.append(now_ts)
 
     token_url = "https://oauth2.googleapis.com/token"
-    client_id = os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "mock-client-id")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "mock-client-secret")
+    client_id = os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        # Fail loudly and immediately rather than silently sending a
+        # "mock-client-id" to Google, which used to fail downstream with a
+        # confusing generic "Failed to exchange Google OAuth code" error.
+        logger.error("Google OAuth is not configured: GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are unset.")
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured on this server.")
 
     token_data = {
         "code": payload.code,

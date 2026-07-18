@@ -1,9 +1,12 @@
 import os
-os.environ["JWT_SECRET"] = "supersecretkey123"
-os.environ["MONGO_URL"] = "mongodb+srv://team_db_user:Wxp0xYSOiwzb9GyE@cluster0.sipmssu.mongodb.net/talentgram?retryWrites=true&w=majority"
+# Local/test-only defaults, matching every other test file in this suite —
+# pytest must never connect to production by default. Set TEST_MONGO_URL to
+# override for a deliberate, explicit run against a different database.
+os.environ["JWT_SECRET"] = "dummy"
+os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:27017")
 
 import sys
-sys.path.insert(0, "/Users/rajrbhansali/.gemini/antigravity/scratch/talentgram-frontend/backend")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock

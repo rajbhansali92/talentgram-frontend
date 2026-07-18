@@ -6,9 +6,9 @@ import logging
 # Ensure backend folder is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Set environment defaults if not set
-os.environ.setdefault("JWT_SECRET", "supersecretkey123")
-os.environ.setdefault("MONGO_URL", "mongodb+srv://team_db_user:Wxp0xYSOiwzb9GyE@cluster0.sipmssu.mongodb.net/talentgram?retryWrites=true&w=majority")
+# JWT_SECRET and MONGO_URL are required and must be set in the environment —
+# core.py reads them via os.environ[...] (no fallback) and raises loudly if
+# either is missing. This process must never supply its own default.
 
 logging.basicConfig(
     level=logging.INFO,

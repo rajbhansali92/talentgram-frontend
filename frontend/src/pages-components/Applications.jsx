@@ -1,5 +1,5 @@
 import React, { useEffect, useCallback, useState } from "react";
-import { adminApi } from "@/lib/api";
+import { adminApi, IMAGE_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     X,
@@ -493,13 +493,13 @@ function ReviewModal({ app, onClose, onDecide }) {
                                 {images.map((m) => (
                                     <a
                                         key={m.id}
-                                        href={m.url}
+                                        href={IMAGE_URL(m)}
                                         target="_blank"
                                         rel="noreferrer"
                                         className="aspect-[3/4] bg-[#fafaf8] overflow-hidden border border-black/[0.08] rounded-lg hover:opacity-90 transition-opacity"
                                     >
                                         <img
-                                            src={m.url}
+                                            src={IMAGE_URL(m)}
                                             alt=""
                                             loading="lazy"
                                             className="w-full h-full object-cover"

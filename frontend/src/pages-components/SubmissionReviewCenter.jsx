@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { adminApi, isAdmin, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { adminApi, isAdmin, IMAGE_URL } from "@/lib/api";
 import { toast } from "sonner";
 import {
     ArrowLeft,
@@ -1881,7 +1881,7 @@ export default function SubmissionReviewCenter() {
                                                                 <FileText className="w-8 h-8 text-black/25" />
                                                             </div>
                                                         ) : (
-                                                            <PremiumImage src={m.thumbnail_url || m.url} alt="" className="w-full aspect-video object-cover" />
+                                                            <PremiumImage src={m.thumbnail_url || IMAGE_URL(m)} alt="" className="w-full aspect-video object-cover" />
                                                         )}
                                                         <div className="p-2 flex flex-col gap-1.5">
                                                             <p className="text-[9px] text-black/50 font-mono uppercase truncate">{m.label || m.category}</p>
@@ -2068,7 +2068,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {indianImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                                                 {"Hidden"}
@@ -2125,7 +2125,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {westernImages.map((m) => (
                                                     <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={m.url} alt="" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                                                 {"Hidden"}
@@ -2182,7 +2182,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {talentPortfolioImages.map((m, idx) => (
                                                     <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={IMAGE_URL(m) || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                                                 {"Hidden"}
@@ -2239,7 +2239,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {talentAdditionalPortfolio.map((m, idx) => (
                                                     <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={m.url || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={IMAGE_URL(m) || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                                                 {"Hidden"}

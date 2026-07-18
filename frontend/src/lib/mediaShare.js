@@ -9,7 +9,7 @@
 //
 // This module is purely additive — it does not touch download logic.
 // ────────────────────────────────────────────────────────────────────────
-import { api as axios, getViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { api as axios, getViewerToken, getSubdomainUrl } from "@/lib/api";
 
 // Path/diagnostics logging — intentionally always on. WhatsApp sharing is a
 // low-frequency, user-initiated action, and these logs are how we verify on a
@@ -142,7 +142,7 @@ async function mintShareUrl(slug, talentId, mediaId) {
     );
     return {
         shareId: data.share_id,
-        url: `${PUBLIC_FRONTEND_URL}/l/${slug}?share=${data.share_id}`,
+        url: `${getSubdomainUrl("links")}/${slug}?share=${data.share_id}`,
     };
 }
 

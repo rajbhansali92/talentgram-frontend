@@ -40,12 +40,22 @@ export function getSubdomainUrl(subdomain) {
  * Resolve the display URL for a media object.
  * Post-Cloudinary migration every record carries a canonical full URL
  * (https://res.cloudinary.com/talentgram/...) on the `url` field — we
- * just return that.
+ * just return that, with an f_auto,q_auto transform inserted for
+ * Cloudinary URLs. Without this, a HEIC upload (the default camera format
+ * on iPhone, and an explicitly accepted upload format) renders as a raw
+ * image/heic response, which only Safari can decode — every other
+ * browser shows a broken image. f_auto negotiates a format the requesting
+ * browser can actually render; it's a no-op for formats already
+ * web-safe (JPEG/PNG/WEBP).
  */
 export const IMAGE_URL = (media) => {
     if (!media) return "";
-    if (typeof media === "string") return media;
-    return media.url || "";
+    const url = typeof media === "string" ? media : media.url || "";
+    if (!url) return url;
+    return url.replace(
+        /(res\.cloudinary\.com\/[^/]+\/image\/upload\/)(?!.*f_auto)/,
+        "$1f_auto,q_auto/"
+    );
 };
 
 // ================= PUBLIC CLIENT API =================

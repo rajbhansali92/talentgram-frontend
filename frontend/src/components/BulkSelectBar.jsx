@@ -18,6 +18,7 @@ import { Trash2, X, Check } from "lucide-react";
 export default function BulkSelectBar({
     count,
     total,
+    grandTotal,
     allSelected,
     onSelectAll,
     onClear,
@@ -31,6 +32,12 @@ export default function BulkSelectBar({
 }) {
     if (count === 0) return null;
     const noun = count === 1 ? labelSingular : labelPlural;
+    // grandTotal (the true count across all pages) can exceed `total` (this
+    // page's loaded rows) when the list is paginated. "Select all N" and
+    // "all selected" must never claim more than what onSelectAll actually
+    // selects, or an admin can believe a bulk action (tag/delete/export)
+    // covers the whole roster when it only covers the current page.
+    const isPageScoped = typeof grandTotal === "number" && grandTotal > total;
     return (
         <div
             className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 border border-border bg-background/95 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-sm px-4 py-2.5 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 max-w-[95vw] overflow-x-auto"
@@ -49,12 +56,12 @@ export default function BulkSelectBar({
                     className="text-xs tg-mono text-muted-foreground hover:text-foreground inline-flex items-center gap-1 shrink-0"
                     data-testid={`${testid}-select-all`}
                 >
-                    <Check className="w-3 h-3" /> Select all {total}
+                    <Check className="w-3 h-3" /> Select all {total}{isPageScoped ? " on this page" : ""}
                 </button>
             )}
             {allSelected && total > 1 && (
                 <span className="text-[10px] tg-mono text-muted-foreground shrink-0">
-                    all selected
+                    {isPageScoped ? "all on this page selected" : "all selected"}
                 </span>
             )}
             <span className="w-px h-5 bg-border shrink-0" />

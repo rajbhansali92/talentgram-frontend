@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { adminApi, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { adminApi, getSubdomainUrl } from "@/lib/api";
 import { Link } from "react-router-dom";
 import {
     Clapperboard,
@@ -367,9 +367,9 @@ function OnboardingLinkCard() {
         }));
     };
 
-    const inviteUrl = selectedId === "default" 
-        ? `${PUBLIC_FRONTEND_URL}/apply` 
-        : `${PUBLIC_FRONTEND_URL}/apply?profile=${selectedId}`;
+    const inviteUrl = selectedId === "default"
+        ? getSubdomainUrl("apply")
+        : `${getSubdomainUrl("apply")}?profile=${selectedId}`;
 
     const copy = async () => {
         try {

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
-import { adminApi, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { adminApi, getSubdomainUrl } from "@/lib/api";
 import { toast } from "sonner";
 import WhatsAppShareButton from "@/components/WhatsAppShareButton";
 import { generateClientViewMessage } from "@/lib/whatsappShare";
@@ -137,7 +137,7 @@ export default function LinkResults() {
     }, [id]);
 
     const subjects = data?.subjects || {};
-    const url = data ? `${PUBLIC_FRONTEND_URL}/l/${data.link.slug}` : "";
+    const url = data ? `${getSubdomainUrl("links")}/${data.link.slug}` : "";
     const viewers = data?.viewers || [];
     const downloads = data?.downloads || [];
     const actions = data?.actions || [];

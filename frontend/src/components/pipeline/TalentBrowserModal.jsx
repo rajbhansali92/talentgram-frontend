@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Search, X, Check, Image as ImageIcon, Instagram, LayoutGrid, Maximize2, Minus, ChevronDown, Sliders, Bookmark, Zap, Clock, Star, TrendingUp, Users, Calendar, Award, List, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
-import { adminApi } from "@/lib/api";
+import { adminApi, IMAGE_URL } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
@@ -1504,7 +1504,7 @@ const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
                         <div className="grid grid-cols-2 gap-2">
                             {images.map((img, idx) => (
                                 <div key={idx} className="relative aspect-[3/4] rounded-lg overflow-hidden bg-gray-50 border border-gray-200">
-                                    <img src={img.url} alt="" loading="lazy" className="w-full h-full object-cover hover:scale-105 transition-transform duration-200" />
+                                    <img src={IMAGE_URL(img)} alt="" loading="lazy" className="w-full h-full object-cover hover:scale-105 transition-transform duration-200" />
                                 </div>
                             ))}
                         </div>

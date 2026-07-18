@@ -62,7 +62,16 @@ const securityHeaders = [
       // the HLS manifest (video.m3u8) and media segments over XHR/fetch when the
       // browser lacks native HLS (Chrome/Firefox). Without it, Stream playback
       // fails even though media-src allows the <video> element.
-      "connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com",
+      // Local dev only: adminApi/viewerApi/portalApi (src/lib/api.js) call
+      // NEXT_PUBLIC_BACKEND_URL directly (not through the same-origin
+      // /api/proxy/* route), so a local backend origin must be allow-listed
+      // here or the browser silently blocks the request with no network
+      // entry at all — confirmed live: admin login POSTs to
+      // http://localhost:8000/api/auth/login failed with no response despite
+      // the backend and CORS both being correctly configured. Production's
+      // backend already lives on the allow-listed *.railway.app origin, so
+      // this never widens the production policy.
+      `connect-src 'self' blob: https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com${process.env.NODE_ENV !== "production" ? " http://localhost:8000" : ""}`,
       "worker-src 'self' blob:",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",

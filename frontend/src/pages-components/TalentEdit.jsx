@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { adminApi, isAdmin } from "@/lib/api";
+import { adminApi, isAdmin, IMAGE_URL } from "@/lib/api";
 import CommTimeline from "@/components/CommTimeline";
 import { toast } from "sonner";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -318,6 +318,7 @@ export default function TalentEdit() {
         try {
             const payload = {
                 ...talent,
+                email: talent.email?.trim() || null,
                 instagram_handle: normalizeInstagramHandle(talent.instagram_handle) || null,
                 dob: talent.dob || null,
                 age: talent.dob
@@ -1531,7 +1532,7 @@ export default function TalentEdit() {
                                                 </div>
                                             ) : (
                                                 <img
-                                                    src={m.url}
+                                                    src={IMAGE_URL(m)}
                                                     alt=""
                                                     loading="lazy" // ISSUE 11: Lazy loading
                                                     className="w-full h-full object-cover"

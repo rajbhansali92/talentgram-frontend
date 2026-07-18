@@ -6,6 +6,7 @@ import {
     PlayCircle,
     Trash2,
 } from "lucide-react";
+import { IMAGE_URL } from "@/lib/api";
 
 /**
  * Full-screen modal viewer for project audition material.
@@ -92,13 +93,13 @@ export default function MaterialModal({ project, onClose, onRemove }) {
                     grid
                     render={(m) => (
                         <a
-                            href={m.url}
+                            href={IMAGE_URL(m)}
                             target="_blank"
                             rel="noreferrer"
                             className="block aspect-square bg-muted overflow-hidden"
                         >
                             <img
-                                src={m.url}
+                                src={IMAGE_URL(m)}
                                 alt=""
                                 loading="lazy"
                                 className="w-full h-full object-cover"

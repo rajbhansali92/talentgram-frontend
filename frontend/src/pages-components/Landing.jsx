@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { ArrowRight, Sparkles } from "lucide-react";
 import Logo from "@/components/Logo";
 import { getSubdomainUrl } from "@/lib/api";
@@ -10,6 +10,20 @@ import { getSubdomainUrl } from "@/lib/api";
  *  · Quiet, premium white luxury branding.
  */
 export default function Landing() {
+    // getSubdomainUrl reads window.location, which is defined on every
+    // client render but not during SSR — so the initial client render must
+    // start from the same SSR-only value the server produced (production
+    // URL), or React logs a hydration mismatch and keeps the server's
+    // (wrong for this environment) href permanently. Resolve the real,
+    // environment-aware URLs only after mount.
+    const [applyUrl, setApplyUrl] = useState("https://apply.talentgramagency.com");
+    const [reviewLoginUrl, setReviewLoginUrl] = useState("https://review.talentgramagency.com/admin/login");
+
+    useEffect(() => {
+        setApplyUrl(getSubdomainUrl("apply"));
+        setReviewLoginUrl(getSubdomainUrl("review") + "/admin/login");
+    }, []);
+
     return (
         <div
             className="min-h-screen bg-[#ffffff] text-black relative overflow-hidden"
@@ -18,7 +32,7 @@ export default function Landing() {
             <div className="relative z-10 min-h-screen flex flex-col">
                 <header className="px-6 md:px-12 py-6 flex items-center justify-end gap-3">
                     <a
-                        href={getSubdomainUrl("apply")}
+                        href={applyUrl}
                         data-testid="landing-apply-link"
                         className="hidden sm:inline-flex items-center gap-1.5 text-sm text-black/70 hover:text-black transition-colors duration-150 px-4 py-2 border border-black/15 rounded-lg hover:border-black/40"
                     >
@@ -26,7 +40,7 @@ export default function Landing() {
                         Apply as Talent
                     </a>
                     <a
-                        href={getSubdomainUrl("review") + "/admin/login"}
+                        href={reviewLoginUrl}
                         data-testid="landing-login-btn"
                         className="text-sm text-black/70 hover:text-black transition-colors duration-150 px-4 py-2 border border-black/15 rounded-lg hover:border-black/40"
                     >
@@ -40,7 +54,7 @@ export default function Landing() {
 
                         <div className="flex items-center gap-4 flex-wrap justify-center">
                             <a
-                                href={getSubdomainUrl("review") + "/admin/login"}
+                                href={reviewLoginUrl}
                                 data-testid="landing-cta-btn"
                                 className="inline-flex items-center gap-2 bg-black text-white px-6 py-3 rounded-lg text-sm font-medium hover:opacity-90 transition-all duration-150"
                             >
@@ -51,7 +65,7 @@ export default function Landing() {
                                 />
                             </a>
                             <a
-                                href={getSubdomainUrl("apply")}
+                                href={applyUrl}
                                 data-testid="landing-apply-card"
                                 className="inline-flex items-center gap-2 px-6 py-3 border border-black/15 hover:border-black/40 text-black/85 hover:text-black text-sm rounded-lg transition-colors duration-150"
                             >

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
+import { api as axios, PORTAL_TOKEN_KEY, IMAGE_URL } from "@/lib/api";
 import {
     appDraftKey,
     normEmail,
@@ -504,9 +504,13 @@ export default function ApplicationPage() {
                     setAid(data.application_id);
                     setToken(data.token);
                     setBasics(ref.basics);
-                    if (data.talent) {
-                        setForm((f) => ({ ...f, ...(data.talent.form_data || {}) }));
-                    }
+                    // Same priority as `basics` above: an applicant who hasn't
+                    // been promoted to a talent profile yet (the common case
+                    // while their application is still pending review) has no
+                    // `data.talent`, but their submitted answers are still on
+                    // the application's own form_data — restore from there so
+                    // "we'll resume from where you stop" is actually true.
+                    setForm((f) => ({ ...f, ...draftFd, ...(data.talent?.form_data || {}) }));
                     setStarted(true);
                     toast.success("Welcome back!");
                 } else {
@@ -1832,7 +1836,7 @@ export default function ApplicationPage() {
                                             className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#eaeaea] overflow-hidden group shadow-sm"
                                         >
                                             <img
-                                                src={m.url}
+                                                src={IMAGE_URL(m)}
                                                 alt=""
                                                 loading="lazy"
                                                 className="w-full h-full object-cover"
@@ -1984,7 +1988,7 @@ function ApplyLookGroup({
                         className="relative aspect-[3/4] bg-[#f5f4f0] rounded-xl border border-[#eaeaea] overflow-hidden group shadow-sm"
                     >
                         <img
-                            src={m.url}
+                            src={IMAGE_URL(m)}
                             alt=""
                             loading="lazy"
                             className="w-full h-full object-cover"

@@ -872,6 +872,7 @@ export default function TalentList() {
                 <BulkSelectBar
                     count={selected.size}
                     total={talents.length}
+                    grandTotal={totalItems}
                     allSelected={selected.size === talents.length}
                     onSelectAll={selectAll}
                     onClear={clear}

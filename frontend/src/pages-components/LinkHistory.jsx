@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, isAdmin, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { adminApi, isAdmin, getSubdomainUrl } from "@/lib/api";
 import { toast } from "sonner";
 import WhatsAppShareButton from "@/components/WhatsAppShareButton";
 import { generateClientViewMessage } from "@/lib/whatsappShare";
@@ -94,7 +94,7 @@ export default function LinkHistory() {
     }, []);
 
     const copyLink = async (slug) => {
-        const url = `${PUBLIC_FRONTEND_URL}/l/${slug}`;
+        const url = `${getSubdomainUrl("links")}/${slug}`;
         const success = await copyToClipboard(url);
         if (success) {
             toast.success("Link copied");
@@ -104,7 +104,7 @@ export default function LinkHistory() {
     };
 
     const shareWhatsApp = (l) => {
-        const url = `${PUBLIC_FRONTEND_URL}/l/${l.slug}`;
+        const url = `${getSubdomainUrl("links")}/${l.slug}`;
         window.open(generateClientViewMessage(l.title, url), "_blank");
     };
 

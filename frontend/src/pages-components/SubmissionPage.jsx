@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
+import { api as axios, PORTAL_TOKEN_KEY, IMAGE_URL } from "@/lib/api";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
@@ -3335,7 +3335,7 @@ function SubmissionPage() {
                                                                     }}
                                                                 >
                                                                     <img
-                                                                        src={m.url}
+                                                                        src={IMAGE_URL(m)}
                                                                         alt=""
                                                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                                                     />
@@ -3573,7 +3573,7 @@ function SubmissionPage() {
                         <X className="w-5 h-5" />
                     </button>
                     <img
-                        src={activeLightboxImage.url}
+                        src={IMAGE_URL(activeLightboxImage)}
                         alt=""
                         className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200"
                     />
@@ -3711,7 +3711,7 @@ function PremiumPortfolioGroup({
                                     }}
                                 >
                                     <img
-                                        src={m.url}
+                                        src={IMAGE_URL(m)}
                                         alt=""
                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                     />

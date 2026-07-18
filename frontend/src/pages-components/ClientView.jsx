@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "next/navigation";
-import { IMAGE_URL, getViewerToken, saveViewerToken, PUBLIC_FRONTEND_URL } from "@/lib/api";
+import { IMAGE_URL, getViewerToken, saveViewerToken, getSubdomainUrl } from "@/lib/api";
 import LazyVideoPlayer from "@/components/LazyVideoPlayer";
 import { thumbnailUrl, posterUrl, resolveTalentCover, displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import Logo from "@/components/Logo";
@@ -1051,7 +1051,7 @@ function ClientView() {
                 },
             );
             
-            const shareUrl = `${PUBLIC_FRONTEND_URL}/l/${slug}?share=${data.share_id}`;
+            const shareUrl = `${getSubdomainUrl("links")}/${slug}?share=${data.share_id}`;
             
             if (navigator.share) {
                 try {
@@ -2917,8 +2917,8 @@ function TalentDetail({
                         <div className="p-4 md:p-8">
                             {/* Multi-select share toggle — additive, never blocks downloads */}
                             {!isSharePreview && shareableMedia.length > 0 && (
-                                <div className="flex items-center justify-between mb-6">
-                                    <p className="text-[11px] text-[#8A8A8A] font-mono tracking-[0.08em] pr-3">
+                                <div className="flex items-center justify-between flex-wrap gap-y-2 mb-6">
+                                    <p className="text-[11px] text-[#8A8A8A] font-mono tracking-[0.08em] pr-3 flex-1 min-w-[140px]">
                                         {downloadsDisabled
                                             ? shareHelpText
                                             : shareMode
@@ -2929,7 +2929,7 @@ function TalentDetail({
                                         type="button"
                                         onClick={() => (shareMode ? exitShareMode() : setShareMode(true))}
                                         data-testid="share-select-toggle"
-                                        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-full text-[11px] font-semibold transition-colors duration-150 min-h-[40px] ${
+                                        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-full text-[11px] font-semibold transition-colors duration-150 min-h-[40px] shrink-0 whitespace-nowrap ${
                                             shareMode
                                                 ? "bg-slate-100 text-[#4A4A4A] hover:bg-slate-200"
                                                 : "border border-black text-black hover:bg-slate-50"

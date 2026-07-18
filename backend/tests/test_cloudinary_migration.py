@@ -19,8 +19,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://casting-deck-pro.preview.emergentagent.com").rstrip("/")
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASSWORD = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
 
 
 # ---------- Fixtures ----------

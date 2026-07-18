@@ -19,7 +19,8 @@ if not BASE_URL:
     # Fallback for when the backend is tested standalone
     BASE_URL = "https://casting-deck-pro.preview.emergentagent.com"
 
-ADMIN = {"email": "admin@talentgram.com", "password": "Admin@123"}
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
+ADMIN = {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
 
 TINY_JPG = bytes.fromhex(
     "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707"

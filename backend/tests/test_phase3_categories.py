@@ -29,8 +29,7 @@ def _load_base_url() -> str:
 
 
 BASE_URL = _load_base_url()
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASSWORD = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
 
 
 # Tiny but valid JPEG (~1 KB stays well below MAX_SUBMISSION_IMAGE_BYTES).

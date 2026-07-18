@@ -17,8 +17,7 @@ import pytest
 import requests
 
 BASE = os.environ.get("TEST_API", "http://localhost:8001/api")
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASS = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD as ADMIN_PASS
 
 
 def _admin_token() -> str:

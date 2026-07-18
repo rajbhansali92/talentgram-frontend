@@ -16,8 +16,7 @@ import pytest
 import requests
 
 BASE = os.environ.get("PYTEST_API_BASE", "http://localhost:8001/api")
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASS = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD as ADMIN_PASS
 
 
 @pytest.fixture(scope="module")

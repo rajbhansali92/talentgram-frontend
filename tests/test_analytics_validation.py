@@ -2,8 +2,10 @@
 Talentgram — Client View Link Analytics
 Pre-Deployment Validation Suite (API-based)
 
-Uses the live Railway backend via HTTP — no local MongoDB required.
-Credentials: admin@talentgram.com / Admin@123
+This script makes real POST/PUT requests (creates and mutates a test link).
+It must never target production by default. Set REACT_APP_BACKEND_URL
+explicitly to point it anywhere other than localhost — doing so prints a
+warning naming exactly where the writes are about to land.
 """
 
 import uuid
@@ -17,13 +19,15 @@ from typing import Any, Dict, List, Optional
 import requests
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-BASE = os.environ.get(
-    "REACT_APP_BACKEND_URL",
-    "https://talentgram-app-production.up.railway.app"
-).rstrip("/") + "/api"
+_DEFAULT_BASE = "http://localhost:8000"
+_raw_base = os.environ.get("REACT_APP_BACKEND_URL", _DEFAULT_BASE)
+if _raw_base.rstrip("/") != _DEFAULT_BASE:
+    print(f"[WARNING] REACT_APP_BACKEND_URL is overridden — this run will send real "
+          f"POST/PUT requests to: {_raw_base}", file=sys.stderr)
+BASE = _raw_base.rstrip("/") + "/api"
 
-ADMIN_EMAIL    = "admin@talentgram.com"
-ADMIN_PASSWORD = "Admin@123"
+ADMIN_EMAIL    = os.environ.get("TEST_ADMIN_EMAIL", "admin@talentgram.com")
+ADMIN_PASSWORD = os.environ.get("TEST_ADMIN_PASSWORD", "Admin@123")
 TIMEOUT        = 20
 
 # ─── helpers ─────────────────────────────────────────────────────────────────

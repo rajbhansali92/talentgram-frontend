@@ -12,8 +12,7 @@ BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://casting-deck-pro.preview
 API = f"{BASE}/api"
 SLUG = "autoflow-c66e26"
 KNOWN_EMAIL = "test_afd08d@ex.com"
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASS = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD as ADMIN_PASS
 
 
 @pytest.fixture(scope="module")

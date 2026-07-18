@@ -12,6 +12,8 @@ import uuid
 import pytest
 import requests
 
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
+
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://casting-deck-pro.preview.emergentagent.com").rstrip("/")
 
 
@@ -26,8 +28,8 @@ def slug(api):
     """Find an existing project slug to test against."""
     # Login as admin to fetch projects
     r = api.post(f"{BASE_URL}/api/auth/login", json={
-        "email": "admin@talentgram.com",
-        "password": "Admin@123",
+        "email": ADMIN_EMAIL,
+        "password": ADMIN_PASSWORD,
     })
     token = r.json().get("token")
     rp = api.get(f"{BASE_URL}/api/projects", headers={"Authorization": f"Bearer {token}"})
@@ -220,8 +222,8 @@ class TestApplyFinalizeOneImage:
 class TestAdminRegression:
     def test_admin_login_and_lists(self, api):
         r = api.post(f"{BASE_URL}/api/auth/login", json={
-            "email": "admin@talentgram.com",
-            "password": "Admin@123",
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
         })
         assert r.status_code == 200, r.text
         token = r.json().get("token") or r.json().get("access_token")

@@ -13,7 +13,8 @@ import requests
 from PIL import Image
 
 BASE = os.environ.get("TEST_API", "http://localhost:8001/api")
-ADMIN = {"email": "admin@talentgram.com", "password": "Admin@123"}
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
+ADMIN = {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
 
 
 @pytest.fixture(scope="module")

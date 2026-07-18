@@ -18,6 +18,8 @@ import os
 import pytest
 import requests
 
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
+
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://casting-deck-pro.preview.emergentagent.com").rstrip("/")
 LINK_SLUG = "talentgram-x-comfort-9339a4"
 LINK_ID = "e12e0864-d11f-4943-af11-ad3d7ef29e0b"
@@ -30,7 +32,7 @@ COMFORT_PID = "cd3d9ac1-9a70-4c24-9af6-9f2beb163b22"
 def admin_token():
     r = requests.post(
         f"{BASE_URL}/api/auth/login",
-        json={"email": "admin@talentgram.com", "password": "Admin@123"},
+        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
         timeout=15,
     )
     assert r.status_code == 200, r.text

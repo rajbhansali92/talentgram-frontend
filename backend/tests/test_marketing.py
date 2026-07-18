@@ -28,8 +28,7 @@ def _load_url() -> str:
 
 BASE_URL = _load_url()
 
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASSWORD = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD
 
 
 # ----- Fixtures -----------------------------------------------------------

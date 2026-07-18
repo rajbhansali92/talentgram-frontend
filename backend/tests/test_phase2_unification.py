@@ -23,8 +23,7 @@ BASE = os.environ.get(
     "PYTEST_API_BASE",
     "https://casting-deck-pro.preview.emergentagent.com/api",
 )
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PASS = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD as ADMIN_PASS
 PUBLIC_SLUG = "pantaloons-with-a-celebrity-11ccd4"
 
 

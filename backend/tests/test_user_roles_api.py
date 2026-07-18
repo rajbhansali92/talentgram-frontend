@@ -27,8 +27,7 @@ if not BASE_URL:
 
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@talentgram.com"
-ADMIN_PW = "Admin@123"
+from _fixtures import ADMIN_EMAIL, ADMIN_PASSWORD as ADMIN_PW
 TEAM_EMAIL = "raj@test.com"
 TEAM_PW = "RajPass123!"
 

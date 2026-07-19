@@ -92,11 +92,8 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
         if (!videoRef.current) return;
         if (isPlaying) {
             videoRef.current.pause();
-            setIsPlaying(false);
         } else {
-            videoRef.current.play().then(() => {
-                setIsPlaying(true);
-            }).catch(() => {});
+            videoRef.current.play().catch(() => {});
         }
     };
 
@@ -107,6 +104,8 @@ function PremiumVideoPlayer({ src, poster, isPrimary, label }) {
                 poster={poster}
                 preload="none"
                 className="w-full h-full object-cover cursor-pointer"
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
                 onEnded={() => setIsPlaying(false)}
                 onClick={togglePlay}
             />

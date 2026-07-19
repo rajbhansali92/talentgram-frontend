@@ -39,10 +39,25 @@ export default function PWAInitializer() {
         if (!("serviceWorker" in navigator)) return;
 
         // 1. Register Service Worker globally (always registers for correct app behavior)
+        // The browser only checks sw.js for byte-level changes on its own ~24h
+        // heuristic or on a full (non-cached) navigation. A casting admin can
+        // plausibly keep a review tab open all day, so force an immediate check
+        // now and again whenever the tab regains focus — otherwise a mid-day
+        // deploy can go undetected for hours and the "new version available"
+        // toast below never gets a chance to fire.
+        const onVisible = () => {
+            if (document.visibilityState !== "visible") return;
+            navigator.serviceWorker.getRegistration().then((reg) => {
+                if (reg) reg.update().catch(() => {});
+            });
+        };
+
         navigator.serviceWorker
             .register("/sw.js")
             .then((reg) => {
                 console.log("[PWA] Service Worker registered with scope:", reg.scope);
+                reg.update().catch(() => {});
+                document.addEventListener("visibilitychange", onVisible);
             })
             .catch((err) => {
                 console.error("[PWA] Service Worker registration failed:", err);
@@ -99,6 +114,7 @@ export default function PWAInitializer() {
         navigator.serviceWorker.addEventListener("controllerchange", handleControllerChange);
         return () => {
             navigator.serviceWorker.removeEventListener("controllerchange", handleControllerChange);
+            document.removeEventListener("visibilitychange", onVisible);
         };
     }, []);
 

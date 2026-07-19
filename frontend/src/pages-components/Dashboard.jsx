@@ -39,13 +39,15 @@ export default function Dashboard() {
                 ]);
 
                 const activeProjects = projectsRes.data.filter(p => (p.status || "ongoing") === "ongoing");
-                
-                // Fetch submission stats in parallel for active projects to sum pending reviews
-                const statsPromises = activeProjects.map(p => 
-                    adminApi.get(`/projects/${p.id}/submissions/stats`).catch(() => ({ data: { pending: 0 } }))
-                );
-                const statsResults = await Promise.all(statsPromises);
-                const totalPendingReviews = statsResults.reduce((acc, curr) => acc + (curr.data.pending || 0), 0);
+
+                // Single aggregation instead of one /submissions/stats call per
+                // active project (was N+1 — hundreds of parallel requests at scale).
+                const pendingReviewsRes = activeProjects.length
+                    ? await adminApi
+                        .post("/projects/submissions/pending-count", { project_ids: activeProjects.map(p => p.id) })
+                        .catch(() => ({ data: { pending: 0 } }))
+                    : { data: { pending: 0 } };
+                const totalPendingReviews = pendingReviewsRes.data.pending || 0;
 
                 setStats({
                     activeProjects: activeProjects.length,
@@ -102,7 +104,7 @@ export default function Dashboard() {
             </div>
 
             {loading ? (
-                <div className="text-black/45 text-sm">Loading operations deck...</div>
+                <div className="text-black/45 text-sm mb-6">Loading operations deck...</div>
             ) : (
                 <>
                     {/* Top KPI Cards Grid */}
@@ -127,10 +129,16 @@ export default function Dashboard() {
                             </div>
                         ))}
                     </div>
+                </>
+            )}
 
-                    {/* Invite New Talent Card */}
-                    <OnboardingLinkCard />
+            {/* Rendered unconditionally (not gated on Dashboard's `loading`)
+                so its own fetch starts in parallel with the KPI stats fetch
+                above instead of waiting for it to finish first. */}
+            <OnboardingLinkCard />
 
+            {!loading && (
+                <>
                     {/* Recent Links + Recent Activity Row */}
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         {/* Recent Links */}

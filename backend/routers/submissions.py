@@ -2351,6 +2351,31 @@ async def list_submissions(
     return _paginated(items, total, p, s)
 
 
+class BulkPendingCountIn(BaseModel):
+    project_ids: List[str]
+
+
+@router.post("/projects/submissions/pending-count")
+async def bulk_pending_submissions_count(
+    payload: BulkPendingCountIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Total pending-review submission count across the given project ids.
+
+    Dashboard's "Pending Reviews" KPI previously summed this by firing one
+    /projects/{pid}/submissions/stats request per active project — an N+1
+    that turns into hundreds of parallel requests at agency scale (500+
+    projects). This replaces that fan-out with a single aggregation.
+    """
+    if not payload.project_ids:
+        return {"pending": 0}
+    count = await db.submissions.count_documents({
+        "project_id": {"$in": payload.project_ids},
+        "decision": "pending",
+    })
+    return {"pending": count}
+
+
 @router.get("/projects/{pid}/submissions/stats")
 async def submissions_stats(
     pid: str,

@@ -3,10 +3,58 @@ import { Link, useNavigate } from "react-router-dom";
 import { adminApi } from "@/lib/api";
 import { Bell, Check, ExternalLink, Loader2 } from "lucide-react";
 
+// AdminLayout mounts NotificationBell 3x simultaneously (desktop sidebar,
+// mobile topbar, mobile drawer — CSS hides the inactive ones, React still
+// mounts all of them). Without this shared singleton, each instance ran its
+// own fetch-on-mount + 30s poll, tripling /notifications/unread-count load.
+let sharedCount = 0;
+let sharedSubscribers = new Set();
+let sharedPollTimer = null;
+let sharedInFlight = null;
+
+async function fetchSharedCount() {
+    if (sharedInFlight) return sharedInFlight;
+    sharedInFlight = adminApi
+        .get("/notifications/unread-count")
+        .then(({ data }) => {
+            sharedCount = data?.count || 0;
+            sharedSubscribers.forEach((cb) => cb(sharedCount));
+        })
+        .catch((e) => console.error(e))
+        .finally(() => {
+            sharedInFlight = null;
+        });
+    return sharedInFlight;
+}
+
+function setSharedCount(next) {
+    sharedCount = next;
+    sharedSubscribers.forEach((cb) => cb(sharedCount));
+}
+
+function subscribeToSharedCount(cb) {
+    sharedSubscribers.add(cb);
+    cb(sharedCount);
+    if (sharedSubscribers.size === 1) {
+        fetchSharedCount();
+        sharedPollTimer = setInterval(() => {
+            if (document.visibilityState === "visible") fetchSharedCount();
+        }, 30000);
+    }
+    return () => {
+        sharedSubscribers.delete(cb);
+        if (sharedSubscribers.size === 0 && sharedPollTimer) {
+            clearInterval(sharedPollTimer);
+            sharedPollTimer = null;
+        }
+    };
+}
+
 /**
  * Notification bell — shown in `AdminLayout`.
  *
- * - Polls `unread-count` every 30s while the page is visible
+ * - Polls `unread-count` every 30s while the page is visible (shared across
+ *   all mounted instances via a module-level singleton — see above)
  * - Dropdown lists the latest 8 notifications (read & unread mixed)
  * - Clicking an item marks it as read and navigates to the deep-link
  *   (project review modal for submission events)
@@ -19,16 +67,6 @@ export default function NotificationBell() {
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(false);
     const ref = useRef(null);
-
-    const fetchCount = async () => {
-        try {
-            const { data } = await adminApi.get("/notifications/unread-count");
-            setCount(data?.count || 0);
-        } catch (e) {
-            console.error(e);
-            // silent — bell just shows stale count
-        }
-    };
 
     const fetchItems = async () => {
         setLoading(true);
@@ -44,13 +82,7 @@ export default function NotificationBell() {
         }
     };
 
-    useEffect(() => {
-        fetchCount();
-        const id = setInterval(() => {
-            if (document.visibilityState === "visible") fetchCount();
-        }, 30000);
-        return () => clearInterval(id);
-    }, []);
+    useEffect(() => subscribeToSharedCount(setCount), []);
 
     // Close dropdown when clicking outside
     useEffect(() => {
@@ -72,7 +104,7 @@ export default function NotificationBell() {
         try {
             if (!n.read_at) {
                 await adminApi.post(`/notifications/${n.id}/read`);
-                setCount((c) => Math.max(0, c - 1));
+                setSharedCount(Math.max(0, sharedCount - 1));
             }
         } catch (e) { console.error(e); }
         const type = n?.type || "";
@@ -91,7 +123,7 @@ export default function NotificationBell() {
     const markAll = async () => {
         try {
             await adminApi.post("/notifications/read-all");
-            setCount(0);
+            setSharedCount(0);
             setItems((arr) => arr.map((n) => ({ ...n, read_at: new Date().toISOString() })));
         } catch (e) { console.error(e); }
     };

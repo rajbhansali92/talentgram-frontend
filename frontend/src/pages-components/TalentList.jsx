@@ -310,7 +310,7 @@ const TalentListRow = React.memo(function TalentListRow({
             data-testid={`talent-row-${t.id}`}
             onClick={isSelectionMode ? handleToggle : undefined}
             className={[
-                "group relative rounded-xl border bg-white p-3.5 transition-all duration-300 ease-out flex items-center justify-between gap-4",
+                "group relative rounded-xl border bg-white p-3.5 transition-all duration-300 ease-out flex flex-wrap items-center justify-between gap-4",
                 isSelectionMode ? "cursor-pointer" : "",
                 checked
                     ? "border-black/45 ring-1 ring-black/25 shadow-sm"

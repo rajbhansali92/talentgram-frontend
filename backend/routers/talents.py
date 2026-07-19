@@ -227,7 +227,14 @@ async def list_talents(
     # / delete_media) and do not walk media[].
     cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
     if page is None and limit is None:
-        talents = await cursor.to_list(2000)
+        # LinkGenerator.jsx and TalentBrowserModal.jsx both call this endpoint
+        # with no page/limit by design, to load the whole roster for
+        # client-side filtering (TalentBrowserModal is explicitly tuned for
+        # "5,000+" talents — see its fetch comment). The old 2000 cap here
+        # silently dropped everything past the 2000 most-recently-created
+        # talents with no error or UI indication. Raised to cover the stated
+        # production scale target (up to ~20,000 talents).
+        talents = await cursor.to_list(20000)
         return [_enrich_list(t) for t in talents]
     skip, page_size, p, s = _paginate_params(page, size, limit)
     total = await db.talents.count_documents(query)

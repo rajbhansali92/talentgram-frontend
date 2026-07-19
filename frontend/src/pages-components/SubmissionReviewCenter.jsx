@@ -817,6 +817,12 @@ export default function SubmissionReviewCenter() {
 
             // Update status locally (functional update — no stale closure).
             setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision } : s)));
+            // Also patch the open detail panel — the fetch effect below only
+            // re-runs when `selectedId` changes, which it won't if the next
+            // navigation (e.g. the end-of-list "Review Approved" shortcut)
+            // re-selects this same submission. Without this, the badge shows
+            // the pre-decision status until some other id is selected first.
+            setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision } : prev));
 
             // Advance to the next item in the order the recruiter was viewing.
             if (nextItem) {

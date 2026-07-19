@@ -457,9 +457,9 @@ function PipelineBoard({ projectId, projectName }) {
 
     // Operational summary derived from data
     const activeCount = data.filter(i => !OUTCOME_STAGES.includes(normaliseStage(i.stage)) && normaliseStage(i.stage) !== 'archived').length;
-    const shortlistedCount = data.filter(i => normaliseStage(i.stage) === 'shortlist').length;
+    const shortlistedCount = data.filter(i => normaliseStage(i.stage) === 'shortlisted').length;
     const approvedCount = data.filter(i => normaliseStage(i.stage) === 'approved').length;
-    const pendingTestsCount = data.filter(i => normaliseStage(i.stage) === 'test_sent').length;
+    const pendingTestsCount = data.filter(i => normaliseStage(i.stage) === 'ask_to_test').length;
 
     // Display project name if provided, otherwise fallback to a cleaner placeholder
     const displayProjectName = projectName || (projectId && projectId.length > 8 ? `${projectId.slice(0, 8)}...` : projectId) || 'Active campaign';

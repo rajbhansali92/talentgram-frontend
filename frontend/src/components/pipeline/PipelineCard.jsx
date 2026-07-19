@@ -136,7 +136,7 @@ const PipelineCard = memo(function PipelineCard({
         }
         if (readOnly) return;
         if (item.talent_id) {
-            navigate(`/admin/talents/${item.talent_id}/edit`);
+            navigate(`/admin/talents/${item.talent_id}`);
         }
     }, [item.talent_id, readOnly, navigate]);
 

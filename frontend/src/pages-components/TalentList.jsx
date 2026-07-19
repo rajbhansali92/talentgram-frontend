@@ -454,7 +454,7 @@ const TalentListRow = React.memo(function TalentListRow({
                                 View
                             </Link>
                             <Link
-                                to={`/admin/talents/${t.id}/edit`}
+                                to={`/admin/talents/${t.id}`}
                                 className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
                                 title="Edit Talent Profile"
                             >

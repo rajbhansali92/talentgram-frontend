@@ -864,9 +864,17 @@ function SubmissionPage() {
             !form.availability.note.trim()
         )
             return "Please share your alternate availability";
-        if (!form.budget.status) return "Please confirm the budget";
-        if (form.budget.status === "custom" && !form.budget.value.trim())
-            return "Please enter your expected budget";
+        // Budget confirmation is only ever rendered when the project has a
+        // budget to show (see the BUDGET decision block below) — requiring
+        // it unconditionally would permanently block submission on projects
+        // with no budget_per_day/talent_budget set, since the talent has no
+        // field to satisfy it with.
+        const budgetShown = Boolean(project?.budget_per_day) || (project?.talent_budget || []).length > 0;
+        if (budgetShown) {
+            if (!form.budget.status) return "Please confirm the budget";
+            if (form.budget.status === "custom" && !form.budget.value.trim())
+                return "Please enter your expected budget";
+        }
         return null;
     };
 
@@ -888,9 +896,12 @@ function SubmissionPage() {
         if (!form.availability.status) return "Please confirm your availability";
         if (form.availability.status === "no" && !form.availability.note.trim())
             return "Please share your alternate availability";
-        if (!form.budget.status) return "Please confirm the budget";
-        if (form.budget.status === "custom" && !form.budget.value.trim())
-            return "Please enter your expected budget";
+        const budgetShown = Boolean(project?.budget_per_day) || (project?.talent_budget || []).length > 0;
+        if (budgetShown) {
+            if (!form.budget.status) return "Please confirm the budget";
+            if (form.budget.status === "custom" && !form.budget.value.trim())
+                return "Please enter your expected budget";
+        }
         return null;
     };
 
@@ -932,23 +943,33 @@ function SubmissionPage() {
                     name: `${form.first_name} ${form.last_name}`.trim(),
                     email: form.email.trim().toLowerCase(),
                     phone: form.phone || null,
-                    age: computedAge != null ? String(computedAge) : form.age || null,
-                    height: form.height,
-                    location: form.location,
-                    // Phase 2 unified identity
-                    dob: form.dob || null,
-                    gender: form.gender || null,
-                    ethnicity: form.ethnicity || null,
-                    instagram_handle: form.instagram_handle || null,
-                    instagram_followers: form.instagram_followers || null,
-                    bio: form.bio || null,
-                    work_links: form.work_links || [],
-                    competitive_brand: form.competitive_brand || null,
-                    availability: form.availability,
-                    budget: form.budget,
-                    skills: form.skills || [],
-                    custom_answers: form.custom_answers,
-                    commission_percent: form.commission || null,
+                    alternate_contact_number: form.alternate_contact_number || null,
+                    // SubmissionStartIn only persists profile fields nested
+                    // under form_data (see startSubmission's payload below) —
+                    // top-level extras are silently dropped by the backend
+                    // model, which used to leave a returning talent's
+                    // submission with an empty form_data and a confusing
+                    // "First and Last Name are required" error on finalize.
+                    form_data: {
+                        first_name: form.first_name,
+                        last_name: form.last_name,
+                        alternate_contact_number: form.alternate_contact_number || "",
+                        dob: form.dob || null,
+                        age: computedAge != null ? String(computedAge) : form.age || "",
+                        height: form.height,
+                        location: form.location,
+                        gender: form.gender || "",
+                        ethnicity: form.ethnicity || "",
+                        instagram_handle: form.instagram_handle || "",
+                        instagram_followers: form.instagram_followers || "",
+                        bio: form.bio || "",
+                        work_links: form.work_links || [],
+                        skills: form.skills || [],
+                        competitive_brand: form.competitive_brand || "",
+                        availability: form.availability,
+                        budget: form.budget,
+                        custom_answers: form.custom_answers || {},
+                    },
                 },
             );
             const next = { id: data.id, token: data.token };

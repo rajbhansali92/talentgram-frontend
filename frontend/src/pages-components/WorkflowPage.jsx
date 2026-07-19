@@ -151,7 +151,7 @@ export default function WorkflowPage() {
             // Normalize safely before rendering
             const normalized = rawList.map((project) => ({
                 id: project._id || project.id,
-                name: project.name || project.title || project.project_name || "Untitled Project",
+                name: project.brand_name || project.name || project.title || project.project_name || "Untitled Project",
                 status: project.status || "ongoing",
                 created_at: project.created_at,
             }))

@@ -317,8 +317,14 @@ const TalentListRow = React.memo(function TalentListRow({
                     : "border-black/[0.07] hover:border-black/[0.18] hover:shadow-[0_4px_20px_rgb(0,0,0,0.02)]",
             ].join(" ")}
         >
-            {/* Left Section: Checkbox + Photo + Identity info */}
-            <div className="flex items-center gap-3.5 min-w-0 flex-1">
+            {/* Left Section: Checkbox + Photo + Identity info.
+                min-w-[180px] (not min-w-0) so this flex-1 block always
+                registers real width in the wrap calculation — flex-basis:0
+                from flex-1 alone reads as "needs no space", so rows with a
+                small shrink-0 actions block (e.g. no tags) never trigger a
+                wrap and the name collapses to 0 instead of dropping the
+                actions to their own line. */}
+            <div className="flex items-center gap-3.5 min-w-[180px] flex-1">
                 {/* Selection checkbox */}
                 {canBulkDelete && (
                     <button

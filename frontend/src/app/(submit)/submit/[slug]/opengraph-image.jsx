@@ -3,10 +3,11 @@ import { logoBlackBase64 } from '@/lib/logoBlackBase64';
 
 export const runtime = 'edge';
 
-// We fetch project data from the Railway backend dynamically
+// We fetch project data from the backend dynamically
 async function getProject(slug) {
     try {
-        const res = await fetch(`https://talentgram-app-production.up.railway.app/api/public/projects/${slug}`, {
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "https://api.talentgramagency.com";
+        const res = await fetch(`${backendUrl}/api/public/projects/${slug}`, {
             next: { revalidate: 60 } // Cache project details for 60 seconds
         });
         if (!res.ok) return null;

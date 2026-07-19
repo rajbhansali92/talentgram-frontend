@@ -5,7 +5,8 @@ export const runtime = 'edge';
 
 async function getTalentPortfolio(slug) {
     try {
-        const res = await fetch(`https://talentgram-app-production.up.railway.app/api/public/links/${slug}`, {
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "https://api.talentgramagency.com";
+        const res = await fetch(`${backendUrl}/api/public/links/${slug}`, {
             next: { revalidate: 60 }
         });
         if (!res.ok) return null;

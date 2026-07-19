@@ -5,7 +5,7 @@ import { createPublicApiClient } from "@/lib/publicApiTransport";
 const BACKEND_URL =
     process.env.NEXT_PUBLIC_BACKEND_URL ||
     process.env.REACT_APP_BACKEND_URL ||
-    "https://talentgram-app-production.up.railway.app";
+    "https://api.talentgramagency.com";
 
 // ✅ STEP 2: API base
 export const API = `${BACKEND_URL}/api`;

@@ -9,7 +9,7 @@ export async function POST(request) {
     const backendUrl =
         process.env.NEXT_PUBLIC_BACKEND_URL ||
         process.env.REACT_APP_BACKEND_URL ||
-        "https://talentgram-app-production.up.railway.app";
+        "https://api.talentgramagency.com";
 
     const body = await request.text();
     // Preserve the real client IP so the backend's existing per-IP rate

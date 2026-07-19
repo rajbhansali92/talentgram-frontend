@@ -69,13 +69,11 @@ const securityHeaders = [
       // entry at all — confirmed live: admin login POSTs to
       // http://localhost:8000/api/auth/login failed with no response despite
       // the backend and CORS both being correctly configured. Production's
-      // backend now lives on api.talentgramagency.com (migrated off the
-      // shared *.up.railway.app domain, which some mobile carrier DNS
-      // resolvers were failing to resolve — see PHASE 24/25). The
-      // *.railway.app entries stay allow-listed temporarily as a rollback
-      // safety net during cutover; remove once the new domain is confirmed
-      // stable in production.
-      `connect-src 'self' blob: https://api.talentgramagency.com https://*.railway.app https://talentgram-app-production.up.railway.app https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com${process.env.NODE_ENV !== "production" ? " http://localhost:8000" : ""}`,
+      // backend lives on api.talentgramagency.com (migrated off the shared
+      // *.up.railway.app domain, which some mobile carrier DNS resolvers
+      // were failing to resolve — see PHASE 24/25). Migration confirmed
+      // stable in production; Railway CSP entries removed (PHASE 25 cleanup).
+      `connect-src 'self' blob: https://api.talentgramagency.com https://oauth2.googleapis.com https://accounts.google.com https://api.resend.com https://nominatim.openstreetmap.org https://api.cloudinary.com https://*.r2.cloudflarestorage.com https://*.cloudflarestream.com${process.env.NODE_ENV !== "production" ? " http://localhost:8000" : ""}`,
       "worker-src 'self' blob:",
       "frame-src https://accounts.google.com",
       "frame-ancestors 'none'",

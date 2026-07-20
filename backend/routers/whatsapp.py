@@ -713,11 +713,19 @@ def _first_name(full_name: Optional[str]) -> str:
 
 def _recipient_variables(name: str, phone: str) -> Dict[str, str]:
     """Per-recipient placeholders. `talent_name` is kept as the canonical alias
-    every existing template relies on; `full_name` is the new equivalent."""
+    every existing template relies on; `full_name` is the new equivalent.
+
+    `talent_name` now resolves to the recipient's FIRST NAME ONLY — every
+    template greets with "Hi {{talent_name}}", so this is the single place
+    that changes the sender-facing greeting for every campaign source
+    (PROJECT/CRM/MANUAL/SAVED_LISTS) and both preview and live send, since
+    they all render through this same function. `full_name` is left as the
+    actual full name — its name promises that, and no template currently
+    uses it, so nothing regresses by keeping it intact."""
     name = name or ""
     return {
-        "talent_name": name,          # back-compat — do not remove
-        "full_name": name,            # alias of talent_name (Part 3)
+        "talent_name": _first_name(name),   # back-compat placeholder — first name only
+        "full_name": name,                  # alias of the real full name (unchanged)
         "first_name": _first_name(name),
         "phone": phone or "",
     }

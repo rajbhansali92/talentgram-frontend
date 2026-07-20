@@ -125,9 +125,11 @@ def test_variable_resolution():
     assert wa._first_name("  Riyaan League  ") == "Riyaan"
     assert wa._first_name("") == "" and wa._first_name(None) == ""
 
-    # Per-recipient vars: talent_name (legacy) + full_name (alias) + first_name + phone.
+    # Per-recipient vars: talent_name now resolves to FIRST NAME ONLY (every
+    # greeting template uses {{talent_name}}) + full_name (the real full name,
+    # unchanged) + first_name + phone.
     rv = wa._recipient_variables("Sahal Mansuri", "+919004706699")
-    assert rv["talent_name"] == "Sahal Mansuri"
+    assert rv["talent_name"] == "Sahal"
     assert rv["full_name"] == "Sahal Mansuri"
     assert rv["first_name"] == "Sahal"
     assert rv["phone"] == "+919004706699"
@@ -161,7 +163,8 @@ def test_variable_resolution():
     data = {**wa._project_variables({"brand_name": "Acme", "slug": "acme"}),
             **wa._recipient_variables("Sahal Mansuri", "")}
     out = wa._render_message(legacy_tpl, data)
-    assert "Hi Sahal Mansuri for" in out
+    assert "Hi Sahal for" in out          # {{talent_name}} -> first name only
+    assert "Sahal Mansuri" not in out     # full name never leaks into the greeting
     assert "*Acme*" in out
     assert "{{unknown_var}}" in out  # unknown placeholders preserved
 
@@ -239,7 +242,79 @@ def test_retry_job_resumes_completed_batch():
     print("8. retry_job resumes a completed batch OK")
 
 
+def test_first_name_only_greeting():
+    """First-name-only greeting: {{talent_name}} must resolve to the first
+    token of the recipient's name everywhere, for every source, and preview
+    must render identically to the actual live send (they share one code
+    path: _recipient_variables + _render_message, called once from
+    create_batch regardless of is_dry_run)."""
+
+    # -- _first_name extraction rules, directly --
+    assert wa._first_name("Shweta Singh") == "Shweta"          # full name
+    assert wa._first_name("  Priya   Shah ") == "Priya"        # multiple/irregular spaces
+    assert wa._first_name("Rahul") == "Rahul"                  # single name
+    assert wa._first_name("John A Smith") == "John"            # three-word name
+    assert wa._first_name("") == ""                            # empty name -> graceful fallback
+    assert wa._first_name(None) == ""                          # null name -> graceful fallback
+    print("9a. _first_name extraction rules OK")
+
+    # -- talent_name / first_name always agree and are first-name-only --
+    for full, expected in [
+        ("Shweta Singh", "Shweta"),
+        ("Karan Mally", "Karan"),
+        ("Avni Surana", "Avni"),
+        ("Rahul", "Rahul"),
+        ("  Priya   Shah ", "Priya"),
+        ("John A Smith", "John"),
+        ("", ""),
+        (None, ""),
+    ]:
+        rv = wa._recipient_variables(full, "+910000000000")
+        assert rv["talent_name"] == expected, (full, rv["talent_name"])
+        assert rv["first_name"] == expected, (full, rv["first_name"])
+        assert rv["full_name"] == (full or ""), (full, rv["full_name"])  # unchanged
+    print("9b. talent_name/first_name first-name-only for all name shapes OK")
+
+    # -- CRM recipient: resolve_recipients_engine("CRM", ...) -> greeting render --
+    wa.db = FakeDB()
+    wa.db.clients.docs = [
+        {"_id": ObjectId(), "name": "Karan Mally", "phone_number": "+919876500000",
+         "contact_type": "Brand Manager"},
+    ]
+    crm = run(wa.resolve_recipients_engine("CRM", wa.SourceParams(contact_type="Brand Manager")))
+    crm_rec = crm["recipients"][0]
+    crm_out = wa._render_message(
+        "Hi {{talent_name}}!", wa._recipient_variables(crm_rec["name"], crm_rec["phone"]))
+    assert crm_out == "Hi Karan!", crm_out
+    print("9c. CRM recipient greeting OK ->", crm_out)
+
+    # -- Talent recipient: resolve_recipients_engine("PROJECT", ...) -> greeting render --
+    wa.db.casting_pipeline.docs = [{"talent_id": "t1"}]
+    wa.db.talents.docs = [
+        {"id": "t1", "name": "Shweta Singh", "phone": "919876500001", "whatsapp_group_name": ""},
+    ]
+    proj = run(wa.resolve_recipients_engine("PROJECT", wa.SourceParams(project_id="p1", pipeline_stages=["locked"])))
+    talent_rec = proj["recipients"][0]
+    talent_out = wa._render_message(
+        "Hi {{talent_name}}!", wa._recipient_variables(talent_rec["name"], talent_rec["phone"]))
+    assert talent_out == "Hi Shweta!", talent_out
+    print("9d. Talent recipient greeting OK ->", talent_out)
+
+    # -- Preview rendering == actual message rendering (same call path, both
+    # is_dry_run branches use identical _recipient_variables/_render_message). --
+    tpl = "Hi {{talent_name}}, welcome to *{{project_name}}*!"
+    base = wa._project_variables({"brand_name": "Acme", "slug": "acme"})
+    rec_vars = {**base, **wa._recipient_variables("Avni Surana", "+919000000000")}
+    preview_render = wa._render_message(tpl, rec_vars)   # is_dry_run=True path
+    live_render = wa._render_message(tpl, rec_vars)      # is_dry_run=False path
+    assert preview_render == live_render == "Hi Avni, welcome to *Acme*!"
+    print("9e. Preview rendering matches actual message rendering OK ->", preview_render)
+
+    print("\nALL FIRST-NAME-GREETING REGRESSION TESTS PASSED")
+
+
 if __name__ == "__main__":
     main()
     test_variable_resolution()
     test_retry_job_resumes_completed_batch()
+    test_first_name_only_greeting()

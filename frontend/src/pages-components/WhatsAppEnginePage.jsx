@@ -50,6 +50,14 @@ function waIsAutoResolved(key, sourceType) {
   return false;
 }
 
+// Mirrors backend _first_name() (routers/whatsapp.py) so this client-side
+// live preview matches the server-rendered {{talent_name}} greeting exactly
+// — first name only, trimmed, whitespace-collapsed, empty-safe.
+function waFirstNameOf(name) {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  return parts[0] || "";
+}
+
 export default function WhatsAppEnginePage() {
   const [activeTab, setActiveTab] = useState("campaigns"); // campaigns | templates | analytics | settings
   const [campaignSubTab, setCampaignSubTab] = useState("launch"); // launch | history
@@ -1087,7 +1095,7 @@ function WECampaignLauncher() {
                     )}
                     <div className="text-[11px] leading-relaxed whitespace-pre-wrap select-text font-sans">
                       {selectedTemplate.body_text
-                        .replace("{{talent_name}}", activePreviewRecipient ? activePreviewRecipient.name : "Ayushi Thakur")
+                        .replace("{{talent_name}}", waFirstNameOf(activePreviewRecipient ? activePreviewRecipient.name : "Ayushi Thakur"))
                         .replace(/\{\{(\w+)\}\}/g, (match, p1) => variables[p1] || `[${p1}]`)
                       }
                     </div>

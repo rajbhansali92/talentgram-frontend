@@ -185,6 +185,61 @@ def test_variable_resolution():
     print("\nALL TEMPLATE-ENGINE VARIABLE TESTS PASSED")
 
 
+class FakeMutableColl:
+    """Minimal find_one/update_one/insert_one mock, keyed on "id"."""
+    def __init__(self, docs=None): self.docs = docs or []
+
+    async def find_one(self, query, *a, **k):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in query.items()):
+                return d
+        return None
+
+    async def update_one(self, query, update, *a, **k):
+        doc = await self.find_one(query)
+        if doc is None:
+            return
+        for k2, v2 in (update.get("$set") or {}).items():
+            doc[k2] = v2
+        for k2 in (update.get("$unset") or {}):
+            doc.pop(k2, None)
+
+    async def insert_one(self, doc):
+        self.docs.append(doc)
+
+
+def test_retry_job_resumes_completed_batch():
+    """A failed job inside an already-"completed" batch must, on retry, both
+    reset to "pending" AND flip the batch back to "running" (clearing
+    completed_at) — otherwise poll_and_process_jobs' batch query (status in
+    [running, pending]) never looks at that batch again and the retried job
+    sits in "pending" forever. Regression test for that exact bug."""
+    job = {
+        "id": "job1", "batch_id": "batch1", "status": "failed",
+        "error_message": "CHAT_NOT_OPENED", "worker_picked_at": "2026-07-15T06:05:00Z",
+        "talent_id": "t1", "talent_name": "Shweta Singh",
+    }
+    batch = {"id": "batch1", "status": "completed", "completed_at": "2026-07-15T06:06:00Z"}
+
+    class FakeDB2:
+        def __init__(self):
+            self.whatsapp_jobs = FakeMutableColl([job])
+            self.whatsapp_batches = FakeMutableColl([batch])
+            self.whatsapp_audit_log = FakeMutableColl([])
+
+    wa.db = FakeDB2()
+    run(wa.retry_job("batch1", "job1", admin={"id": "admin1"}))
+
+    assert job["status"] == "pending"
+    assert job["error_message"] is None
+    assert job["worker_picked_at"] is None
+    assert batch["status"] == "running", batch["status"]
+    assert "completed_at" not in batch
+    assert wa.db.whatsapp_audit_log.docs[-1]["event_type"] == "job_retried"
+    print("8. retry_job resumes a completed batch OK")
+
+
 if __name__ == "__main__":
     main()
     test_variable_resolution()
+    test_retry_job_resumes_completed_batch()

@@ -1383,11 +1383,17 @@ async def retry_job(
         {"$set": {"status": "pending", "error_message": None, "worker_picked_at": None}},
     )
 
-    # Ensure batch is in running state if it was paused/failed
+    # Ensure batch is in running state if it was paused/failed/completed —
+    # completed is included because a batch reaches it once every job hits a
+    # terminal state (sent/failed), even if some failed; without resuming it
+    # here, poll_and_process_jobs' batch query (status in [running, pending])
+    # never looks at this batch again, so the retried job sits in "pending"
+    # forever and is never picked up.
     batch = await db.whatsapp_batches.find_one({"id": batch_id})
-    if batch and batch.get("status") in ("failed", "paused"):
+    if batch and batch.get("status") in ("failed", "paused", "completed"):
         await db.whatsapp_batches.update_one(
-            {"id": batch_id}, {"$set": {"status": "running"}}
+            {"id": batch_id},
+            {"$set": {"status": "running"}, "$unset": {"completed_at": ""}},
         )
 
     await _write_audit(

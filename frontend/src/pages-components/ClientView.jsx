@@ -2495,6 +2495,31 @@ function TalentDetail({
         });
     }, [images, trackMediaView]);
 
+    // Prefetch the adjacent (next + previous) portfolio images into the
+    // browser's HTTP cache so Next/Previous/thumbnail navigation shows an
+    // already-downloaded image instead of starting a cold fetch — no src/UI
+    // change, the visible <img> still swaps src exactly as before, this just
+    // warms the cache for whichever image the viewer is about to land on.
+    useEffect(() => {
+        if (images.length < 2) return;
+        const neighborIdxs = [
+            (idx + 1) % images.length,
+            (idx - 1 + images.length) % images.length,
+        ];
+        const preloaders = neighborIdxs.map((i) => {
+            const url = IMAGE_URL(images[i]);
+            if (!url) return null;
+            const preload = new window.Image();
+            preload.src = url;
+            return preload;
+        });
+        return () => {
+            // Cancel any still-in-flight preload if the viewer moves on again
+            // before it finishes, so we never pile up abandoned requests.
+            preloaders.forEach((p) => { if (p) p.src = ""; });
+        };
+    }, [images, idx]);
+
     // Effect 1: Body scroll lock — empty deps so it only runs on mount/unmount.
     // Previously combined with the keyboard effect whose deps included viewerAction?.action,
     // causing scroll to flicker on every action button tap (mobile jank).

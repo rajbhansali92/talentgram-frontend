@@ -5,6 +5,7 @@ Handles browser actions for locating a chat (personal or group) and sending mess
 from __future__ import annotations
 
 import asyncio
+import json as _p26b_json
 import logging
 import os
 import tempfile
@@ -19,9 +20,131 @@ from db import get_db
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from modals import dismiss_blocking_dialogs
-from session import SEL
+from session import SEL, get_recent_console_errors, get_recent_network_errors
 
 logger = logging.getLogger(__name__)
+
+
+# ==========================================================================
+# PHASE 26B — TEMPORARY chat-discovery investigation instrumentation.
+# Every function/call in this block is additive logging, screenshots, and
+# DOM capture ONLY — none of it changes a selector, timeout, retry count, or
+# control-flow branch anywhere in this file. Call sites are tagged
+# "# PHASE26B" so this can be stripped cleanly once the investigation is
+# closed. Log lines are prefixed "PHASE26B " for easy grep.
+# ==========================================================================
+
+_P26B_DUMP_JS = """
+() => {
+    const grab = (sel) => { const el = document.querySelector(sel);
+        return el ? el.outerHTML.slice(0, 6000) : null; };
+    const active = document.activeElement;
+    const spinnerText = (document.body.innerText || '').includes('Starting chat');
+    return {
+        url: window.location.href,
+        title: document.title,
+        active_element: active ? {
+            tag: active.tagName,
+            id: active.id || null,
+            testid: active.getAttribute ? active.getAttribute('data-testid') : null,
+            role: active.getAttribute ? active.getAttribute('role') : null,
+        } : null,
+        conversation_pane_exists: !!document.querySelector('#main'),
+        composer_exists: !!document.querySelector('[data-testid="conversation-compose-box-input"]'),
+        loading_spinner_exists: !!(
+            document.querySelector('[data-testid="spinner"]')
+            || document.querySelector('[role="progressbar"]')
+            || spinnerText
+        ),
+        search_container_html: grab('#side'),
+        conversation_container_html: grab('#main'),
+        composer_html: grab('[data-testid="conversation-compose-box-input"]') || grab('footer'),
+        search_results_html: grab('#pane-side'),
+        body_text_excerpt: (document.body.innerText || '').slice(0, 500),
+    };
+}
+"""
+
+
+async def _p26b_dump(page: Page, stage: str, extra: Optional[dict] = None) -> dict:
+    """PHASE26B: one structured checkpoint — URL, title, activeElement,
+    conversation-pane/composer/spinner presence, truncated outerHTML of the
+    search container / conversation container / composer / search-results
+    list, a screenshot, and recent console/network errors. Logs a single
+    JSON line so every stage is greppable as `PHASE26B stage=<name>`."""
+    shot_path = f"/tmp/p26b_{stage}.png"
+    await _safe_screenshot(page, shot_path)
+    try:
+        state = await page.evaluate(_P26B_DUMP_JS)
+    except Exception as exc:
+        state = {"error": str(exc)}
+    state["stage"] = stage
+    state["screenshot"] = shot_path
+    if extra:
+        state["extra"] = extra
+    try:
+        state["recent_console_errors"] = get_recent_console_errors()
+        state["recent_network_errors"] = get_recent_network_errors()
+    except Exception as exc:
+        state["console_network_error"] = str(exc)
+    logger.info("PHASE26B stage=%s snapshot=%s", stage,
+                _p26b_json.dumps(state, ensure_ascii=False)[:6000])
+    return state
+
+
+async def _p26b_search_evidence(page: Page, stage: str, search_sel: Optional[str],
+                                  search_term: str) -> dict:
+    """PHASE26B: search-analysis checkpoint — search term entered, the value
+    actually present in the search box, DOM result count vs visible result
+    count, text of every visible result, and (via _p26b_dump) a screenshot +
+    the search-results container HTML. If zero results, records why."""
+    box_value = None
+    if search_sel:
+        try:
+            box_value = await page.locator(search_sel).first.evaluate(
+                "el => (el.value != null ? el.value : (el.innerText || ''))",
+                timeout=2_000,
+            )
+        except Exception as exc:
+            box_value = f"<unreadable:{exc}>"
+    dom_count = 0
+    visible_results = []
+    matched_selector = None
+    for sel in RESULT_TITLE_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            n = await loc.count()
+        except Exception:
+            continue
+        if not n:
+            continue
+        matched_selector = sel
+        dom_count = n
+        for i in range(min(n, 30)):
+            try:
+                if await loc.nth(i).is_visible():
+                    visible_results.append((await loc.nth(i).inner_text()).strip()[:80])
+            except Exception:
+                pass
+        break
+    evidence = {
+        "search_term_entered": search_term,
+        "search_box_value": box_value,
+        "result_selector_matched": matched_selector,
+        "dom_result_count": dom_count,
+        "visible_result_count": len(visible_results),
+        "visible_result_texts": visible_results,
+    }
+    if dom_count == 0:
+        evidence["zero_results_reason"] = (
+            "no element matched any RESULT_TITLE_SELECTORS ("
+            + ", ".join(RESULT_TITLE_SELECTORS)
+            + ") — WhatsApp's own sidebar search returned nothing for this query"
+        )
+    await _p26b_dump(page, stage, extra=evidence)
+    logger.info("PHASE26B SEARCH_ANALYSIS stage=%s %s", stage,
+                _p26b_json.dumps(evidence, ensure_ascii=False)[:4000])
+    return evidence
 
 # Resilient send-button fallback chain. WhatsApp Web rotates data-testid/class
 # names, so we try several signals in order and log which one matched. The
@@ -845,6 +968,13 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
         diag["worker_stage"] = stage
         logger.info("sender: GROUP-RESOLVE DIAG %s", diag)
 
+    # PHASE26B STEP 3: full selector inventory for this discovery attempt —
+    # every selector that MIGHT be tried, logged once up front.
+    logger.info(
+        "PHASE26B STEP3_SELECTORS search_box_selectors=%s result_title_selectors=%s",
+        SEARCH_BOX_SELECTORS, RESULT_TITLE_SELECTORS,
+    )
+
     # Neutral state first — never search relative to a previously-open chat.
     await _reset_to_chat_list(page)
     if not await dismiss_blocking_dialogs(page, "search"):
@@ -873,6 +1003,7 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
         return "SEARCH_FAILED"
     logger.info("sender: STEP 1 search textbox located via %s", search_sel)
     await _safe_screenshot(page, "/tmp/before_search.png")
+    await _p26b_dump(page, "group_before_search", extra={"search_selector": search_sel})  # PHASE26B
 
     # 2) Focus it and PROVE focus is inside the sidebar before typing.
     try:
@@ -927,6 +1058,7 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     logger.info("sender: STEP 2b activeElement after type: tag=%s id=%s value=%r in_side=%s",
                 post.get("tag"), post.get("id"), post.get("value"), post.get("in_side"))
     await _safe_screenshot(page, "/tmp/after_search.png")
+    await _p26b_search_evidence(page, "group_after_type", search_sel, group_name)  # PHASE26B
 
     # STEP 3 — read-back classification: READ_OK_MATCH / READ_OK_MISMATCH /
     # READ_UNREADABLE. The read-back is DEFENCE-IN-DEPTH only: an unreadable box
@@ -955,6 +1087,7 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
 
     # 5) Collect candidates, log them (raw + normalized), match deterministically.
     diag["worker_stage"] = "await_results"
+    await _p26b_search_evidence(page, "group_after_settle", search_sel, group_name)  # PHASE26B
     result_sel, candidates = await _collect_search_candidates(page)
     diag["candidates"] = [c["title"] for c in candidates]
     diag["candidates_norm"] = [c["norm"] for c in candidates]
@@ -973,6 +1106,14 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
             "group": group_name, "requested_norm": target,
             "candidates": diag["candidates"], "candidates_norm": diag["candidates_norm"],
             "result_selector": result_sel, "search_selector": search_sel,
+        })
+        # PHASE26B: WHY zero/no-match results — explicit, evidence-backed reason.
+        await _p26b_dump(page, "group_not_found", extra={
+            "why": diag["rejection_reason"],
+            "dom_candidates_count": len(candidates),
+            "candidates_raw": diag["candidates"],
+            "candidates_normalized": diag["candidates_norm"],
+            "requested_normalized": target,
         })
         return "NOT_FOUND"
 
@@ -995,6 +1136,7 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     logger.info("sender: STEP 6 candidate clicked")
     await _safe_screenshot(page, "/tmp/after_click.png")
     await asyncio.sleep(1.0)
+    await _p26b_dump(page, "group_after_select", extra={"selected": match["title"]})  # PHASE26B
     return "OPENED"
 
 
@@ -1021,6 +1163,23 @@ async def send_whatsapp_message(
     }
     logger.info("sender: preparing to send to %s (%s)", destination, destination_type)
 
+    # PHASE26B STEP 1/2: raw destination, detected type, normalized value,
+    # and which discovery strategy this destination_type will use.
+    _p26b_normalized = (
+        "".join(filter(str.isdigit, destination)) if destination_type == "number"
+        else _norm_group(destination)
+    )
+    _p26b_strategy = (
+        "PHONE_DEEPLINK (page.goto https://web.whatsapp.com/send?phone=<digits>)"
+        if destination_type == "number"
+        else "SIDEBAR_SEARCH (#side search box -> #pane-side results list)"
+    )
+    logger.info(
+        "PHASE26B STEP1_2 raw_destination=%r destination_type=%r normalized_destination=%r "
+        "discovery_strategy=%r",
+        destination, destination_type, _p26b_normalized, _p26b_strategy,
+    )
+
     # Clear any blocking dialog BEFORE any interaction (login nags, feature
     # announcements). Unknown/undismissable dialogs -> retryable, nothing sent.
     if not await dismiss_blocking_dialogs(page, "pre-open"):
@@ -1033,12 +1192,23 @@ async def send_whatsapp_message(
         # Navigate to wa.me link with prepopulated text or empty send to open the chat
         wa_url = f"https://web.whatsapp.com/send?phone={phone}"
         logger.info("sender: navigating to number link: %s", wa_url)
+        await _p26b_dump(page, "number_before_navigate")  # PHASE26B
+        _p26b_nav_started = time.monotonic()  # PHASE26B
         await page.goto(wa_url, wait_until="domcontentloaded")
-        
+        await _p26b_dump(page, "number_after_navigate",
+                          extra={"elapsed_sec": round(time.monotonic() - _p26b_nav_started, 2)})  # PHASE26B
+
         # Wait for the chat to load (msg_box or chat not found popups)
         try:
             await page.wait_for_selector(SEL["msg_box"], timeout=45_000)
         except PlaywrightTimeoutError:
+            # PHASE26B: capture ALL failure evidence BEFORE any raise below —
+            # URL/DOM/screenshot/activeElement/pane+composer+spinner presence/
+            # console+network errors, exactly as required by the investigation.
+            await _p26b_dump(page, "number_composer_wait_timeout", extra={
+                "elapsed_sec": round(time.monotonic() - _p26b_nav_started, 2),
+                "timeout_ms": 45_000,
+            })
             # Check if there is an error dialog (e.g. "Phone number shared via url is invalid")
             # Usually it says "Use WhatsApp on your phone..." or "Phone number... is invalid"
             dialog_exists = await page.is_visible("text=Phone number shared via url is invalid") or \
@@ -1053,12 +1223,17 @@ async def send_whatsapp_message(
                 raise ValueError(f"Phone number {phone} is invalid on WhatsApp")
             raise RuntimeError("Timed out waiting for chat window to load via wa.me link")
 
+        await _p26b_dump(page, "number_composer_appeared",
+                          extra={"elapsed_sec": round(time.monotonic() - _p26b_nav_started, 2)})  # PHASE26B
         evidence["chat_opened"] = True
 
     elif destination_type == "group":
         logger.info("sender: searching for group name '%s'", destination)
         result = await _open_group_chat(page, destination)
         if result == "SEARCH_FAILED":
+            # PHASE26B: full evidence capture BEFORE returning the terminal
+            # CHAT_NOT_OPENED state (mission: "capture ALL evidence before throwing").
+            await _p26b_dump(page, "chat_not_opened_search_failed", extra={"group": destination})
             # Pre-send failure (stale/missing search box). Nothing was sent —
             # snapshot the DOM and return a RETRYABLE state (never 'sent').
             await _store_dom_snapshot(page, "group_search_failed", {"group": destination})
@@ -1066,6 +1241,8 @@ async def send_whatsapp_message(
                            destination)
             return {"state": CHAT_NOT_OPENED, "evidence": evidence}
         if result == "NOT_FOUND":
+            # PHASE26B: full evidence capture BEFORE raising (terminal, not retried).
+            await _p26b_dump(page, "group_not_found_before_raise", extra={"group": destination})
             # Group genuinely absent — terminal (do not retry).
             raise ValueError(f"WhatsApp group '{destination}' not found in chat list")
         # result == "OPENED" -> fall through to chat-ready + typing + verify (unchanged)
@@ -1079,8 +1256,11 @@ async def send_whatsapp_message(
         await _wait_for_chat_ready(page)
         evidence["compose_found"] = True
         logger.info("sender: STEP 11 composer found and interactive")
+        await _p26b_dump(page, "composer_ready")  # PHASE26B
     except Exception as exc:
         logger.warning("sender: STEP 7/11 FAILED — chat not ready (%s) -> CHAT_NOT_OPENED", exc)
+        # PHASE26B: full evidence capture BEFORE returning CHAT_NOT_OPENED.
+        await _p26b_dump(page, "composer_wait_failed", extra={"destination": destination, "error": str(exc)})
         await _capture_open_failure(page, "chat_not_ready",
                                     {"destination": destination, "error": str(exc)})
         return {"state": CHAT_NOT_OPENED, "evidence": evidence}
@@ -1102,6 +1282,12 @@ async def send_whatsapp_message(
     logger.info("sender: STEP 13 verification passed=%s", conversation_ready)
     if not conversation_ready:
         logger.warning("sender: conversation NOT open -> CHAT_NOT_OPENED (refusing to type)")
+        # PHASE26B: full evidence capture BEFORE returning CHAT_NOT_OPENED.
+        await _p26b_dump(page, "conversation_verify_failed", extra={
+            "destination": destination, "expected": expected_name,
+            "header_found": hdr_found, "recipient_found": rcp_found,
+            "recipient_text": rcp_text, "body_present": body_present,
+        })
         await _capture_open_failure(page, "conversation_not_open",
                                     {"destination": destination, "expected": expected_name,
                                      "header_found": hdr_found, "recipient_found": rcp_found,
@@ -1109,12 +1295,14 @@ async def send_whatsapp_message(
         return {"state": CHAT_NOT_OPENED, "evidence": evidence}
     evidence["header_verified"] = True
     logger.info("sender: STEP 14 ready to send")
+    await _p26b_dump(page, "conversation_verified")  # PHASE26B
 
     # Snapshot message counts BEFORE typing — verification will only check NEW
     # messages that appear after this point, preventing false positives from old
     # campaign messages with the same template text.
     baselines = await _snapshot_msg_baselines(page)
 
+    await _p26b_dump(page, "before_send")  # PHASE26B
     # Instrumentation: send-button DOM + the exact message string (PROBLEM #3 trace).
     await _dump_send_dom(page)
     logger.info(

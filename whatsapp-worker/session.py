@@ -16,6 +16,7 @@ import base64
 import io
 import logging
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -80,6 +81,50 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# PHASE 26B — TEMPORARY chat-discovery investigation instrumentation.
+# Rolling buffers of recent browser console messages / failed network
+# requests, so a CHAT_NOT_OPENED failure capture (sender.py) can include
+# "console errors" / "network errors" without a live remote-debugging
+# session. Read-only logging support — registering these listeners does not
+# change any WhatsApp Web interaction. Safe to delete this block (and the
+# listener registration in start()) once the investigation is closed.
+# ---------------------------------------------------------------------------
+_P26B_CONSOLE_BUFFER: deque = deque(maxlen=50)
+_P26B_NETWORK_ERROR_BUFFER: deque = deque(maxlen=50)
+
+
+def get_recent_console_errors() -> list:
+    """Console messages of type error/warning seen in the last ~50 events."""
+    return [m for m in _P26B_CONSOLE_BUFFER if m.get("type") in ("error", "warning")]
+
+
+def get_recent_network_errors() -> list:
+    """Failed network requests (requestfailed) seen in the last ~50 events."""
+    return list(_P26B_NETWORK_ERROR_BUFFER)
+
+
+def _p26b_register_listeners(page: Page) -> None:
+    def _on_console(msg) -> None:
+        try:
+            _P26B_CONSOLE_BUFFER.append(
+                {"type": msg.type, "text": msg.text[:300], "time": _utcnow()}
+            )
+        except Exception:
+            pass
+
+    def _on_request_failed(req) -> None:
+        try:
+            _P26B_NETWORK_ERROR_BUFFER.append(
+                {"url": req.url[:200], "failure": str(req.failure), "time": _utcnow()}
+            )
+        except Exception:
+            pass
+
+    page.on("console", _on_console)
+    page.on("requestfailed", _on_request_failed)
+
+
 class WhatsAppSession:
     """
     Manages a single persistent Playwright / WhatsApp Web session.
@@ -134,6 +179,8 @@ class WhatsAppSession:
             if self._context.pages
             else await self._context.new_page()
         )
+
+        _p26b_register_listeners(self.page)  # PHASE 26B — temporary, logging only
 
         await self._authenticate()
 

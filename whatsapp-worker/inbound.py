@@ -268,6 +268,13 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
 
         direction = await sender._is_outgoing_msg(page, full_sel, i)
         if direction is True:
+            # TEMP research logging (2026-07-21): capture what a confirmed-
+            # outgoing message's DOM looks like so the incoming-side fallback
+            # (for messages with no tail element) can target the real
+            # structure. Remove once the fallback rule is confirmed.
+            diag = await _direction_diag(page, full_sel, i)
+            logger.info("inbound: RESEARCH outgoing-confirmed index=%d testid=%r diag=%s",
+                        i, testid, diag)
             # Ours — mark seen (if we have a stable id) so we never
             # re-evaluate it, and never dispatch it.
             if message_id:

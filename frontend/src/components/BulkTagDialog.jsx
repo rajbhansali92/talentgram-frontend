@@ -3,6 +3,7 @@ import { X, Tag, Loader2 } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 
 export default function BulkTagDialog({ selectedCount, selectedIds, actionType, onSave, onClose }) {
     const [allTags, setAllTags] = useState([]);
@@ -33,6 +34,7 @@ export default function BulkTagDialog({ selectedCount, selectedIds, actionType, 
                 tag_id: tag.id
             });
             onSave(tag, actionType);
+            selectedIds.forEach(id => talentPreviewCache.invalidateTalent(id));
             toast.success(`Successfully ${actionType === "assign" ? "assigned" : "removed"} tag "${tag.name}" for selected talents.`);
             onClose();
         } catch (e) {
@@ -54,6 +56,7 @@ export default function BulkTagDialog({ selectedCount, selectedIds, actionType, 
                 tag_id: tag.id
             });
             onSave(tag, "assign");
+            selectedIds.forEach(id => talentPreviewCache.invalidateTalent(id));
             toast.success(`Created & assigned tag "${name}" for selected talents.`);
             onClose();
         } catch (e) {

@@ -3,6 +3,7 @@ import { X, Plus, Search, Tag, Loader2, AlertTriangle } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 
 export default function TagPopover({ talent, onSave, onClose }) {
     const [allTags, setAllTags] = useState([]);
@@ -34,6 +35,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
             const updated = [...localTags, { id: tag.id, name: tag.name }];
             setLocalTags(updated);
             onSave(talent.id, updated);
+            talentPreviewCache.invalidateTalent(talent.id);
             toast.success(`Assigned tag "${tag.name}"`);
         } catch (e) {
             toast.error(formatErrorDetail(e, "Failed to assign tag"));
@@ -49,6 +51,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
             const updated = localTags.filter(t => t.id !== tagId);
             setLocalTags(updated);
             onSave(talent.id, updated);
+            talentPreviewCache.invalidateTalent(talent.id);
             toast.success("Tag removed");
         } catch (e) {
             toast.error(formatErrorDetail(e, "Failed to remove tag"));
@@ -73,6 +76,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
                 const updated = [...localTags, { id: tag.id, name: tag.name }];
                 setLocalTags(updated);
                 onSave(talent.id, updated);
+                talentPreviewCache.invalidateTalent(talent.id);
             }
             setTagSearch("");
             toast.success(data.created ? `Tag "${name}" created and assigned` : `Tag "${name}" assigned`);

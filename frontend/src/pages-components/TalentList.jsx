@@ -8,6 +8,7 @@ import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import TagPopover from "@/components/TagPopover";
 import BulkTagDialog from "@/components/BulkTagDialog";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 
 // ---------------------------------------------------------------------------
 // Skeleton card — prevents layout shift during load
@@ -643,6 +644,7 @@ export default function TalentList() {
         const ids = Array.from(selected);
         try {
             const res = await adminApi.post("/talents/bulk-delete", { ids });
+            ids.forEach(id => talentPreviewCache.invalidateTalent(id));
             toast.success(
                 `Deleted ${res.data.deleted} talent${res.data.deleted === 1 ? "" : "s"}${
                     res.data.missing ? ` (${res.data.missing} already gone)` : ""

@@ -1,5 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { adminApi } from "@/lib/api";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
+
+/**
+ * Primes the Quick View cache with the partial talent fields the pipeline
+ * payload already carries (name/instagram/image — see
+ * backend/routers/casting_pipeline.py's _talent_merge_fields), so the Eye
+ * click on a PipelineCard finds a cache hit instead of constructing that
+ * object itself. Never overwrites an existing entry — a talent that's
+ * already been fully hydrated (or was just invalidated on purpose after an
+ * edit) must not be clobbered by this partial data on the next pipeline
+ * load.
+ */
+function primeTalentPreviewCache(items) {
+    for (const item of items) {
+        if (!item?.talent_id || talentPreviewCache.getTalent(item.talent_id)) continue;
+        talentPreviewCache.setTalent(item.talent_id, {
+            id: item.talent_id,
+            name: item.talent_name,
+            instagram_handle: item.instagram_handle,
+            image_url: item.image_url,
+        });
+    }
+}
 
 /**
  * usePipelineData — owns the project pipeline fetch + cache.
@@ -19,7 +42,9 @@ export function usePipelineData(projectId) {
                 `/projects/${projectId}/pipeline`
             );
 
-            setData(res.data?.data || []);
+            const items = res.data?.data || [];
+            setData(items);
+            primeTalentPreviewCache(items);
         } catch (e) {
             console.error("Failed to fetch pipeline:", e);
             setError("Failed to load pipeline data");
@@ -43,7 +68,9 @@ export function usePipelineData(projectId) {
 
                 if (!alive) return;
 
-                setData(res.data?.data || []);
+                const items = res.data?.data || [];
+                setData(items);
+                primeTalentPreviewCache(items);
             } catch (e) {
                 if (!alive) return;
 

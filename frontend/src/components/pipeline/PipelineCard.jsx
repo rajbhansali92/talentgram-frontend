@@ -23,7 +23,7 @@ import { displayInstagramHandle, instagramProfileUrl, firstNameOf } from "@/lib/
 // Reuse Browse Roster's existing Quick View drawer + breakpoint hook verbatim
 // — no parallel implementation, no duplicated talent-detail rendering.
 import { TalentPreviewDrawer, useMediaQuery } from "./TalentBrowserModal";
-import { getCachedTalent, fetchTalentOnce } from "@/lib/talentPreviewCache";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 // Icons from lucide-react for consistency and maintainability
 import {
     User,
@@ -378,16 +378,17 @@ const PipelineCard = memo(function PipelineCard({
     // have — so opening with that partial object needs zero network
     // round trips and zero drawer changes. `media` is the one field only
     // a full /talents/{id} response carries, so its presence is the
-    // hydrated-vs-partial signal. talentPreviewCache (module-level, shared
-    // across every card) makes every open after the first — same talent,
-    // re-open, or a different already-opened talent — free.
+    // hydrated-vs-partial signal. talentPreviewCache is primed once the
+    // pipeline finishes loading (see usePipelineData.js), so the common
+    // case here is a cache hit; the inline fallback below only matters if
+    // a card somehow renders before priming has run.
     const openQuickView = useCallback((e) => {
         e.stopPropagation();
         if (!item.talent_id) {
             toast.error("No talent linked to this card");
             return;
         }
-        const cached = getCachedTalent(item.talent_id);
+        const cached = talentPreviewCache.getTalent(item.talent_id);
         const initial = cached || {
             id: item.talent_id,
             name: displayName,
@@ -400,7 +401,7 @@ const PipelineCard = memo(function PipelineCard({
         if (isFullyHydrated) return; // cache hit — no request at all
 
         setPreviewLoading(true);
-        fetchTalentOnce(item.talent_id, async () => {
+        talentPreviewCache.hydrateTalent(item.talent_id, async () => {
             const { data } = await adminApi.get(`/talents/${item.talent_id}`);
             return data;
         })

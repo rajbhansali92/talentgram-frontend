@@ -39,6 +39,7 @@ import LocationSelector from "@/components/LocationSelector";
 import DobInput from "@/components/DobInput";
 import HlsVideo from "@/components/HlsVideo";
 import { formatErrorDetail } from "@/lib/errorFormatter";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 
 
 
@@ -330,6 +331,7 @@ export default function TalentEdit() {
             };
             if (isEdit) {
                 await adminApi.put(`/talents/${id}`, payload);
+                talentPreviewCache.invalidateTalent(id);
                 setOriginalTalent(payload);
                 setIsEditing(false);
                 toast.success("Saved");
@@ -354,6 +356,7 @@ export default function TalentEdit() {
         if (!isEdit) return;
         try {
             const res = await adminApi.delete(`/talents/${id}`);
+            talentPreviewCache.invalidateTalent(id);
             if (process.env.NODE_ENV === "development") {
                 console.info("[delete talent]", id, res?.data);
             }
@@ -430,15 +433,16 @@ export default function TalentEdit() {
             
             const results = await Promise.all(uploadPromises);
             const latestTalent = results[results.length - 1];
-            
+
             if (latestTalent) {
-                updateTalent({ 
+                updateTalent({
                     media: latestTalent.media || [],
                     cover_media_id: latestTalent.cover_media_id ?? talent.cover_media_id,
                     cover_url: latestTalent.cover_url ?? talent.cover_url,
                 });
             }
-            
+            talentPreviewCache.invalidateTalent(id);
+
             toast.success(`${validFiles.length} upload(s) added`);
         } catch (e) {
             toast.error(formatErrorDetail(e, "Upload failed"));
@@ -460,6 +464,7 @@ export default function TalentEdit() {
                 cover_media_id: wasCover ? null : talent.cover_media_id,
                 cover_url: wasCover ? null : talent.cover_url,
             });
+            talentPreviewCache.invalidateTalent(id);
             toast.success("Media removed");
         } catch (e) {
             toast.error(formatErrorDetail(e, "Remove failed"));
@@ -479,6 +484,7 @@ export default function TalentEdit() {
                 cover_media_id: mid,
                 cover_url: data?.cover_url ?? null,
             });
+            talentPreviewCache.invalidateTalent(id);
             toast.success("Cover updated");
         } catch (e) {
             toast.error(formatErrorDetail(e, "Failed to set cover"));
@@ -507,6 +513,7 @@ export default function TalentEdit() {
             const updated = [...(talent.tags || []), { id: tag.id, name: tag.name }];
             updateTalent({ tags: updated });
             setOriginalTalent(prev => ({ ...prev, tags: updated }));
+            talentPreviewCache.invalidateTalent(id);
         } catch (e) {
             toast.error(formatErrorDetail(e, "Failed to assign tag"));
         }
@@ -534,6 +541,7 @@ export default function TalentEdit() {
                 const updated = [...(talent.tags || []), { id: tag.id, name: tag.name }];
                 updateTalent({ tags: updated });
                 setOriginalTalent(prev => ({ ...prev, tags: updated }));
+                talentPreviewCache.invalidateTalent(id);
             }
             setTagInput("");
             toast.success(data.created ? `Tag "${name}" created` : `Tag "${name}" assigned`);
@@ -558,6 +566,7 @@ export default function TalentEdit() {
             const updated = (talent.tags || []).filter(t => t.id !== tagId);
             updateTalent({ tags: updated });
             setOriginalTalent(prev => ({ ...prev, tags: updated }));
+            talentPreviewCache.invalidateTalent(id);
         } catch (e) {
             toast.error(formatErrorDetail(e, "Failed to remove tag"));
         }

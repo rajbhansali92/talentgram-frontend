@@ -69,7 +69,8 @@ async def _collect_or_advance(agent, intent, conv: dict, text: str) -> DispatchR
     collected = dict(conv.get("collected") or {})
 
     if conv["step"] == "editing":
-        edits = parse_edit_instructions(text, intent.fields)
+        edit_parser = intent.parse_edits or parse_edit_instructions
+        edits = edit_parser(text, intent.fields)
         if not edits:
             return DispatchResult(handled=True, reply=UNRECOGNIZED_EDIT_REPLY)
         for key, raw_value in edits.items():
@@ -158,7 +159,8 @@ async def handle_inbound_message(
                 # — unrelated chatter in the group, ignore.
                 return DispatchResult(handled=False)
 
-            initial_raw = extract_initial_fields(intent, raw_message)
+            extractor = intent.extract_fields or (lambda t: extract_initial_fields(intent, t))
+            initial_raw = extractor(raw_message)
             collected: dict = {}
             initial_errors: list = []
             for field in intent.fields:

@@ -15,8 +15,16 @@ from agents.models import IntentDefinition
 def build_confirmation_message(intent: IntentDefinition, collected: Dict[str, str]) -> str:
     lines = [intent.summary_title, ""]
     for f in intent.fields:
+        value = (collected.get(f.key, "") or "").strip()
+        if not value:
+            # Optional fields (required=False) that were never mentioned
+            # are omitted entirely rather than shown as "—" — the summary
+            # should only list what was actually understood.
+            if not f.required:
+                continue
+            value = "—"
         lines.append(f"{f.label}:")
-        lines.append(collected.get(f.key, "") or "—")
+        lines.append(value)
         lines.append("")
     lines.append("Reply:")
     lines.append("1 → Approve")

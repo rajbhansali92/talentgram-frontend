@@ -128,6 +128,8 @@ def parse_edit_instructions(text: str, fields: List[FieldSpec]) -> Dict[str, str
 
 def next_missing_field(intent: IntentDefinition, collected: Dict[str, str]) -> Optional[FieldSpec]:
     for field in intent.fields:
+        if not field.required:
+            continue
         if not (collected.get(field.key) or "").strip():
             return field
     return None

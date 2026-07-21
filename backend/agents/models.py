@@ -53,6 +53,12 @@ class FieldSpec:
     question: str  # asked when this field is still missing, e.g. "What's the name?"
     validate: Callable[[str], ValidationResult]
     aliases: List[str] = field(default_factory=list)  # extra names accepted in "Key = value" edits
+    # Optional fields never block confirmation and are omitted from the
+    # summary when empty — the generic engine's missing-field prompt only
+    # ever fires for required=True fields (2026-07-21 understanding-layer
+    # upgrade: a CRM contact needs name/phone/role, but company/email/etc.
+    # are enrichment only, never demanded).
+    required: bool = True
 
 
 @dataclass
@@ -63,6 +69,21 @@ class IntentDefinition:
     fields: List[FieldSpec]
     executor: Callable[[Dict[str, str], ExecContext], Awaitable[ExecResult]]
     summary_title: str = "I understood:"
+    # Optional overrides (2026-07-21 understanding-layer upgrade) — the
+    # generic engine (parser.py/dispatcher.py) still owns the conversation
+    # state machine and confirmation flow unchanged; a domain module may
+    # supply smarter, domain-aware text understanding by overriding just
+    # these two extraction steps instead of parser.py's generic
+    # line-position-based ones:
+    #   extract_fields(text) -> {field_key: raw_value} for the message that
+    #     opens a fresh conversation (replaces parser.extract_initial_fields).
+    #   parse_edits(text, fields) -> {field_key: raw_value} for a message
+    #     sent during the "editing" step (replaces parser.parse_edit_instructions,
+    #     which only understands "Key = value" syntax).
+    # None means "use the generic engine's default" — every other existing
+    # or future intent is unaffected unless it opts in.
+    extract_fields: Optional[Callable[[str], Dict[str, str]]] = None
+    parse_edits: Optional[Callable[[str, List[FieldSpec]], Dict[str, str]]] = None
 
 
 @dataclass

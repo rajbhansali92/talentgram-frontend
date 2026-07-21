@@ -235,10 +235,14 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
                 await _mark_processed(message_id)
             continue
         if direction is None:
+            try:
+                snippet = (await loc.nth(i).inner_text()).strip()[:80]
+            except Exception:
+                snippet = "<unreadable>"
             logger.warning(
                 "inbound: direction undeterminable for group=%r index=%d testid=%r "
-                "— skipping (fail closed, not guessing)",
-                group_name, i, testid,
+                "text=%r — skipping (fail closed, not guessing)",
+                group_name, i, testid, snippet,
             )
             if message_id:
                 await _mark_processed(message_id)

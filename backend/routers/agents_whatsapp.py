@@ -34,6 +34,11 @@ class InboundMessageIn(BaseModel):
     text: str = Field(default="")
     sender_name: Optional[str] = None
     message_id: Optional[str] = None
+    # Set by the transport when it was able to determine, at receive time,
+    # whether the sender is a current participant of the WhatsApp group —
+    # only meaningful for agents configured with security_mode="group_members".
+    # None means "transport couldn't tell" and is treated as not-a-member.
+    sender_is_group_member: Optional[bool] = None
 
 
 @router.get("/known-groups")
@@ -69,6 +74,7 @@ async def inbound_message(
         sender_phone=payload.sender_phone,
         text=payload.text,
         sender_name=payload.sender_name,
+        sender_is_group_member=payload.sender_is_group_member,
     )
     return {"handled": result.handled, "reply": result.reply}
 
@@ -77,6 +83,9 @@ class AgentConfigUpdate(BaseModel):
     group_names: Optional[List[str]] = None
     allowed_senders: Optional[List[str]] = None
     active: Optional[bool] = None
+    # "allowlist" (default) or "group_members" — see agents/registry.py's
+    # is_sender_allowed for what each mode means.
+    security_mode: Optional[str] = None
 
 
 def _serialise_config(doc: dict) -> dict:
@@ -84,6 +93,7 @@ def _serialise_config(doc: dict) -> dict:
         "agent_id": doc["agent_id"],
         "group_names": doc.get("group_names") or [],
         "allowed_senders": doc.get("allowed_senders") or [],
+        "security_mode": doc.get("security_mode") or "allowlist",
         "active": doc.get("active", True),
         "updated_at": doc.get("updated_at"),
     }
@@ -125,6 +135,10 @@ async def update_config(agent_id: str, payload: AgentConfigUpdate, _admin: dict 
         upd["allowed_senders"] = [n.strip() for n in payload.allowed_senders if n.strip()]
     if payload.active is not None:
         upd["active"] = payload.active
+    if payload.security_mode is not None:
+        if payload.security_mode not in ("allowlist", "group_members"):
+            raise HTTPException(400, "security_mode must be 'allowlist' or 'group_members'")
+        upd["security_mode"] = payload.security_mode
     if not upd:
         raise HTTPException(status_code=400, detail="No fields to update")
     from datetime import datetime, timezone

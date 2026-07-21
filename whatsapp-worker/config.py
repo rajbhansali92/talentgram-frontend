@@ -53,6 +53,12 @@ INBOUND_POLL_SEC: int = int(os.environ.get("WA_INBOUND_POLL_SEC", "8"))
 # How often to refresh the list of agent-mapped group names from the backend.
 INBOUND_GROUPS_REFRESH_SEC: int = int(os.environ.get("WA_INBOUND_GROUPS_REFRESH_SEC", "120"))
 
+# How often to re-read a WhatsApp group's participant list (only consumed by
+# agents configured with security_mode="group_members"). This costs a real
+# page navigation (open Group Info, close it) each time it's stale, so it's
+# refreshed far less often than the 8s message-poll cycle.
+PARTICIPANTS_REFRESH_SEC: int = int(os.environ.get("WA_PARTICIPANTS_REFRESH_SEC", "90"))
+
 # How long a processed message id is remembered for dedup (survives worker
 # restarts via a Mongo TTL index — see whatsapp_inbound_seen).
 INBOUND_DEDUP_TTL_SEC: int = int(os.environ.get("WA_INBOUND_DEDUP_TTL_SEC", str(48 * 3600)))

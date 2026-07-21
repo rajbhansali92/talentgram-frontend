@@ -156,6 +156,35 @@ class KnownGroupsCache:
         return self._groups
 
 
+class GroupParticipantsCache:
+    """Per-group cache of the WhatsApp group's current participant list,
+    refreshed on a timer rather than on every message — same pattern as
+    KnownGroupsCache. Only consumed by agents configured with
+    security_mode="group_members" (see backend/agents/registry.py); reading
+    it costs a real page navigation (open Group Info, close it), so it must
+    never be fetched more than once per scan cycle per group."""
+
+    def __init__(self):
+        self._by_group: dict[str, list] = {}
+        self._last_refresh: dict[str, float] = {}
+
+    async def get(self, page, group_name: str) -> Optional[list]:
+        now = time.monotonic()
+        last = self._last_refresh.get(group_name, 0.0)
+        if now - last < config.PARTICIPANTS_REFRESH_SEC and group_name in self._by_group:
+            return self._by_group[group_name]
+        participants = await sender.get_group_participants(page, group_name)
+        if participants is None:
+            # Transient read failure — keep serving whatever we last had
+            # (possibly None, if we've never successfully fetched) rather
+            # than fabricate an empty list, which would silently lock
+            # every sender out.
+            return self._by_group.get(group_name)
+        self._by_group[group_name] = participants
+        self._last_refresh[group_name] = now
+        return participants
+
+
 def _auth_headers() -> dict:
     headers = {}
     if config.AGENTS_INBOUND_SECRET:
@@ -240,7 +269,26 @@ async def _direction_diag(page, css_selector: str, index: int) -> dict:
         return {"error": str(exc)}
 
 
-async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
+async def _match_group_member(participants: Optional[list], sender_name: Optional[str]):
+    """Match a message's sender_name against a fetched participant list.
+    Returns (is_member: Optional[bool], matched_phone: Optional[str]).
+    None for is_member means "couldn't determine" (participants unavailable,
+    or no sender_name to match against) — callers must treat that as
+    not-a-member for any security decision, never guess a yes."""
+    if participants is None or not sender_name:
+        return None, None
+    needle = sender_name.strip().lower()
+    if not needle:
+        return None, None
+    for p in participants:
+        if needle in (p.get("raw_text") or "").strip().lower():
+            return True, p.get("phone")
+    return False, None
+
+
+async def _scan_group_for_new_messages(
+    page, group_name: str, participants_cache: "GroupParticipantsCache"
+) -> list[dict]:
     """Scan the ALREADY-OPEN, ALREADY-VERIFIED conversation for the most
     recent messages, returning ones that are new + incoming + not yet
     processed. Reuses sender._resolve_scope / sender._is_outgoing_msg
@@ -258,6 +306,11 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
     # keeps the scan cheap regardless of how long the chat history is.
     start = max(0, n - 15)
     new_messages: list[dict] = []
+    # Fetched at most once per scan call (not per message), only if a
+    # message actually needs it — group_members security mode is the only
+    # consumer, and most scan cycles find nothing new to check.
+    participants: Optional[list] = None
+    participants_fetched = False
 
     for i in range(start, n):
         try:
@@ -314,11 +367,18 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
             if m:
                 sender_name = m.group(1).strip()
 
+        if not participants_fetched:
+            participants = await participants_cache.get(page, group_name)
+            participants_fetched = True
+        is_member, matched_phone = await _match_group_member(participants, sender_name)
+        phone = phone or matched_phone
+
         new_messages.append({
             "message_id": message_id,
             "text": text,
             "sender_name": sender_name,
             "sender_phone": phone,
+            "sender_is_group_member": is_member,
             "raw_pre_plain_text": pre_plain,
         })
 
@@ -326,7 +386,8 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
 
 
 async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phone: str,
-                         sender_name: Optional[str], text: str, message_id: str) -> Optional[dict]:
+                         sender_name: Optional[str], text: str, message_id: str,
+                         sender_is_group_member: Optional[bool] = None) -> Optional[dict]:
     t0 = time.monotonic()
     try:
         resp = await http.post(
@@ -338,6 +399,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                 "sender_name": sender_name,
                 "text": text,
                 "message_id": message_id,
+                "sender_is_group_member": sender_is_group_member,
             },
             timeout=20.0,
         )
@@ -371,7 +433,10 @@ async def _send_reply(page, group_name: str, reply_text: str) -> None:
         logger.exception("inbound: failed to send reply into group=%r", group_name)
 
 
-async def poll_once(session, http: httpx.AsyncClient, groups_cache: KnownGroupsCache) -> None:
+async def poll_once(
+    session, http: httpx.AsyncClient, groups_cache: KnownGroupsCache,
+    participants_cache: "GroupParticipantsCache",
+) -> None:
     groups = await groups_cache.get()
     if not groups:
         return
@@ -392,7 +457,7 @@ async def poll_once(session, http: httpx.AsyncClient, groups_cache: KnownGroupsC
                 continue
 
             try:
-                new_messages = await _scan_group_for_new_messages(page, group_name)
+                new_messages = await _scan_group_for_new_messages(page, group_name, participants_cache)
             except Exception:
                 logger.exception("inbound: scan failed for group=%r", group_name)
                 continue
@@ -402,18 +467,22 @@ async def poll_once(session, http: httpx.AsyncClient, groups_cache: KnownGroupsC
                 if not phone:
                     logger.warning(
                         "inbound: could not determine sender phone for message_id=%r "
-                        "group=%r sender_name=%r text=%r pre_plain_text=%r — "
-                        "declining to dispatch (fail closed: never guess a security-relevant "
-                        "identity). Marking seen so we do not retry it forever.",
-                        msg["message_id"], group_name, msg["sender_name"], msg["text"][:80],
+                        "group=%r sender_name=%r sender_is_group_member=%r text=%r "
+                        "pre_plain_text=%r — declining to dispatch (fail closed: never "
+                        "guess a security-relevant identity). Marking seen so we do not "
+                        "retry it forever.",
+                        msg["message_id"], group_name, msg["sender_name"],
+                        msg["sender_is_group_member"], msg["text"][:80],
                         msg["raw_pre_plain_text"],
                     )
                     await _mark_processed(msg["message_id"])
                     continue
 
                 logger.info(
-                    "inbound: new message group=%r sender_name=%r sender_phone=%r message_id=%r text=%r",
-                    group_name, msg["sender_name"], phone, msg["message_id"], msg["text"][:120],
+                    "inbound: new message group=%r sender_name=%r sender_phone=%r "
+                    "sender_is_group_member=%r message_id=%r text=%r",
+                    group_name, msg["sender_name"], phone, msg["sender_is_group_member"],
+                    msg["message_id"], msg["text"][:120],
                 )
                 result = await _post_inbound(
                     http,
@@ -422,6 +491,7 @@ async def poll_once(session, http: httpx.AsyncClient, groups_cache: KnownGroupsC
                     sender_name=msg["sender_name"],
                     text=msg["text"],
                     message_id=msg["message_id"],
+                    sender_is_group_member=msg["sender_is_group_member"],
                 )
                 if result is None:
                     # Backend call failed — do NOT mark as processed, so a
@@ -448,6 +518,7 @@ async def inbound_listener_loop(session) -> None:
     await _ensure_indexes()
     async with httpx.AsyncClient() as http:
         groups_cache = KnownGroupsCache(http)
+        participants_cache = GroupParticipantsCache()
         logger.info(
             "inbound: listener started (poll_sec=%d, groups_refresh_sec=%d)",
             config.INBOUND_POLL_SEC, config.INBOUND_GROUPS_REFRESH_SEC,
@@ -455,7 +526,7 @@ async def inbound_listener_loop(session) -> None:
         while True:
             try:
                 if session.is_healthy:
-                    await poll_once(session, http, groups_cache)
+                    await poll_once(session, http, groups_cache, participants_cache)
                 else:
                     logger.info("inbound: session unhealthy — skipping this poll cycle")
             except asyncio.CancelledError:

@@ -98,6 +98,7 @@ async def handle_inbound_message(
     sender_phone: str,
     text: str,
     sender_name: Optional[str] = None,
+    sender_is_group_member: Optional[bool] = None,
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
@@ -109,7 +110,9 @@ async def handle_inbound_message(
             return DispatchResult(handled=False)
         agent, config = resolved
 
-        if not registry.is_sender_allowed(config, phone):
+        if not registry.is_sender_allowed(
+            config, phone, is_group_member=sender_is_group_member
+        ):
             await audit.log_turn(
                 agent_id=agent.agent_id,
                 group_name=group_name,

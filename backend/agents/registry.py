@@ -97,7 +97,26 @@ async def resolve_agent_for_group(group_name: str) -> Optional[Tuple[AgentDefini
     return None
 
 
-def is_sender_allowed(config: dict, phone: str) -> bool:
+def is_sender_allowed(
+    config: dict, phone: str, *, is_group_member: Optional[bool] = None
+) -> bool:
+    """Security gate for who may issue commands to an agent. Branches on the
+    agent's `security_mode` (default "allowlist") so different agents can use
+    different boundaries without changing this function's callers:
+
+      - "allowlist" (default): phone must be in `allowed_senders`. An empty
+        allowlist accepts no one — fail closed, never open.
+      - "group_members": the sender must currently be a participant of the
+        WhatsApp group the message arrived in. The Agent Platform has no way
+        to know this itself (it doesn't talk to WhatsApp) — the transport
+        layer determines live membership and reports it via `is_group_member`.
+        Fail closed: if the transport couldn't determine membership
+        (`is_group_member is None`), access is denied, same as "can't verify
+        => don't guess" everywhere else in this system.
+    """
+    mode = config.get("security_mode") or "allowlist"
+    if mode == "group_members":
+        return bool(is_group_member)
     allowed = config.get("allowed_senders") or []
     if not allowed:
         # An agent with an empty allowlist accepts no one — allowlists must

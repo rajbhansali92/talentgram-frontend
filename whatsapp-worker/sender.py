@@ -814,6 +814,140 @@ RESULT_TITLE_SELECTORS = [
     '#side [data-testid="cell-frame-title"]',
 ]
 
+# Clicking the conversation header opens the Group Info drawer. Ordered
+# most-specific first, same convention as SEARCH_BOX_SELECTORS.
+GROUP_INFO_TRIGGER_SELECTORS = [
+    '#main header[data-testid="conversation-header"]',
+    '#main header',
+]
+
+# The Group Info drawer itself, once opened.
+GROUP_INFO_PANEL_SELECTORS = [
+    '[data-testid="drawer-right"]',
+    'div[role="complementary"]',
+]
+
+# Individual participant rows inside the drawer. WhatsApp reuses the same
+# list-cell component here as the sidebar chat list, so these overlap with
+# RESULT_TITLE_SELECTORS's row shape — kept separate since they're scoped to
+# a different container and read differently (whole-row text, not just title).
+PARTICIPANT_ROW_SELECTORS = [
+    '[data-testid="cell-frame-container"]',
+    '[role="listitem"]',
+]
+
+
+async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
+    """Open the Group Info drawer for the ALREADY-OPEN conversation and scrape
+    every participant row's visible text (plus any phone-number pattern found
+    in it). Used only by the inbound listener's group_members security mode
+    (2026-07-21) to determine, at message-processing time, whether a sender
+    is a CURRENT group participant — so a removed member loses access
+    immediately rather than staying allowed forever via a stale allowlist.
+
+    Returns None if the panel can't be opened or read at all (DOM drifted,
+    a dialog is blocking, etc.) — callers MUST treat None as "couldn't
+    determine" and fail closed, never guess membership. Always closes the
+    drawer (Escape) before returning, whether it succeeded or not, so the
+    conversation is left in the same state it was found in.
+
+    This function has not yet been verified against a live Group Info
+    drawer — the exact selectors above are a best-effort starting point
+    following this file's established DOM conventions (see
+    SEARCH_BOX_SELECTORS's history), not confirmed live evidence. Expect to
+    iterate on GROUP_INFO_PANEL_SELECTORS / PARTICIPANT_ROW_SELECTORS the
+    same way SEARCH_BOX_SELECTORS was iterated on 2026-07-21."""
+    header_sel = None
+    for sel in GROUP_INFO_TRIGGER_SELECTORS:
+        try:
+            if await page.locator(sel).count():
+                header_sel = sel
+                break
+        except Exception:
+            pass
+    if not header_sel:
+        logger.warning("sender: group-info: no conversation header found for %r", group_name)
+        return None
+
+    try:
+        await page.click(header_sel, timeout=5_000)
+        await asyncio.sleep(0.6)
+    except Exception as exc:
+        logger.warning("sender: group-info: header click failed for %r: %s", group_name, exc)
+        return None
+
+    panel_sel = None
+    for sel in GROUP_INFO_PANEL_SELECTORS:
+        try:
+            if await page.locator(sel).count():
+                panel_sel = sel
+                break
+        except Exception:
+            pass
+    if not panel_sel:
+        logger.warning(
+            "sender: group-info: panel did not open for %r (header clicked, no drawer found)",
+            group_name,
+        )
+        await _capture_open_failure(page, "group_info_panel_absent", {"group": group_name})
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return None
+
+    try:
+        rows = await page.evaluate(
+            """([panelSel, rowSels]) => {
+                const panel = document.querySelector(panelSel);
+                if (!panel) return [];
+                const seen = new Set();
+                const out = [];
+                rowSels.forEach(rowSel => {
+                    panel.querySelectorAll(rowSel).forEach(el => {
+                        const t = (el.innerText || '').trim();
+                        if (t && t.length < 200 && !seen.has(t)) {
+                            seen.add(t);
+                            out.push(t);
+                        }
+                    });
+                });
+                return out;
+            }""",
+            [panel_sel, PARTICIPANT_ROW_SELECTORS],
+        )
+    except Exception:
+        logger.exception("sender: group-info: failed reading participant rows for %r", group_name)
+        rows = None
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+
+    if rows is None:
+        return None
+    if not rows:
+        logger.warning(
+            "sender: group-info: drawer opened but no participant rows matched for %r "
+            "(panel_selector=%r) — selectors likely need updating",
+            group_name, panel_sel,
+        )
+        return None
+
+    phone_re = re.compile(r"(\+?\d[\d\s\-]{6,17}\d)")
+    participants = []
+    for raw in rows:
+        m = phone_re.search(raw)
+        phone = "".join(ch for ch in m.group(1) if ch.isdigit()) if m else None
+        participants.append({"raw_text": raw, "phone": phone})
+    logger.info(
+        "sender: group-info: read %d participant row(s) for %r via panel=%r",
+        len(participants), group_name, panel_sel,
+    )
+    return participants
+
 
 def _norm_group(text: str) -> str:
     """Deterministic group-name key: Unicode NFKC + whitespace-collapse + casefold.

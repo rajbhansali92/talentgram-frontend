@@ -201,6 +201,36 @@ async def _extract_message_info(page, full_selector: str, index: int) -> dict:
         return {"prePlainText": None, "phone": None}
 
 
+async def _direction_diag(page, css_selector: str, index: int) -> dict:
+    """Diagnostic-only mirror of sender._is_outgoing_msg's ancestor walk — logs
+    what it actually saw (classNames + data-id at each level, checkmark count)
+    instead of collapsing straight to True/False/None, so a live 'undeterminable'
+    verdict is debuggable without guessing."""
+    try:
+        return await page.evaluate("""([sel, idx]) => {
+            const els = document.querySelectorAll(sel);
+            if (idx >= els.length) return {error: 'index out of range'};
+            const el = els[idx];
+            const chain = [];
+            let node = el;
+            for (let i = 0; i < 6 && node && node !== document; i++) {
+                chain.push({
+                    tag: node.tagName || null,
+                    className: typeof node.className === 'string' ? node.className : null,
+                    dataId: node.getAttribute ? node.getAttribute('data-id') : null,
+                });
+                node = node.parentElement;
+            }
+            const checks = el.querySelectorAll(
+                '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
+                + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
+            );
+            return {chain: chain, checkCount: checks.length};
+        }""", [css_selector, index])
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
     """Scan the ALREADY-OPEN, ALREADY-VERIFIED conversation for the most
     recent messages, returning ones that are new + incoming + not yet
@@ -239,10 +269,11 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
                 snippet = (await loc.nth(i).inner_text()).strip()[:80]
             except Exception:
                 snippet = "<unreadable>"
+            diag = await _direction_diag(page, full_sel, i)
             logger.warning(
                 "inbound: direction undeterminable for group=%r index=%d testid=%r "
-                "text=%r — skipping (fail closed, not guessing)",
-                group_name, i, testid, snippet,
+                "text=%r diag=%s — skipping (fail closed, not guessing)",
+                group_name, i, testid, snippet, diag,
             )
             if message_id:
                 await _mark_processed(message_id)

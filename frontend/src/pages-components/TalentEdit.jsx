@@ -1239,6 +1239,7 @@ export default function TalentEdit() {
                                                                         const updated = [...(talent.tags || []), { id: newTag.id, name: newTag.name }];
                                                                         updateTalent({ tags: updated });
                                                                         setOriginalTalent(prev => ({ ...prev, tags: updated }));
+                                                                        talentPreviewCache.invalidateTalent(id);
                                                                         toast.success(`Tag "${newTag.name}" created and assigned`);
                                                                         setTagSearch("");
                                                                         setIsTagDropdownOpen(false);

@@ -138,6 +138,7 @@ async def handle_inbound_message(
 
             initial_raw = extract_initial_fields(intent, raw_message)
             collected: dict = {}
+            initial_errors: list = []
             for field in intent.fields:
                 raw_value = initial_raw.get(field.key)
                 if not raw_value:
@@ -145,9 +146,13 @@ async def handle_inbound_message(
                 result = field.validate(raw_value)
                 if result.ok:
                     collected[field.key] = result.value
-                # Invalid initial values are treated as not-yet-collected;
-                # the normal "ask for the next missing field" flow will
-                # re-prompt for them rather than aborting the whole command.
+                else:
+                    # Invalid initial values are treated as not-yet-collected
+                    # (not fatal) — but we tell the user exactly what was
+                    # wrong with what they sent, then still ask for it via
+                    # the normal missing-field flow below, rather than
+                    # silently discarding it as if it had never been sent.
+                    initial_errors.append(result.error)
 
             conv = await conversation.start_conversation(
                 agent_id=agent.agent_id,
@@ -163,7 +168,7 @@ async def handle_inbound_message(
             # the message that opens the conversation).
             missing = next_missing_field(intent, collected)
             if missing:
-                reply = missing.question
+                reply = ("\n\n".join(initial_errors) + "\n\n" + missing.question) if initial_errors else missing.question
             else:
                 await conversation.update_conversation(
                     agent.agent_id, phone, collected=collected, step="confirming"
@@ -177,6 +182,7 @@ async def handle_inbound_message(
                 conversation_id=str(conv.get("_id") or ""),
                 parsed_intent=intent.intent_id,
                 parsed_fields=collected,
+                validation_errors=initial_errors or None,
             )
             return DispatchResult(handled=True, reply=reply)
 

@@ -827,14 +827,6 @@ GROUP_INFO_PANEL_SELECTORS = [
     'div[role="complementary"]',
 ]
 
-# Individual participant rows inside the drawer. WhatsApp reuses the same
-# list-cell component here as the sidebar chat list, so these overlap with
-# RESULT_TITLE_SELECTORS's row shape — kept separate since they're scoped to
-# a different container and read differently (whole-row text, not just title).
-PARTICIPANT_ROW_SELECTORS = [
-    '[data-testid="cell-frame-container"]',
-    '[role="listitem"]',
-]
 
 
 async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
@@ -851,12 +843,15 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
     drawer (Escape) before returning, whether it succeeded or not, so the
     conversation is left in the same state it was found in.
 
-    This function has not yet been verified against a live Group Info
-    drawer — the exact selectors above are a best-effort starting point
-    following this file's established DOM conventions (see
-    SEARCH_BOX_SELECTORS's history), not confirmed live evidence. Expect to
-    iterate on GROUP_INFO_PANEL_SELECTORS / PARTICIPANT_ROW_SELECTORS the
-    same way SEARCH_BOX_SELECTORS was iterated on 2026-07-21."""
+    Live testing (2026-07-21) found that scoping to specific row-container
+    selectors (e.g. [data-testid="cell-frame-container"]) is unreliable —
+    WhatsApp renders action rows like "Invite to group via link" through the
+    exact same generic list-cell component as real participant rows, so a
+    structural selector alone can't tell them apart. Instead this reads the
+    ENTIRE drawer's rendered text and splits it into lines: matching only
+    needs substring containment of a sender's name, so extra noise lines
+    (headings, buttons) are harmless, while missing a real participant due
+    to an overly-narrow selector would not be."""
     header_sel = None
     for sel in GROUP_INFO_TRIGGER_SELECTORS:
         try:
@@ -898,23 +893,21 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
 
     try:
         rows = await page.evaluate(
-            """([panelSel, rowSels]) => {
+            """(panelSel) => {
                 const panel = document.querySelector(panelSel);
                 if (!panel) return [];
                 const seen = new Set();
                 const out = [];
-                rowSels.forEach(rowSel => {
-                    panel.querySelectorAll(rowSel).forEach(el => {
-                        const t = (el.innerText || '').trim();
-                        if (t && t.length < 200 && !seen.has(t)) {
-                            seen.add(t);
-                            out.push(t);
-                        }
-                    });
+                (panel.innerText || '').split('\\n').forEach(line => {
+                    const t = line.trim();
+                    if (t && t.length < 200 && !seen.has(t)) {
+                        seen.add(t);
+                        out.push(t);
+                    }
                 });
                 return out;
             }""",
-            [panel_sel, PARTICIPANT_ROW_SELECTORS],
+            panel_sel,
         )
     except Exception:
         logger.exception("sender: group-info: failed reading participant rows for %r", group_name)

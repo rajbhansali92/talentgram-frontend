@@ -142,6 +142,14 @@ class WhatsAppSession:
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self._healthy: bool = False
+        # Shared between outbound sending (worker.py's job loop) and the
+        # inbound Agent Platform listener (inbound.py) — both drive page
+        # navigation on the same single Page, so every page-touching
+        # operation from either side must hold this lock. Created once and
+        # reused across start()/stop() restarts (unlike `page`, which gets
+        # replaced on restart) so callers holding a reference to the
+        # session never need to re-fetch the lock.
+        self.page_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle

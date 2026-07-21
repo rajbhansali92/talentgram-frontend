@@ -36,6 +36,27 @@ class InboundMessageIn(BaseModel):
     message_id: Optional[str] = None
 
 
+@router.get("/known-groups")
+async def known_groups(x_internal_secret: Optional[str] = Header(default=None)):
+    """Flat, de-duplicated list of every WhatsApp group name currently
+    mapped to an active agent, across all agents. This is the ONLY thing a
+    transport (the Playwright worker, or any future one) needs from the
+    Agent Registry to decide which chats are worth watching at all — it
+    never needs to know which agent owns which group, just which group
+    names matter, so group names are never hardcoded in the transport.
+    Same shared-secret gate as /inbound since it's still an unauthenticated
+    (no admin session) endpoint."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    names: set[str] = set()
+    cursor = db[registry.CONFIG_COLLECTION].find({"active": True})
+    async for cfg in cursor:
+        for g in cfg.get("group_names") or []:
+            if g and g.strip():
+                names.add(g.strip())
+    return {"groups": sorted(names)}
+
+
 @router.post("/inbound")
 async def inbound_message(
     payload: InboundMessageIn,

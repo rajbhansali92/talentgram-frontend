@@ -229,14 +229,18 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     is_retry = job["attempt_count"] > 0
 
     try:
-        result = await send_whatsapp_message(
-            page=session.page,
-            destination_type=job["destination_type"],
-            destination=job["destination"],
-            message_body=job["message_body"],
-            media_url=job.get("media_url"),
-            is_retry=is_retry,
-        )
+        # Shared with the inbound Agent Platform listener (inbound.py),
+        # which also navigates this same Page — never let outbound sending
+        # and inbound scanning touch the page at the same time.
+        async with session.page_lock:
+            result = await send_whatsapp_message(
+                page=session.page,
+                destination_type=job["destination_type"],
+                destination=job["destination"],
+                message_body=job["message_body"],
+                media_url=job.get("media_url"),
+                is_retry=is_retry,
+            )
         state = result["state"]
         evidence = result.get("evidence", {})
     except ValueError as exc:
@@ -524,6 +528,17 @@ async def main() -> None:
     # Start the heartbeat loop task in background
     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
+    # Inbound Agent Platform transport adapter — pure transport, owns no
+    # business logic; see inbound.py. Runs as an independent background
+    # task sharing session.page_lock with outbound sending. A failure to
+    # start this must never take down outbound sending, hence the guard.
+    inbound_task = None
+    try:
+        import inbound as inbound_module
+        inbound_task = asyncio.create_task(inbound_module.inbound_listener_loop(session))
+    except Exception as e:
+        logger.warning("worker: inbound listener failed to start (non-fatal, outbound sending unaffected): %s", e)
+
     # Startup DOM health check — log which registry selectors resolve on the live
     # WhatsApp DOM so verification selector drift is visible immediately.
     try:
@@ -556,6 +571,8 @@ async def main() -> None:
         logger.info("worker: shutting down...")
     finally:
         heartbeat_task.cancel()
+        if inbound_task is not None:
+            inbound_task.cancel()
         await session.stop()
 
 

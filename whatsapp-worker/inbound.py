@@ -124,6 +124,22 @@ def _fallback_message_id(group_name: str, text: str, pre_plain: Optional[str]) -
     return "fallback:" + hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()[:24]
 
 
+def _pseudo_identity_from_name(group_name: str, sender_name: str) -> str:
+    """Stable digits-only fallback identifier for a confirmed group member
+    whose real phone number couldn't be read from either the message DOM or
+    the Group Info panel (WhatsApp's member list shows display names, not
+    numbers, once a push name is set). ONLY ever called after
+    sender_is_group_member has already resolved True — this is purely a
+    conversation-state key (dispatcher.py keys multi-turn state by this
+    string; the CRM module never reads sender_phone at all), never a
+    security decision — group membership already gated that. Deterministic
+    per (group, name) so the same sender's conversation state stays stable
+    across turns, digits-only so dispatcher.py's _normalize_sender leaves it
+    untouched."""
+    digest = hashlib.sha256(f"{group_name}|{sender_name.strip().lower()}".encode("utf-8")).hexdigest()
+    return str(int(digest[:16], 16))[:15]
+
+
 class KnownGroupsCache:
     """Refreshes the agent-mapped group name list from the backend on a
     timer, so we don't hit the Agent Registry on every poll cycle."""
@@ -372,6 +388,8 @@ async def _scan_group_for_new_messages(
             participants_fetched = True
         is_member, matched_phone = await _match_group_member(participants, sender_name)
         phone = phone or matched_phone
+        if not phone and is_member and sender_name:
+            phone = _pseudo_identity_from_name(group_name, sender_name)
 
         new_messages.append({
             "message_id": message_id,

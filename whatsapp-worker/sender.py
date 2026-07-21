@@ -523,14 +523,19 @@ async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optiona
     old class-name/data-id-prefix heuristics no longer match anything — that
     build renders every message row with the same generic atomic CSS classes
     regardless of direction, and data-id no longer carries a true_/false_
-    prefix. The bubble's own tail element, however, still carries a stable
-    semantic marker (data-icon="tail-out"/"tail-in") that survived the
-    rewrite, so it's checked first."""
+    prefix. Two markers did survive the rewrite: the bubble's tail element
+    (data-icon="tail-out"/"tail-in") and an accessibility label WhatsApp
+    stamps on every one of the account's own messages
+    (aria-label="You:"). The tail is only rendered on the first bubble of a
+    consecutive run from the same sender — a second message sent back-to-back
+    by the same person, with no reply in between, won't have one — so the
+    aria-label check (unaffected by grouping) is checked first."""
     try:
         return await page.evaluate("""([sel, idx]) => {
             const els = document.querySelectorAll(sel);
             if (idx >= els.length) return null;
             const el = els[idx];
+            if (el.querySelector('span[aria-label="You:"]')) return true;
             if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return true;
             if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return false;
             let node = el;

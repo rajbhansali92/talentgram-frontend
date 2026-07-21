@@ -185,6 +185,41 @@ export default function ProjectEdit() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeTab]);
 
+    // The tab bar uses position:fixed rather than sticky: this app's <html>/
+    // <body> both carry their own overflow-y:auto (see index.css), which
+    // makes the browser treat <body> as the sticky containing block even
+    // though <html> is the element that actually scrolls — the net effect
+    // is that position:sticky never engages anywhere in this layout (the
+    // existing sidebar's sticky top-0 has the same problem). Fixed
+    // positioning is immune to that, at the cost of measuring the sidebar's
+    // width ourselves so the bar starts exactly where the content column
+    // does, and reacting to its resize/collapse transition.
+    const tabBarRef = useRef(null);
+    const [tabBarLayout, setTabBarLayout] = useState({ left: 0, height: 0 });
+
+    useEffect(() => {
+        if (!isEdit) return;
+        const updateLayout = () => {
+            const aside = document.querySelector("aside");
+            const asideVisible = aside && getComputedStyle(aside).display !== "none";
+            const barEl = tabBarRef.current;
+            setTabBarLayout({
+                left: asideVisible ? aside.getBoundingClientRect().right : 0,
+                height: barEl ? barEl.getBoundingClientRect().height : 0,
+            });
+        };
+        updateLayout();
+        const ro = new ResizeObserver(updateLayout);
+        const aside = document.querySelector("aside");
+        if (aside) ro.observe(aside);
+        if (tabBarRef.current) ro.observe(tabBarRef.current);
+        window.addEventListener("resize", updateLayout);
+        return () => {
+            ro.disconnect();
+            window.removeEventListener("resize", updateLayout);
+        };
+    }, [isEdit]);
+
     const [project, setProject] = useState(empty);
     const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -676,33 +711,38 @@ export default function ProjectEdit() {
             </div>
 
             {isEdit && (
-                <div
-                    className="sticky top-14 md:top-0 z-30 bg-white border-b border-[#eaeaea] mb-6"
-                    data-testid="project-tab-bar"
-                >
-                    <div className="flex gap-1 overflow-x-auto tg-noscrollbar">
-                        {PROJECT_TABS.map((tab) => (
-                            <button
-                                key={tab.id}
-                                type="button"
-                                onClick={() => selectTab(tab.id)}
-                                data-testid={`project-tab-${tab.id}`}
-                                aria-current={activeTab === tab.id ? "true" : undefined}
-                                className={`shrink-0 px-4 md:px-5 py-3.5 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
-                                    activeTab === tab.id
-                                        ? "border-black text-black"
-                                        : "border-transparent text-black/45 hover:text-black/70"
-                                }`}
-                            >
-                                {tab.label}
-                            </button>
-                        ))}
+                <>
+                    <div style={{ height: tabBarLayout.height || 53 }} aria-hidden="true" />
+                    <div
+                        ref={tabBarRef}
+                        className="fixed top-14 md:top-0 right-0 z-30 bg-white border-b border-[#eaeaea]"
+                        style={{ left: tabBarLayout.left }}
+                        data-testid="project-tab-bar"
+                    >
+                        <div className="flex gap-1 overflow-x-auto tg-noscrollbar max-w-7xl mx-auto px-6 md:px-10">
+                            {PROJECT_TABS.map((tab) => (
+                                <button
+                                    key={tab.id}
+                                    type="button"
+                                    onClick={() => selectTab(tab.id)}
+                                    data-testid={`project-tab-${tab.id}`}
+                                    aria-current={activeTab === tab.id ? "true" : undefined}
+                                    className={`shrink-0 px-4 md:px-5 py-3.5 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                                        activeTab === tab.id
+                                            ? "border-black text-black"
+                                            : "border-transparent text-black/45 hover:text-black/70"
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
-                </div>
+                </>
             )}
 
             {/* Project details */}
-            <div style={{ display: !isEdit || activeTab === "details" ? "block" : "none" }} data-testid="project-tab-panel-details">
+            <div className={isEdit ? "mt-6" : undefined} style={{ display: !isEdit || activeTab === "details" ? "block" : "none" }} data-testid="project-tab-panel-details">
             <section className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mb-6">
                 <div className="flex items-center justify-between mb-6">
                     <p className="eyebrow">Project Details</p>

@@ -23,6 +23,7 @@ import { displayInstagramHandle, instagramProfileUrl, firstNameOf } from "@/lib/
 // Reuse Browse Roster's existing Quick View drawer + breakpoint hook verbatim
 // — no parallel implementation, no duplicated talent-detail rendering.
 import { TalentPreviewDrawer, useMediaQuery } from "./TalentBrowserModal";
+import { getCachedTalent, fetchTalentOnce } from "@/lib/talentPreviewCache";
 // Icons from lucide-react for consistency and maintainability
 import {
     User,
@@ -367,26 +368,53 @@ const PipelineCard = memo(function PipelineCard({
     }, [projectId, item.id, displayName, refresh]);
 
     // Quick View — reuses the exact TalentPreviewDrawer component from
-    // Browse Roster's TalentBrowserModal (imported above), fetching the same
-    // full talent record via the existing /talents/{id} endpoint. No parallel
+    // Browse Roster's TalentBrowserModal (imported above); no parallel
     // drawer, no duplicated rendering.
-    const openQuickView = useCallback(async (e) => {
+    //
+    // Instant-open + lazy hydration + session cache: the pipeline card
+    // already carries name/instagram_handle/image_url (see
+    // backend/routers/casting_pipeline.py's _talent_merge_fields), and
+    // TalentPreviewDrawer already renders "—" for any field it doesn't
+    // have — so opening with that partial object needs zero network
+    // round trips and zero drawer changes. `media` is the one field only
+    // a full /talents/{id} response carries, so its presence is the
+    // hydrated-vs-partial signal. talentPreviewCache (module-level, shared
+    // across every card) makes every open after the first — same talent,
+    // re-open, or a different already-opened talent — free.
+    const openQuickView = useCallback((e) => {
         e.stopPropagation();
         if (!item.talent_id) {
             toast.error("No talent linked to this card");
             return;
         }
+        const cached = getCachedTalent(item.talent_id);
+        const initial = cached || {
+            id: item.talent_id,
+            name: displayName,
+            instagram_handle: displayIg,
+            image_url: item.image_url,
+        };
+        setPreviewTalent(initial);
+
+        const isFullyHydrated = Array.isArray(initial.media);
+        if (isFullyHydrated) return; // cache hit — no request at all
+
         setPreviewLoading(true);
-        try {
+        fetchTalentOnce(item.talent_id, async () => {
             const { data } = await adminApi.get(`/talents/${item.talent_id}`);
-            setPreviewTalent(data);
-        } catch (err) {
-            console.error("Quick View failed:", err);
-            toast.error(formatErrorDetail(err, "Failed to load talent preview"));
-        } finally {
-            setPreviewLoading(false);
-        }
-    }, [item.talent_id]);
+            return data;
+        })
+            .then((full) => {
+                // Only patch the drawer if the user is still looking at THIS
+                // talent — they may have opened a different card meanwhile.
+                setPreviewTalent((prev) => (prev && prev.id === item.talent_id ? full : prev));
+            })
+            .catch((err) => {
+                console.error("Quick View hydration failed:", err);
+                toast.error(formatErrorDetail(err, "Failed to load full talent details"));
+            })
+            .finally(() => setPreviewLoading(false));
+    }, [item.talent_id, item.image_url, displayName, displayIg]);
 
     const closeMoreMenu = useCallback(() => {
         setShowMoreActions(false);
@@ -862,8 +890,7 @@ const PipelineCard = memo(function PipelineCard({
                     </button>
                     <button
                         onClick={openQuickView}
-                        disabled={previewLoading}
-                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors disabled:opacity-60"
+                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors"
                         title="Quick View"
                     >
                         {previewLoading ? (

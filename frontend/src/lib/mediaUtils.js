@@ -19,6 +19,18 @@ export function posterUrl(media) {
 }
 
 /**
+ * First token of a name, trimmed and whitespace-collapsed — mirrors the
+ * backend's _first_name() (routers/whatsapp.py) so any client-side text
+ * that greets/addresses someone by name (e.g. a confirmation dialog) matches
+ * what the WhatsApp Engine actually sends. Never returns undefined; falls
+ * back to "" for a missing name.
+ */
+export function firstNameOf(name) {
+    const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+    return parts[0] || "";
+}
+
+/**
  * Returns true if the media item represents a video.
  */
 export function isVideo(media) {

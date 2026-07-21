@@ -311,6 +311,13 @@ class SourceParams(BaseModel):
     # PROJECT
     project_id: Optional[str] = None
     pipeline_stages: List[str] = Field(default_factory=list)
+    # Optional narrowing for PROJECT source — when set, only these talent_ids
+    # (still within pipeline_stages) are resolved. Empty/omitted preserves the
+    # original "every talent in these stages" behavior untouched. Added for
+    # single-talent triggers (e.g. a pipeline card's Follow-up Reminder
+    # button) that need the exact same PROJECT routing/template/delivery path
+    # without pulling in every other talent in that stage.
+    talent_ids: List[str] = Field(default_factory=list)
     # CRM (Marketing)
     contact_type: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
@@ -852,8 +859,11 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
     if source_type == "PROJECT":
         if not params.project_id:
             raise HTTPException(400, "project_id required for PROJECT source")
+        pipeline_query = {"project_id": params.project_id, "stage": {"$in": params.pipeline_stages}}
+        if params.talent_ids:
+            pipeline_query["talent_id"] = {"$in": params.talent_ids}
         rows = await db.casting_pipeline.find(
-            {"project_id": params.project_id, "stage": {"$in": params.pipeline_stages}},
+            pipeline_query,
             {"_id": 0, "talent_id": 1},
         ).to_list(5000)
         tids = list({r["talent_id"] for r in rows})

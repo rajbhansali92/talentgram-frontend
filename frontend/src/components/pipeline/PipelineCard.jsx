@@ -19,7 +19,7 @@ import {
     normaliseStage,
     VISIBLE_ACTIONS_PER_CARD,
 } from "./constants";
-import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
+import { displayInstagramHandle, instagramProfileUrl, firstNameOf } from "@/lib/mediaUtils";
 // Icons from lucide-react for consistency and maintainability
 import {
     User,
@@ -29,6 +29,9 @@ import {
     Phone,
     MoreHorizontal,
     Check,
+    Bell,
+    X,
+    Loader2,
 } from "lucide-react";
 
 // ============================================================================
@@ -128,6 +131,8 @@ const PipelineCard = memo(function PipelineCard({
 }) {
     const navigate = useNavigate();
     const [moving, setMoving] = useState(false);
+    const [sendingReminder, setSendingReminder] = useState(false);
+    const [removing, setRemoving] = useState(false);
     
     const handleCardClick = useCallback((e) => {
         // If clicking input, buttons, or links, do not navigate to profile
@@ -246,7 +251,75 @@ const PipelineCard = memo(function PipelineCard({
             }
         },
     }), [displayPhone]);
-    
+
+    // Send Follow-up Reminder — reuses the existing WhatsApp Engine end to
+    // end: the same PROJECT recipient-resolution path (group-name priority,
+    // then phone number — identical routing to any real campaign), the same
+    // system "Follow Up" template (looked up by its stable slug, never
+    // duplicated), and the same batch/job/worker delivery pipeline. This
+    // handler only narrows PROJECT resolution to this one talent via the
+    // talent_ids filter added to SourceParams — no new messaging logic.
+    const sendReminder = useCallback(async (e) => {
+        e.stopPropagation();
+        if (!item.talent_id) {
+            toast.error("No talent linked to this card");
+            return;
+        }
+        if (!window.confirm(`Send Follow-up reminder to ${firstNameOf(displayName) || displayName}?`)) {
+            return;
+        }
+        setSendingReminder(true);
+        try {
+            const { data: templates } = await adminApi.get("/whatsapp/templates");
+            const followUp = (templates || []).find((t) => t.slug === "follow_up");
+            if (!followUp) {
+                toast.error('Follow Up template not found — check WhatsApp Engine → Templates.');
+                return;
+            }
+            const { data: batch } = await adminApi.post("/whatsapp/batches", {
+                source_type: "PROJECT",
+                source_params: {
+                    project_id: projectId,
+                    pipeline_stages: [canonicalStage],
+                    talent_ids: [item.talent_id],
+                },
+                template_id: followUp.id,
+                is_dry_run: false,
+            });
+            if (!batch?.jobs?.length) {
+                toast.error(`${firstNameOf(displayName) || displayName} has no WhatsApp number or group on file`);
+                return;
+            }
+            toast.success(`Follow-up reminder queued for ${firstNameOf(displayName) || displayName}`);
+        } catch (err) {
+            console.error("Send reminder failed:", err);
+            toast.error(formatErrorDetail(err, "Failed to send reminder"));
+        } finally {
+            setSendingReminder(false);
+        }
+    }, [item.talent_id, displayName, projectId, canonicalStage]);
+
+    // Remove from Ask To Test — reuses the existing single-entry pipeline
+    // delete endpoint (already built, previously unused by any UI) which
+    // deletes only this one casting_pipeline row. It never touches the
+    // talent, submission, application, media, or project records.
+    const removeFromAskToTest = useCallback(async (e) => {
+        e.stopPropagation();
+        if (!window.confirm(`Remove ${firstNameOf(displayName) || displayName} from Ask To Test?`)) {
+            return;
+        }
+        setRemoving(true);
+        try {
+            await adminApi.delete(`/projects/${projectId}/pipeline/${item.id}`);
+            await refresh();
+            toast.success(`Removed ${firstNameOf(displayName) || displayName} from Ask To Test`);
+        } catch (err) {
+            console.error("Remove from Ask To Test failed:", err);
+            toast.error(formatErrorDetail(err, "Failed to remove"));
+            setRemoving(false);
+        }
+    }, [projectId, item.id, displayName, refresh]);
+
     const closeMoreMenu = useCallback(() => {
         setShowMoreActions(false);
     }, []);
@@ -468,6 +541,26 @@ const PipelineCard = memo(function PipelineCard({
                 </div>
             )}
 
+            {/* Remove from Ask To Test — ONLY this stage; deletes just this one
+                pipeline entry (existing DELETE endpoint), never the talent/
+                submission/application/media/project. */}
+            {!readOnly && canonicalStage === "ask_to_test" && (
+                <button
+                    type="button"
+                    onClick={removeFromAskToTest}
+                    disabled={removing}
+                    aria-label={`Remove ${displayName} from Ask To Test`}
+                    title="Remove from Ask To Test"
+                    className="absolute top-2 right-2 z-30 w-5 h-5 rounded-full flex items-center justify-center text-black/35 hover:text-black/70 hover:bg-black/[0.06] transition-colors disabled:opacity-40"
+                >
+                    {removing ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                        <X className="w-3 h-3" strokeWidth={2.5} />
+                    )}
+                </button>
+            )}
+
             <div className="p-3 md:p-4 space-y-2 md:space-y-2.5">
                 {/* Row 1: Identity block — Avatar + Name/Handle + workflow chips inline */}
                 <div className="flex items-start gap-3">
@@ -685,6 +778,18 @@ const PipelineCard = memo(function PipelineCard({
                             <Phone className="w-3.5 h-3.5" />
                         </button>
                     )}
+                    <button
+                        onClick={sendReminder}
+                        disabled={sendingReminder}
+                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors disabled:opacity-40"
+                        title="Send Follow-up Reminder"
+                    >
+                        {sendingReminder ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                            <Bell className="w-3.5 h-3.5" />
+                        )}
+                    </button>
                 </div>
             )}
 

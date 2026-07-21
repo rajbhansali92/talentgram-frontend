@@ -47,17 +47,25 @@ PAGE_LOAD_TIMEOUT_MS: int = int(os.environ.get("WA_PAGE_LOAD_MS", "60000"))
 LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
 
 # --- Inbound Agent Platform transport adapter -------------------------------
-# How often to poll each known agent-mapped group for new messages.
-INBOUND_POLL_SEC: int = int(os.environ.get("WA_INBOUND_POLL_SEC", "8"))
+# How often to poll each known agent-mapped group for new messages. Lowered
+# from the original 8s (2026-07-21 speed pass) now that _open_group_chat has
+# an already-open fast path — most cycles no longer pay the full sidebar
+# search cost, so polling faster no longer means proportionally more load.
+INBOUND_POLL_SEC: int = int(os.environ.get("WA_INBOUND_POLL_SEC", "2"))
 
 # How often to refresh the list of agent-mapped group names from the backend.
 INBOUND_GROUPS_REFRESH_SEC: int = int(os.environ.get("WA_INBOUND_GROUPS_REFRESH_SEC", "120"))
 
 # How often to re-read a WhatsApp group's participant list (only consumed by
 # agents configured with security_mode="group_members"). This costs a real
-# page navigation (open Group Info, close it) each time it's stale, so it's
-# refreshed far less often than the 8s message-poll cycle.
-PARTICIPANTS_REFRESH_SEC: int = int(os.environ.get("WA_PARTICIPANTS_REFRESH_SEC", "90"))
+# page navigation (open Group Info, close it) each time it's stale.
+# GroupParticipantsCache also force-refreshes on any membership-match miss
+# (self-healing for a newly-added member), so this interval mainly bounds
+# how fast a REMOVED member loses access — a miss on their existing cached
+# entry isn't detectable until the next refresh. Kept short (not the 8s
+# poll cadence) since a removed member losing access within ~20s, not
+# 90s, is the actual requirement.
+PARTICIPANTS_REFRESH_SEC: int = int(os.environ.get("WA_PARTICIPANTS_REFRESH_SEC", "20"))
 
 # How long a processed message id is remembered for dedup (survives worker
 # restarts via a Mongo TTL index — see whatsapp_inbound_seen).

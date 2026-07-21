@@ -206,10 +206,10 @@ class GroupParticipantsCache:
         self._by_group: dict[str, list] = {}
         self._last_refresh: dict[str, float] = {}
 
-    async def get(self, page, group_name: str) -> Optional[list]:
+    async def get(self, page, group_name: str, force: bool = False) -> Optional[list]:
         now = time.monotonic()
         last = self._last_refresh.get(group_name, 0.0)
-        if now - last < config.PARTICIPANTS_REFRESH_SEC and group_name in self._by_group:
+        if not force and now - last < config.PARTICIPANTS_REFRESH_SEC and group_name in self._by_group:
             return self._by_group[group_name]
         participants = await sender.get_group_participants(page, group_name)
         if participants is None:
@@ -411,6 +411,14 @@ async def _scan_group_for_new_messages(
             participants = await participants_cache.get(page, group_name)
             participants_fetched = True
         is_member, matched_phone = await _match_group_member(participants, sender_name)
+        if not is_member and sender_name:
+            # Self-healing: don't let a merely-stale cache (this sender may
+            # have just been added to the group) cost them a whole
+            # PARTICIPANTS_REFRESH_SEC wait — force one fresh read before
+            # concluding non-membership. Bounded cost: only happens on an
+            # actual match miss, not on every scan.
+            participants = await participants_cache.get(page, group_name, force=True)
+            is_member, matched_phone = await _match_group_member(participants, sender_name)
         phone = phone or matched_phone
         if not phone and is_member and sender_name:
             phone = _pseudo_identity_from_name(group_name, sender_name)
@@ -463,16 +471,48 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
         return None
 
 
-async def _send_reply(page, group_name: str, reply_text: str) -> None:
+async def _send_reply(page, group_name: str, reply_text: str) -> float:
+    """Returns elapsed seconds spent sending (0.0 if there was nothing to send)."""
     if not reply_text:
-        return
+        return 0.0
+    t0 = time.monotonic()
     try:
         result = await sender.send_whatsapp_message(
             page, destination_type="group", destination=group_name, message_body=reply_text,
         )
-        logger.info("inbound: reply send result group=%r state=%s", group_name, result.get("state"))
+        elapsed = time.monotonic() - t0
+        logger.info("inbound: reply send result group=%r state=%s elapsed_sec=%.2f",
+                     group_name, result.get("state"), elapsed)
+        return elapsed
     except Exception:
         logger.exception("inbound: failed to send reply into group=%r", group_name)
+        return time.monotonic() - t0
+
+
+# If the backend hasn't responded within this long, send an immediate
+# acknowledgment so the user isn't left wondering whether their message was
+# seen — the backend is normally fast (~1-1.5s observed live); this only
+# fires on genuinely slow calls, so the common case never sends the extra
+# message (which would itself cost a full Playwright send+verify cycle).
+ACK_THRESHOLD_SEC = 2.0
+ACK_TEXT = "Got it — processing..."
+
+# Rolling latency stats for observability (Part 6) — a fixed-size window is
+# enough to see current trends in production logs without standing up a
+# separate metrics store.
+_LATENCY_WINDOW: list[float] = []
+_LATENCY_WINDOW_MAX = 50
+
+
+def _record_latency(total_sec: float) -> None:
+    _LATENCY_WINDOW.append(total_sec)
+    if len(_LATENCY_WINDOW) > _LATENCY_WINDOW_MAX:
+        _LATENCY_WINDOW.pop(0)
+    avg = sum(_LATENCY_WINDOW) / len(_LATENCY_WINDOW)
+    logger.info(
+        "inbound: METRICS window=%d avg_total_sec=%.2f max_total_sec=%.2f latest_sec=%.2f",
+        len(_LATENCY_WINDOW), avg, max(_LATENCY_WINDOW), total_sec,
+    )
 
 
 async def poll_once(
@@ -520,13 +560,15 @@ async def poll_once(
                     await _mark_processed(msg["message_id"])
                     continue
 
+                t_detected = time.monotonic()
                 logger.info(
                     "inbound: new message group=%r sender_name=%r sender_phone=%r "
                     "sender_is_group_member=%r message_id=%r text=%r",
                     group_name, msg["sender_name"], phone, msg["sender_is_group_member"],
                     msg["message_id"], msg["text"][:120],
                 )
-                result = await _post_inbound(
+
+                backend_task = asyncio.create_task(_post_inbound(
                     http,
                     group_name=group_name,
                     sender_phone=phone,
@@ -534,7 +576,19 @@ async def poll_once(
                     text=msg["text"],
                     message_id=msg["message_id"],
                     sender_is_group_member=msg["sender_is_group_member"],
-                )
+                ))
+                done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
+                ack_sent_sec = None
+                if backend_task not in done:
+                    ack_elapsed = await _send_reply(page, group_name, ACK_TEXT)
+                    ack_sent_sec = round(time.monotonic() - t_detected, 2)
+                    logger.info(
+                        "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
+                        "message_id=%r", ACK_THRESHOLD_SEC, ack_elapsed, msg["message_id"],
+                    )
+                result = await backend_task
+                t_backend_done = time.monotonic()
+
                 if result is None:
                     # Backend call failed — do NOT mark as processed, so a
                     # transient outage gets a chance to be retried on the
@@ -544,8 +598,17 @@ async def poll_once(
                 await _mark_processed(msg["message_id"])
 
                 reply = result.get("reply")
+                reply_elapsed = 0.0
                 if reply:
-                    await _send_reply(page, group_name, reply)
+                    reply_elapsed = await _send_reply(page, group_name, reply)
+                t_total = time.monotonic() - t_detected
+                logger.info(
+                    "inbound: TIMING message_id=%r backend_sec=%.2f reply_send_sec=%.2f "
+                    "ack_sent_at_sec=%s total_sec=%.2f",
+                    msg["message_id"], t_backend_done - t_detected, reply_elapsed,
+                    ack_sent_sec, t_total,
+                )
+                _record_latency(t_total)
 
 
 async def inbound_listener_loop(session) -> None:

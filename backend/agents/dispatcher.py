@@ -43,6 +43,25 @@ def _normalize_sender(raw: str) -> str:
     return digits
 
 
+class _BlankOnMissing(dict):
+    """Renders a missing {placeholder} as empty string instead of raising —
+    a question template referencing a not-yet-collected field degrades to
+    slightly-generic phrasing rather than crashing the conversation."""
+    def __missing__(self, key):
+        return ""
+
+
+def _render_question(template: str, collected: dict) -> str:
+    """A domain module's FieldSpec.question may reference already-collected
+    values (e.g. "What's {name}'s phone number?") to sound like a real
+    conversation instead of a form. Purely generic string substitution —
+    this engine still has no idea what "name" means."""
+    try:
+        return " ".join(template.format_map(_BlankOnMissing(collected)).split())
+    except Exception:
+        return template
+
+
 async def _collect_or_advance(agent, intent, conv: dict, text: str) -> DispatchResult:
     """Handle one turn while the conversation is in "collecting" or
     "editing" step. Returns the reply; caller is responsible for the
@@ -82,7 +101,7 @@ async def _collect_or_advance(agent, intent, conv: dict, text: str) -> DispatchR
         await conversation.update_conversation(
             agent.agent_id, conv["phone"], collected=collected, step="collecting"
         )
-        return DispatchResult(handled=True, reply=still_missing.question)
+        return DispatchResult(handled=True, reply=_render_question(still_missing.question, collected))
 
     await conversation.update_conversation(
         agent.agent_id, conv["phone"], collected=collected, step="confirming"
@@ -171,7 +190,8 @@ async def handle_inbound_message(
             # the message that opens the conversation).
             missing = next_missing_field(intent, collected)
             if missing:
-                reply = ("\n\n".join(initial_errors) + "\n\n" + missing.question) if initial_errors else missing.question
+                question = _render_question(missing.question, collected)
+                reply = ("\n\n".join(initial_errors) + "\n\n" + question) if initial_errors else question
             else:
                 await conversation.update_conversation(
                     agent.agent_id, phone, collected=collected, step="confirming"

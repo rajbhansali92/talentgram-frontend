@@ -1117,7 +1117,24 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     Every attempt emits a structured diagnostic record (Investigation 6). On
     NOT_FOUND a DOM snapshot is stored. The search box is ALWAYS inside #side, so
     typing can never land in the conversation composer.
+
+    Fast path (2026-07-21, speed pass): the inbound listener calls this once
+    per group on every poll cycle, and a reply into that same group calls it
+    again moments later via send_whatsapp_message — in the steady-state case
+    the requested chat is USUALLY already the open one. A full open costs a
+    sidebar reset + search-box focus + type + read-back + candidate click
+    (several hundred ms to a few seconds); checking whether the right chat is
+    already open costs a handful of cheap locator reads. Skip straight to
+    'OPENED' when it is.
     """
+    try:
+        already_ready, hdr_found, _, _ = await _verify_chat_open(page, group_name)
+        if already_ready and hdr_found:
+            logger.info("sender: group %r already open — skipping sidebar search (fast path)", group_name)
+            return "OPENED"
+    except Exception as exc:
+        logger.info("sender: fast-path already-open check failed (%s) — falling back to full open", exc)
+
     diag = {
         "requested_group": group_name,
         "requested_norm": _norm_group(group_name),

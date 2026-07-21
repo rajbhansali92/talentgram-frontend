@@ -10,6 +10,7 @@ agents/modules/__init__.py.
 """
 from __future__ import annotations
 
+import difflib
 import re
 
 from core import db
@@ -86,15 +87,39 @@ def _validate_phone(raw: str) -> ValidationResult:
     if not norm:
         return ValidationResult(
             ok=False,
-            error="That doesn't look like a valid phone number. Please send 7-15 digits, e.g. 9876543210.",
+            error=(
+                "I think this phone number is incomplete.\n"
+                "Please send a valid mobile number including country code, e.g. 919876543210."
+            ),
         )
     return ValidationResult(ok=True, value=norm)
+
+
+# Auto-accept a close match above this similarity — covers ordinary typos
+# ("Brand Manger", "castng director") where one candidate is clearly what
+# was meant. Below it but still a plausible match, ask instead of guessing —
+# several similarly-close roles (e.g. "Casting Head" vs Casting
+# Director/Agency Producer/Casting Company) are genuinely ambiguous.
+_ROLE_AUTOCORRECT_CUTOFF = 0.85
 
 
 def _validate_role(raw: str) -> ValidationResult:
     key = re.sub(r"\s+", " ", (raw or "").strip().lower()).replace("_", " ")
     if key in SUPPORTED_ROLES:
         return ValidationResult(ok=True, value=SUPPORTED_ROLES[key])
+
+    close = difflib.get_close_matches(key, SUPPORTED_ROLES.keys(), n=3, cutoff=0.6)
+    if close:
+        best_ratio = difflib.SequenceMatcher(None, key, close[0]).ratio()
+        if best_ratio >= _ROLE_AUTOCORRECT_CUTOFF:
+            return ValidationResult(ok=True, value=SUPPORTED_ROLES[close[0]])
+        options = [SUPPORTED_ROLES[k] for k in close]
+        numbered = "\n".join(f"{i}. {opt}" for i, opt in enumerate(options, start=1))
+        return ValidationResult(
+            ok=False,
+            error=f'I couldn\'t recognise "{raw.strip()}".\nDid you mean:\n{numbered}\n\nPlease send the correct one.',
+        )
+
     supported = ", ".join(sorted(set(SUPPORTED_ROLES.values())))
     return ValidationResult(
         ok=False,
@@ -146,10 +171,10 @@ CREATE_CONTACT_INTENT = IntentDefinition(
     triggers=["save", "add", "new contact"],
     fields=[
         FieldSpec(key="name", label="Name", question="What's the name?", validate=_validate_name),
-        FieldSpec(key="phone", label="Phone", question="What's the phone?", validate=_validate_phone,
-                   aliases=["phone number", "mobile", "number"]),
-        FieldSpec(key="role", label="Role", question="What's the role?", validate=_validate_role,
-                   aliases=["contact type", "designation"]),
+        FieldSpec(key="phone", label="Phone", question="Got it. What's {name}'s phone number?",
+                   validate=_validate_phone, aliases=["phone number", "mobile", "number"]),
+        FieldSpec(key="role", label="Role", question="Great. What's {name}'s role or designation?",
+                   validate=_validate_role, aliases=["contact type", "designation"]),
     ],
     executor=_create_contact_executor,
 )

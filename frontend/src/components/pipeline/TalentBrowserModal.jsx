@@ -253,7 +253,10 @@ const sortTalents = (talents) => {
 // ============================================================================
 
 // Media query hook for responsive design
-const useMediaQuery = (query) => {
+// Named export (default export below stays the primary API) so other
+// surfaces — e.g. Pipeline cards — can reuse the exact same breakpoint
+// hook and preview drawer instead of building parallel implementations.
+export const useMediaQuery = (query) => {
     const [matches, setMatches] = useState(false);
     
     useEffect(() => {
@@ -1386,7 +1389,7 @@ TalentListRow.displayName = "TalentListRow";
 // TALENT SNEAK PREVIEW / QUICK VIEW
 // ============================================================================
 
-const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
+export const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
     if (!talent) return null;
     
     const imageUrl = pickImage(talent);

@@ -20,6 +20,9 @@ import {
     VISIBLE_ACTIONS_PER_CARD,
 } from "./constants";
 import { displayInstagramHandle, instagramProfileUrl, firstNameOf } from "@/lib/mediaUtils";
+// Reuse Browse Roster's existing Quick View drawer + breakpoint hook verbatim
+// — no parallel implementation, no duplicated talent-detail rendering.
+import { TalentPreviewDrawer, useMediaQuery } from "./TalentBrowserModal";
 // Icons from lucide-react for consistency and maintainability
 import {
     User,
@@ -32,6 +35,7 @@ import {
     Bell,
     X,
     Loader2,
+    Eye,
 } from "lucide-react";
 
 // ============================================================================
@@ -131,19 +135,36 @@ const PipelineCard = memo(function PipelineCard({
 }) {
     const navigate = useNavigate();
     const [moving, setMoving] = useState(false);
-    const [sendingReminder, setSendingReminder] = useState(false);
-    const [removing, setRemoving] = useState(false);
+    // 'idle' | 'loading' | 'success' — drives Bell/X icon swap + disabled state.
+    // A ref (not just the state) guards against a second click firing before
+    // React re-renders with disabled=true, since window.confirm() only blocks
+    // re-entrancy up to the moment it returns.
+    const [reminderState, setReminderState] = useState('idle');
+    const [removeState, setRemoveState] = useState('idle');
+    const reminderInFlightRef = useRef(false);
+    const removeInFlightRef = useRef(false);
+    const reminderResetTimeoutRef = useRef(null);
+    const removeRefreshTimeoutRef = useRef(null);
+    const [previewTalent, setPreviewTalent] = useState(null);
+    const [previewLoading, setPreviewLoading] = useState(false);
+    const isMobile = useMediaQuery('(max-width: 767px)');
     
     const handleCardClick = useCallback((e) => {
         // If clicking input, buttons, or links, do not navigate to profile
         if (e.target.closest('button') || e.target.closest('a') || e.target.closest('input')) {
             return;
         }
+        // The Quick View drawer is rendered via createPortal (into
+        // document.body), but React bubbles its events through the
+        // component tree regardless of DOM position — without this guard,
+        // clicking the drawer's backdrop/content to close it would also
+        // fire this card's navigate-to-profile handler.
+        if (previewTalent) return;
         if (readOnly) return;
         if (item.talent_id) {
             navigate(`/admin/talents/${item.talent_id}`);
         }
-    }, [item.talent_id, readOnly, navigate]);
+    }, [item.talent_id, readOnly, navigate, previewTalent]);
 
     const [showMoreActions, setShowMoreActions] = useState(false);
     const [showActionRail, setShowActionRail] = useState(false);
@@ -259,8 +280,13 @@ const PipelineCard = memo(function PipelineCard({
     // duplicated), and the same batch/job/worker delivery pipeline. This
     // handler only narrows PROJECT resolution to this one talent via the
     // talent_ids filter added to SourceParams — no new messaging logic.
+    //
+    // UX state machine: idle -> loading -> success -> (1.5s) -> idle, or
+    // idle -> loading -> idle on failure. reminderInFlightRef blocks a
+    // second invocation firing before React commits disabled=true.
     const sendReminder = useCallback(async (e) => {
         e.stopPropagation();
+        if (reminderInFlightRef.current) return;
         if (!item.talent_id) {
             toast.error("No talent linked to this card");
             return;
@@ -268,12 +294,15 @@ const PipelineCard = memo(function PipelineCard({
         if (!window.confirm(`Send Follow-up reminder to ${firstNameOf(displayName) || displayName}?`)) {
             return;
         }
-        setSendingReminder(true);
+        reminderInFlightRef.current = true;
+        setReminderState('loading');
         try {
             const { data: templates } = await adminApi.get("/whatsapp/templates");
             const followUp = (templates || []).find((t) => t.slug === "follow_up");
             if (!followUp) {
                 toast.error('Follow Up template not found — check WhatsApp Engine → Templates.');
+                reminderInFlightRef.current = false;
+                setReminderState('idle');
                 return;
             }
             const { data: batch } = await adminApi.post("/whatsapp/batches", {
@@ -288,14 +317,21 @@ const PipelineCard = memo(function PipelineCard({
             });
             if (!batch?.jobs?.length) {
                 toast.error(`${firstNameOf(displayName) || displayName} has no WhatsApp number or group on file`);
+                reminderInFlightRef.current = false;
+                setReminderState('idle');
                 return;
             }
             toast.success(`Follow-up reminder queued for ${firstNameOf(displayName) || displayName}`);
+            setReminderState('success');
+            reminderResetTimeoutRef.current = setTimeout(() => {
+                reminderInFlightRef.current = false;
+                setReminderState('idle');
+            }, 1500);
         } catch (err) {
             console.error("Send reminder failed:", err);
             toast.error(formatErrorDetail(err, "Failed to send reminder"));
-        } finally {
-            setSendingReminder(false);
+            reminderInFlightRef.current = false;
+            setReminderState('idle');
         }
     }, [item.talent_id, displayName, projectId, canonicalStage]);
 
@@ -303,22 +339,54 @@ const PipelineCard = memo(function PipelineCard({
     // delete endpoint (already built, previously unused by any UI) which
     // deletes only this one casting_pipeline row. It never touches the
     // talent, submission, application, media, or project records.
+    //
+    // UX state machine: idle -> loading -> success -> (checkmark shown ~1.5s)
+    // -> refresh() removes the card from the board naturally. On failure,
+    // idle -> loading -> idle (X restored) with the existing error toast.
     const removeFromAskToTest = useCallback(async (e) => {
         e.stopPropagation();
+        if (removeInFlightRef.current) return;
         if (!window.confirm(`Remove ${firstNameOf(displayName) || displayName} from Ask To Test?`)) {
             return;
         }
-        setRemoving(true);
+        removeInFlightRef.current = true;
+        setRemoveState('loading');
         try {
             await adminApi.delete(`/projects/${projectId}/pipeline/${item.id}`);
-            await refresh();
+            setRemoveState('success');
             toast.success(`Removed ${firstNameOf(displayName) || displayName} from Ask To Test`);
+            removeRefreshTimeoutRef.current = setTimeout(() => {
+                refresh();
+            }, 1500);
         } catch (err) {
             console.error("Remove from Ask To Test failed:", err);
             toast.error(formatErrorDetail(err, "Failed to remove"));
-            setRemoving(false);
+            removeInFlightRef.current = false;
+            setRemoveState('idle');
         }
     }, [projectId, item.id, displayName, refresh]);
+
+    // Quick View — reuses the exact TalentPreviewDrawer component from
+    // Browse Roster's TalentBrowserModal (imported above), fetching the same
+    // full talent record via the existing /talents/{id} endpoint. No parallel
+    // drawer, no duplicated rendering.
+    const openQuickView = useCallback(async (e) => {
+        e.stopPropagation();
+        if (!item.talent_id) {
+            toast.error("No talent linked to this card");
+            return;
+        }
+        setPreviewLoading(true);
+        try {
+            const { data } = await adminApi.get(`/talents/${item.talent_id}`);
+            setPreviewTalent(data);
+        } catch (err) {
+            console.error("Quick View failed:", err);
+            toast.error(formatErrorDetail(err, "Failed to load talent preview"));
+        } finally {
+            setPreviewLoading(false);
+        }
+    }, [item.talent_id]);
 
     const closeMoreMenu = useCallback(() => {
         setShowMoreActions(false);
@@ -444,6 +512,12 @@ const PipelineCard = memo(function PipelineCard({
             if (hoverTimeoutRef.current) {
                 clearTimeout(hoverTimeoutRef.current);
             }
+            if (reminderResetTimeoutRef.current) {
+                clearTimeout(reminderResetTimeoutRef.current);
+            }
+            if (removeRefreshTimeoutRef.current) {
+                clearTimeout(removeRefreshTimeoutRef.current);
+            }
         };
     }, []);
     
@@ -548,16 +622,14 @@ const PipelineCard = memo(function PipelineCard({
                 <button
                     type="button"
                     onClick={removeFromAskToTest}
-                    disabled={removing}
+                    disabled={removeState !== 'idle'}
                     aria-label={`Remove ${displayName} from Ask To Test`}
                     title="Remove from Ask To Test"
-                    className="absolute top-2 right-2 z-30 w-5 h-5 rounded-full flex items-center justify-center text-black/35 hover:text-black/70 hover:bg-black/[0.06] transition-colors disabled:opacity-40"
+                    className="absolute top-2 right-2 z-30 w-5 h-5 rounded-full flex items-center justify-center text-black/35 hover:text-black/70 hover:bg-black/[0.06] transition-colors disabled:opacity-100"
                 >
-                    {removing ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                        <X className="w-3 h-3" strokeWidth={2.5} />
-                    )}
+                    {removeState === 'loading' && <Loader2 className="w-3 h-3 animate-spin" />}
+                    {removeState === 'success' && <Check className="w-3 h-3 text-emerald-500" strokeWidth={3} />}
+                    {removeState === 'idle' && <X className="w-3 h-3" strokeWidth={2.5} />}
                 </button>
             )}
 
@@ -780,14 +852,24 @@ const PipelineCard = memo(function PipelineCard({
                     )}
                     <button
                         onClick={sendReminder}
-                        disabled={sendingReminder}
-                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors disabled:opacity-40"
+                        disabled={reminderState !== 'idle'}
+                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors disabled:opacity-100"
                         title="Send Follow-up Reminder"
                     >
-                        {sendingReminder ? (
+                        {reminderState === 'loading' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {reminderState === 'success' && <Check className="w-3.5 h-3.5 text-emerald-500" strokeWidth={3} />}
+                        {reminderState === 'idle' && <Bell className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                        onClick={openQuickView}
+                        disabled={previewLoading}
+                        className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors disabled:opacity-60"
+                        title="Quick View"
+                    >
+                        {previewLoading ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
                         ) : (
-                            <Bell className="w-3.5 h-3.5" />
+                            <Eye className="w-3.5 h-3.5" />
                         )}
                     </button>
                 </div>
@@ -804,6 +886,16 @@ const PipelineCard = memo(function PipelineCard({
                 >
                     <MoreHorizontal className="w-4 h-4 md:w-3 md:h-3" />
                 </button>
+            )}
+
+            {/* Quick View — same drawer Browse Roster uses, rendered via
+                createPortal so its position here is layout-irrelevant. */}
+            {previewTalent && (
+                <TalentPreviewDrawer
+                    talent={previewTalent}
+                    onClose={() => setPreviewTalent(null)}
+                    isMobile={isMobile}
+                />
             )}
         </div>
     );

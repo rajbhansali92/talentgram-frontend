@@ -71,6 +71,28 @@ _PRE_PLAIN_NAME_RE = re.compile(r"^\[[^\]]*\]\s*(.+?):\s*$")
 # actually observed live.
 _JID_PHONE_RE = re.compile(r"(\d{7,15})@(?:c\.us|s\.whatsapp\.net)")
 
+# WhatsApp always renders an inline timestamp as the last line of a message
+# bubble's own text (e.g. "...\n2:15 pm") — .inner_text() picks it up as
+# plain content indistinguishable from the message itself. Strict parsers on
+# the Agent Platform side (e.g. the confirmation reply matcher, which checks
+# exact membership like text.strip().lower() == "1") break on this, so it's
+# stripped here — a WhatsApp rendering quirk is a transport concern, not
+# something the platform should need to know about.
+_TRAILING_TIMESTAMP_RE = re.compile(r"\n\d{1,2}:\d{2}\s*[ap]m\s*$", re.IGNORECASE)
+
+
+def _clean_message_text(text: str, sender_name: Optional[str]) -> str:
+    """Strip WhatsApp rendering artifacts that leak into .inner_text() but
+    are never part of what the sender actually typed: the trailing inline
+    timestamp (always present), and the sender's own name repeated as a
+    leading line (only rendered on the first bubble of a consecutive run —
+    see the direction-detection fix earlier in this file for the same
+    grouping behavior)."""
+    cleaned = _TRAILING_TIMESTAMP_RE.sub("", text)
+    if sender_name and cleaned.startswith(sender_name + "\n"):
+        cleaned = cleaned[len(sender_name) + 1:]
+    return cleaned.strip()
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -383,6 +405,8 @@ async def _scan_group_for_new_messages(
             if m:
                 sender_name = m.group(1).strip()
 
+        clean_text = _clean_message_text(text, sender_name)
+
         if not participants_fetched:
             participants = await participants_cache.get(page, group_name)
             participants_fetched = True
@@ -393,7 +417,7 @@ async def _scan_group_for_new_messages(
 
         new_messages.append({
             "message_id": message_id,
-            "text": text,
+            "text": clean_text,
             "sender_name": sender_name,
             "sender_phone": phone,
             "sender_is_group_member": is_member,

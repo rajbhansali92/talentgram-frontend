@@ -515,14 +515,24 @@ async def _msg_timestamp(page: Page, full_selector: str) -> str:
 async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optional[bool]:
     """Best-effort directional check on a matched message element.
     Returns True (outgoing), False (incoming), or None (can't determine).
-    Uses multiple heuristics — class names, data-id prefix, check-mark icons —
-    and walks up to 6 ancestors. None means the DOM changed and we can't tell;
-    callers should accept-with-warning rather than reject."""
+    Uses multiple heuristics and walks up to 6 ancestors. None means the DOM
+    changed and we can't tell; callers should accept-with-warning rather than
+    reject (except the inbound listener, which fails closed on None).
+
+    Live testing (2026-07-21) against a current WhatsApp Web build found the
+    old class-name/data-id-prefix heuristics no longer match anything — that
+    build renders every message row with the same generic atomic CSS classes
+    regardless of direction, and data-id no longer carries a true_/false_
+    prefix. The bubble's own tail element, however, still carries a stable
+    semantic marker (data-icon="tail-out"/"tail-in") that survived the
+    rewrite, so it's checked first."""
     try:
         return await page.evaluate("""([sel, idx]) => {
             const els = document.querySelectorAll(sel);
             if (idx >= els.length) return null;
             const el = els[idx];
+            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return true;
+            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return false;
             let node = el;
             for (let i = 0; i < 6 && node && node !== document; i++) {
                 const cls = typeof node.className === 'string' ? node.className : '';

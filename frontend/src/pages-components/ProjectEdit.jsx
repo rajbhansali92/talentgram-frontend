@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams, Link } from "react-router-dom";
+import { useNavigate, useParams, Link, useSearchParams } from "react-router-dom";
 import { adminApi, isAdmin, getSubdomainUrl } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import { toast } from "sonner";
@@ -105,12 +105,85 @@ function TextField({ label, value, onChange, type = "text", disabled = false, ..
     );
 }
 
+const PROJECT_TABS = [
+    { id: "details", label: "Project Details" },
+    { id: "submissions", label: "Submission Review" },
+    { id: "pipeline", label: "Casting Pipeline" },
+];
+const LAST_PROJECT_TAB_KEY = "tg_last_project_tab";
+
 export default function ProjectEdit() {
     const { id } = useParams();
     const nav = useNavigate();
     const isEdit = Boolean(id);
     const isAdminRole = isAdmin();
     const isMounted = useRef(true);
+
+    // Tabbed workspace: URL ?tab= wins (deep-linking), then the
+    // last-used tab remembered in sessionStorage (so an admin who lives in
+    // Pipeline lands back there), then "details" as the default. Inactive
+    // tabs stay mounted and are only hidden via CSS (never unmounted) so
+    // their internal state/scroll survives switching; each tab's own
+    // scroll offset is saved/restored on switch since the whole page still
+    // shares one document-level scroll.
+    const [searchParams, setSearchParams] = useSearchParams();
+    const [activeTab, setActiveTabState] = useState(() => {
+        const urlTab = searchParams.get("tab");
+        if (PROJECT_TABS.some((t) => t.id === urlTab)) return urlTab;
+        try {
+            const stored = sessionStorage.getItem(LAST_PROJECT_TAB_KEY);
+            if (PROJECT_TABS.some((t) => t.id === stored)) return stored;
+        } catch {
+            // sessionStorage unavailable — fall through to default
+        }
+        return "details";
+    });
+    const [visitedTabs, setVisitedTabs] = useState(() => new Set([activeTab]));
+    const scrollPositionsRef = useRef({});
+
+    const selectTab = useCallback((tabId) => {
+        setActiveTabState((prev) => {
+            if (prev === tabId) return prev;
+            scrollPositionsRef.current[prev] = window.scrollY;
+            return tabId;
+        });
+        setVisitedTabs((prev) => (prev.has(tabId) ? prev : new Set(prev).add(tabId)));
+        try {
+            sessionStorage.setItem(LAST_PROJECT_TAB_KEY, tabId);
+        } catch {
+            // sessionStorage unavailable — tab memory just won't persist
+        }
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("tab", tabId);
+                return next;
+            },
+            { replace: true },
+        );
+    }, [setSearchParams]);
+
+    // Keep the URL's ?tab= in sync with the resolved initial tab (covers the
+    // case where it came from sessionStorage rather than the URL itself),
+    // and restore each tab's saved scroll offset after switching.
+    useEffect(() => {
+        if (searchParams.get("tab") !== activeTab) {
+            setSearchParams(
+                (prev) => {
+                    const next = new URLSearchParams(prev);
+                    next.set("tab", activeTab);
+                    return next;
+                },
+                { replace: true },
+            );
+        }
+        const saved = scrollPositionsRef.current[activeTab];
+        const raf = requestAnimationFrame(() => {
+            window.scrollTo(0, saved || 0);
+        });
+        return () => cancelAnimationFrame(raf);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab]);
 
     const [project, setProject] = useState(empty);
     const [saving, setSaving] = useState(false);
@@ -602,7 +675,34 @@ export default function ProjectEdit() {
                 </div>
             </div>
 
+            {isEdit && (
+                <div
+                    className="sticky top-14 md:top-0 z-30 bg-white border-b border-[#eaeaea] mb-6"
+                    data-testid="project-tab-bar"
+                >
+                    <div className="flex gap-1 overflow-x-auto tg-noscrollbar">
+                        {PROJECT_TABS.map((tab) => (
+                            <button
+                                key={tab.id}
+                                type="button"
+                                onClick={() => selectTab(tab.id)}
+                                data-testid={`project-tab-${tab.id}`}
+                                aria-current={activeTab === tab.id ? "true" : undefined}
+                                className={`shrink-0 px-4 md:px-5 py-3.5 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                                    activeTab === tab.id
+                                        ? "border-black text-black"
+                                        : "border-transparent text-black/45 hover:text-black/70"
+                                }`}
+                            >
+                                {tab.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {/* Project details */}
+            <div style={{ display: !isEdit || activeTab === "details" ? "block" : "none" }} data-testid="project-tab-panel-details">
             <section className="border border-[#eaeaea] bg-white rounded-xl p-6 md:p-8 mb-6">
                 <div className="flex items-center justify-between mb-6">
                     <p className="eyebrow">Project Details</p>
@@ -1779,8 +1879,11 @@ export default function ProjectEdit() {
                 </section>
             )}
 
+            </div>
+
             {/* Submissions Review */}
-            {isEdit && (
+            {visitedTabs.has("submissions") && isEdit && (
+                <div style={{ display: activeTab === "submissions" ? "block" : "none" }} data-testid="project-tab-panel-submissions">
                 <section
                     className="border border-[#eaeaea] bg-white rounded-xl mt-6"
                     data-testid="submissions-review-section"
@@ -1933,11 +2036,14 @@ export default function ProjectEdit() {
                         </div>
                     )}
                 </section>
+                </div>
             )}
 
             {/* Casting Pipeline */}
-            {isEdit && (
-                <ProjectPipeline projectId={id} />
+            {visitedTabs.has("pipeline") && isEdit && (
+                <div style={{ display: activeTab === "pipeline" ? "block" : "none" }} data-testid="project-tab-panel-pipeline">
+                    <ProjectPipeline projectId={id} />
+                </div>
             )}
 
             {/* Material viewer modal */}

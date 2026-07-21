@@ -84,13 +84,29 @@ _TRAILING_TIMESTAMP_RE = re.compile(r"\n\d{1,2}:\d{2}\s*[ap]m\s*$", re.IGNORECAS
 def _clean_message_text(text: str, sender_name: Optional[str]) -> str:
     """Strip WhatsApp rendering artifacts that leak into .inner_text() but
     are never part of what the sender actually typed: the trailing inline
-    timestamp (always present), and the sender's own name repeated as a
-    leading line (only rendered on the first bubble of a consecutive run —
-    see the direction-detection fix earlier in this file for the same
-    grouping behavior)."""
+    timestamp (always present), and a leading author-label block (only
+    rendered on the first bubble of a consecutive run — see the
+    direction-detection fix earlier in this file for the same grouping
+    behavior).
+
+    Live bug (2026-07-21): for at least one WhatsApp Business account, the
+    author label is TWO lines — the business name, then the phone-number
+    identifier that data-pre-plain-text actually uses as sender_name (e.g.
+    "Candor General Trading\n+971 54 329 9197\nSave\n..."), not the single
+    line every other observed sender renders. A message left with
+    "Candor General Trading" as its first line fails detect_trigger's
+    first-line check and gets silently treated as unrelated chatter — no
+    error, just never dispatched. Strips everything up to and including
+    whichever of the first two lines equals sender_name, not just an exact
+    single-line prefix."""
     cleaned = _TRAILING_TIMESTAMP_RE.sub("", text)
-    if sender_name and cleaned.startswith(sender_name + "\n"):
-        cleaned = cleaned[len(sender_name) + 1:]
+    if sender_name:
+        target = sender_name.strip()
+        lines = cleaned.split("\n")
+        for i, line in enumerate(lines[:2]):
+            if line.strip() == target:
+                cleaned = "\n".join(lines[i + 1:])
+                break
     return cleaned.strip()
 
 

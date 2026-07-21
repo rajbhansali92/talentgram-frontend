@@ -759,6 +759,9 @@ SIDEBAR_SCOPE = "#side"
 # Search-box selectors — ALL scoped under #side so the conversation composer in
 # #main can never be selected. Ordered most-specific first.
 SEARCH_BOX_SELECTORS = [
+    # WhatsApp Web migrated the sidebar search box from a contenteditable div to
+    # a native <input data-tab="3">; keep this first since it's the current DOM.
+    '#side input[data-tab="3"]',
     '#side div[contenteditable="true"][data-tab="3"]',
     '#side [aria-label="Search input textbox"]',
     '#side [aria-label="Search or start a new chat"]',

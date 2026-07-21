@@ -41,6 +41,34 @@ SUPPORTED_ROLES = {
     "casting agency": "Casting Agency",
 }
 
+# Label -> the snake_case slug MarketingHub.jsx's CONTACT_TYPES actually
+# stores/filters/counts by (its <select> value, not its display label).
+# SUPPORTED_ROLES' values stay as human-readable labels so the WhatsApp
+# confirmation message keeps showing "Role: Casting Director" — this
+# separate mapping is applied only at the point of writing contact_type to
+# the database, so a WhatsApp-created contact shows up correctly in the
+# Marketing UI's Contact Type filter/dropdown instead of silently not
+# matching any option (found live 2026-07-21: the badge on the contact
+# card fell back to displaying the raw stored label, masking that the
+# dropdown/filter/count logic never matched it).
+ROLE_LABEL_TO_SLUG = {
+    "Brand Manager": "brand_manager",
+    "Marketing Manager": "marketing_manager",
+    "Influencer Marketing Manager": "influencer_marketing",
+    "Creative Director": "creative_director",
+    "Agency Producer": "agency_producer",
+    "Casting Director": "casting_director",
+    "Casting Assistant": "casting_assistant",
+    "Casting Company": "casting_company",
+    "Producer": "producer",
+    "Executive Producer": "executive_producer",
+    "Production House": "production_house",
+    "Line Producer": "line_producer",
+    "Talent Agency": "talent_agency",
+    "Modeling Agency": "modeling_agency",
+    "Casting Agency": "casting_agency",
+}
+
 
 def _validate_name(raw: str) -> ValidationResult:
     name = " ".join((raw or "").strip().split())
@@ -107,7 +135,7 @@ async def _create_contact_executor(collected: dict, ctx: ExecContext) -> ExecRes
     doc = await insert_client_doc(
         name=name,
         phone_number=phone,
-        contact_type=role,
+        contact_type=ROLE_LABEL_TO_SLUG.get(role, role),
         source=f"whatsapp_agent:{ctx.agent_id}",
     )
     return ExecResult(ok=True, message=f"Saved successfully\nCRM ID: {doc['id']}", data=doc)

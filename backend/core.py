@@ -2625,8 +2625,11 @@ def _clean_ids(ids: List[str]) -> List[str]:
 # `source_submission_media_id`.
 
 # Categories that should be mirrored from submission to global talent.
-# Audition-only categories (intro_video, take, take_*) are project-scoped
-# and intentionally NOT mirrored.
+# intro_video IS mirrored (single-slot replace, see cat_mapping below) since
+# the public /prefill endpoint reads it as the talent's global intro video.
+# Only take/take_1/take_2/take_3 (audition takes) are project-scoped and
+# intentionally excluded — see cat_mapping's early-return for anything not
+# in that dict.
 SYNC_TO_GLOBAL_CATEGORIES = {
     "image", "portfolio", "indian", "western", "video", "intro_video", "headshot", "headshots", "additional_portfolio"
 }

@@ -1310,7 +1310,23 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
             fd = updated_app.get("form_data") or {}
             dob = (fd.get("dob") or "").strip() or None
             age = compute_age(dob) if dob else None
-            
+
+            # Guard against regressing the global profile's media with a
+            # stale snapshot. This application's own media array was last
+            # refreshed from db.talents at talent_profile_updated_at (see
+            # _reconcile_draft_from_talent above); if db.talents.media has
+            # been updated more recently than that — e.g. a project
+            # submission via /submit synced newer photos/video in the
+            # meantime — this application predates that change and must
+            # not overwrite it. Non-media detail fields are unaffected.
+            talent_media_updated = existing_talent.get("updated_at")
+            app_media_snapshot = updated_app.get("talent_profile_updated_at")
+            media_is_stale = bool(
+                talent_media_updated
+                and app_media_snapshot
+                and talent_media_updated > app_media_snapshot
+            )
+
             new_media = []
             cover_mid = None
             for m in updated_app.get("media", []) or []:
@@ -1394,6 +1410,9 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
             # existing master value rather than wiping it. Drop empties so only
             # the latest *valid* values are written.
             update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
+            if media_is_stale:
+                update.pop("media", None)
+                update.pop("cover_media_id", None)
             if update:
                 await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update})
                 await update_talent_cover_cache(existing_talent["id"])

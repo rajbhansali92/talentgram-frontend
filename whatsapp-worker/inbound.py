@@ -586,6 +586,19 @@ async def poll_once(
                         msg["sender_is_group_member"], msg["text"][:80],
                         msg["raw_pre_plain_text"],
                     )
+                    try:
+                        await get_db().whatsapp_dispatch_failures.insert_one({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "group_name": group_name,
+                            "message_id": msg["message_id"],
+                            "sender_name": msg["sender_name"],
+                            "sender_is_group_member": msg["sender_is_group_member"],
+                            "text": msg["text"],
+                            "raw_pre_plain_text": msg["raw_pre_plain_text"],
+                            "reason": "no_phone_resolved",
+                        })
+                    except Exception:
+                        logger.exception("inbound: failed to persist dispatch-failure record")
                     await _mark_processed(msg["message_id"])
                     continue
 

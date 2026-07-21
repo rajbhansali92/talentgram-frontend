@@ -969,6 +969,20 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
         "sender: group-info: read %d participant row(s) for %r via panel=%r rows=%r",
         len(participants), group_name, panel_sel, rows,
     )
+    # Durable copy (2026-07-21 multi-user investigation) — console logs get
+    # rotated out of retrieval range within minutes during busy periods,
+    # which made this exact data impossible to inspect after the fact.
+    # Mongo has no such window.
+    try:
+        await get_db().whatsapp_participant_reads.insert_one({
+            "group_name": group_name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "panel_selector": panel_sel,
+            "rows": rows,
+            "participants": participants,
+        })
+    except Exception:
+        logger.exception("sender: group-info: failed to persist durable read copy")
     return participants
 
 

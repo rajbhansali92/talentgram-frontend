@@ -134,6 +134,43 @@ def _serialise_interaction(doc: dict) -> dict:
     }
 
 
+async def insert_client_doc(
+    *,
+    name: str,
+    company_name: Optional[str] = None,
+    phone_number: Optional[str] = None,
+    email: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    stage: Optional[str] = None,
+    value: Optional[float] = None,
+    contact_type: Optional[str] = None,
+    source: Optional[str] = None,
+) -> dict:
+    """Core client-insert logic, shared by the HTTP endpoint below and
+    any non-HTTP caller (e.g. the WhatsApp CRM agent executor) so there is
+    exactly one place a `clients` document gets created. `source` is an
+    optional free-text provenance tag (e.g. "whatsapp_agent:crm-agent")
+    stored on the doc but not required by the HTTP API."""
+    now = _now()
+    doc = {
+        "name": name.strip(),
+        "company_name": (company_name or "").strip() or None,
+        "phone_number": (phone_number or "").strip() or None,
+        "email": (email or "").strip().lower() or None,
+        "tags": [t.strip() for t in tags if t.strip()] if tags else [],
+        "stage": (stage or "lead").strip(),
+        "value": value,
+        "contact_type": (contact_type or "").strip() or None,
+        "created_at": now,
+        "last_contacted_date": now,
+    }
+    if source:
+        doc["source"] = source
+    res = await db.clients.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return _serialise_client(doc)
+
+
 # ---------------------------------------------------------------------------
 # Clients
 # ---------------------------------------------------------------------------
@@ -146,22 +183,16 @@ async def create_client(
     to the same instant as `created_at` so the row sorts naturally
     among other already-contacted clients before the first interaction
     is logged."""
-    now = _now()
-    doc = {
-        "name": payload.name.strip(),
-        "company_name": (payload.company_name or "").strip() or None,
-        "phone_number": (payload.phone_number or "").strip() or None,
-        "email": (payload.email or "").strip().lower() or None,
-        "tags": [t.strip() for t in payload.tags if t.strip()] if payload.tags else [],
-        "stage": (payload.stage or "lead").strip(),
-        "value": payload.value,
-        "contact_type": (payload.contact_type or "").strip() or None,
-        "created_at": now,
-        "last_contacted_date": now,
-    }
-    res = await db.clients.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    return _serialise_client(doc)
+    return await insert_client_doc(
+        name=payload.name,
+        company_name=payload.company_name,
+        phone_number=payload.phone_number,
+        email=payload.email,
+        tags=payload.tags,
+        stage=payload.stage,
+        value=payload.value,
+        contact_type=payload.contact_type,
+    )
 
 
 @router.get("/clients")

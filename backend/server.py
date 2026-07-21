@@ -15,6 +15,7 @@ from services.import_worker import start_import_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from request_context import generate_request_id, reset_request_id, set_request_id
 from routers import (
+    agents_whatsapp,
     applications,
     auth,
     casting_pipeline,
@@ -148,6 +149,7 @@ app.include_router(whatsapp.router)
 app.include_router(webhooks.router)
 app.include_router(cloudflare_stream.router)
 app.include_router(imports.router)
+app.include_router(agents_whatsapp.router)
 
 
 
@@ -550,6 +552,14 @@ async def on_startup():
             await whatsapp.ensure_whatsapp_ready()
         except Exception as _e:
             logger.warning("WhatsApp Engine startup init failed (non-fatal): %s", _e)
+
+        # WhatsApp Agent Platform — registers domain agents (CRM first),
+        # seeds default group routing, creates conversation/audit indexes.
+        try:
+            from agents import ensure_agents_ready
+            await ensure_agents_ready()
+        except Exception as _e:
+            logger.warning("WhatsApp Agent Platform startup init failed (non-fatal): %s", _e)
 
         # AI Scout Capture — warm EasyOCR in the background so the first user
         # request doesn't pay model download/load latency. Non-blocking (boot +

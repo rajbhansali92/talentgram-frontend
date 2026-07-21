@@ -266,7 +266,9 @@ async def _scan_group_for_new_messages(page, group_name: str) -> list[dict]:
             continue
         message_id = testid or None
 
-        direction = await sender._is_outgoing_msg(page, full_sel, i)
+        direction = await sender._is_outgoing_msg(
+            page, full_sel, i, self_display_name=config.WA_SELF_DISPLAY_NAME
+        )
         if direction is True:
             # Ours — mark seen (if we have a stable id) so we never
             # re-evaluate it, and never dispatch it.

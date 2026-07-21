@@ -61,6 +61,13 @@ INBOUND_DEDUP_TTL_SEC: int = int(os.environ.get("WA_INBOUND_DEDUP_TTL_SEC", str(
 AGENTS_BACKEND_URL: str = os.environ.get("AGENTS_BACKEND_URL", "https://api.talentgramagency.com")
 AGENTS_INBOUND_SECRET: str = os.environ.get("AGENTS_INBOUND_SECRET", "")
 
+# The connected WhatsApp account's own display name, as WhatsApp Web renders
+# it inside data-pre-plain-text on the account's own messages (confirmed live
+# 2026-07-21: "Talentgram Team"). Used as a message-direction fallback for
+# messages that lack a tail/aria-label marker (consecutive messages from the
+# same sender with nothing in between don't render a fresh tail).
+WA_SELF_DISPLAY_NAME: str = os.environ.get("WA_SELF_DISPLAY_NAME", "Talentgram Team")
+
 # Set to "false" to disable the inbound listener entirely (outbound sending
 # keeps working) — an emergency kill switch that needs no redeploy of the
 # Agent Platform or Marketing module, just a worker restart.

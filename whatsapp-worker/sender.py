@@ -8,6 +8,7 @@ import asyncio
 import json as _p26b_json
 import logging
 import os
+import re
 import tempfile
 import time
 import unicodedata
@@ -16,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
+import config
 from db import get_db
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -512,7 +514,9 @@ async def _msg_timestamp(page: Page, full_selector: str) -> str:
         return ""
 
 
-async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optional[bool]:
+async def _is_outgoing_msg(
+    page: Page, css_selector: str, index: int, self_display_name: Optional[str] = None
+) -> Optional[bool]:
     """Best-effort directional check on a matched message element.
     Returns True (outgoing), False (incoming), or None (can't determine).
     Uses multiple heuristics and walks up to 6 ancestors. None means the DOM
@@ -525,28 +529,33 @@ async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optiona
     regardless of direction, and data-id no longer carries a true_/false_
     prefix. Two markers did survive the rewrite: the bubble's tail element
     (data-icon="tail-out"/"tail-in") and an accessibility label WhatsApp
-    stamps on every one of the account's own messages
-    (aria-label="You:"). The tail is only rendered on the first bubble of a
-    consecutive run from the same sender — a second message sent back-to-back
-    by the same person, with no reply in between, won't have one — so the
-    aria-label check (unaffected by grouping) is checked first."""
+    stamps on every one of the account's own messages (aria-label="You:").
+    Both, however, are only rendered on the FIRST bubble of a consecutive run
+    from the same sender — two messages sent back-to-back by the same person
+    (human or the worker itself), with no reply from the other side in
+    between, render with neither marker on the second one. The
+    data-pre-plain-text attribute (already used elsewhere to extract the
+    sender's display name) does NOT depend on grouping — it's present on
+    every message — so when self_display_name is supplied and neither marker
+    above resolved anything, the parsed name is compared against it as a
+    final fallback before giving up and returning None."""
     try:
-        return await page.evaluate("""([sel, idx]) => {
+        result = await page.evaluate("""([sel, idx]) => {
             const els = document.querySelectorAll(sel);
             if (idx >= els.length) return null;
             const el = els[idx];
-            if (el.querySelector('span[aria-label="You:"]')) return true;
-            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return true;
-            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return false;
+            if (el.querySelector('span[aria-label="You:"]')) return {dir: true};
+            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return {dir: true};
+            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return {dir: false};
             let node = el;
             for (let i = 0; i < 6 && node && node !== document; i++) {
                 const cls = typeof node.className === 'string' ? node.className : '';
-                if (cls.includes('message-out')) return true;
-                if (cls.includes('message-in')) return false;
+                if (cls.includes('message-out')) return {dir: true};
+                if (cls.includes('message-in')) return {dir: false};
                 const did = node.getAttribute ? node.getAttribute('data-id') : null;
                 if (did) {
-                    if (did.startsWith('true_')) return true;
-                    if (did.startsWith('false_')) return false;
+                    if (did.startsWith('true_')) return {dir: true};
+                    if (did.startsWith('false_')) return {dir: false};
                 }
                 node = node.parentElement;
             }
@@ -554,12 +563,24 @@ async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optiona
                 '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
                 + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
             );
-            if (checks.length > 0) return true;
-            return null;
+            if (checks.length > 0) return {dir: true};
+            const pp = el.querySelector('[data-pre-plain-text]');
+            return {dir: null, prePlainText: pp ? pp.getAttribute('data-pre-plain-text') : null};
         }""", [css_selector, index])
     except Exception as exc:
         logger.info("sender: direction check error: %s", exc)
         return None
+
+    if result is None:
+        return None
+    if result.get("dir") is not None:
+        return result["dir"]
+    if self_display_name:
+        pre_plain = result.get("prePlainText")
+        m = re.match(r"^\[[^\]]*\]\s*(.+?):\s*$", pre_plain) if pre_plain else None
+        if m:
+            return m.group(1).strip().lower() == self_display_name.strip().lower()
+    return None
 
 
 async def _snapshot_msg_baselines(page: Page) -> dict:
@@ -612,7 +633,9 @@ async def _find_outgoing_with_text(page: Page, needle: str, baselines: Optional[
             except Exception:
                 continue
             if needle and (needle in t or (norm_needle and norm_needle in _norm(t))):
-                direction = await _is_outgoing_msg(page, full, i)
+                direction = await _is_outgoing_msg(
+                    page, full, i, self_display_name=config.WA_SELF_DISPLAY_NAME
+                )
                 if direction is False:
                     logger.info("sender: verify — text matched at element#%d but message is "
                                 "INCOMING — skipping", i)

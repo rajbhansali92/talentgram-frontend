@@ -307,19 +307,40 @@ async def _direction_diag(page, css_selector: str, index: int) -> dict:
         return {"error": str(exc)}
 
 
+_PHONE_LIKE_RE = re.compile(r"^\+?[\d\s\-]{7,20}$")
+
+
 async def _match_group_member(participants: Optional[list], sender_name: Optional[str]):
     """Match a message's sender_name against a fetched participant list.
     Returns (is_member: Optional[bool], matched_phone: Optional[str]).
     None for is_member means "couldn't determine" (participants unavailable,
     or no sender_name to match against) — callers must treat that as
-    not-a-member for any security decision, never guess a yes."""
+    not-a-member for any security decision, never guess a yes.
+
+    Live bug (2026-07-21): WhatsApp's data-pre-plain-text sometimes carries
+    the sender's raw phone number instead of their display name (observed
+    for a WhatsApp Business account where the group's own member list shows
+    the business name, e.g. "Candor General Trading LLC..."; the message
+    itself is attributed to "+971 54 329 9197") — the same person, two
+    different representations depending on which part of the UI is asked.
+    A plain substring match on `sender_name` alone misses this, so when it
+    looks phone-shaped, its digits are also compared against each
+    participant's already-extracted phone."""
     if participants is None or not sender_name:
         return None, None
     needle = sender_name.strip().lower()
     if not needle:
         return None, None
+    needle_digits = None
+    if _PHONE_LIKE_RE.match(sender_name.strip()):
+        digits = "".join(ch for ch in sender_name if ch.isdigit())
+        if len(digits) >= 7:
+            needle_digits = digits
     for p in participants:
-        if needle in (p.get("raw_text") or "").strip().lower():
+        raw = (p.get("raw_text") or "").strip().lower()
+        if needle in raw:
+            return True, p.get("phone")
+        if needle_digits and needle_digits in (p.get("phone") or ""):
             return True, p.get("phone")
     return False, None
 
@@ -421,6 +442,13 @@ async def _scan_group_for_new_messages(
             participants = await participants_cache.get(page, group_name, force=True)
             is_member, matched_phone = await _match_group_member(participants, sender_name)
         phone = phone or matched_phone
+        if not phone and sender_name and _PHONE_LIKE_RE.match(sender_name.strip()):
+            # data-pre-plain-text sometimes carries the sender's actual
+            # phone number instead of a display name — prefer it outright
+            # over a hashed pseudo-identity when available.
+            digits = "".join(ch for ch in sender_name if ch.isdigit())
+            if len(digits) >= 7:
+                phone = digits
         if not phone and is_member and sender_name:
             phone = _pseudo_identity_from_name(group_name, sender_name)
 

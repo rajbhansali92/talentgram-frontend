@@ -893,18 +893,48 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
 
     try:
         rows = await page.evaluate(
-            """(panelSel) => {
+            """async (panelSel) => {
                 const panel = document.querySelector(panelSel);
                 if (!panel) return [];
+
+                // The drawer's own content can be taller than its viewport, and
+                // WhatsApp virtualizes long lists — a participant row that is
+                // scrolled out of view is not in the DOM at all yet. Find the
+                // actual scrollable container (largest scrollHeight-clientHeight
+                // overflow among the panel and its descendants; with only a
+                // couple of members the whole drawer may fit without scrolling,
+                // in which case this is a no-op) and scroll it through its full
+                // range, collecting text at each step so every virtualized row
+                // gets rendered at least once.
+                let target = panel;
+                let maxOverflow = panel.scrollHeight - panel.clientHeight;
+                panel.querySelectorAll('*').forEach(el => {
+                    const overflow = el.scrollHeight - el.clientHeight;
+                    if (overflow > maxOverflow) { maxOverflow = overflow; target = el; }
+                });
+
                 const seen = new Set();
                 const out = [];
-                (panel.innerText || '').split('\\n').forEach(line => {
-                    const t = line.trim();
-                    if (t && t.length < 200 && !seen.has(t)) {
-                        seen.add(t);
-                        out.push(t);
+                const collect = () => {
+                    (panel.innerText || '').split('\\n').forEach(line => {
+                        const t = line.trim();
+                        if (t && t.length < 200 && !seen.has(t)) {
+                            seen.add(t);
+                            out.push(t);
+                        }
+                    });
+                };
+
+                collect();
+                const steps = 6;
+                const range = target.scrollHeight - target.clientHeight;
+                if (range > 0) {
+                    for (let i = 1; i <= steps; i++) {
+                        target.scrollTop = Math.round((range * i) / steps);
+                        await new Promise(r => setTimeout(r, 150));
+                        collect();
                     }
-                });
+                }
                 return out;
             }""",
             panel_sel,

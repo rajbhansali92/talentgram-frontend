@@ -71,6 +71,13 @@ ROLE_LABEL_TO_SLUG = {
 }
 
 
+_NAME_FORMAT_HINT = (
+    "That doesn't look like a valid name.\n"
+    "Please send name, phone, and role on separate lines, e.g.:\n"
+    "Save\nTanu Malhotra\n9619015464\nCasting Director"
+)
+
+
 def _validate_name(raw: str) -> ValidationResult:
     name = " ".join((raw or "").strip().split())
     if len(name) < 2:
@@ -79,6 +86,16 @@ def _validate_name(raw: str) -> ValidationResult:
         return ValidationResult(ok=False, error="That name is too long (max 200 characters). Please shorten it.")
     if not re.search(r"[A-Za-z]", name):
         return ValidationResult(ok=False, error="That doesn't look like a valid name. Please send the contact's full name.")
+    if re.search(r"\d{3,}", name):
+        # Live bug (2026-07-21): a single-line message like "add Tanu
+        # Malhotra +91 96190 15464 casting director" has no newlines for
+        # extract_initial_fields to split on, so the whole remainder was
+        # swallowed into "name" — which then technically passed the old
+        # validator (it has letters) and silently produced a garbled
+        # contact name. A real name never contains a run of 3+ digits, so
+        # reject it here with a hint toward the format that actually works,
+        # rather than silently accepting a smashed-together value.
+        return ValidationResult(ok=False, error=_NAME_FORMAT_HINT)
     return ValidationResult(ok=True, value=name)
 
 

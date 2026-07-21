@@ -1376,10 +1376,19 @@ async def send_whatsapp_message(
     message_body: str,
     media_url: Optional[str] = None,
     is_retry: bool = False,
+    fast: bool = False,
 ) -> dict:
     """
     Core automation logic for sending a single WhatsApp message.
     Returns {"state": str, "evidence": dict} with structured decision evidence.
+
+    `fast`: shortens the fixed post-type/post-click/pre-verify sleeps in the
+    text-send path (2026-07-21 speed pass). Those sleeps were tuned for bulk
+    campaign sends where correctness matters far more than shaving a couple
+    of seconds off any one message; an interactive agent reply is the
+    opposite trade-off. Defaults to False so the existing outbound
+    campaign/job-queue path (worker.py's poll_and_process_jobs) is
+    completely unaffected — only inbound.py's agent-reply path opts in.
     """
     evidence = {
         "chat_opened": False,
@@ -1643,7 +1652,7 @@ async def send_whatsapp_message(
                 await page.keyboard.up("Shift")
         
         logger.info("sender: message text inserted? True (%d line(s))", len(lines))
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2 if fast else 0.5)
         # Click send button via resilient fallback chain. If a dialog is
         # blocking, do NOT press anything (Enter could activate a dialog
         # button) — composer still holds the text, so this is retryable.
@@ -1655,7 +1664,7 @@ async def send_whatsapp_message(
         sent_via = await _find_and_click_send(page)
         evidence["send_clicked"] = True
         logger.info("sender: text send click executed via %s", sent_via)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.4 if fast else 1.0)
         await _safe_screenshot(page, "/tmp/post_send.png")
 
     # TASK 2 instrumentation: dump the live outgoing-message DOM so the real
@@ -1663,7 +1672,7 @@ async def send_whatsapp_message(
     await _dump_outgoing_dom(page)
 
     # PROBLEM #2 / TASK 4: classify the outcome — never collapse to one FAILED.
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(0.7 if fast else 1.5)
     logger.info("sender: verification started (baselines=%s)", "provided" if baselines else "none")
     verified, composer_cleared, matched_sel = await _verify_delivery(page, message_body, baselines=baselines)
 

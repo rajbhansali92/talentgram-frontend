@@ -352,12 +352,27 @@ async def _match_group_member(participants: Optional[list], sender_name: Optiona
         digits = "".join(ch for ch in sender_name if ch.isdigit())
         if len(digits) >= 7:
             needle_digits = digits
-    for p in participants:
+    for i, p in enumerate(participants):
         raw = (p.get("raw_text") or "").strip().lower()
-        if needle in raw:
-            return True, p.get("phone")
-        if needle_digits and needle_digits in (p.get("phone") or ""):
-            return True, p.get("phone")
+        matched = needle in raw or (needle_digits and needle_digits in (p.get("phone") or ""))
+        if not matched:
+            continue
+        phone = p.get("phone")
+        if not phone:
+            # Live bug (2026-07-21): Group Info renders one participant's
+            # name, about-text, business name, and phone as several
+            # CONSECUTIVE rows, not one — matching by name lands on a row
+            # with no phone of its own. Without this, the SAME person's
+            # conversation could get keyed by a hashed pseudo-identity on
+            # one message (name matched) and by their real phone on
+            # another (phone matched directly), splitting their own
+            # conversation state in two. Search a small window of
+            # neighboring rows for whichever one carries a phone.
+            for j in range(max(0, i - 3), min(len(participants), i + 4)):
+                if participants[j].get("phone"):
+                    phone = participants[j]["phone"]
+                    break
+        return True, phone
     return False, None
 
 
@@ -524,6 +539,7 @@ async def _send_reply(page, group_name: str, reply_text: str) -> float:
     try:
         result = await sender.send_whatsapp_message(
             page, destination_type="group", destination=group_name, message_body=reply_text,
+            fast=True,
         )
         elapsed = time.monotonic() - t0
         logger.info("inbound: reply send result group=%r state=%s elapsed_sec=%.2f",

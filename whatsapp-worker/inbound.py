@@ -225,7 +225,16 @@ async def _direction_diag(page, css_selector: str, index: int) -> dict:
                 '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
                 + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
             );
-            return {chain: chain, checkCount: checks.length};
+            const main = document.querySelector('#main');
+            const elRect = el.getBoundingClientRect();
+            const mainRect = main ? main.getBoundingClientRect() : null;
+            return {
+                chain: chain,
+                checkCount: checks.length,
+                outerHtml: el.outerHTML.slice(0, 2500),
+                elRect: {left: elRect.left, right: elRect.right, width: elRect.width},
+                mainRect: mainRect ? {left: mainRect.left, right: mainRect.right, width: mainRect.width} : null,
+            };
         }""", [css_selector, index])
     except Exception as exc:
         return {"error": str(exc)}

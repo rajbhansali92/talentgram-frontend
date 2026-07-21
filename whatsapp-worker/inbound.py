@@ -339,6 +339,7 @@ async def _scan_group_for_new_messages(
     except Exception:
         logger.exception("inbound: message count failed for group=%r", group_name)
         return []
+    logger.info("inbound: DIAG scan group=%r scope=%r n=%d", group_name, scope, n)
 
     # Only the tail — new messages always arrive at the bottom, and this
     # keeps the scan cheap regardless of how long the chat history is.

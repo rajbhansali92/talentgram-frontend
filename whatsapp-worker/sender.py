@@ -943,8 +943,8 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
         phone = "".join(ch for ch in m.group(1) if ch.isdigit()) if m else None
         participants.append({"raw_text": raw, "phone": phone})
     logger.info(
-        "sender: group-info: read %d participant row(s) for %r via panel=%r",
-        len(participants), group_name, panel_sel,
+        "sender: group-info: read %d participant row(s) for %r via panel=%r rows=%r",
+        len(participants), group_name, panel_sel, rows,
     )
     return participants
 

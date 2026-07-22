@@ -269,20 +269,40 @@ _SIMPLE_SORTS = {
     "created_asc": [("created_at", 1)],
     "updated_desc": [("updated_at", -1)],
     "updated_asc": [("updated_at", 1)],
-    "height_asc": [("height_inches", 1)],
-    "height_desc": [("height_inches", -1)],
-    # Age: older = smaller (earlier) dob string, so "oldest first" is a dob
-    # ASCENDING sort and "youngest first" is DESCENDING — inverted vs age itself.
-    "age_desc": [("dob", 1)],   # oldest -> youngest
-    "age_asc": [("dob", -1)],   # youngest -> oldest
 }
 _COMPUTED_SORTS = {"followers_asc", "followers_desc", "completeness_desc"}
+
+# height_inches/dob are sparse fields (most existing talent records predate
+# them, or a talent simply hasn't had height/dob filled in yet). A plain
+# find().sort() on a sparse field clusters every doc missing it together at
+# one end (Mongo treats missing-as-null, and null sorts before all numbers/
+# strings) in whatever order the collection scan happens to return them —
+# NOT by actual height/age — which is what made "Shortest -> Tallest" etc.
+# look unordered. These go through the aggregation branch instead: a
+# "_hasValue" tiebreak sorts every doc WITH a real value first (in correct
+# order), and every doc missing it into one predictable block at the end,
+# regardless of asc/desc direction.
+_NULL_SAFE_SORTS = {
+    "height_asc": ("height_inches", 1),
+    "height_desc": ("height_inches", -1),
+    # Age: older = smaller (earlier) dob string, so "oldest first" is a dob
+    # ASCENDING sort and "youngest first" is DESCENDING — inverted vs age itself.
+    "age_desc": ("dob", 1),    # oldest -> youngest
+    "age_asc": ("dob", -1),    # youngest -> oldest
+}
 
 _COMPLETENESS_FIELDS = [
     "cover_url", "height", "location", "gender", "dob", "ethnicity",
     "instagram_handle", "instagram_followers", "bio", "skills",
     "interested_in", "work_links",
 ]
+
+
+def _has_value_expr(field: str) -> Dict[str, Any]:
+    """1 if `field` holds a real (non-missing, non-null) value, else 0 — used
+    as a primary sort key so docs missing the field always land in one block
+    after every doc that has it, regardless of the requested sort direction."""
+    return {"$cond": [{"$in": [{"$type": f"${field}"}, ["missing", "null"]]}, 0, 1]}
 
 
 def _followers_ordinal_expr() -> Dict[str, Any]:
@@ -448,6 +468,23 @@ async def list_talents(
             {"$match": query},
             {"$addFields": {score_field: score_expr}},
             {"$sort": {score_field: direction, "_id": 1}},
+            {"$facet": {
+                "data": [{"$skip": skip}, {"$limit": page_size}, {"$project": _LIST_PROJECTION}],
+                "count": [{"$count": "total"}],
+            }},
+        ]
+        result = await db.talents.aggregate(pipeline).to_list(1)
+        facet = result[0] if result else {"data": [], "count": []}
+        talents = facet["data"]
+        total = (facet["count"][0]["total"] if facet["count"] else 0)
+        return _paginated([_enrich_list(t) for t in talents], total, p, s)
+
+    if sort_by in _NULL_SAFE_SORTS:
+        field, direction = _NULL_SAFE_SORTS[sort_by]
+        pipeline = [
+            {"$match": query},
+            {"$addFields": {"_hasValue": _has_value_expr(field)}},
+            {"$sort": {"_hasValue": -1, field: direction, "_id": 1}},
             {"$facet": {
                 "data": [{"$skip": skip}, {"$limit": page_size}, {"$project": _LIST_PROJECTION}],
                 "count": [{"$count": "total"}],

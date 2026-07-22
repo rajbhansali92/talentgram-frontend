@@ -172,6 +172,27 @@ const parseFollowers = (s) => {
     return Math.round(n * mult);
 };
 
+// Pre-memoize structures the render/scoring layer expects on every raw
+// talent doc coming back from GET /talents — shared by the initial fetch and
+// every subsequent infinite-scroll page so both paths stay identical.
+const transformTalent = (talent) => {
+    const parsedHeight = parseHeightToInches(talent.height);
+    const validTags = (talent.tags || []).filter(tag => tag && typeof tag === 'object' && tag.id && tag.name);
+    const tagIdsSet = new Set(validTags.map(tag => tag.id));
+    const interestedInSet = new Set((talent.interested_in || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
+    const skillsSet = new Set((talent.skills || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
+
+    return {
+        ...talent,
+        tags: validTags,
+        _heightInches: parsedHeight,
+        _tagIdsSet: tagIdsSet,
+        _interestedInSet: interestedInSet,
+        _skillsSet: skillsSet,
+        instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
+    };
+};
+
 const formatFollowers = (n) => {
     if (!n || n < 1_000) return n ? String(n) : "";
     if (n >= 1_000_000) {
@@ -291,7 +312,15 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     // Core state
     const [talents, setTalents] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState(null);
+    // total/hasMore come from the backend's paginated response (`total` is a
+    // real count_documents() over the full match set, not the page size) —
+    // NEVER derive the displayed roster count from talents.length, since
+    // that's just however many pages have been fetched so far.
+    const [total, setTotal] = useState(0);
+    const [page, setPage] = useState(0);
+    const [hasMore, setHasMore] = useState(false);
     const [filters, setFilters] = useState(FILTER_DEFAULTS);
     const [densityMode, setDensityMode] = useState("comfortable");
     const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
@@ -356,14 +385,18 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     // list_talents), not a client-side scan of the whole roster. Re-fetches
     // (debounced) whenever a filter changes, so Mongo does the actual
     // filtering with indexes instead of shipping every talent to the
-    // browser. Capped at FETCH_SIZE per request — comfortably enough for a
-    // single browse-and-multi-select session without ever approaching the
-    // old "20,000 records" payload.
-    const FETCH_SIZE = 500;
+    // browser. PAGE_SIZE matches the backend's own max page-size clamp
+    // (_paginate_params caps `size` at 200 server-side regardless of what's
+    // requested) — requesting more than that here would just get silently
+    // truncated back down to 200 by the backend on every call, so there's no
+    // benefit to asking for more. Additional pages are loaded via infinite
+    // scroll (see the gridScrollRef scroll listener below) so the full
+    // roster stays reachable, not just the first page.
+    const PAGE_SIZE = 200;
     const fetchDebounceRef = useRef(null);
 
-    const buildFetchParams = useCallback(() => {
-        const params = { page: 0, size: FETCH_SIZE };
+    const buildFetchParams = useCallback((pageArg = 0) => {
+        const params = { page: pageArg, size: PAGE_SIZE };
         if (filters.search.trim()) params.q = filters.search.trim();
         if (filters.gender !== "any") params.gender = filters.gender;
         if (filters.ethnicity !== "any") params.ethnicity = filters.ethnicity;
@@ -413,35 +446,19 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                 setError(null);
                 try {
                     const response = await adminApi.get("/talents", {
-                        params: buildFetchParams(),
+                        params: buildFetchParams(0),
                         signal: abortControllerRef.current.signal,
                     });
                     if (!isMounted) return;
 
                     const list = response.data?.data ?? response.data?.items ?? [];
-
-                    // Pre-memoize structures the render/scoring layer already
-                    // expects — unchanged from before, just applied to a much
-                    // smaller, server-filtered list now.
-                    const transformedTalents = list.map(talent => {
-                        const parsedHeight = parseHeightToInches(talent.height);
-                        const validTags = (talent.tags || []).filter(tag => tag && typeof tag === 'object' && tag.id && tag.name);
-                        const tagIdsSet = new Set(validTags.map(tag => tag.id));
-                        const interestedInSet = new Set((talent.interested_in || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
-                        const skillsSet = new Set((talent.skills || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
-
-                        return {
-                            ...talent,
-                            tags: validTags,
-                            _heightInches: parsedHeight,
-                            _tagIdsSet: tagIdsSet,
-                            _interestedInSet: interestedInSet,
-                            _skillsSet: skillsSet,
-                            instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
-                        };
-                    });
+                    const responseTotal = response.data?.total ?? list.length;
+                    const transformedTalents = list.map(transformTalent);
 
                     setTalents(transformedTalents);
+                    setTotal(responseTotal);
+                    setPage(0);
+                    setHasMore(transformedTalents.length < responseTotal);
 
                     // Top 10 most-used tags among the currently-fetched
                     // (server-filtered) set — same computation as before,
@@ -479,6 +496,53 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, filters]);
+
+    // Infinite scroll — loads the NEXT page and appends (never replaces) so
+    // the whole 1184+ roster stays reachable by scrolling, not just whatever
+    // fits in the first PAGE_SIZE=200 response. Guarded by loadingMoreRef so
+    // a fast scroll can't fire the same page fetch twice, and reads
+    // talents.length via a ref (not the `talents` state closure) so this
+    // stays callable from a scroll listener registered once per modal open.
+    const loadingMoreRef = useRef(false);
+    const talentsCountRef = useRef(0);
+    useEffect(() => { talentsCountRef.current = talents.length; }, [talents.length]);
+
+    const loadMore = useCallback(async () => {
+        if (loadingMoreRef.current || !hasMore || loading) return;
+        loadingMoreRef.current = true;
+        setLoadingMore(true);
+        const nextPage = page + 1;
+        try {
+            const response = await adminApi.get("/talents", { params: buildFetchParams(nextPage) });
+            const list = response.data?.data ?? response.data?.items ?? [];
+            const responseTotal = response.data?.total ?? total;
+            const transformed = list.map(transformTalent);
+            setTalents(prev => [...prev, ...transformed]);
+            setPage(nextPage);
+            setTotal(responseTotal);
+            setHasMore(talentsCountRef.current + transformed.length < responseTotal);
+        } catch (err) {
+            console.error("Failed to load more talents:", err);
+        } finally {
+            loadingMoreRef.current = false;
+            setLoadingMore(false);
+        }
+    }, [page, hasMore, loading, total, buildFetchParams]);
+
+    // Scroll listener on the same grid container — fires loadMore once the
+    // user nears the bottom (300px lookahead so the next page is ready
+    // before they actually hit the end).
+    useEffect(() => {
+        const el = gridScrollRef.current;
+        if (!el || !open) return;
+        const onScroll = () => {
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
+                loadMore();
+            }
+        };
+        el.addEventListener("scroll", onScroll);
+        return () => el.removeEventListener("scroll", onScroll);
+    }, [open, loadMore]);
 
     // Filter dropdown options — distinct values actually present in the
     // roster, fetched once via the lightweight facets endpoint instead of
@@ -557,13 +621,16 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     // Derived filter options — from the /talents/facets endpoint (distinct
     // values actually present in the roster) rather than scanning `talents`,
     // since that array is now a bounded, server-filtered result set, not
-    // the whole roster.
+    // the whole roster. totalCount uses the backend's `total` (a real
+    // count_documents() over the full match set) — NOT talents.length, which
+    // is only however many of the (possibly 1000+) matching talents have
+    // been paged into the browser so far.
     const filterOptions = useMemo(() => ({
         genders: facets.genders || [],
         ethnicities: facets.ethnicities || [],
         locations: facets.locations || [],
-        totalCount: talents.length,
-    }), [facets, talents.length]);
+        totalCount: total,
+    }), [facets, total]);
     
     // Debounced search handler
     const handleSearchChange = useCallback((value) => {
@@ -1149,11 +1216,37 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                             })}
                                         </div>
                                     )}
+
+                                    {/* Infinite-scroll footer — loadMore fires automatically as the
+                                        user nears the bottom (see the gridScrollRef scroll listener);
+                                        this is a visible fallback + status indicator, not the primary
+                                        trigger. */}
+                                    {hasMore && (
+                                        <div className="flex justify-center py-6">
+                                            {loadingMore ? (
+                                                <p className="text-xs text-[#8b8b8b]">Loading more talents…</p>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={loadMore}
+                                                    data-testid="talent-browser-load-more"
+                                                    className="px-4 py-2 text-xs font-medium text-[#333333] border border-gray-200 rounded-full hover:border-gray-300"
+                                                >
+                                                    Load more talents
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                    {!hasMore && talents.length > 0 && talents.length === total && total > PAGE_SIZE && (
+                                        <p className="text-center text-xs text-[#8b8b8b] py-6">
+                                            All {total.toLocaleString()} talents loaded
+                                        </p>
+                                    )}
                                 </div>
                             )}
                         </div>
                     </div>
-                    
+
                     {/* Selection Tray */}
                     {selected.size > 0 && (
                         <SelectionTray

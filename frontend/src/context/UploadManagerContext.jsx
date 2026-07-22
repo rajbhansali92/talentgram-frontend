@@ -529,7 +529,14 @@ export function UploadManagerProvider({ children }) {
                 }));
                 setActiveUploads((prev) => ({
                     ...prev,
-                    [slotKey]: { ...prev[slotKey], status: "failed", error: msg },
+                    // statusText must be cleared here — it may still hold an
+                    // in-flight label (e.g. "Processing complete", set the
+                    // instant upload bytes finish leaving the browser, before
+                    // the server response is known) from just before this
+                    // failure. Left stale, the view model prefers it over the
+                    // canonical "Failed" label, so the panel showed that
+                    // in-flight text simultaneously with the failure reason.
+                    [slotKey]: { ...prev[slotKey], status: "failed", error: msg, statusText: undefined },
                 }));
                 toast.error(`${msg} — tap Retry to try again`);
                 delete inFlightUploads.current[slotKey]; // release lock on failure
@@ -606,7 +613,7 @@ export function UploadManagerProvider({ children }) {
                                         ...prev[slotKey],
                                         status: pct >= 100 ? "processing" : "uploading",
                                         pct,
-                                        statusText: pct >= 100 ? "Processing complete" : `Uploading video... (${pct}%)`
+                                        statusText: pct >= 100 ? "Processing complete" : `${isVideoSlot ? "Uploading video" : "Uploading"}... (${pct}%)`
                                     }
                                 };
                             });
@@ -706,7 +713,12 @@ export function UploadManagerProvider({ children }) {
             [slotKey]: {
                 ...prev[slotKey],
                 status: "failed",
-                error: formattedErr
+                error: formattedErr,
+                // See the identical clear in the chunked-transport catch
+                // block above: without this, a stale in-flight statusText
+                // (e.g. "Uploading video... (100%)") from just before the
+                // failure keeps rendering alongside the failure reason.
+                statusText: undefined
             }
         }));
 

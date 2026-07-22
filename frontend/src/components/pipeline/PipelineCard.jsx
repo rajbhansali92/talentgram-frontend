@@ -186,7 +186,12 @@ const PipelineCard = memo(function PipelineCard({
     const nextStages = NEXT_STAGE_FLOW[canonicalStage] || [];
     const statusTone = STATUS_TONES[canonicalStage];
     const visibleActions = nextStages.slice(0, VISIBLE_ACTIONS_PER_CARD);
-    const overflowActions = nextStages.slice(VISIBLE_ACTIONS_PER_CARD);
+    // "Reached Out" only ever applies to a card currently in Ask To Test —
+    // appended into the SAME overflow ("...") menu the other secondary
+    // actions already live in, not a new menu.
+    const overflowActions = canonicalStage === "ask_to_test"
+        ? [...nextStages.slice(VISIBLE_ACTIONS_PER_CARD), "follow_up"]
+        : nextStages.slice(VISIBLE_ACTIONS_PER_CARD);
     
     const displayName = item.talent_name || item.talent_id || "Unknown";
     const displayEmail = item.talent_email || item.email || null;
@@ -799,7 +804,10 @@ const PipelineCard = memo(function PipelineCard({
                                                 onClick={() => handleOverflowAction(stage)}
                                                 className="w-full text-left px-3 py-1.5 text-[9px] tracking-wide uppercase text-black/60 hover:text-black/90 hover:bg-black/[0.02]"
                                             >
-                                                {STAGE_LABELS[stage] || getStageLabel(stage)}
+                                                {/* "follow_up" is action-labeled "Reached Out" here — the
+                                                    destination's own label (STAGE_LABELS.follow_up =
+                                                    "FOLLOW-UP") is for the column header, not this button. */}
+                                                {stage === "follow_up" ? "Reached Out" : (STAGE_LABELS[stage] || getStageLabel(stage))}
                                             </button>
                                         ))}
                                     </div>

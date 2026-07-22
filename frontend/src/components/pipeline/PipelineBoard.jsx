@@ -67,6 +67,16 @@ function PipelineBoard({ projectId, projectName }) {
         selectAllInColumn,
     } = useBulkSelection();
 
+    // "Reached Out" bulk action is only offered when every selected row is
+    // currently in Ask To Test — never shown for any other stage mix.
+    const bulkAllAskToTest = useMemo(() => {
+        if (bulkIds.size === 0) return false;
+        return Array.from(bulkIds).every((id) => {
+            const row = data.find((i) => i.id === id);
+            return row && normaliseStage(row.stage) === "ask_to_test";
+        });
+    }, [bulkIds, data]);
+
     // FIX 1: Added projectId to usePipelineDnD
     const {
         dragSupported,
@@ -232,12 +242,21 @@ function PipelineBoard({ projectId, projectName }) {
             setBulkIds(new Set());
             setBulkMode(false);
             await fetchPipeline();
-            toast.success(`Moved ${count} talents to ${getStageLabel(targetStage)}`);
+            if (targetStage === "follow_up") {
+                toast.success(`${count} talent${count === 1 ? "" : "s"} moved to Follow-Up.`);
+            } else {
+                toast.success(`Moved ${count} talents to ${getStageLabel(targetStage)}`);
+            }
         } catch (e) {
             console.error("Bulk move failed:", e);
             toast.error(formatErrorDetail(e, "Failed to move talents"));
         }
     };
+
+    // "Reached Out" bulk action — a thin, purpose-named wrapper around the
+    // SAME bulk-move call every other stage transition already uses. No new
+    // endpoint, no parallel workflow.
+    const handleBulkReachedOut = () => handleBulkMove("follow_up");
 
     const handleBulkLabel = async () => {
         const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
@@ -695,6 +714,8 @@ function PipelineBoard({ projectId, projectName }) {
                     onWhatsApp={() => setShowWhatsAppModal(true)}
                     onEmail={() => setShowEmailModal(true)}
                     onArchive={handleBulkArchive}
+                    onReachedOut={handleBulkReachedOut}
+                    showReachedOut={bulkAllAskToTest}
                 />
 
                 <TalentBrowserModal

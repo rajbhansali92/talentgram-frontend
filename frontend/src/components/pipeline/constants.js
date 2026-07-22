@@ -179,6 +179,11 @@ export const VISIBLE_ACTIONS_PER_CARD = 2;
  * ------------------------------------------------------------------- */
 export const NEXT_STAGE_FLOW = {
     ask_to_test: ["approved", "not_interested", "not_available"],
+    // Mirrors ask_to_test: a "Reached Out" talent still needs the same
+    // outcomes available (approve/decline/mark unavailable) — being
+    // contacted doesn't change what's possible next, just tracks contact
+    // status. Without this, follow_up cards would have zero quick actions.
+    follow_up: ["approved", "not_interested", "not_available"],
     approved: ["shortlisted", "hold", "rejected"],
     hold: ["approved", "shortlisted", "rejected"],
     shortlisted: ["locked", "already_tested", "rejected"],

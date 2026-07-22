@@ -20,17 +20,19 @@ import {
  * Rich floating cinematic action bar anchored to the bottom-center of the viewport.
  * Disappears when selection is empty.
  */
-const BulkActionBar = memo(function BulkActionBar({ 
-    count, 
-    onClear, 
-    onMove, 
+const BulkActionBar = memo(function BulkActionBar({
+    count,
+    onClear,
+    onMove,
     onLabel,
     onNote,
     onDelete,
     onExport,
     onWhatsApp,
     onEmail,
-    onArchive
+    onArchive,
+    onReachedOut,
+    showReachedOut,
 }) {
     const visible = count > 0;
     const [busy, setBusy] = useState(false);
@@ -103,6 +105,29 @@ const BulkActionBar = memo(function BulkActionBar({
 
                 {/* Actions group - scrollable on small viewports */}
                 <div className="flex-1 flex items-center gap-2 overflow-x-auto scrollbar-none py-0.5">
+                    {/* Reached Out — only ever shown when every selected talent
+                        is currently in Ask To Test. Moves them all straight to
+                        Follow-Up in one click (no dropdown, no confirmation). */}
+                    {showReachedOut && (
+                        <button
+                            type="button"
+                            onClick={onReachedOut}
+                            disabled={busy}
+                            data-testid="pipeline-bulk-reached-out"
+                            className="
+                                flex items-center gap-1.5 shrink-0
+                                px-3 py-2 rounded-lg
+                                text-[10.5px] tracking-wide uppercase font-semibold
+                                text-white bg-emerald-500/15 hover:bg-emerald-500/25
+                                border border-emerald-400/25 hover:border-emerald-400/40
+                                transition-all duration-200 disabled:opacity-40
+                            "
+                        >
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Reached Out</span>
+                        </button>
+                    )}
+
                     {/* Stage quick moves */}
                     <div className="relative" ref={dropdownRef}>
                         <button

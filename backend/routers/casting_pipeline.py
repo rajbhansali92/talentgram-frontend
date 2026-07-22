@@ -71,6 +71,14 @@ PIPELINE_STAGE_ORDER = [
     "not_available",
     "not_interested",
     "pitch",
+    # "Reached Out" shortcut target. Not part of the main kanban flow (the
+    # frontend renders it as its own dedicated lane via the is_follow_up
+    # flag below, not via MAIN_FLOW_STAGES) — listed here purely so
+    # /pipeline/move and /pipeline/bulk-move accept it as a valid stage.
+    # AUTO_SYNC_OVERWRITABLE_STAGES already included "follow_up" pre-emptively
+    # (see comment there), so a submission decision correctly moves a talent
+    # back out of follow_up with no further changes needed.
+    "follow_up",
 ]
 
 PIPELINE_STAGES = set(PIPELINE_STAGE_ORDER)
@@ -460,9 +468,16 @@ async def list_pipeline(
         canonical_stage = _normalise_stage(row.get("stage")) or row.get("stage")
         tid = row.get("talent_id")
         is_follow_up = (
-            canonical_stage == "ask_to_test"
-            and bool(tid)
-            and tid not in submitted_talent_ids
+            # Explicit "Reached Out" action — the admin manually flagged this
+            # talent as contacted and awaiting a response.
+            canonical_stage == "follow_up"
+            or (
+                # Existing automatic signal, unchanged: an ask_to_test talent
+                # who hasn't submitted yet also surfaces in the Follow-Up lane.
+                canonical_stage == "ask_to_test"
+                and bool(tid)
+                and tid not in submitted_talent_ids
+            )
         )
         hydrated.append({
             **row,

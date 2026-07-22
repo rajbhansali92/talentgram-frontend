@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
-import { Search, Plus, Check, User, LayoutGrid, List, Tag, SlidersHorizontal } from "lucide-react";
+import { instagramProfileUrl } from "@/lib/mediaUtils";
+import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -138,6 +139,8 @@ const TalentCard = React.memo(function TalentCard({
         [t, onTagClick]
     );
 
+    const igUrl = instagramProfileUrl(t.instagram_handle);
+
     const cardContent = (
         <>
             {/* Thumbnail — aspect-ratio container prevents layout shift */}
@@ -232,6 +235,27 @@ const TalentCard = React.memo(function TalentCard({
                 <Tag className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
             </button>
 
+            {/* Instagram shortcut — external tab only; Instagram blocks embedding */}
+            {igUrl && (
+                <a
+                    href={igUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={`Open ${t.name || "talent"}'s Instagram profile`}
+                    title="Open Instagram"
+                    data-testid={`talent-instagram-btn-${t.id}`}
+                    className={[
+                        "absolute top-2 right-[3.25rem] md:right-11 z-10 w-11 h-11 md:w-8 md:h-8 rounded-full bg-white/90 border border-black/15 shadow-sm flex items-center justify-center text-black/60 hover:text-black hover:bg-white active:scale-95 transition-all",
+                        checked
+                            ? "opacity-100"
+                            : "opacity-100 md:opacity-0 md:group-hover:opacity-100",
+                    ].join(" ")}
+                >
+                    <Instagram className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
+                </a>
+            )}
+
             {/* Card body — link or button depending on selection mode */}
             {!isSelectionMode ? (
                 <Link
@@ -311,6 +335,8 @@ const TalentListRow = React.memo(function TalentListRow({
             toast.error("No phone number available");
         }
     }, [t.phone]);
+
+    const igUrl = instagramProfileUrl(t.instagram_handle);
 
     return (
         <div
@@ -459,6 +485,20 @@ const TalentListRow = React.memo(function TalentListRow({
                                 <Tag className="w-4.5 h-4.5 md:w-3.5 md:h-3.5 md:mr-1" />
                                 <span className="hidden md:inline">Tags</span>
                             </button>
+                            {igUrl && (
+                                <a
+                                    href={igUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    aria-label={`Open ${t.name || "talent"}'s Instagram profile`}
+                                    title="Open Instagram"
+                                    data-testid={`talent-instagram-btn-${t.id}`}
+                                    className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 hover:bg-black/[0.02] bg-white text-black/60 hover:text-black w-11 h-11 md:w-8 md:h-8 rounded-lg transition-colors select-none min-h-[44px] md:min-h-0 shrink-0"
+                                >
+                                    <Instagram className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
+                                </a>
+                            )}
                             <Link
                                 to={`/admin/talents/${t.id}`}
                                 className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"

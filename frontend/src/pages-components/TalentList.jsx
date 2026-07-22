@@ -159,8 +159,23 @@ const TalentCard = React.memo(function TalentCard({
                 <div className="font-semibold text-[13.5px] leading-snug tracking-tight text-neutral-800 truncate">
                     {t.name || "—"}
                 </div>
-                <div className="text-[11px] text-neutral-500 mt-0.5 truncate">
+                <div className="flex items-center justify-between gap-1.5 mt-0.5">
+                <div className="text-[11px] text-neutral-500 truncate">
                     {[formatTalentLocation(t.location), t.category].filter(Boolean).join(" · ") || "\u00a0"}
+                </div>
+                {igUrl && (
+                    <a
+                        href={igUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        aria-label={`Open ${t.name || "talent"}'s Instagram profile`}
+                        data-testid={`talent-instagram-btn-mobile-${t.id}`}
+                        className="md:hidden shrink-0 flex items-center justify-center w-10 h-10 -my-2 -mr-1 text-black/50 active:text-black active:scale-95 transition-all"
+                    >
+                        <Instagram className="w-4 h-4" />
+                    </a>
+                )}
                 </div>
                 {/* Compact tag pills — max 2 visible + overflow badge */}
                 {(t.tags || []).length > 0 && (
@@ -235,7 +250,10 @@ const TalentCard = React.memo(function TalentCard({
                 <Tag className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
             </button>
 
-            {/* Instagram shortcut — external tab only; Instagram blocks embedding */}
+            {/* Instagram shortcut — external tab only; Instagram blocks embedding.
+                Desktop only: on mobile this floating icon sat over the image
+                and could cover the talent's face, so mobile gets its own
+                shortcut inside the info row instead (see cardContent below). */}
             {igUrl && (
                 <a
                     href={igUrl}
@@ -246,13 +264,11 @@ const TalentCard = React.memo(function TalentCard({
                     title="Open Instagram"
                     data-testid={`talent-instagram-btn-${t.id}`}
                     className={[
-                        "absolute top-2 right-[3.25rem] md:right-11 z-10 w-11 h-11 md:w-8 md:h-8 rounded-full bg-white/90 border border-black/15 shadow-sm flex items-center justify-center text-black/60 hover:text-black hover:bg-white active:scale-95 transition-all",
-                        checked
-                            ? "opacity-100"
-                            : "opacity-100 md:opacity-0 md:group-hover:opacity-100",
+                        "hidden md:flex absolute top-2 right-11 z-10 w-8 h-8 rounded-full bg-white/90 border border-black/15 shadow-sm items-center justify-center text-black/60 hover:text-black hover:bg-white active:scale-95 transition-all",
+                        checked ? "opacity-100" : "opacity-0 group-hover:opacity-100",
                     ].join(" ")}
                 >
-                    <Instagram className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
+                    <Instagram className="w-3.5 h-3.5" />
                 </a>
             )}
 

@@ -106,13 +106,15 @@ export default function FloatingUploadManager({ activeUploads = {}, completedCou
                                     <span className={`font-mono text-[10px] font-semibold ${item.textClass}`}>
                                         {item.displayText}
                                     </span>
-                                    <button
-                                        type="button"
-                                        onClick={() => onDismiss(item.key)}
-                                        className="text-[#333333] hover:text-[#222222] p-0.5"
-                                    >
-                                        <X className="w-3 h-3" />
-                                    </button>
+                                    {(item.status === "completed" || item.status === "failed") && (
+                                        <button
+                                            type="button"
+                                            onClick={() => onDismiss(item.key)}
+                                            className="text-[#333333] hover:text-[#222222] p-0.5"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 

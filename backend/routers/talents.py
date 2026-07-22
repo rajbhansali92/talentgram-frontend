@@ -4,7 +4,8 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 from core import (
@@ -28,6 +29,8 @@ from core import (
     resolve_cover_media,
     update_talent_cover_cache,
     normalize_email,
+    parse_height_to_inches,
+    FOLLOWER_BUCKET_ORDER,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +56,9 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
         if age is not None:
             if not (0 <= age <= 120):
                 raise HTTPException(400, "Age must be between 0 and 120")
+    # height_inches: normalized numeric mirror of `height` (free text) so the
+    # filter/sort engine can range-query without re-parsing on every read.
+    doc["height_inches"] = parse_height_to_inches(doc.get("height"))
 
     # FEATURE 1: whatsapp_group_name is admin-only — non-admins cannot set it.
     if admin.get("role") != "admin":
@@ -186,6 +192,199 @@ def _enrich_list(doc: dict) -> dict:
     return doc
 
 
+# ---------------------------------------------------------------------------
+# Shared talent-directory query engine — powers both Global Talent (paginated
+# server-side browsing) and Browse Roster (the pipeline "Add Talents" modal).
+# Both surfaces call this SAME endpoint with the SAME structured params so
+# there is exactly one place criteria → Mongo query translation happens.
+# ---------------------------------------------------------------------------
+
+# UUID-shaped strings get an exact-match `id` fast path in search instead of
+# joining the slow $or-of-regex clause (Talent ID search).
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+# Fields the "any single term must match one of these" free-text search
+# scans. Extended (vs. the original) with phone and tag names so Search
+# covers Name / Instagram / Phone / Email / Internal Tags / Talent ID per the
+# Global Talent UX spec — Talent ID additionally gets the exact-match fast
+# path above when the query looks like a UUID.
+_SEARCH_FIELDS = [
+    "name", "email", "phone", "instagram_handle", "location.city",
+    "location.country", "gender", "category", "skills", "interested_in",
+    "tags.name",
+]
+
+
+def _shift_years(d, years: int):
+    """`date.replace(year=...)`, tolerating Feb-29 -> non-leap-year by
+    falling back to Feb 28 instead of raising."""
+    try:
+        return d.replace(year=d.year - years)
+    except ValueError:
+        return d.replace(month=2, day=28, year=d.year - years)
+
+
+def _age_range_to_dob_range(age_min: Optional[int], age_max: Optional[int]) -> Dict[str, Any]:
+    """Convert an age range into a `dob` string range clause.
+
+    dob is stored as an ISO 'YYYY-MM-DD' string, which sorts lexicographically
+    identically to chronological order, so a plain string $gte/$lte works —
+    no need to parse dob into a real date at query time. Older DOB = higher
+    age, so the min/max sense inverts.
+    """
+    today = datetime.now(timezone.utc).date()
+    clause: Dict[str, Any] = {}
+    if age_max is not None:
+        # A person is at most age_max if born on/after (today - age_max - 1yr + 1day).
+        clause["$gt"] = _shift_years(today, age_max + 1).isoformat()
+    if age_min is not None:
+        clause["$lte"] = _shift_years(today, age_min).isoformat()
+    return clause
+
+
+def _array_match_clause(field: str, values: List[str], mode: str) -> Dict[str, Any]:
+    """`$all` for "match every selected value" (AND/ALL), `$in` for "match any" (OR/ANY)."""
+    if (mode or "any").lower() == "all":
+        return {field: {"$all": values}}
+    return {field: {"$in": values}}
+
+
+def _followers_bucket_gte(threshold: str) -> List[str]:
+    """Every bucket label at or above `threshold` in FOLLOWER_BUCKET_ORDER."""
+    try:
+        idx = FOLLOWER_BUCKET_ORDER.index(threshold)
+    except ValueError:
+        return []
+    return FOLLOWER_BUCKET_ORDER[idx:]
+
+
+# sort_by -> (field, direction) for the plain find().sort() path. Sorts that
+# need a value not stored directly on the document (followers ordinal,
+# completeness score) are NOT here — they're handled by the aggregation
+# branch below.
+_SIMPLE_SORTS = {
+    "name_asc": [("name", 1)],
+    "name_desc": [("name", -1)],
+    "created_desc": [("created_at", -1)],
+    "created_asc": [("created_at", 1)],
+    "updated_desc": [("updated_at", -1)],
+    "updated_asc": [("updated_at", 1)],
+    "height_asc": [("height_inches", 1)],
+    "height_desc": [("height_inches", -1)],
+    # Age: older = smaller (earlier) dob string, so "oldest first" is a dob
+    # ASCENDING sort and "youngest first" is DESCENDING — inverted vs age itself.
+    "age_desc": [("dob", 1)],   # oldest -> youngest
+    "age_asc": [("dob", -1)],   # youngest -> oldest
+}
+_COMPUTED_SORTS = {"followers_asc", "followers_desc", "completeness_desc"}
+
+_COMPLETENESS_FIELDS = [
+    "cover_url", "height", "location", "gender", "dob", "ethnicity",
+    "instagram_handle", "instagram_followers", "bio", "skills",
+    "interested_in", "work_links",
+]
+
+
+def _followers_ordinal_expr() -> Dict[str, Any]:
+    """Aggregation $switch mapping the stored bucket label to its ordinal
+    position in FOLLOWER_BUCKET_ORDER (higher = more followers). Unknown/
+    missing values sort last (-1) regardless of sort direction handling
+    below."""
+    branches = [
+        {"case": {"$eq": ["$instagram_followers", label]}, "then": i}
+        for i, label in enumerate(FOLLOWER_BUCKET_ORDER)
+    ]
+    return {"$switch": {"branches": branches, "default": -1}}
+
+
+def _completeness_score_expr() -> Dict[str, Any]:
+    """Aggregation $sum of boolean-cast field-presence checks — an
+    approximate profile-completeness score, used only as a sort tiebreaker
+    (not a filter), so exact weighting doesn't need to be perfect."""
+    parts = []
+    for f in _COMPLETENESS_FIELDS:
+        parts.append({
+            "$cond": [
+                {"$in": [{"$type": f"${f}"}, ["missing", "null"]]},
+                0,
+                {"$cond": [{"$eq": [f"${f}", []]}, 0, 1]},
+            ]
+        })
+    return {"$sum": parts}
+
+
+def _build_talent_query(
+    q: Optional[str],
+    status: Optional[str],
+    gender: Optional[str],
+    ethnicity: Optional[str],
+    location: Optional[str],
+    age_min: Optional[int],
+    age_max: Optional[int],
+    height_min: Optional[float],
+    height_max: Optional[float],
+    followers_min: Optional[str],
+    interested_in: List[str],
+    interested_in_mode: str,
+    skills: List[str],
+    skills_mode: str,
+    tags: List[str],
+    tags_mode: str,
+) -> Dict[str, Any]:
+    if status:
+        query: Dict[str, Any] = {"status": status}
+    else:
+        query = {"status": {"$nin": ["DRAFT", "ARCHIVED"]}}
+
+    and_clauses: List[Dict[str, Any]] = []
+
+    if q:
+        needle = q.strip()
+        if _UUID_RE.match(needle):
+            and_clauses.append({"id": needle})
+        else:
+            terms = [t for t in re.split(r"[\s+\-,;]+", needle) if t]
+            for term in terms:
+                rgx = {"$regex": re.escape(term), "$options": "i"}
+                and_clauses.append({"$or": [{f: rgx} for f in _SEARCH_FIELDS]})
+
+    if gender and gender != "any":
+        and_clauses.append({"gender": gender})
+    if ethnicity and ethnicity != "any":
+        and_clauses.append({"ethnicity": ethnicity})
+    if location and location != "any":
+        rgx = {"$regex": re.escape(location), "$options": "i"}
+        and_clauses.append({"$or": [{"location.city": rgx}, {"location.country": rgx}]})
+
+    dob_range = _age_range_to_dob_range(age_min, age_max)
+    if dob_range:
+        and_clauses.append({"dob": dob_range})
+
+    if height_min is not None or height_max is not None:
+        h_clause: Dict[str, Any] = {}
+        if height_min is not None:
+            h_clause["$gte"] = height_min
+        if height_max is not None:
+            h_clause["$lte"] = height_max
+        and_clauses.append({"height_inches": h_clause})
+
+    if followers_min:
+        buckets = _followers_bucket_gte(followers_min)
+        if buckets:
+            and_clauses.append({"instagram_followers": {"$in": buckets}})
+
+    if interested_in:
+        and_clauses.append(_array_match_clause("interested_in", interested_in, interested_in_mode))
+    if skills:
+        and_clauses.append(_array_match_clause("skills", skills, skills_mode))
+    if tags:
+        and_clauses.append(_array_match_clause("tags.id", tags, tags_mode))
+
+    if and_clauses:
+        query["$and"] = and_clauses
+    return query
+
+
 @router.get("/talents")
 async def list_talents(
     q: Optional[str] = None,
@@ -193,50 +392,72 @@ async def list_talents(
     page: Optional[int] = None,
     size: Optional[int] = None,
     limit: Optional[int] = None,
+    gender: Optional[str] = None,
+    ethnicity: Optional[str] = None,
+    location: Optional[str] = None,
+    age_min: Optional[int] = None,
+    age_max: Optional[int] = None,
+    height_min: Optional[float] = None,
+    height_max: Optional[float] = None,
+    followers_min: Optional[str] = None,
+    interested_in: List[str] = Query(default_factory=list),
+    interested_in_mode: str = "any",
+    skills: List[str] = Query(default_factory=list),
+    skills_mode: str = "any",
+    tags: List[str] = Query(default_factory=list),
+    tags_mode: str = "any",
+    sort_by: Optional[str] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
-    if status:
-        query: Dict[str, Any] = {"status": status}
-    else:
-        query: Dict[str, Any] = {"status": {"$nin": ["DRAFT", "ARCHIVED"]}}
-    if q:
-        needle = q.strip()
-        terms = [t for t in re.split(r"[\s+\-,;]+", needle) if t]
-        if terms:
-            and_clauses = []
-            for term in terms:
-                rgx = {"$regex": re.escape(term), "$options": "i"}
-                and_clauses.append({
-                    "$or": [
-                        {"name": rgx},
-                        {"email": rgx},
-                        {"instagram_handle": rgx},
-                        {"location.city": rgx},
-                        {"location.country": rgx},
-                        {"gender": rgx},
-                        {"category": rgx},
-                        {"skills": rgx},
-                        {"interested_in": rgx},
-                    ]
-                })
-            query["$and"] = and_clauses
+    query = _build_talent_query(
+        q, status, gender, ethnicity, location, age_min, age_max,
+        height_min, height_max, followers_min,
+        interested_in, interested_in_mode, skills, skills_mode, tags, tags_mode,
+    )
+    has_structured_filters = bool(query.get("$and"))
+
     # List projection excludes internal/provenance fields (see _LIST_PROJECTION).
     # NOTE: media[] IS returned — the Browse Talent modal renders it in the
     # per-talent preview drawer. Roster cards prefer the denormalized
     # cover_url/cover_thumbnail_url scalars (maintained by set_cover / add_media
     # / delete_media) and do not walk media[].
-    cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
-    if page is None and limit is None:
-        # LinkGenerator.jsx and TalentBrowserModal.jsx both call this endpoint
-        # with no page/limit by design, to load the whole roster for
-        # client-side filtering (TalentBrowserModal is explicitly tuned for
-        # "5,000+" talents — see its fetch comment). The old 2000 cap here
-        # silently dropped everything past the 2000 most-recently-created
-        # talents with no error or UI indication. Raised to cover the stated
-        # production scale target (up to ~20,000 talents).
+    if page is None and limit is None and not has_structured_filters:
+        # LinkGenerator.jsx calls this endpoint with no page/limit/filters by
+        # design, to load the whole roster for its own local picker UI (small
+        # payload fields only get used there, not filtered against). Browse
+        # Roster no longer takes this path — it always sends page/size now,
+        # same as Global Talent. Kept capped (not truly unbounded) as a
+        # defensive ceiling, not the primary access pattern.
+        cursor = db.talents.find(query, _LIST_PROJECTION).sort("created_at", -1)
         talents = await cursor.to_list(20000)
         return [_enrich_list(t) for t in talents]
+
     skip, page_size, p, s = _paginate_params(page, size, limit)
+
+    if sort_by in _COMPUTED_SORTS:
+        direction = -1 if sort_by.endswith("_desc") else 1
+        score_field = "_followers_ordinal" if sort_by.startswith("followers") else "_completeness"
+        score_expr = _followers_ordinal_expr() if score_field == "_followers_ordinal" else _completeness_score_expr()
+        pipeline = [
+            {"$match": query},
+            {"$addFields": {score_field: score_expr}},
+            {"$sort": {score_field: direction, "_id": 1}},
+            {"$facet": {
+                "data": [{"$skip": skip}, {"$limit": page_size}, {"$project": _LIST_PROJECTION}],
+                "count": [{"$count": "total"}],
+            }},
+        ]
+        result = await db.talents.aggregate(pipeline).to_list(1)
+        facet = result[0] if result else {"data": [], "count": []}
+        talents = facet["data"]
+        total = (facet["count"][0]["total"] if facet["count"] else 0)
+        return _paginated([_enrich_list(t) for t in talents], total, p, s)
+
+    sort_spec = _SIMPLE_SORTS.get(sort_by, [("created_at", -1)])
+    collation = {"locale": "en", "strength": 2} if sort_by in ("name_asc", "name_desc") else None
+    cursor = db.talents.find(query, _LIST_PROJECTION).sort(sort_spec)
+    if collation:
+        cursor = cursor.collation(collation)
     total = await db.talents.count_documents(query)
     talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
     return _paginated([_enrich_list(t) for t in talents], total, p, s)
@@ -355,6 +576,24 @@ async def bulk_talents(
     return {"success": True, "data": ordered}
 
 
+@router.get("/talents/facets")
+async def talent_facets(admin: dict = Depends(current_team_or_admin)):
+    """Distinct gender/ethnicity/location values actually present in the
+    roster — powers Browse Roster's filter dropdowns without fetching every
+    talent document just to scan them client-side. Small, cheap `.distinct()`
+    calls; no full-roster payload."""
+    genders = await db.talents.distinct("gender", {"gender": {"$nin": [None, ""]}})
+    ethnicities = await db.talents.distinct("ethnicity", {"ethnicity": {"$nin": [None, ""]}})
+    cities = await db.talents.distinct("location.city", {"location.city": {"$nin": [None, ""]}})
+    countries = await db.talents.distinct("location.country", {"location.country": {"$nin": [None, ""]}})
+    locations = sorted({f"{c}" for c in cities} | {f"{c}" for c in countries})
+    return {
+        "genders": sorted(genders),
+        "ethnicities": sorted(ethnicities),
+        "locations": locations,
+    }
+
+
 @router.get("/talents/migration/report")
 async def get_migration_report(admin: dict = Depends(current_admin)):
     """Fetch the latest duplicate media cleanup migration report."""
@@ -464,6 +703,7 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
         if age is not None:
             if not (0 <= age <= 120):
                 raise HTTPException(400, "Age must be between 0 and 120")
+    update["height_inches"] = parse_height_to_inches(update.get("height"))
 
     # FEATURE 1: whatsapp_group_name is admin-only. Drop it for non-admins so the
     # existing value is preserved (not overwritten).

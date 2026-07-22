@@ -221,10 +221,12 @@ const calculateMatchScore = (talent, filters) => {
     else if (followers >= 1000) score += 10;
     maxScore += 25;
     
-    // Location match (15%)
+    // Location match (15%) — filters.location is a plain city or country
+    // value (see GET /talents/facets), matched against either field.
     if (filters.location !== "any") {
+        const needle = filters.location.toLowerCase();
         const hasLocMatch = Array.isArray(talent.location) && talent.location.some(
-            (loc) => `${loc.city}, ${loc.country}` === filters.location
+            (loc) => loc.city?.toLowerCase() === needle || loc.country?.toLowerCase() === needle
         );
         if (hasLocMatch) score += 15;
     }
@@ -346,92 +348,148 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         setShowAdvancedFilters(false);
     }, []);
     
-    // Fetch talents with proper abort controller
+    // Fetch talents — SERVER-SIDE filtered against the same GET /api/talents
+    // query engine the Global Talent page uses (routers/talents.py
+    // list_talents), not a client-side scan of the whole roster. Re-fetches
+    // (debounced) whenever a filter changes, so Mongo does the actual
+    // filtering with indexes instead of shipping every talent to the
+    // browser. Capped at FETCH_SIZE per request — comfortably enough for a
+    // single browse-and-multi-select session without ever approaching the
+    // old "20,000 records" payload.
+    const FETCH_SIZE = 500;
+    const fetchDebounceRef = useRef(null);
+
+    const buildFetchParams = useCallback(() => {
+        const params = { page: 0, size: FETCH_SIZE };
+        if (filters.search.trim()) params.q = filters.search.trim();
+        if (filters.gender !== "any") params.gender = filters.gender;
+        if (filters.ethnicity !== "any") params.ethnicity = filters.ethnicity;
+        if (filters.location !== "any") {
+            // filterOptions.locations is a flat list of distinct city AND
+            // country values (see GET /talents/facets) — the backend
+            // location param already regex-matches against city OR country,
+            // so the selected value is passed straight through.
+            params.location = filters.location;
+        }
+        if (filters.ageMin !== "") params.age_min = filters.ageMin;
+        if (filters.ageMax !== "") params.age_max = filters.ageMax;
+        if (filters.heightMin !== "") params.height_min = filters.heightMin;
+        if (filters.heightMax !== "") params.height_max = filters.heightMax;
+        if (filters.minFollowers > 0) {
+            // Map the modal's coarse numeric buckets onto the backend's
+            // bucket-label vocabulary (core.py FOLLOWER_BUCKET_ORDER) — all
+            // four values here exist verbatim in that list.
+            const label = { 1000: "1K+", 10000: "10K+", 100000: "100K+", 1000000: "1M+" }[filters.minFollowers];
+            if (label) params.followers_min = label;
+        }
+        if (filters.interestedIn.length) {
+            params.interested_in = filters.interestedIn;
+            params.interested_in_mode = filters.interestedInMatchMode === "AND" ? "all" : "any";
+        }
+        if (filters.skills && filters.skills.length) {
+            params.skills = filters.skills;
+            params.skills_mode = filters.skillsMatchMode === "AND" ? "all" : "any";
+        }
+        if (filters.internalTags.length) {
+            params.tags = filters.internalTags;
+            params.tags_mode = filters.tagMatchMode === "AND" ? "all" : "any";
+        }
+        return params;
+    }, [filters]);
+
     useEffect(() => {
-        if (!open || talents.length > 0 || isFetchingRef.current) return;
-        
-        let isMounted = true;
-        isFetchingRef.current = true;
-        
-        // Create abort controller for this request
-        abortControllerRef.current = new AbortController();
-        
-        const fetchTalents = async () => {
-            setLoading(true);
-            setError(null);
-            
-            try {
-                // Configure axios to use abort signal
-                const response = await adminApi.get("/talents", {
-                    signal: abortControllerRef.current.signal
-                });
-                
-                if (!isMounted) return;
-                
-                const list = Array.isArray(response.data) ? response.data : response.data?.data || [];
-                
-                // Transform talents with real metrics and pre-memoize structures for extreme 5,000+ performance
-                const transformedTalents = list.map(talent => {
-                    const parsedHeight = parseHeightToInches(talent.height);
-                    // Safe tagging parsing - skip null/deleted tags to prevent rendering errors
-                    const validTags = (talent.tags || []).filter(tag => tag && typeof tag === 'object' && tag.id && tag.name);
-                    const tagIdsSet = new Set(validTags.map(tag => tag.id));
-                    const interestedInSet = new Set((talent.interested_in || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
-                    const skillsSet = new Set((talent.skills || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
- 
-                    return {
-                        ...talent,
-                        tags: validTags, // Overwrite to ensure zero card rendering bugs with legacy/deleted tags
-                        _heightInches: parsedHeight,
-                        _tagIdsSet: tagIdsSet,
-                        _interestedInSet: interestedInSet,
-                        _skillsSet: skillsSet,
-                        instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
-                    };
-                });
-                
-                // Dynamically compute the top 10 most frequently used tags
-                const tagCounts = {};
-                const tagNames = {};
-                transformedTalents.forEach(t => {
-                    t.tags.forEach(tag => {
-                        tagCounts[tag.id] = (tagCounts[tag.id] || 0) + 1;
-                        tagNames[tag.id] = tag.name;
+        if (!open) return;
+
+        if (fetchDebounceRef.current) clearTimeout(fetchDebounceRef.current);
+        fetchDebounceRef.current = setTimeout(() => {
+            let isMounted = true;
+            if (abortControllerRef.current) abortControllerRef.current.abort();
+            abortControllerRef.current = new AbortController();
+
+            const fetchTalents = async () => {
+                setLoading(true);
+                setError(null);
+                try {
+                    const response = await adminApi.get("/talents", {
+                        params: buildFetchParams(),
+                        signal: abortControllerRef.current.signal,
                     });
-                });
-                
-                const topTags = Object.keys(tagCounts)
-                    .map(id => ({ id, name: tagNames[id], count: tagCounts[id] }))
-                    .sort((a, b) => b.count - a.count)
-                    .slice(0, 10);
-                
-                setFrequentTags(topTags);
-                setTalents(transformedTalents);
-            } catch (err) {
-                if (isMounted && err.name !== 'CanceledError' && err.code !== 'ERR_CANCELED') {
-                    console.error("Failed to load talents:", err);
-                    setError("Failed to load talent roster");
+                    if (!isMounted) return;
+
+                    const list = response.data?.data ?? response.data?.items ?? [];
+
+                    // Pre-memoize structures the render/scoring layer already
+                    // expects — unchanged from before, just applied to a much
+                    // smaller, server-filtered list now.
+                    const transformedTalents = list.map(talent => {
+                        const parsedHeight = parseHeightToInches(talent.height);
+                        const validTags = (talent.tags || []).filter(tag => tag && typeof tag === 'object' && tag.id && tag.name);
+                        const tagIdsSet = new Set(validTags.map(tag => tag.id));
+                        const interestedInSet = new Set((talent.interested_in || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
+                        const skillsSet = new Set((talent.skills || []).filter(Boolean).map(s => String(s).toLowerCase().trim()));
+
+                        return {
+                            ...talent,
+                            tags: validTags,
+                            _heightInches: parsedHeight,
+                            _tagIdsSet: tagIdsSet,
+                            _interestedInSet: interestedInSet,
+                            _skillsSet: skillsSet,
+                            instagram_followers_count: talent.instagram_followers_count || parseFollowers(talent.instagram_followers),
+                        };
+                    });
+
+                    setTalents(transformedTalents);
+
+                    // Top 10 most-used tags among the currently-fetched
+                    // (server-filtered) set — same computation as before,
+                    // just over a bounded set instead of the whole roster.
+                    const tagCounts = {};
+                    const tagNames = {};
+                    transformedTalents.forEach(t => {
+                        t.tags.forEach(tag => {
+                            tagCounts[tag.id] = (tagCounts[tag.id] || 0) + 1;
+                            tagNames[tag.id] = tag.name;
+                        });
+                    });
+                    setFrequentTags(
+                        Object.keys(tagCounts)
+                            .map(id => ({ id, name: tagNames[id], count: tagCounts[id] }))
+                            .sort((a, b) => b.count - a.count)
+                            .slice(0, 10)
+                    );
+                } catch (err) {
+                    if (isMounted && err.name !== 'CanceledError' && err.code !== 'ERR_CANCELED') {
+                        console.error("Failed to load talents:", err);
+                        setError("Failed to load talent roster");
+                    }
+                } finally {
+                    if (isMounted) setLoading(false);
                 }
-            } finally {
-                if (isMounted) {
-                    isFetchingRef.current = false;
-                    setLoading(false);
-                }
-            }
-        };
-        
-        fetchTalents();
-        
+            };
+
+            fetchTalents();
+            return () => { isMounted = false; };
+        }, 250);
+
         return () => {
-            isMounted = false;
-            isFetchingRef.current = false;
-            // Abort in-flight request on cleanup
-            if (abortControllerRef.current) {
-                abortControllerRef.current.abort();
-                abortControllerRef.current = null;
-            }
+            if (fetchDebounceRef.current) clearTimeout(fetchDebounceRef.current);
         };
-    }, [open, talents.length, setLoading, setError, setTalents]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, filters]);
+
+    // Filter dropdown options — distinct values actually present in the
+    // roster, fetched once via the lightweight facets endpoint instead of
+    // scanning a full in-memory talent array that no longer exists.
+    const [facets, setFacets] = useState({ genders: [], ethnicities: [], locations: [] });
+    useEffect(() => {
+        if (!open) return;
+        let isMounted = true;
+        adminApi.get("/talents/facets").then(({ data }) => {
+            if (isMounted) setFacets(data);
+        }).catch(() => {});
+        return () => { isMounted = false; };
+    }, [open]);
 
     // Fetch global tags when modal opens
     useEffect(() => {
@@ -494,36 +552,16 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return () => window.removeEventListener("keydown", onKey);
     }, [open, onClose]);
     
-    // Derived filter options
-    const filterOptions = useMemo(() => {
-        const genders = new Set();
-        const ethnicities = new Set();
-        const locations = new Set();
-        
-        for (const t of talents) {
-            if (t.gender) genders.add(String(t.gender).trim());
-            if (t.ethnicity) ethnicities.add(String(t.ethnicity).trim());
-            if (t.location) {
-                if (Array.isArray(t.location)) {
-                    t.location.forEach(loc => {
-                        if (loc && loc.city && loc.country) {
-                            locations.add(`${loc.city}, ${loc.country}`);
-                        }
-                    });
-                } else {
-                    locations.add(String(t.location).trim());
-                }
-            }
-        }
-        
-        const sort = (set) => Array.from(set).filter(Boolean).sort((a, b) => a.localeCompare(b));
-        return {
-            genders: sort(genders),
-            ethnicities: sort(ethnicities),
-            locations: sort(locations),
-            totalCount: talents.length
-        };
-    }, [talents]);
+    // Derived filter options — from the /talents/facets endpoint (distinct
+    // values actually present in the roster) rather than scanning `talents`,
+    // since that array is now a bounded, server-filtered result set, not
+    // the whole roster.
+    const filterOptions = useMemo(() => ({
+        genders: facets.genders || [],
+        ethnicities: facets.ethnicities || [],
+        locations: facets.locations || [],
+        totalCount: talents.length,
+    }), [facets, talents.length]);
     
     // Debounced search handler
     const handleSearchChange = useCallback((value) => {
@@ -547,121 +585,13 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
     }, []);
     
     // Filtered and sorted talents (precompiled performance structure for 5,000+ scaling)
+    // `talents` is already server-filtered (see the fetch effect above,
+    // which sends `filters` straight to GET /api/talents) — this no longer
+    // re-filters client-side, just attaches the visual match-score badge.
     const filteredTalents = useMemo(() => {
-        let { 
-            search, gender, ethnicity, location, 
-            ageMin, ageMax, heightMin, heightMax, 
-            minFollowers, interestedIn, internalTags, 
-            tagMatchMode, interestedInMatchMode,
-            skills, skillsMatchMode
-        } = filters;
-        
-        const searchLower = search.trim().toLowerCase();
-        const ageMinNum = ageMin === "" ? null : Number(ageMin);
-        const ageMaxNum = ageMax === "" ? null : Number(ageMax);
-        const heightMinNum = heightMin === "" ? null : Number(heightMin);
-        const heightMaxNum = heightMax === "" ? null : Number(heightMax);
-        
-        const skillList = skills || [];
-        
-        return talents.filter((t) => {
-            // 1. Text Search
-            if (searchLower) {
-                const skillStr = (t.skills || []).join(" ");
-                const interestStr = (t.interested_in || []).join(" ");
-                const locStr = Array.isArray(t.location) 
-                    ? t.location.map(l => `${l.city} ${l.country}`).join(" ")
-                    : String(t.location || "");
-                const haystack = [
-                    t.name, 
-                    t.email, 
-                    t.instagram_handle, 
-                    locStr, 
-                    t.gender, 
-                    t.category, 
-                    skillStr, 
-                    interestStr
-                ]
-                    .filter(Boolean)
-                    .join(" ")
-                    .toLowerCase();
-                
-                const searchTerms = searchLower.split(/[\s+\-,;]+/).filter(Boolean);
-                if (searchTerms.length > 0) {
-                    const matchesAll = searchTerms.every(term => haystack.includes(term));
-                    if (!matchesAll) return false;
-                }
-            }
-            
-            // 2. Demographics
-            if (gender !== "any" && t.gender !== gender) return false;
-            if (ethnicity !== "any" && t.ethnicity !== ethnicity) return false;
-            if (location !== "any") {
-                const hasLoc = Array.isArray(t.location) && t.location.some(
-                    (loc) => `${loc.city}, ${loc.country}` === location
-                );
-                if (!hasLoc) return false;
-            }
-            
-            // 3. Age Range
-            if (ageMinNum !== null && !Number.isNaN(ageMinNum)) {
-                if (!t.age || t.age < ageMinNum) return false;
-            }
-            if (ageMaxNum !== null && !Number.isNaN(ageMaxNum)) {
-                if (!t.age || t.age > ageMaxNum) return false;
-            }
-            
-            // 4. Height Range (Numerical Comparison using Pre-Parsed Inches)
-            if (heightMinNum !== null || heightMaxNum !== null) {
-                if (t._heightInches === null) return false; // Exclude candidates with missing/unparseable height
-                if (heightMinNum !== null && t._heightInches < heightMinNum) return false;
-                if (heightMaxNum !== null && t._heightInches > heightMaxNum) return false;
-            }
-            
-            // 5. Followers
-            if (minFollowers > 0) {
-                if (t.instagram_followers_count < minFollowers) return false;
-            }
-            
-            // 6. Interested In Categories (Multi-select AND/OR matching)
-            if (interestedIn.length > 0) {
-                const lowerSelected = interestedIn.map(s => s.toLowerCase());
-                if (interestedInMatchMode === "AND") {
-                    const hasAll = lowerSelected.every(cat => t._interestedInSet && t._interestedInSet.has(cat));
-                    if (!hasAll) return false;
-                } else {
-                    const hasAny = lowerSelected.some(cat => t._interestedInSet && t._interestedInSet.has(cat));
-                    if (!hasAny) return false;
-                }
-            }
-            
-            // 7. Internal Tags (Multi-select AND/OR matching)
-            if (internalTags.length > 0) {
-                if (tagMatchMode === "AND") {
-                    const hasAll = internalTags.every(tagId => t._tagIdsSet && t._tagIdsSet.has(tagId));
-                    if (!hasAll) return false;
-                } else {
-                    const hasAny = internalTags.some(tagId => t._tagIdsSet && t._tagIdsSet.has(tagId));
-                    if (!hasAny) return false;
-                }
-            }
-            
-            // 8. Skills & Special Abilities (Multi-select AND/OR matching)
-            if (skillList.length > 0) {
-                const lowerSelected = skillList.map(s => s.toLowerCase());
-                if (skillsMatchMode === "AND") {
-                    const hasAll = lowerSelected.every(s => t._skillsSet && t._skillsSet.has(s));
-                    if (!hasAll) return false;
-                } else {
-                    const hasAny = lowerSelected.some(s => t._skillsSet && t._skillsSet.has(s));
-                    if (!hasAny) return false;
-                }
-            }
-            
-            return true;
-        }).map(t => ({
+        return talents.map(t => ({
             ...t,
-            matchScore: calculateMatchScore(t, filters), // Precomputed visual match score
+            matchScore: calculateMatchScore(t, filters),
         }));
     }, [talents, filters]);
     

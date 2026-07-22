@@ -2,13 +2,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
-import { Search, Plus, Check, User, LayoutGrid, List, Tag } from "lucide-react";
+import { Search, Plus, Check, User, LayoutGrid, List, Tag, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import TagPopover from "@/components/TagPopover";
 import BulkTagDialog from "@/components/BulkTagDialog";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
+import { useTalentDirectory } from "@/hooks/useTalentDirectory";
+import FilterPanel from "@/components/talent-directory/FilterPanel";
+import MobileFilterSheet from "@/components/talent-directory/MobileFilterSheet";
+import SortDropdown from "@/components/talent-directory/SortDropdown";
+import FilterChips from "@/components/talent-directory/FilterChips";
 
 // ---------------------------------------------------------------------------
 // Skeleton card — prevents layout shift during load
@@ -489,14 +494,42 @@ const TalentListRow = React.memo(function TalentListRow({
 // Main page
 // ---------------------------------------------------------------------------
 export default function TalentList() {
+    const {
+        search: q,
+        setSearch: setQ,
+        filters,
+        setFilter,
+        removeFilter,
+        clearAllFilters,
+        activeFilterCount,
+        filtersActive,
+        sortBy,
+        setSortBy,
+        page,
+        setPage,
+        pageSize,
+        total: totalItems,
+        pages: totalPages,
+        talents: fetchedTalents,
+        loading,
+        refetch,
+    } = useTalentDirectory({ pageSize: 40 });
+    // Local mirror of fetched talents — kept in sync via the effect below,
+    // but still a plain useState so the existing optimistic tag-update
+    // helpers (handleSaveTagsOptimistic etc.) can keep mutating it in place
+    // exactly as before, without waiting on a full server round-trip.
     const [talents, setTalents] = useState([]);
-    const [q, setQ] = useState("");
-    const [loading, setLoading] = useState(true);
+    useEffect(() => { setTalents(fetchedTalents); }, [fetchedTalents]);
+
+    const [availableTags, setAvailableTags] = useState([]);
+    useEffect(() => {
+        adminApi.get("/tags").then(({ data }) => setAvailableTags(data?.tags || [])).catch(() => {});
+    }, []);
+
+    const [showDesktopFilters, setShowDesktopFilters] = useState(false);
+
     const [selected, setSelected] = useState(new Set());
     const [confirmOpen, setConfirmOpen] = useState(false);
-    const [page, setPage] = useState(1);
-    const [totalPages, setTotalPages] = useState(1);
-    const [totalItems, setTotalItems] = useState(0);
     const canBulkDelete = isAdmin();
 
     const searchInputRef = useRef(null);
@@ -538,63 +571,16 @@ export default function TalentList() {
         }
     }, [viewMode]);
 
-    const pageSize = 40;
-
-    // ── Data fetching ────────────────────────────────────────────────────────
-    const load = useCallback(async (qq = "", pageNum = 1) => {
-        setLoading(true);
-        try {
-            const { data } = await adminApi.get("/talents", {
-                params: {
-                    ...(qq ? { q: qq } : {}),
-                    page: pageNum - 1,
-                    size: pageSize,
-                },
-            });
-            if (Array.isArray(data)) {
-                setTalents(data);
-                setTotalPages(1);
-                setTotalItems(data.length);
-            } else {
-                setTalents(data?.items ?? []);
-                setTotalPages(data?.pages ?? 1);
-                setTotalItems(data?.total ?? 0);
-            }
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
-    const [debouncedQ, setDebouncedQ] = useState(q);
-
-    // Debounce search input (250ms)
-    useEffect(() => {
-        const t = setTimeout(() => {
-            setDebouncedQ(q);
-        }, 250);
-        return () => clearTimeout(t);
-    }, [q]);
-
-    // Reset page to 1 when debounced query changes
-    useEffect(() => {
-        setPage(1);
-    }, [debouncedQ]);
-
-    // Trigger load when page or debounced query changes
-    useEffect(() => {
-        load(debouncedQ, page);
-    }, [page, debouncedQ, load]);
-
-    // Re-fetch when navigating back from detail page
+    // Data fetching (search/filter/sort/pagination) is entirely owned by
+    // useTalentDirectory now — see the hook call above. Re-fetch when
+    // navigating back from a talent's detail page (e.g. after an edit).
     useEffect(() => {
         const onVisible = () => {
-            if (document.visibilityState === "visible") {
-                load(debouncedQ, page);
-            }
+            if (document.visibilityState === "visible") refetch();
         };
         document.addEventListener("visibilitychange", onVisible);
         return () => document.removeEventListener("visibilitychange", onVisible);
-    }, [load, page, debouncedQ]);
+    }, [refetch]);
 
     // ── Selection ────────────────────────────────────────────────────────────
     const toggle = useCallback((id) => {
@@ -652,14 +638,14 @@ export default function TalentList() {
             );
             clear();
             setConfirmOpen(false);
-            load(q);
+            refetch();
         } catch (err) {
             toast.error(
                 err?.response?.data?.detail ?? err?.message ?? "Bulk delete failed"
             );
             throw err;
         }
-    }, [selected, clear, load, q]);
+    }, [selected, clear, refetch]);
 
     // ── Export ───────────────────────────────────────────────────────────────
     const handleExport = useCallback(() => {
@@ -741,7 +727,7 @@ export default function TalentList() {
                         type="text"
                         value={q}
                         onChange={(e) => setQ(e.target.value)}
-                        placeholder="Search by name…"
+                        placeholder="Search name, Instagram, phone, email, tag, or talent ID…"
                         data-testid="talent-search-input"
                         autoComplete="off"
                         spellCheck={false}
@@ -783,6 +769,60 @@ export default function TalentList() {
                 </div>
             </div>
 
+            {/* Filter / Sort toolbar — desktop gets an inline toggleable panel
+                (mirrors Browse Roster's "Show/Hide Filters"), mobile gets the
+                compact button + bottom sheet. Both drive the same
+                useTalentDirectory filter state, so results always match. */}
+            <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        data-testid="desktop-filter-toggle"
+                        onClick={() => setShowDesktopFilters((v) => !v)}
+                        className={`hidden md:flex items-center gap-2 px-3 py-2 text-sm border rounded-lg transition-colors ${
+                            showDesktopFilters ? "border-black/30 bg-black/[0.02]" : "border-gray-200 bg-white hover:border-gray-300"
+                        }`}
+                    >
+                        <SlidersHorizontal className="w-4 h-4 text-[#333333]" />
+                        Filters
+                        {activeFilterCount > 0 && (
+                            <span className="min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-[#0c2340] text-white text-[10px] font-semibold">
+                                {activeFilterCount}
+                            </span>
+                        )}
+                    </button>
+                    <div className="md:hidden">
+                        <MobileFilterSheet
+                            filters={filters}
+                            setFilter={setFilter}
+                            clearAllFilters={clearAllFilters}
+                            activeFilterCount={activeFilterCount}
+                            availableTags={availableTags}
+                        />
+                    </div>
+                </div>
+                <SortDropdown value={sortBy} onChange={setSortBy} />
+            </div>
+
+            {showDesktopFilters && (
+                <div className="hidden md:block border border-gray-200 bg-gray-50/50 rounded-xl p-5 mb-4">
+                    <FilterPanel filters={filters} setFilter={setFilter} availableTags={availableTags} />
+                </div>
+            )}
+
+            {filtersActive && (
+                <div className="mb-6">
+                    <FilterChips
+                        filters={filters}
+                        setFilter={setFilter}
+                        removeFilter={removeFilter}
+                        clearAllFilters={clearAllFilters}
+                        activeFilterCount={activeFilterCount}
+                        availableTags={availableTags}
+                    />
+                </div>
+            )}
+
             {/* Grid */}
             {loading ? (
                 <div
@@ -797,9 +837,22 @@ export default function TalentList() {
                 <div className="border border-black/[0.08] bg-white rounded-xl p-14 text-center">
                     <User className="w-10 h-10 text-black/18 mx-auto mb-4" strokeWidth={1} />
                     <p className="text-black/55 mb-2 font-medium">
-                        {q ? `No results for "${q}"` : "No talents yet"}
+                        {q
+                            ? `No results for "${q}"`
+                            : filtersActive
+                                ? "No talents match these filters"
+                                : "No talents yet"}
                     </p>
-                    {!q && (
+                    {filtersActive && !q && (
+                        <button
+                            type="button"
+                            onClick={clearAllFilters}
+                            className="text-xs font-medium text-[#333333] hover:text-[#111111] underline underline-offset-2"
+                        >
+                            Clear all filters
+                        </button>
+                    )}
+                    {!q && !filtersActive && (
                         <Link
                             to="/admin/talents/new"
                             className="inline-flex items-center gap-2 bg-black text-white px-5 py-2.5 rounded-lg text-xs font-medium hover:bg-black/85 transition-colors duration-150 mt-4"

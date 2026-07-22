@@ -1137,6 +1137,46 @@ def compute_age(dob: Optional[str]) -> Optional[int]:
         return None
 
 
+def parse_height_to_inches(raw: Optional[str]) -> Optional[float]:
+    """Normalize a free-text height string to inches for range queries/sort.
+
+    Python port of the frontend's parseHeightToInches (TalentBrowserModal.jsx)
+    so both the write path (backfilling `height_inches`) and the query engine
+    agree on the same parsing rules. Handles "5'6\"", "5ft 6in", "172cm",
+    "172" (bare cm), and tolerates curly-quote apostrophes.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip().lower()
+    if not s:
+        return None
+
+    cm_match = re.match(r"^(\d+(?:\.\d+)?)\s*(?:cm)?$", s)
+    if cm_match:
+        val = float(cm_match.group(1))
+        if val > 100:
+            return round(val / 2.54, 1)
+
+    feet_inches_match = re.search(r"(\d+)\s*(?:'|’|ft|feet)\s*(\d+)?", s)
+    if feet_inches_match:
+        feet = int(feet_inches_match.group(1))
+        inches = int(feet_inches_match.group(2)) if feet_inches_match.group(2) else 0
+        return float(feet * 12 + inches)
+
+    return None
+
+
+# Ordered smallest→largest — mirrors the bucket list surfaced on the public
+# apply/submission forms (INSTAGRAM_FOLLOWERS select options). Position in
+# this list IS the sort/filter ordinal for the stored bucket-label string;
+# there is no raw follower count stored anywhere.
+FOLLOWER_BUCKET_ORDER = [
+    "1K+", "10K+", "25K+", "50K+", "75K+", "100K+", "150K+", "200K+",
+    "300K+", "400K+", "500K+", "750K+", "1M+", "2M+", "3M+", "4M+", "5M+",
+    "7M+", "10M+", "15M+", "20M+", "25M+", "30M+", "40M+", "50M+",
+]
+
+
 def compute_effective_age(form_data: Optional[dict], stored_age: Optional[int] = None) -> Optional[int]:
     """Resolve the effective age for a project submission or application.
     Priority:

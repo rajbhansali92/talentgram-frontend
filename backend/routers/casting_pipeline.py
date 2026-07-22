@@ -27,6 +27,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from pymongo.errors import BulkWriteError
 
 from core import (
     _now,
@@ -100,6 +101,15 @@ def _normalise_stage(raw: Optional[str]) -> Optional[str]:
 class PipelineAddIn(BaseModel):
     talent_ids: List[str] = Field(default_factory=list)
     # Optional stage override for the bulk-add. Defaults to "ask_to_test".
+    stage: Optional[str] = None
+
+
+class BulkProjectAddIn(BaseModel):
+    """Cross-project bulk add — the Global Talent Directory's 'Add to
+    Project' action. Every (project_id, talent_id) pair is inserted at most
+    once; pairs already in the pipeline are skipped, never duplicated."""
+    project_ids: List[str] = Field(default_factory=list)
+    talent_ids: List[str] = Field(default_factory=list)
     stage: Optional[str] = None
 
 
@@ -549,6 +559,162 @@ async def add_to_pipeline(
         "added": len(new_docs),
         "skipped": len(existing_ids),
         "data": new_docs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/projects/bulk-add-talents
+#
+# Cross-project counterpart to /{project_id}/pipeline/add — the Global
+# Talent Directory's bulk "Add to Project" action. Adds many talents into
+# many projects' pipelines in ONE request: one query to validate the
+# projects, one to validate the talents, one to find every existing
+# (project_id, talent_id) pair across all selected projects, and one
+# insert_many for everything that's new. No per-(project, talent) API calls,
+# no N+1 inserts.
+# ---------------------------------------------------------------------------
+@router.post("/bulk-add-talents", status_code=status.HTTP_201_CREATED)
+async def bulk_add_talents_to_projects(
+    payload: BulkProjectAddIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Bulk-add talents into multiple ACTIVE projects' pipelines.
+
+    Idempotent per (project_id, talent_id): a pair already in the pipeline
+    is silently skipped, never duplicated (backed by the casting_pipeline
+    unique index as a DB-level safety net against races on top of the
+    application-level pre-check below). Rejects the whole request if any
+    selected project doesn't exist or isn't `ongoing` — the picker only ever
+    offers active projects, so this should only fire on a stale selection.
+    """
+    # Normalise + dedup ids (mirrors add_to_pipeline's handling).
+    def _clean_ids(raw_list: List[str]) -> List[str]:
+        seen: set = set()
+        out: List[str] = []
+        for raw in raw_list or []:
+            if not isinstance(raw, str):
+                continue
+            cid = raw.strip()
+            if cid and cid not in seen:
+                seen.add(cid)
+                out.append(cid)
+        return out
+
+    project_ids = _clean_ids(payload.project_ids)
+    talent_ids = _clean_ids(payload.talent_ids)
+
+    if not project_ids:
+        raise HTTPException(status_code=400, detail="Select at least one project")
+    if not talent_ids:
+        raise HTTPException(status_code=400, detail="Select at least one talent")
+
+    # Validate projects: must exist AND be `ongoing` (the only status that
+    # accepts new pipeline entries — hold/complete/locked are all rejected).
+    projects = await db.projects.find(
+        {"id": {"$in": project_ids}},
+        {"_id": 0, "id": 1, "brand_name": 1, "status": 1},
+    ).to_list(len(project_ids))
+    projects_by_id = {p["id"]: p for p in projects}
+
+    missing = [pid for pid in project_ids if pid not in projects_by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Project(s) not found: {missing}")
+
+    inactive = [projects_by_id[pid] for pid in project_ids if projects_by_id[pid].get("status") != "ongoing"]
+    if inactive:
+        names = [p.get("brand_name") or p["id"] for p in inactive]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot add talents to inactive project(s): {', '.join(names)}",
+        )
+
+    # Validate talents: drop any id that doesn't correspond to a real talent
+    # (defensive — the picker only ever sends ids for talents it just
+    # rendered, so this should be a no-op in normal use).
+    valid_talent_docs = await db.talents.find(
+        {"id": {"$in": talent_ids}}, {"_id": 0, "id": 1}
+    ).to_list(len(talent_ids))
+    valid_talent_ids = {t["id"] for t in valid_talent_docs}
+    talent_ids = [tid for tid in talent_ids if tid in valid_talent_ids]
+    if not talent_ids:
+        raise HTTPException(status_code=400, detail="No valid talents to add")
+
+    # Stage: explicit override (validated) or the configured pipeline
+    # default — never hardcoded here.
+    if payload.stage is None:
+        stage = DEFAULT_STAGE
+    else:
+        normalised = _normalise_stage(payload.stage)
+        if normalised not in PIPELINE_STAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stage. Must be one of: {PIPELINE_STAGE_ORDER}",
+            )
+        stage = normalised
+
+    # One query for every existing (project_id, talent_id) pair across ALL
+    # selected projects — avoids a per-project existence check.
+    existing_pairs = {
+        (d["project_id"], d["talent_id"])
+        for d in await db.casting_pipeline.find(
+            {"project_id": {"$in": project_ids}, "talent_id": {"$in": talent_ids}},
+            {"_id": 0, "project_id": 1, "talent_id": 1},
+        ).to_list(len(project_ids) * len(talent_ids))
+    }
+
+    now = _now()
+    new_docs = []
+    per_project_added: dict = {pid: 0 for pid in project_ids}
+    per_project_skipped: dict = {pid: 0 for pid in project_ids}
+    for pid in project_ids:
+        for tid in talent_ids:
+            if (pid, tid) in existing_pairs:
+                per_project_skipped[pid] += 1
+                continue
+            per_project_added[pid] += 1
+            new_docs.append({
+                "id": str(uuid.uuid4()),
+                "project_id": pid,
+                "talent_id": tid,
+                "stage": stage,
+                "created_at": now,
+                "updated_at": now,
+            })
+
+    inserted = 0
+    if new_docs:
+        try:
+            result = await db.casting_pipeline.insert_many(new_docs, ordered=False)
+            inserted = len(result.inserted_ids)
+        except BulkWriteError as bwe:
+            # The unique (project_id, talent_id) index caught a race our
+            # pre-check missed (e.g. a concurrent add of the same pair).
+            # Whatever DID land is reported accurately via nInserted; the
+            # rest are effectively "skipped" (already there by the time the
+            # write landed) rather than a hard failure.
+            inserted = bwe.details.get("nInserted", 0)
+            logger.warning(
+                "bulk_add_talents_to_projects: %d/%d inserts raced with a duplicate pair",
+                len(new_docs) - inserted, len(new_docs),
+            )
+
+    total_skipped = (len(project_ids) * len(talent_ids)) - inserted
+
+    return {
+        "success": True,
+        "added": inserted,
+        "skipped": total_skipped,
+        "project_count": len(project_ids),
+        "talent_count": len(talent_ids),
+        "projects": [
+            {
+                "project_id": pid,
+                "brand_name": projects_by_id[pid].get("brand_name"),
+                "added": per_project_added[pid],
+                "skipped": per_project_skipped[pid],
+            }
+            for pid in project_ids
+        ],
     }
 
 

@@ -8,6 +8,7 @@ import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import TagPopover from "@/components/TagPopover";
 import BulkTagDialog from "@/components/BulkTagDialog";
+import AddToProjectModal from "@/components/AddToProjectModal";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
 import FilterPanel from "@/components/talent-directory/FilterPanel";
@@ -559,6 +560,7 @@ export default function TalentList() {
     // Inline tagging state
     const [tagPopoverTalent, setTagPopoverTalent] = useState(null);
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
+    const [showAddToProject, setShowAddToProject] = useState(false);
 
     const [viewMode, setViewMode] = useState(() => {
         try {
@@ -947,9 +949,19 @@ export default function TalentList() {
                     onAssignTags={() => setBulkTagAction("assign")}
                     onRemoveTags={() => setBulkTagAction("remove")}
                     onExport={handleExport}
+                    onAddToProject={() => setShowAddToProject(true)}
                     labelSingular="talent"
                     labelPlural="talents"
                     testid="talents-bulk-bar"
+                />
+            )}
+
+            {showAddToProject && (
+                <AddToProjectModal
+                    open={showAddToProject}
+                    talentIds={Array.from(selected)}
+                    onClose={() => setShowAddToProject(false)}
+                    onSuccess={clear}
                 />
             )}
 

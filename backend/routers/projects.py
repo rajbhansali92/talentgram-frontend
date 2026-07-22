@@ -54,13 +54,15 @@ async def create_project(payload: ProjectIn, admin: dict = Depends(current_team_
 async def list_projects(
     page: Optional[int] = None,
     size: Optional[int] = None,
+    status: Optional[str] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
-    cursor = db.projects.find({}, {"_id": 0}).sort("created_at", -1)
+    query = {"status": status} if status else {}
+    cursor = db.projects.find(query, {"_id": 0}).sort("created_at", -1)
     if page is None:
         return await cursor.to_list(2000)
     skip, limit, p, s = _paginate_params(page, size)
-    total = await db.projects.count_documents({})
+    total = await db.projects.count_documents(query)
     items = await cursor.skip(skip).limit(limit).to_list(limit)
     return _paginated(items, total, p, s)
 

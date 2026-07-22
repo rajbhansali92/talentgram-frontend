@@ -1,5 +1,5 @@
 import React from "react";
-import { Trash2, X, Check } from "lucide-react";
+import { Trash2, X, Check, FolderKanban } from "lucide-react";
 
 /**
  * Floating action bar rendered at the bottom of the viewport when the user
@@ -26,6 +26,7 @@ export default function BulkSelectBar({
     onAssignTags,
     onRemoveTags,
     onExport,
+    onAddToProject,
     labelSingular = "item",
     labelPlural = "items",
     testid = "bulk-select-bar",
@@ -65,7 +66,19 @@ export default function BulkSelectBar({
                 </span>
             )}
             <span className="w-px h-5 bg-border shrink-0" />
-            
+
+            {onAddToProject && (
+                <button
+                    type="button"
+                    onClick={onAddToProject}
+                    className="text-xs px-3 py-2 bg-foreground text-background rounded-sm inline-flex items-center gap-1.5 hover:opacity-90 shrink-0"
+                    data-testid={`${testid}-add-to-project`}
+                >
+                    <FolderKanban className="w-3.5 h-3.5" />
+                    Add to Project
+                </button>
+            )}
+
             {onAssignTags && (
                 <button
                     type="button"

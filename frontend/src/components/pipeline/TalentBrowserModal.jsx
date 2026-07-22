@@ -7,6 +7,7 @@ import { adminApi, IMAGE_URL } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
+import LocationMultiSelect from "@/components/talent-directory/LocationMultiSelect";
 import HlsVideo from "@/components/HlsVideo";
 
 /* ---------------------------------------------------------------------
@@ -133,7 +134,7 @@ const FILTER_DEFAULTS = {
     search: "",
     gender: "any",
     ethnicity: "any",
-    location: "any",
+    locations: [],
     ageMin: "",
     ageMax: "",
     heightMin: "",
@@ -154,7 +155,7 @@ const SAVED_SEARCHES = [
     { id: "gen_z_fashion", label: "Gen Z Fashion", icon: Zap, filters: { ageMin: "18", ageMax: "25", minFollowers: 10000 } },
     { id: "veteran_models", label: "Veteran Models", icon: Star, filters: { ageMin: "30", ageMax: "45" } },
     { id: "high_impact", label: "High Impact", icon: TrendingUp, filters: { minFollowers: 100000 } },
-    { id: "local_talent", label: "Local Talent", icon: Users, filters: { location: "Los Angeles" } },
+    { id: "local_talent", label: "Local Talent", icon: Users, filters: { locations: ["Los Angeles"] } },
 ];
 
 // Parse follower counts
@@ -221,12 +222,14 @@ const calculateMatchScore = (talent, filters) => {
     else if (followers >= 1000) score += 10;
     maxScore += 25;
     
-    // Location match (15%) — filters.location is a plain city or country
-    // value (see GET /talents/facets), matched against either field.
-    if (filters.location !== "any") {
-        const needle = filters.location.toLowerCase();
+    // Location match (15%) — filters.locations is a list of plain city/
+    // country values (see GET /talents/facets); any one selected value
+    // matching either field on the talent counts (OR/IN, mirrors the
+    // backend's location query semantics).
+    if (filters.locations.length > 0) {
+        const needles = filters.locations.map((l) => l.toLowerCase());
         const hasLocMatch = Array.isArray(talent.location) && talent.location.some(
-            (loc) => loc.city?.toLowerCase() === needle || loc.country?.toLowerCase() === needle
+            (loc) => needles.includes(loc.city?.toLowerCase()) || needles.includes(loc.country?.toLowerCase())
         );
         if (hasLocMatch) score += 15;
     }
@@ -364,12 +367,11 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         if (filters.search.trim()) params.q = filters.search.trim();
         if (filters.gender !== "any") params.gender = filters.gender;
         if (filters.ethnicity !== "any") params.ethnicity = filters.ethnicity;
-        if (filters.location !== "any") {
-            // filterOptions.locations is a flat list of distinct city AND
-            // country values (see GET /talents/facets) — the backend
-            // location param already regex-matches against city OR country,
-            // so the selected value is passed straight through.
-            params.location = filters.location;
+        if (filters.locations.length) {
+            // Multiple selected locations combine with OR/IN server-side
+            // ("Mumbai" + "Delhi" -> either) — this whole group still ANDs
+            // against every other selected filter group.
+            params.location = filters.locations;
         }
         if (filters.ageMin !== "") params.age_min = filters.ageMin;
         if (filters.ageMax !== "") params.age_max = filters.ageMax;
@@ -600,7 +602,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
             filters.search.trim() !== "" ||
             filters.gender !== "any" ||
             filters.ethnicity !== "any" ||
-            filters.location !== "any" ||
+            filters.locations.length > 0 ||
             filters.ageMin !== "" ||
             filters.ageMax !== "" ||
             filters.heightMin !== "" ||
@@ -616,7 +618,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         let count = 0;
         if (filters.gender !== "any") count++;
         if (filters.ethnicity !== "any") count++;
-        if (filters.location !== "any") count++;
+        if (filters.locations.length > 0) count++;
         if (filters.ageMin || filters.ageMax) count++;
         if (filters.heightMin || filters.heightMax) count++;
         if (filters.minFollowers > 0) count++;
@@ -973,7 +975,9 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                         <span className="text-[10px] text-[#333333] hidden sm:inline">Active:</span>
                                         {filters.gender !== "any" && <FilterChip label={`Gender: ${filters.gender}`} onRemove={() => setFilter("gender", "any")} />}
                                         {filters.ethnicity !== "any" && <FilterChip label={`Ethnicity: ${filters.ethnicity}`} onRemove={() => setFilter("ethnicity", "any")} />}
-                                        {filters.location !== "any" && <FilterChip label={`Location: ${filters.location}`} onRemove={() => setFilter("location", "any")} />}
+                                        {filters.locations.map((loc) => (
+                                            <FilterChip key={loc} label={`Location: ${loc}`} onRemove={() => setFilter("locations", filters.locations.filter((l) => l !== loc))} />
+                                        ))}
                                         {(filters.ageMin || filters.ageMax) && (
                                             <FilterChip label={`Age: ${filters.ageMin || "Any"}–${filters.ageMax || "Any"}`} onRemove={() => { setFilter("ageMin", ""); setFilter("ageMax", ""); }} />
                                         )}
@@ -1712,17 +1716,16 @@ const AdvancedFiltersPanel = memo(({ filters, setFilter, filterOptions, globalTa
                 
                 <div>
                     <label className="text-xs font-semibold text-[#222222] uppercase tracking-wider">Location</label>
-                    <select
-                        value={filters.location}
-                        onChange={(e) => setFilter("location", e.target.value)}
-                        className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-300"
-                    >
-                        <option value="any">Any</option>
-                        {filterOptions.locations.map(l => <option key={l} value={l}>{l}</option>)}
-                    </select>
+                    <div className="mt-1.5">
+                        <LocationMultiSelect
+                            value={filters.locations}
+                            onChange={(v) => setFilter("locations", v)}
+                            options={filterOptions.locations}
+                        />
+                    </div>
                 </div>
             </div>
-            
+
             {/* ROW 4 (Physical & Outreach) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
@@ -2021,14 +2024,13 @@ const MobileFiltersSheet = memo(({ filters, setFilter, filterOptions, globalTags
                     {/* Location */}
                     <div>
                         <label className="text-xs font-semibold text-[#333333] uppercase tracking-wider">Location</label>
-                        <select 
-                            value={localFilters.location} 
-                            onChange={(e) => setLocalFilter("location", e.target.value)} 
-                            className="w-full mt-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
-                        >
-                            <option value="any">Any</option>
-                            {filterOptions.locations.map(l => <option key={l} value={l}>{l}</option>)}
-                        </select>
+                        <div className="mt-1.5">
+                            <LocationMultiSelect
+                                value={localFilters.locations}
+                                onChange={(v) => setLocalFilter("locations", v)}
+                                options={filterOptions.locations}
+                            />
+                        </div>
                     </div>
                     
                     {/* Age Range */}

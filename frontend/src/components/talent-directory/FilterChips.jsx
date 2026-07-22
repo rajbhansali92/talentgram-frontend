@@ -31,9 +31,6 @@ export default function FilterChips({ filters, setFilter, removeFilter, clearAll
     if (filters.ethnicity !== "any") {
         chips.push({ key: "ethnicity", label: `Ethnicity: ${ETHNICITY_OPTIONS.find((e) => e.key === filters.ethnicity)?.label || filters.ethnicity}` });
     }
-    if (filters.location.trim()) {
-        chips.push({ key: "location", label: `Location: ${filters.location}` });
-    }
     if (filters.ageMin !== "" || filters.ageMax !== "") {
         chips.push({ key: "age", label: `Age: ${filters.ageMin || "0"}–${filters.ageMax || "∞"}` });
     }
@@ -45,6 +42,7 @@ export default function FilterChips({ filters, setFilter, removeFilter, clearAll
     if (filters.followersMin) {
         chips.push({ key: "followersMin", label: `Followers: ${filters.followersMin}+` });
     }
+    filters.locations.forEach((v) => chips.push({ key: "locations", value: v, label: `Location: ${v}` }));
     filters.interestedIn.forEach((v) => chips.push({ key: "interestedIn", value: v, label: `Interested: ${v}` }));
     filters.skills.forEach((v) => chips.push({ key: "skills", value: v, label: `Skill: ${v}` }));
     filters.tags.forEach((v) => chips.push({ key: "tags", value: v, label: `Tag: ${availableTags.find((t) => t.id === v)?.name || v}` }));

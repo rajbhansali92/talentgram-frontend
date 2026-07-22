@@ -526,6 +526,11 @@ export default function TalentList() {
         adminApi.get("/tags").then(({ data }) => setAvailableTags(data?.tags || [])).catch(() => {});
     }, []);
 
+    const [availableLocations, setAvailableLocations] = useState([]);
+    useEffect(() => {
+        adminApi.get("/talents/facets").then(({ data }) => setAvailableLocations(data?.locations || [])).catch(() => {});
+    }, []);
+
     const [showDesktopFilters, setShowDesktopFilters] = useState(false);
 
     const [selected, setSelected] = useState(new Set());
@@ -798,6 +803,7 @@ export default function TalentList() {
                             clearAllFilters={clearAllFilters}
                             activeFilterCount={activeFilterCount}
                             availableTags={availableTags}
+                            availableLocations={availableLocations}
                         />
                     </div>
                 </div>
@@ -806,7 +812,7 @@ export default function TalentList() {
 
             {showDesktopFilters && (
                 <div className="hidden md:block border border-gray-200 bg-gray-50/50 rounded-xl p-5 mb-4">
-                    <FilterPanel filters={filters} setFilter={setFilter} availableTags={availableTags} />
+                    <FilterPanel filters={filters} setFilter={setFilter} availableTags={availableTags} availableLocations={availableLocations} />
                 </div>
             )}
 

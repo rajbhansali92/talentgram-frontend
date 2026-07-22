@@ -318,7 +318,7 @@ def _build_talent_query(
     status: Optional[str],
     gender: Optional[str],
     ethnicity: Optional[str],
-    location: Optional[str],
+    location: List[str],
     age_min: Optional[int],
     age_max: Optional[int],
     height_min: Optional[float],
@@ -352,9 +352,15 @@ def _build_talent_query(
         and_clauses.append({"gender": gender})
     if ethnicity and ethnicity != "any":
         and_clauses.append({"ethnicity": ethnicity})
-    if location and location != "any":
-        rgx = {"$regex": re.escape(location), "$options": "i"}
-        and_clauses.append({"$or": [{"location.city": rgx}, {"location.country": rgx}]})
+    if location:
+        # Multiple selected locations combine with OR/IN — "Mumbai + Delhi"
+        # means either city, never both at once for a single talent.
+        # Location IS its own filter GROUP though: this whole clause still
+        # ANDs against every other selected group via and_clauses below.
+        and_clauses.append({"$or": [
+            {"location.city": {"$in": location}},
+            {"location.country": {"$in": location}},
+        ]})
 
     dob_range = _age_range_to_dob_range(age_min, age_max)
     if dob_range:
@@ -394,7 +400,7 @@ async def list_talents(
     limit: Optional[int] = None,
     gender: Optional[str] = None,
     ethnicity: Optional[str] = None,
-    location: Optional[str] = None,
+    location: List[str] = Query(default_factory=list),
     age_min: Optional[int] = None,
     age_max: Optional[int] = None,
     height_min: Optional[float] = None,

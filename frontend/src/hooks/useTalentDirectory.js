@@ -18,7 +18,7 @@ export const DEFAULT_FILTERS = {
     search: "",
     gender: "any",
     ethnicity: "any",
-    location: "",
+    locations: [],
     ageMin: "",
     ageMax: "",
     heightMin: "",
@@ -40,7 +40,7 @@ function buildParams(filters, sortBy, page, pageSize) {
     if (filters.search.trim()) params.q = filters.search.trim();
     if (filters.gender !== "any") params.gender = filters.gender;
     if (filters.ethnicity !== "any") params.ethnicity = filters.ethnicity;
-    if (filters.location.trim()) params.location = filters.location.trim();
+    if (filters.locations.length) params.location = filters.locations;
     if (filters.ageMin !== "") params.age_min = filters.ageMin;
     if (filters.ageMax !== "") params.age_max = filters.ageMax;
     if (filters.heightMin !== "") params.height_min = filters.heightMin;
@@ -110,7 +110,7 @@ export function useTalentDirectory({ pageSize = DEFAULT_PAGE_SIZE, initialFilter
         if (filters.search.trim()) count++;
         if (filters.gender !== "any") count++;
         if (filters.ethnicity !== "any") count++;
-        if (filters.location.trim()) count++;
+        if (filters.locations.length) count++;
         if (filters.ageMin !== "" || filters.ageMax !== "") count++;
         if (filters.heightMin !== "" || filters.heightMax !== "") count++;
         if (filters.followersMin) count++;

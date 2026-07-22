@@ -15,7 +15,7 @@ import FilterPanel from "./FilterPanel";
  * Uses local draft state + explicit Apply, so filter requests don't fire on
  * every tap while the sheet is open — only when the talent commits.
  */
-export default function MobileFilterSheet({ filters, setFilter, clearAllFilters, activeFilterCount, availableTags = [] }) {
+export default function MobileFilterSheet({ filters, setFilter, clearAllFilters, activeFilterCount, availableTags = [], availableLocations = [] }) {
     const [open, setOpen] = useState(false);
     const [draft, setDraft] = useState(filters);
 
@@ -68,7 +68,7 @@ export default function MobileFilterSheet({ filters, setFilter, clearAllFilters,
                     </SheetClose>
                 </div>
                 <div className="flex-1 overflow-y-auto px-5 py-4">
-                    <FilterPanel filters={draft} setFilter={setDraftFilter} availableTags={availableTags} />
+                    <FilterPanel filters={draft} setFilter={setDraftFilter} availableTags={availableTags} availableLocations={availableLocations} />
                 </div>
                 <div className="flex items-center gap-3 px-5 py-4 border-t border-gray-100 shrink-0 bg-white pb-[calc(1rem+env(safe-area-inset-bottom))]">
                     <button

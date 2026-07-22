@@ -79,7 +79,28 @@ export const api = createPublicApiClient({ backendApiUrl: API, portalTokenKey: P
 
 // ================= ADMIN API =================
 
-export const adminApi = axios.create({ baseURL: API });
+// Axios's default array serialization is `key[]=a&key[]=b` (bracket
+// notation), but FastAPI's `List[str] = Query(...)` params only recognize
+// the repeated-key form `key=a&key=b` — the object-form
+// `paramsSerializer: { indexes: false }` config does NOT override this (only
+// takes effect via axios's own internal serializer path, not the one
+// actually used when building requests — confirmed empirically), so a
+// literal serializer function is required. Left broken, every array-valued
+// query param (talent directory filters: tags/skills/interested_in/location)
+// silently arrives server-side as an empty list — the param name never
+// matches `key[]` vs `key`, so it just doesn't filter anything, with no
+// error anywhere in the chain to surface it.
+function repeatKeyParamsSerializer(params) {
+    const parts = [];
+    Object.entries(params).forEach(([key, value]) => {
+        if (value === undefined || value === null) return;
+        const values = Array.isArray(value) ? value : [value];
+        values.forEach((v) => parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(v)}`));
+    });
+    return parts.join("&");
+}
+
+export const adminApi = axios.create({ baseURL: API, paramsSerializer: repeatKeyParamsSerializer });
 
 adminApi.interceptors.request.use((cfg) => {
     const t = localStorage.getItem("tg_admin_token");

@@ -2,6 +2,7 @@ import React from "react";
 import { GENDER_OPTIONS, ETHNICITY_OPTIONS } from "@/lib/talentSchema";
 import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
 import { FOLLOWER_BUCKETS, HEIGHT_INCH_OPTIONS } from "./constants";
+import LocationMultiSelect from "./LocationMultiSelect";
 
 const INTERESTED_IN_OPTIONS = ["Acting", "Modeling", "Influencer Campaigns"];
 
@@ -57,7 +58,7 @@ const labelCls = "text-xs font-semibold text-[#222222] uppercase tracking-wider"
  * bottom sheet (MobileFilterSheet.jsx) — same props, same behavior, so the
  * two surfaces (and mobile vs desktop within each) can never drift.
  */
-export default function FilterPanel({ filters, setFilter, availableTags = [] }) {
+export default function FilterPanel({ filters, setFilter, availableTags = [], availableLocations = [] }) {
     const toggleArrayValue = (key, value) => {
         const current = filters[key];
         setFilter(key, current.includes(value) ? current.filter((v) => v !== value) : [...current, value]);
@@ -82,13 +83,13 @@ export default function FilterPanel({ filters, setFilter, availableTags = [] }) 
                 </div>
                 <div>
                     <label className={labelCls}>Location</label>
-                    <input
-                        type="text"
-                        value={filters.location}
-                        onChange={(e) => setFilter("location", e.target.value)}
-                        placeholder="City or country…"
-                        className={`${selectCls} mt-1.5`}
-                    />
+                    <div className="mt-1.5">
+                        <LocationMultiSelect
+                            value={filters.locations}
+                            onChange={(v) => setFilter("locations", v)}
+                            options={availableLocations}
+                        />
+                    </div>
                 </div>
             </div>
 

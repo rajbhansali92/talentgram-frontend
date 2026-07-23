@@ -1613,6 +1613,46 @@ async def video_complete(
     return {"ok": True, "media": media}
 
 
+class VideoUploadEventIn(BaseModel):
+    public_id: str
+    stage: str
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    retry_count: int = 0
+    bytes_transferred: Optional[int] = None
+    upload_duration_ms: Optional[float] = None
+    client: Optional[Dict[str, Any]] = None
+
+
+@router.post("/public/submissions/{sid}/video-upload-event")
+async def video_upload_event(
+    sid: str,
+    payload: VideoUploadEventIn,
+    authorization: Optional[str] = Header(None),
+):
+    """Best-effort upload telemetry beacon (P0 upload-reliability fix). Fired
+    by the frontend transport at each stage of an R2 upload attempt so a
+    stuck/orphaned asset_metadata row is diagnosable without live device
+    access. Never blocks or fails the upload itself — always 200s."""
+    from core import record_upload_telemetry
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        return {"ok": False}
+    if not payload.public_id.startswith(f"raw-uploads/submissions/{sid}/"):
+        return {"ok": False}
+    await record_upload_telemetry(
+        payload.public_id,
+        payload.stage,
+        error_type=payload.error_type,
+        error_message=payload.error_message,
+        retry_count=payload.retry_count,
+        bytes_transferred=payload.bytes_transferred,
+        upload_duration_ms=payload.upload_duration_ms,
+        client_info=payload.client,
+    )
+    return {"ok": True}
+
+
 async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_type: str, decision: Optional[str] = None):
     try:
         project_id = submission.get("project_id")

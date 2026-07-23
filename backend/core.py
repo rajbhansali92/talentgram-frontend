@@ -2986,6 +2986,53 @@ def generate_r2_presigned_url(key: str, method: str = "PUT", expiry: int = 3600)
     )
 
 
+async def record_upload_telemetry(
+    public_id: str,
+    stage: str,
+    *,
+    error_type: Optional[str] = None,
+    error_message: Optional[str] = None,
+    retry_count: int = 0,
+    bytes_transferred: Optional[int] = None,
+    upload_duration_ms: Optional[float] = None,
+    client_info: Optional[dict] = None,
+) -> None:
+    """Best-effort telemetry write for a single R2 upload attempt/stage.
+
+    Appends onto the same asset_metadata doc the video-signature call already
+    upserts (keyed by public_id), so a stuck/orphaned upload — like the two
+    found during the P0 audit, both with created_at == updated_at and no
+    trace of why — is diagnosable after the fact without live device access.
+    NEVER raises: a telemetry failure must never affect the upload itself.
+    """
+    try:
+        event = {
+            "stage": stage,
+            "error_type": error_type,
+            "error_message": (error_message or "")[:500] or None,
+            "retry_count": retry_count,
+            "bytes_transferred": bytes_transferred,
+            "upload_duration_ms": upload_duration_ms,
+            "client": client_info or {},
+            "at": datetime.now(timezone.utc),
+        }
+        await db.asset_metadata.update_one(
+            {"public_id": public_id},
+            {
+                "$set": {
+                    "last_stage": stage,
+                    "last_error_type": error_type,
+                    "last_retry_count": retry_count,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                # Capped so a pathological retry loop can't grow this doc unbounded.
+                "$push": {"upload_events": {"$each": [event], "$slice": -20}},
+            },
+        )
+    except Exception as e:
+        logger.warning(f"record_upload_telemetry: failed for {public_id} stage={stage}: {e}")
+
+
 async def cleanup_media_storage(media: dict, scope: Optional[str] = None, parent_id: Optional[str] = None, operation_id: Optional[str] = None) -> None:
     """Best-effort deletion of a single media item's backing storage objects and
     its tracking row. Shared by submission + application media-delete paths.

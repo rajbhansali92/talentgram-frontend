@@ -13,6 +13,171 @@ const STALL_TIMEOUT_MS = 60000; // abort a chunk that makes NO upload progress f
 // with a stale signature/timestamp.
 const SIGNATURE_REFRESH_MS = 30 * 60 * 1000;
 
+// ── R2 direct-PUT transport (P0 upload-reliability fix) ──────────────────
+// The R2 path was originally a single unchunked, unretried, unwatched PUT —
+// unlike the Cloudinary path above it sits beside, which already had
+// per-chunk retries and a stall watchdog. That asymmetry (not anything
+// Cloudinary-specific) is what let one transient mobile network blip during
+// a multi-hundred-MB upload become an unrecoverable "R2 upload network
+// error". These constants intentionally mirror the Cloudinary path's
+// already-proven values rather than inventing new tuning.
+const R2_MAX_ATTEMPTS = 4;
+const R2_STALL_TIMEOUT_MS = 60000; // no upload-progress event for 60s == stalled
+const R2_RETRY_BASE_MS = 1000; // 1s, 2s, 4s …
+// The final "attach to the app/submission" POST runs AFTER the bytes are
+// already safely in R2 — retrying just this small call (instead of falling
+// back to a full re-upload) avoids re-sending a 500 MB file because of one
+// blipped POST at the very end.
+const MAX_COMPLETE_ATTEMPTS = 3;
+const COMPLETE_RETRY_BASE_MS = 1500;
+
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+
+// Lightweight, dependency-free device/browser signal for telemetry — not a
+// full UA-parser, just enough to tell "which real-world device reported
+// this" apart in production logs.
+function getClientInfo() {
+    try {
+        const ua = navigator.userAgent || "";
+        let browser = "unknown";
+        if (/SamsungBrowser/i.test(ua)) browser = "Samsung Internet";
+        else if (/CriOS/i.test(ua)) browser = "Chrome (iOS)";
+        else if (/FxiOS/i.test(ua)) browser = "Firefox (iOS)";
+        else if (/EdgiOS|Edg\//i.test(ua)) browser = "Edge";
+        else if (/Chrome/i.test(ua)) browser = "Chrome";
+        else if (/CriOS/i.test(ua)) browser = "Chrome (iOS)";
+        else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
+        else if (/Firefox/i.test(ua)) browser = "Firefox";
+
+        let os = "unknown";
+        if (/iPhone|iPad|iPod/i.test(ua)) os = "iOS";
+        else if (/Android/i.test(ua)) os = "Android";
+        else if (/Mac OS X/i.test(ua)) os = "macOS";
+        else if (/Windows/i.test(ua)) os = "Windows";
+
+        const conn = navigator.connection || navigator.webkitConnection || navigator.mozConnection;
+        return {
+            browser,
+            os,
+            device: /iPad|Tablet/i.test(ua) ? "tablet" : /Mobi/i.test(ua) ? "mobile" : "desktop",
+            network_effective_type: conn?.effectiveType || null,
+            network_downlink_mbps: conn?.downlink ?? null,
+            user_agent: ua.slice(0, 200),
+        };
+    } catch {
+        return {};
+    }
+}
+
+// Fire-and-forget telemetry beacon. MUST NEVER throw or block the upload —
+// a diagnostics call failing is not the user's problem.
+function sendUploadTelemetry(endpoint, token, payload) {
+    try {
+        const headers = token ? { Authorization: `Bearer ${token}` } : {};
+        api.post(endpoint, { ...payload, client: getClientInfo() }, { headers }).catch(() => {});
+    } catch {
+        /* noop — telemetry is best-effort only */
+    }
+}
+
+// Single R2 PUT attempt with a fresh XHR + fresh stall watchdog every call —
+// "retry" never reuses a prior attempt's transport or connection state.
+export function putR2Once(uploadUrl, file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", uploadUrl, true);
+
+        let stallTimer = null;
+        const armStall = () => {
+            if (stallTimer) clearTimeout(stallTimer);
+            stallTimer = setTimeout(() => {
+                try { xhr.abort(); } catch (_) { /* noop */ }
+            }, R2_STALL_TIMEOUT_MS);
+        };
+        const clearStall = () => {
+            if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+        };
+
+        xhr.upload.onprogress = (e) => {
+            armStall(); // progress → still alive → reset the watchdog
+            if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+        };
+        xhr.onload = () => {
+            clearStall();
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve({ bytes: file.size });
+            } else {
+                const err = new Error(`R2 upload was rejected by the server (${xhr.status})`);
+                err.errorType = "upload_rejected";
+                err.httpStatus = xhr.status;
+                // 403 on an R2 presigned PUT means the signature is expired
+                // or invalid — retryable via a fresh signature, unlike other
+                // 4xx which usually indicate a genuinely malformed request.
+                err.retryable = xhr.status === 403 || xhr.status >= 500;
+                reject(err);
+            }
+        };
+        xhr.onerror = () => {
+            clearStall();
+            const err = new Error("R2 upload network error");
+            err.errorType = "network_interruption";
+            err.retryable = true;
+            reject(err);
+        };
+        xhr.onabort = () => {
+            clearStall();
+            const err = new Error("R2 upload stalled — no progress for 60s");
+            err.errorType = "stalled";
+            err.retryable = true;
+            reject(err);
+        };
+        armStall(); // start the watchdog before sending
+        xhr.send(file);
+    });
+}
+
+// Bounded, intelligent retry around putR2Once: fresh transport every attempt,
+// exponential backoff, and — specifically for an expired/invalid signature
+// (403) — a fresh presigned URL before the next attempt rather than blindly
+// re-hammering a dead signature. Progress necessarily resets to 0 on each
+// retry (this is a single whole-file PUT, not a resumable multipart upload —
+// see the file-level note on why that's an explicit, separate future
+// enhancement, not folded into this fix); onRetryStatus tells the caller so
+// the UI can say so honestly instead of implying continuity that isn't real.
+export async function putR2WithRetry({ uploadUrl, file, onProgress, onRetryStatus, refreshUploadUrl }) {
+    let currentUrl = uploadUrl;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= R2_MAX_ATTEMPTS; attempt++) {
+        try {
+            return await putR2Once(currentUrl, file, onProgress);
+        } catch (err) {
+            lastErr = err;
+            const retryable = err.retryable !== false && attempt < R2_MAX_ATTEMPTS;
+            if (!retryable) break;
+
+            if (onRetryStatus) {
+                onRetryStatus({ attempt: attempt + 1, maxAttempts: R2_MAX_ATTEMPTS, reason: err.errorType });
+            }
+
+            // Expired/invalid signature — get a fresh presigned URL before
+            // retrying instead of re-sending against a dead one.
+            if (err.errorType === "upload_rejected" && err.httpStatus === 403 && refreshUploadUrl) {
+                try {
+                    currentUrl = await refreshUploadUrl();
+                } catch {
+                    // Keep the old URL — the retry will just fail again and
+                    // surface the real error rather than masking it.
+                }
+            }
+
+            await sleep(R2_RETRY_BASE_MS * Math.pow(2, attempt - 1));
+        }
+    }
+    throw lastErr;
+}
+
 // Read a video's duration from its file metadata (client-side guard).
 function readVideoDuration(file) {
     return new Promise((resolve) => {
@@ -111,7 +276,7 @@ async function uploadChunkWithRetry(uploadUrl, formParams, blob, start, total, u
 }
 
 // Returns the backend /video-complete response: { ok, media }.
-export async function directVideoUpload({ sid, token, category, label, file, isApplication, onProgress, preFetchedSig }) {
+export async function directVideoUpload({ sid, token, category, label, file, isApplication, onProgress, onRetryStatus, preFetchedSig }) {
     // Client-side duration guard (server re-validates authoritatively).
     const duration = await readVideoDuration(file);
     if (duration != null && duration > MAX_DURATION_SECONDS) {
@@ -130,12 +295,24 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
         ? `/public/apply/${sid}/video-complete`
         : `/public/submissions/${sid}/video-complete`;
 
+    const uploadEventEndpoint = isApplication
+        ? `/public/apply/${sid}/video-upload-event`
+        : `/public/submissions/${sid}/video-upload-event`;
+
     const fetchSignature = async (publicId) => {
-        const res = await api.post(
-            signatureEndpoint,
-            { category, label: label || null, content_type: file.type || null, public_id: publicId || null },
-            { headers: authHeader }
-        );
+        let res;
+        try {
+            res = await api.post(
+                signatureEndpoint,
+                { category, label: label || null, content_type: file.type || null, public_id: publicId || null },
+                { headers: authHeader }
+            );
+        } catch (err) {
+            const wrapped = new Error("Couldn't start the upload — please check your connection and try again.");
+            wrapped.errorType = "signature_failure";
+            wrapped.cause = err;
+            throw wrapped;
+        }
         const d = res.data;
         if (d.use_r2) {
             return {
@@ -156,45 +333,110 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
     let sig = preFetchedSig || await fetchSignature(null);
 
     if (sig.use_r2) {
-        // Upload directly to R2 pre-signed URL via PUT
-        const lastResponse = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open("PUT", sig.uploadUrl, true);
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable && onProgress) {
-                    onProgress(e.loaded, e.total);
-                }
-            };
-            xhr.onload = () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    resolve({
-                        public_id: sig.publicId,
-                        bytes: file.size,
-                    });
-                } else {
-                    reject(new Error(`R2 upload failed (${xhr.status})`));
-                }
-            };
-            xhr.onerror = () => reject(new Error("R2 upload network error"));
-            xhr.onabort = () => reject(new Error("R2 upload aborted"));
-            xhr.send(file);
+        const uploadStartedAt = Date.now();
+        let retryCount = 0;
+
+        sendUploadTelemetry(uploadEventEndpoint, token, {
+            public_id: sig.publicId,
+            stage: "upload_started",
+            bytes_transferred: 0,
         });
 
-        // 3) Notify the backend to attach (finalize reconciliation is the safety net).
-        const completeRes = await api.post(
-            completeEndpoint,
-            {
-                public_id: lastResponse.public_id,
-                secure_url: null,
-                resource_type: "video",
-                bytes: lastResponse.bytes || 0,
-                duration: duration,
-                format: null,
-                label: label || null,
-            },
-            { headers: authHeader }
+        let putResult;
+        try {
+            putResult = await putR2WithRetry({
+                uploadUrl: sig.uploadUrl,
+                file,
+                onProgress,
+                onRetryStatus: (info) => {
+                    retryCount = info.attempt - 1;
+                    sendUploadTelemetry(uploadEventEndpoint, token, {
+                        public_id: sig.publicId,
+                        stage: "upload_retry",
+                        error_type: info.reason,
+                        retry_count: retryCount,
+                    });
+                    if (onRetryStatus) {
+                        onRetryStatus({ ...info, phase: "uploading" });
+                    }
+                },
+                refreshUploadUrl: async () => {
+                    const fresh = await fetchSignature(sig.publicId);
+                    return fresh.uploadUrl;
+                },
+            });
+        } catch (err) {
+            sendUploadTelemetry(uploadEventEndpoint, token, {
+                public_id: sig.publicId,
+                stage: "upload_failed",
+                error_type: err.errorType || "network_interruption",
+                error_message: err.message,
+                retry_count: retryCount,
+                upload_duration_ms: Date.now() - uploadStartedAt,
+            });
+            // Re-throw with the classification intact so the UI (and the
+            // caller's telemetry-free retry button) can show the real reason
+            // instead of a generic message.
+            throw err;
+        }
+
+        sendUploadTelemetry(uploadEventEndpoint, token, {
+            public_id: sig.publicId,
+            stage: "r2_upload_complete",
+            retry_count: retryCount,
+            bytes_transferred: putResult.bytes,
+            upload_duration_ms: Date.now() - uploadStartedAt,
+        });
+
+        // 3) Notify the backend to attach. The bytes are already safely in
+        // R2 at this point — retry just this small call a few times before
+        // giving up, rather than forcing a full re-upload of a possibly
+        // 500 MB file over a blipped final POST. (Finalize-time reconcile
+        // remains the last-resort safety net if even this exhausts.)
+        let completeErr = null;
+        for (let attempt = 1; attempt <= MAX_COMPLETE_ATTEMPTS; attempt++) {
+            try {
+                const completeRes = await api.post(
+                    completeEndpoint,
+                    {
+                        public_id: sig.publicId,
+                        secure_url: null,
+                        resource_type: "video",
+                        bytes: putResult.bytes || 0,
+                        duration: duration,
+                        format: null,
+                        label: label || null,
+                    },
+                    { headers: authHeader }
+                );
+                sendUploadTelemetry(uploadEventEndpoint, token, {
+                    public_id: sig.publicId,
+                    stage: "completed",
+                    retry_count: retryCount,
+                    upload_duration_ms: Date.now() - uploadStartedAt,
+                });
+                return completeRes.data;
+            } catch (err) {
+                completeErr = err;
+                if (attempt === MAX_COMPLETE_ATTEMPTS) break;
+                await sleep(COMPLETE_RETRY_BASE_MS * Math.pow(2, attempt - 1));
+            }
+        }
+
+        sendUploadTelemetry(uploadEventEndpoint, token, {
+            public_id: sig.publicId,
+            stage: "completion_callback_failed",
+            error_type: "backend_persistence_failure",
+            error_message: completeErr?.message,
+            retry_count: retryCount,
+            upload_duration_ms: Date.now() - uploadStartedAt,
+        });
+        const wrapped = new Error(
+            "Your video uploaded successfully, but we couldn't save it to your application — tap Retry to finish."
         );
-        return completeRes.data;
+        wrapped.errorType = "backend_persistence_failure";
+        wrapped.cause = completeErr;
+        throw wrapped;
     }
 
     let signedAt = Date.now();

@@ -1191,6 +1191,47 @@ async def app_video_complete(
     return {"ok": True, "media": media}
 
 
+class AppVideoUploadEventIn(BaseModel):
+    public_id: str
+    stage: str
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    retry_count: int = 0
+    bytes_transferred: Optional[int] = None
+    upload_duration_ms: Optional[float] = None
+    client: Optional[Dict[str, Any]] = None
+
+
+@router.post("/public/apply/{aid}/video-upload-event")
+async def app_video_upload_event(
+    aid: str,
+    payload: AppVideoUploadEventIn,
+    authorization: Optional[str] = Header(None),
+):
+    """Best-effort upload telemetry beacon (P0 upload-reliability fix). See
+    submissions.video_upload_event for the rationale — same contract, mirrored
+    for the Talent Invite Link's application flow. Never blocks or fails the
+    upload itself — always 200s."""
+    from core import record_upload_telemetry
+    try:
+        await _check_app_token(authorization, aid)
+    except HTTPException:
+        return {"ok": False}
+    if not payload.public_id.startswith(f"raw-uploads/applications/{aid}/"):
+        return {"ok": False}
+    await record_upload_telemetry(
+        payload.public_id,
+        payload.stage,
+        error_type=payload.error_type,
+        error_message=payload.error_message,
+        retry_count=payload.retry_count,
+        bytes_transferred=payload.bytes_transferred,
+        upload_duration_ms=payload.upload_duration_ms,
+        client_info=payload.client,
+    )
+    return {"ok": True}
+
+
 @router.delete("/public/apply/{aid}/media/{mid}")
 async def delete_application_media(
     aid: str, mid: str, authorization: Optional[str] = Header(None)

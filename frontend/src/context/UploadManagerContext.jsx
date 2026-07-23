@@ -488,6 +488,31 @@ export function UploadManagerProvider({ children }) {
                             };
                         });
                     },
+                    // P0 upload-reliability fix: the R2 transport retries a
+                    // dropped/stalled PUT automatically, but a whole-file PUT
+                    // can't resume mid-byte — a retry genuinely restarts from
+                    // 0%. Say so honestly (never silently reset the bar back
+                    // to 0 under an unchanged "Uploading..." label, which
+                    // would read as the upload going backwards for no reason).
+                    onRetryStatus: ({ attempt, maxAttempts, reason }) => {
+                        const reasonText = reason === "stalled"
+                            ? "connection stalled"
+                            : reason === "upload_rejected"
+                                ? "upload link expired"
+                                : "network interruption";
+                        setActiveUploads((prev) => {
+                            if (!prev[slotKey]) return prev;
+                            return {
+                                ...prev,
+                                [slotKey]: {
+                                    ...prev[slotKey],
+                                    status: "retrying",
+                                    pct: 0,
+                                    statusText: `Upload restarted after a ${reasonText} — attempt ${attempt} of ${maxAttempts}…`,
+                                },
+                            };
+                        });
+                    },
                 });
 
                 // Re-fetch the full document so onSuccess receives the updated state

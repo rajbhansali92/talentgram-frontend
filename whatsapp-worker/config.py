@@ -71,6 +71,16 @@ PARTICIPANTS_REFRESH_SEC: int = int(os.environ.get("WA_PARTICIPANTS_REFRESH_SEC"
 # restarts via a Mongo TTL index — see whatsapp_inbound_seen).
 INBOUND_DEDUP_TTL_SEC: int = int(os.environ.get("WA_INBOUND_DEDUP_TTL_SEC", str(48 * 3600)))
 
+# Retention for whatsapp_dom_snapshots (forensic dialog/DOM captures — see
+# modals.py / sender.py). Audited 2026-07-26: write-only, no code reader
+# anywhere — a human queries it directly, and the existing guidance is to
+# "check logs ... after WhatsApp Web updates", i.e. near-term, not archival.
+# At the observed ~16 MB/day growth rate (519.9 MB over the ~32 days since
+# this capture went live), 7 days keeps steady-state size to ~112 MB —
+# this collection alone previously grew to 98% of the 512 MB Atlas quota
+# and blocked all writes cluster-wide.
+DOM_SNAPSHOT_TTL_SEC: int = int(os.environ.get("WA_DOM_SNAPSHOT_TTL_SEC", str(7 * 24 * 3600)))
+
 # Base backend URL + shared secret for POSTing to the Agent Platform.
 AGENTS_BACKEND_URL: str = os.environ.get("AGENTS_BACKEND_URL", "https://api.talentgramagency.com")
 AGENTS_INBOUND_SECRET: str = os.environ.get("AGENTS_INBOUND_SECRET", "")

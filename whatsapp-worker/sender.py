@@ -713,6 +713,10 @@ async def _store_dom_snapshot(page: Page, reason: str, extra: Optional[dict] = N
         "reason": reason,
         "url": page.url,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        # Native datetime (not the ISO string above) — required for the
+        # created_at TTL index in worker.py to expire documents at all;
+        # Mongo's TTL monitor silently ignores string-typed fields.
+        "created_at": datetime.now(timezone.utc),
         "html_excerpt": html,
         "selector_health": {str(k): v for k, v in health.items()},
         "extra": extra or {},

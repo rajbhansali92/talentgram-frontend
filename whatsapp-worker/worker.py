@@ -496,10 +496,27 @@ async def _maybe_reset_session() -> None:
     )
 
 
+async def _ensure_dom_snapshot_ttl_index() -> None:
+    """TTL for forensic DOM/dialog snapshots (see modals.py / sender.py) — this
+    collection previously grew to 98% of the Atlas quota with no retention
+    policy and blocked all writes cluster-wide. Unconditional (unlike the
+    inbound listener's own indexes in inbound.py's _ensure_indexes()) since
+    both writers run regardless of WA_INBOUND_LISTENER_ENABLED. Guarded: an
+    index-creation failure must never block worker startup."""
+    try:
+        db = get_db()
+        await db["whatsapp_dom_snapshots"].create_index(
+            "created_at", expireAfterSeconds=config.DOM_SNAPSHOT_TTL_SEC
+        )
+    except Exception:
+        logger.exception("worker: failed to create whatsapp_dom_snapshots TTL index (non-fatal)")
+
+
 async def main() -> None:
     """Main execution lifecycle."""
     logger.info("worker: initializing database connection...")
     await init_db()
+    await _ensure_dom_snapshot_ttl_index()
 
     # Honor a pending admin reset before touching the browser/session.
     await _maybe_reset_session()

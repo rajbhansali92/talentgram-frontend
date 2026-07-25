@@ -238,6 +238,10 @@ async def _capture_dialog(page, dialog, context, title, body, reason) -> None:
         "dialog_body": body,
         "url": getattr(page, "url", ""),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        # Native datetime (not the ISO string above) — required for the
+        # created_at TTL index in worker.py to expire documents at all;
+        # Mongo's TTL monitor silently ignores string-typed fields.
+        "created_at": datetime.now(timezone.utc),
         "html_excerpt": (html or "")[:40000],
         "diagnostics": diagnostics,
     }

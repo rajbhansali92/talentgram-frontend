@@ -163,6 +163,14 @@ def main():
     assert len(fake_db.docs) == n_before + 1
     assert fake_db.docs[-1]["reason"] == "unknown_dialog"
     assert "Log out" in fake_db.docs[-1]["dialog_title"]
+    # P1 retention fix: created_at must be a native datetime, not the ISO
+    # string `timestamp` field is — Mongo's TTL monitor silently ignores
+    # string-typed fields, so a wrong type here means the index never expires
+    # anything (exactly how whatsapp_dom_snapshots grew to 98% of the Atlas
+    # quota and blocked all writes cluster-wide).
+    import datetime as _dt
+    assert isinstance(fake_db.docs[-1]["created_at"], _dt.datetime), \
+        f"created_at must be a real datetime for TTL, got {type(fake_db.docs[-1]['created_at'])}"
     print("5. UNKNOWN dialog               -> False, ZERO interactions, snapshot stored")
 
     # 6. Recognized but undismissable -> False, captured as dialog_undismissable.

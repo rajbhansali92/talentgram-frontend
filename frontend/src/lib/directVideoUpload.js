@@ -84,10 +84,48 @@ function sendUploadTelemetry(endpoint, token, payload) {
 
 // Single R2 PUT attempt with a fresh XHR + fresh stall watchdog every call —
 // "retry" never reuses a prior attempt's transport or connection state.
+// Diagnostic-only instrumentation (P0 real-user-failure investigation): a
+// backgrounded/locked-screen iOS Safari tab is suspected of throttling the
+// setTimeout-based stall watchdog itself, which would explain a real
+// production trace where per-attempt failures took 45–120s despite a coded
+// 60s ceiling. This does NOT change retry/backoff/transport behavior at
+// all — it only records what actually happened so the next real attempt is
+// provable instead of inferred. Kept local to a single putR2Once call.
+function trackAttemptDiagnostics() {
+    const startedAt = Date.now();
+    let lastProgressLoaded = 0;
+    let lastProgressAt = startedAt;
+    const visibilityEvents = [];
+    const onVisibility = () => {
+        visibilityEvents.push({ state: document.visibilityState, at_ms: Date.now() - startedAt });
+    };
+    if (typeof document !== "undefined" && document.addEventListener) {
+        document.addEventListener("visibilitychange", onVisibility);
+    }
+    return {
+        onProgress(loaded) {
+            lastProgressLoaded = loaded;
+            lastProgressAt = Date.now();
+        },
+        stop() {
+            if (typeof document !== "undefined" && document.removeEventListener) {
+                document.removeEventListener("visibilitychange", onVisibility);
+            }
+            return {
+                bytesLoadedAtFailure: lastProgressLoaded,
+                msSinceLastProgress: Date.now() - lastProgressAt,
+                attemptDurationMs: Date.now() - startedAt,
+                visibilityEvents,
+            };
+        },
+    };
+}
+
 export function putR2Once(uploadUrl, file, onProgress) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("PUT", uploadUrl, true);
+        const diag = trackAttemptDiagnostics();
 
         let stallTimer = null;
         const armStall = () => {
@@ -102,10 +140,12 @@ export function putR2Once(uploadUrl, file, onProgress) {
 
         xhr.upload.onprogress = (e) => {
             armStall(); // progress → still alive → reset the watchdog
+            diag.onProgress(e.loaded);
             if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
         };
         xhr.onload = () => {
             clearStall();
+            diag.stop();
             if (xhr.status >= 200 && xhr.status < 300) {
                 resolve({ bytes: file.size });
             } else {
@@ -124,6 +164,7 @@ export function putR2Once(uploadUrl, file, onProgress) {
             const err = new Error("R2 upload network error");
             err.errorType = "network_interruption";
             err.retryable = true;
+            Object.assign(err, diag.stop());
             reject(err);
         };
         xhr.onabort = () => {
@@ -131,6 +172,7 @@ export function putR2Once(uploadUrl, file, onProgress) {
             const err = new Error("R2 upload stalled — no progress for 60s");
             err.errorType = "stalled";
             err.retryable = true;
+            Object.assign(err, diag.stop());
             reject(err);
         };
         armStall(); // start the watchdog before sending
@@ -158,7 +200,17 @@ export async function putR2WithRetry({ uploadUrl, file, onProgress, onRetryStatu
             if (!retryable) break;
 
             if (onRetryStatus) {
-                onRetryStatus({ attempt: attempt + 1, maxAttempts: R2_MAX_ATTEMPTS, reason: err.errorType });
+                onRetryStatus({
+                    attempt: attempt + 1,
+                    maxAttempts: R2_MAX_ATTEMPTS,
+                    reason: err.errorType,
+                    diagnostics: {
+                        bytesLoadedAtFailure: err.bytesLoadedAtFailure,
+                        msSinceLastProgress: err.msSinceLastProgress,
+                        attemptDurationMs: err.attemptDurationMs,
+                        visibilityEvents: err.visibilityEvents,
+                    },
+                });
             }
 
             // Expired/invalid signature — get a fresh presigned URL before
@@ -340,6 +392,8 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             public_id: sig.publicId,
             stage: "upload_started",
             bytes_transferred: 0,
+            file_size: file.size,
+            file_type: file.type,
         });
 
         let putResult;
@@ -350,11 +404,16 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
                 onProgress,
                 onRetryStatus: (info) => {
                     retryCount = info.attempt - 1;
+                    const d = info.diagnostics || {};
                     sendUploadTelemetry(uploadEventEndpoint, token, {
                         public_id: sig.publicId,
                         stage: "upload_retry",
                         error_type: info.reason,
                         retry_count: retryCount,
+                        bytes_transferred: d.bytesLoadedAtFailure,
+                        attempt_duration_ms: d.attemptDurationMs,
+                        ms_since_last_progress: d.msSinceLastProgress,
+                        visibility_events: d.visibilityEvents,
                     });
                     if (onRetryStatus) {
                         onRetryStatus({ ...info, phase: "uploading" });
@@ -373,6 +432,12 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
                 error_message: err.message,
                 retry_count: retryCount,
                 upload_duration_ms: Date.now() - uploadStartedAt,
+                bytes_transferred: err.bytesLoadedAtFailure,
+                attempt_duration_ms: err.attemptDurationMs,
+                ms_since_last_progress: err.msSinceLastProgress,
+                visibility_events: err.visibilityEvents,
+                file_size: file.size,
+                file_type: file.type,
             });
             // Re-throw with the classification intact so the UI (and the
             // caller's telemetry-free retry button) can show the real reason

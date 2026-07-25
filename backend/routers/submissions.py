@@ -1621,6 +1621,14 @@ class VideoUploadEventIn(BaseModel):
     retry_count: int = 0
     bytes_transferred: Optional[int] = None
     upload_duration_ms: Optional[float] = None
+    # Diagnostic-only fields (P0 real-user-failure investigation): let a
+    # suspended/backgrounded tab be proven from telemetry instead of inferred
+    # from retry timing alone. Never used for any control-flow decision.
+    attempt_duration_ms: Optional[float] = None
+    ms_since_last_progress: Optional[float] = None
+    visibility_events: Optional[List[Dict[str, Any]]] = None
+    file_size: Optional[int] = None
+    file_type: Optional[str] = None
     client: Optional[Dict[str, Any]] = None
 
 
@@ -1649,6 +1657,13 @@ async def video_upload_event(
         bytes_transferred=payload.bytes_transferred,
         upload_duration_ms=payload.upload_duration_ms,
         client_info=payload.client,
+        extra={
+            "attempt_duration_ms": payload.attempt_duration_ms,
+            "ms_since_last_progress": payload.ms_since_last_progress,
+            "visibility_events": payload.visibility_events,
+            "file_size": payload.file_size,
+            "file_type": payload.file_type,
+        },
     )
     return {"ok": True}
 

@@ -2996,6 +2996,7 @@ async def record_upload_telemetry(
     bytes_transferred: Optional[int] = None,
     upload_duration_ms: Optional[float] = None,
     client_info: Optional[dict] = None,
+    extra: Optional[dict] = None,
 ) -> None:
     """Best-effort telemetry write for a single R2 upload attempt/stage.
 
@@ -3004,6 +3005,11 @@ async def record_upload_telemetry(
     found during the P0 audit, both with created_at == updated_at and no
     trace of why — is diagnosable after the fact without live device access.
     NEVER raises: a telemetry failure must never affect the upload itself.
+
+    `extra` carries diagnostic-only fields added for the real-user-failure
+    investigation (attempt_duration_ms, ms_since_last_progress,
+    visibility_events, file_size, file_type) — passed through verbatim,
+    never interpreted or used for any control-flow decision.
     """
     try:
         event = {
@@ -3015,6 +3021,7 @@ async def record_upload_telemetry(
             "upload_duration_ms": upload_duration_ms,
             "client": client_info or {},
             "at": datetime.now(timezone.utc),
+            **{k: v for k, v in (extra or {}).items() if v is not None},
         }
         await db.asset_metadata.update_one(
             {"public_id": public_id},

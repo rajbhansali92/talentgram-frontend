@@ -26,6 +26,11 @@ class FakeXHR {
     progress(loaded, total) {
         this.upload.onprogress?.({ lengthComputable: true, loaded, total });
     }
+    // Fires when the request body has finished leaving the browser — after
+    // this, no further upload-progress event can occur.
+    bodySent() {
+        this.upload.onload?.();
+    }
     succeed() {
         this.status = 200;
         this.onload?.();
@@ -96,6 +101,32 @@ describe("putR2Once", () => {
         await vi.advanceTimersByTimeAsync(59000); // total elapsed 118s, but only 59s since last progress
         xhrRef.succeed();
         await expect(promise).resolves.toMatchObject({ bytes: 100 });
+        vi.useRealTimers();
+    });
+
+    it("does not abort a finished upload that R2 takes longer than the progress watchdog to acknowledge", async () => {
+        vi.useFakeTimers();
+        let xhrRef;
+        FakeXHR.onSend = (xhr) => { xhrRef = xhr; };
+        const promise = putR2Once("https://r2.example/upload", { size: 100 }, () => {});
+        xhrRef.progress(100, 100);
+        xhrRef.bodySent(); // all bytes out — no progress event can fire again
+        await vi.advanceTimersByTimeAsync(120000); // 2 min of legitimate commit time
+        expect(xhrRef.aborted).toBeUndefined();
+        xhrRef.succeed();
+        await expect(promise).resolves.toMatchObject({ bytes: 100 });
+        vi.useRealTimers();
+    });
+
+    it("still bounds the response wait so a server that never answers cannot hang forever", async () => {
+        vi.useFakeTimers();
+        let xhrRef;
+        FakeXHR.onSend = (xhr) => { xhrRef = xhr; };
+        const promise = putR2Once("https://r2.example/upload", { size: 100 }, () => {});
+        const assertion = expect(promise).rejects.toMatchObject({ errorType: "stalled", retryable: true });
+        xhrRef.bodySent();
+        await vi.advanceTimersByTimeAsync(300001);
+        await assertion;
         vi.useRealTimers();
     });
 });

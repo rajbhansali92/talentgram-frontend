@@ -464,3 +464,74 @@ def test_submission_video_complete_ownership_failure_reproduction(mock_decode):
             )
             # This asserts ownership matching
             assert response_complete.status_code == 200
+
+
+# ── R2 re-sign key stability ────────────────────────────────────────────────
+# A re-sign echoes back the `public_id` we returned, which for the R2 pipeline
+# IS the full object key. Re-deriving the key from it nested the whole key
+# inside a fresh prefix, so the refreshed presigned URL pointed at a DIFFERENT
+# object than the upload was targeting: the retried bytes landed on a bogus
+# key, /video-complete then attached metadata for an object that did not exist,
+# and the doubled key left an orphaned asset_metadata row behind.
+
+def _r2_presign_capture(captured):
+    def _fake(key, method="PUT", expiry=3600):
+        captured.append(key)
+        return f"https://r2.example/{key}?sig=x"
+    return _fake
+
+
+@patch("routers.submissions.decode_submitter")
+def test_submission_r2_resign_targets_the_same_key(mock_decode):
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
+    })
+    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
+    mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
+
+    keys = []
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
+         patch("core.generate_r2_presigned_url", _r2_presign_capture(keys)):
+        first = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "take", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+        resigned = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "take", "label": None, "public_id": first},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+    assert first.startswith("raw-uploads/submissions/sid123/take/")
+    assert resigned == first
+    assert keys == [first, first]  # the URL actually signed, not just the echo
+
+
+@patch("routers.applications._check_app_token")
+def test_application_r2_resign_targets_the_same_key(mock_check):
+    mock_check.return_value = None
+    mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
+    mock_db.applications.update_one = AsyncMock(return_value=None)
+    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
+
+    keys = []
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
+         patch("core.generate_r2_presigned_url", _r2_presign_capture(keys)):
+        first = client.post(
+            "/api/public/apply/aid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+        resigned = client.post(
+            "/api/public/apply/aid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": first},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+    assert first.startswith("raw-uploads/applications/aid123/")
+    assert resigned == first
+    assert keys == [first, first]

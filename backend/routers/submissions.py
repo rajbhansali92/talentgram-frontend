@@ -1382,6 +1382,12 @@ async def video_signature(
     folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
 
     is_resign = bool(payload.public_id)
+    # A re-sign for the R2 pipeline carries the FULL object key (the client
+    # echoes back the `public_id` we returned, which is the key itself), not a
+    # leaf. Carry it through verbatim — re-deriving the key from it would nest
+    # the whole key inside a fresh prefix and sign a DIFFERENT object than the
+    # one the upload is already targeting.
+    resign_r2_key = None
     if is_resign:
         # Re-sign the SAME in-progress target. The public_id is a leaf
         # (e.g. "intro_video" or "take_abcd1234"); validate it matches
@@ -1392,6 +1398,7 @@ async def video_signature(
             if not payload.public_id.startswith(f"raw-uploads/submissions/{sid}/"):
                 raise HTTPException(400, "Invalid public_id for this submission")
             public_id = payload.public_id
+            resign_r2_key = payload.public_id
         else:
             if not _re.fullmatch(r"intro_video|take_[0-9a-f]{8}", payload.public_id):
                 raise HTTPException(400, "Invalid public_id for this submission")
@@ -1410,7 +1417,7 @@ async def video_signature(
 
     from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
     if ENABLE_R2_MEDIA_PIPELINE:
-        r2_key = f"raw-uploads/submissions/{sid}/{category}/{public_id}.mp4"
+        r2_key = resign_r2_key or f"raw-uploads/submissions/{sid}/{category}/{public_id}.mp4"
         upload_url = generate_r2_presigned_url(r2_key, "PUT")
         try:
             await db.asset_metadata.update_one(

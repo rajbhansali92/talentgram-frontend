@@ -23,6 +23,13 @@ const SIGNATURE_REFRESH_MS = 30 * 60 * 1000;
 // already-proven values rather than inventing new tuning.
 const R2_MAX_ATTEMPTS = 4;
 const R2_STALL_TIMEOUT_MS = 60000; // no upload-progress event for 60s == stalled
+// Once the last byte has left the browser there are no more progress events by
+// definition — the connection is legitimately idle while R2 commits the object
+// and answers. Bounding that phase with the *byte-progress* watchdog aborts
+// healthy uploads (a big object's commit, or a slow uplink whose final buffered
+// bytes are still in flight, routinely takes longer than 60s), so the response
+// wait gets its own, longer bound.
+const R2_RESPONSE_TIMEOUT_MS = 300000; // 5 min for R2 to acknowledge a finished PUT
 const R2_RETRY_BASE_MS = 1000; // 1s, 2s, 4s …
 // The final "attach to the app/submission" POST runs AFTER the bytes are
 // already safely in R2 — retrying just this small call (instead of falling
@@ -128,11 +135,12 @@ export function putR2Once(uploadUrl, file, onProgress) {
         const diag = trackAttemptDiagnostics();
 
         let stallTimer = null;
-        const armStall = () => {
+        let awaitingResponse = false;
+        const armStall = (ms = R2_STALL_TIMEOUT_MS) => {
             if (stallTimer) clearTimeout(stallTimer);
             stallTimer = setTimeout(() => {
                 try { xhr.abort(); } catch (_) { /* noop */ }
-            }, R2_STALL_TIMEOUT_MS);
+            }, ms);
         };
         const clearStall = () => {
             if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
@@ -142,6 +150,12 @@ export function putR2Once(uploadUrl, file, onProgress) {
             armStall(); // progress → still alive → reset the watchdog
             diag.onProgress(e.loaded);
             if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+        };
+        // Every byte is out. No further progress event can ever fire, so hand
+        // the remaining wait to the response-phase bound (see the constant).
+        xhr.upload.onload = () => {
+            awaitingResponse = true;
+            armStall(R2_RESPONSE_TIMEOUT_MS);
         };
         xhr.onload = () => {
             clearStall();
@@ -169,7 +183,11 @@ export function putR2Once(uploadUrl, file, onProgress) {
         };
         xhr.onabort = () => {
             clearStall();
-            const err = new Error("R2 upload stalled — no progress for 60s");
+            const err = new Error(
+                awaitingResponse
+                    ? "R2 never confirmed the finished upload"
+                    : "R2 upload stalled — no progress for 60s"
+            );
             err.errorType = "stalled";
             err.retryable = true;
             Object.assign(err, diag.stop());

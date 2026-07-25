@@ -953,6 +953,11 @@ async def app_video_signature(
 
     folder = f"{APP_NAME}/applications/{aid}"
     is_resign = bool(payload.public_id)
+    # An R2 re-sign carries the FULL object key (the client echoes back the
+    # `public_id` we returned, which is the key itself). Carry it through
+    # verbatim — re-deriving the key from it would nest the whole key inside a
+    # fresh prefix and sign a DIFFERENT object than the upload is targeting.
+    resign_r2_key = None
 
     if is_resign:
         # Support R2 key structures on resign
@@ -961,6 +966,7 @@ async def app_video_signature(
             if not payload.public_id.startswith(f"raw-uploads/applications/{aid}/"):
                 raise HTTPException(400, "Invalid public_id for this application")
             public_id = payload.public_id
+            resign_r2_key = payload.public_id
         else:
             if payload.public_id != "intro_video":
                 raise HTTPException(400, "Invalid public_id for this application")
@@ -974,7 +980,7 @@ async def app_video_signature(
 
     from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
     if ENABLE_R2_MEDIA_PIPELINE:
-        r2_key = f"raw-uploads/applications/{aid}/{category}/{public_id}.mp4"
+        r2_key = resign_r2_key or f"raw-uploads/applications/{aid}/{category}/{public_id}.mp4"
         upload_url = generate_r2_presigned_url(r2_key, "PUT")
         try:
             await db.asset_metadata.update_one(

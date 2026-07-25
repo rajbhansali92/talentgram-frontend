@@ -535,3 +535,96 @@ def test_application_r2_resign_targets_the_same_key(mock_check):
     assert first.startswith("raw-uploads/applications/aid123/")
     assert resigned == first
     assert keys == [first, first]
+
+
+# ── P2: intro_video R2 leaf uniqueness (Stream overwrite-race fix) ─────────
+# Confirmed production issue: intro_video always wrote to a FIXED R2 key, so
+# re-recording while Cloudflare Stream was still fetching the previous object
+# overwrote it mid-fetch — corrupting that ingest (ERR_FETCH_ORIGIN_ERROR /
+# ERR_FETCH_BAD_USER_INPUT) and silently clobbering its asset_metadata row via
+# the second upload's upsert on the same key. Reproduced live against real R2
+# + real Cloudflare Stream before this fix; both uploads now reach `ready`.
+
+@patch("routers.submissions.decode_submitter")
+def test_submission_intro_video_fresh_uploads_get_distinct_r2_keys(mock_decode):
+    """Two SEPARATE (non-resign) intro_video signature calls must target
+    different R2 objects, so a re-record can never overwrite a video that
+    Cloudflare Stream might still be mid-fetch on."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
+    })
+    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
+    mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
+
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
+         patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
+        first = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+        second = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+    assert first.startswith("raw-uploads/submissions/sid123/intro_video/intro_video_")
+    assert second.startswith("raw-uploads/submissions/sid123/intro_video/intro_video_")
+    assert first != second, "fresh intro_video uploads must never share an R2 key"
+
+
+@patch("routers.applications._check_app_token")
+def test_application_intro_video_fresh_uploads_get_distinct_r2_keys(mock_check):
+    mock_check.return_value = None
+    mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
+    mock_db.applications.update_one = AsyncMock(return_value=None)
+    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
+
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
+         patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
+        first = client.post(
+            "/api/public/apply/aid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+        second = client.post(
+            "/api/public/apply/aid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+    assert first.startswith("raw-uploads/applications/aid123/intro_video/intro_video_")
+    assert second.startswith("raw-uploads/applications/aid123/intro_video/intro_video_")
+    assert first != second, "fresh intro_video uploads must never share an R2 key"
+
+
+@patch("routers.submissions.decode_submitter")
+def test_submission_intro_video_resign_still_targets_same_unique_key(mock_decode):
+    """The re-sign path (403 recovery) must still hit the SAME key the first
+    signature minted — uniqueness must not break in-progress-upload retries."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
+    })
+    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
+    mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
+
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
+         patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
+        first = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": None},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+        resigned = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "intro_video", "label": None, "public_id": first},
+            headers={"Authorization": "Bearer dummy_token"},
+        ).json()["public_id"]
+
+    assert resigned == first

@@ -1417,7 +1417,19 @@ async def video_signature(
 
     from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
     if ENABLE_R2_MEDIA_PIPELINE:
-        r2_key = resign_r2_key or f"raw-uploads/submissions/{sid}/{category}/{public_id}.mp4"
+        # P2 fix: intro_video's R2 leaf must be unique per FRESH upload attempt
+        # (a re-sign still reuses resign_r2_key verbatim, unaffected). The old
+        # fixed leaf meant a re-record while Cloudflare Stream was still
+        # fetching the PREVIOUS object overwrote it mid-fetch, corrupting that
+        # ingest (ERR_FETCH_ORIGIN_ERROR / ERR_FETCH_BAD_USER_INPUT) and
+        # leaving its asset_metadata row's public_id key silently clobbered by
+        # the second upload's upsert. Scoped to the R2 leaf only — Cloudinary's
+        # public_id (used when ENABLE_R2_MEDIA_PIPELINE is off) is untouched,
+        # since Cloudinary's own overwrite:"true" replacement is a different,
+        # non-racy mechanism and giving it a unique id per attempt would leak
+        # Cloudinary storage instead of fixing anything.
+        r2_leaf = f"{public_id}_{uuid.uuid4().hex[:8]}" if (category == "intro_video" and not resign_r2_key) else public_id
+        r2_key = resign_r2_key or f"raw-uploads/submissions/{sid}/{category}/{r2_leaf}.mp4"
         upload_url = generate_r2_presigned_url(r2_key, "PUT")
         try:
             await db.asset_metadata.update_one(

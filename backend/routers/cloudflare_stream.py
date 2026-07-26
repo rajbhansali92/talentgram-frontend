@@ -61,10 +61,26 @@ async def cloudflare_stream_webhook(
     parent_id = meta.get("parent_id")
     scope = meta.get("scope")
     category = meta.get("category")
-    
+    r2_key = meta.get("r2_key")  # exact raw object key; absent on jobs queued before this field existed
+
     if not media_id or not parent_id or not scope:
         logger.info(f"[Cloudflare Stream Webhook] Non-Talentgram event or missing metadata: uid={uid}")
         return {"status": "ignored"}
+
+    async def _update_asset_metadata(fields: dict) -> None:
+        """Exact match on r2_key when available; otherwise the old category-
+        prefix match (kept only for jobs already in-flight at deploy time —
+        see the r2_key comment in providers.py for why prefix alone is unsafe
+        now that a category folder can hold more than one raw object)."""
+        if r2_key:
+            await db.asset_metadata.update_one({"public_id": r2_key}, {"$set": fields})
+        else:
+            _prefix = f"raw-uploads/{scope}s/{parent_id}/{category}/"
+            await db.asset_metadata.update_many(
+                {"public_id": {"$regex": f"^{re.escape(_prefix)}"},
+                 "upload_status": {"$in": ["pending", "processing"]}},
+                {"$set": fields},
+            )
 
     # Load Stream customer delivery domain.
     # CLOUDFLARE_STREAM_CUSTOMER_CODE may be stored as either:
@@ -106,13 +122,10 @@ async def cloudflare_stream_webhook(
         # so match by that prefix — scope-agnostic and exact. Without this the row
         # stays "processing" forever after Stream finishes.
         try:
-            _prefix = f"raw-uploads/{scope}s/{parent_id}/{category}/"
-            await db.asset_metadata.update_many(
-                {"public_id": {"$regex": f"^{re.escape(_prefix)}"},
-                 "upload_status": {"$in": ["pending", "processing"]}},
-                {"$set": {"upload_status": "completed", "stream_uid": uid,
-                          "updated_at": datetime.now(timezone.utc)}},
-            )
+            await _update_asset_metadata({
+                "upload_status": "completed", "stream_uid": uid,
+                "updated_at": datetime.now(timezone.utc),
+            })
         except Exception as e:
             logger.warning(f"[Cloudflare Stream Webhook] asset_metadata complete update failed: {e}")
 
@@ -153,13 +166,10 @@ async def cloudflare_stream_webhook(
         # P1-C fix: mirror the failure onto the R2 tracking row so it doesn't sit
         # in "processing" indefinitely.
         try:
-            _prefix = f"raw-uploads/{scope}s/{parent_id}/{category}/"
-            await db.asset_metadata.update_many(
-                {"public_id": {"$regex": f"^{re.escape(_prefix)}"},
-                 "upload_status": {"$in": ["pending", "processing"]}},
-                {"$set": {"upload_status": "failed", "error_reason": err_msg,
-                          "updated_at": datetime.now(timezone.utc)}},
-            )
+            await _update_asset_metadata({
+                "upload_status": "failed", "error_reason": err_msg,
+                "updated_at": datetime.now(timezone.utc),
+            })
         except Exception as e:
             logger.warning(f"[Cloudflare Stream Webhook] asset_metadata fail update failed: {e}")
         logger.warning(f"[Cloudflare Stream Webhook] Video uid={uid} failed processing: {err_msg}")

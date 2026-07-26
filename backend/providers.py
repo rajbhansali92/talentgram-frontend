@@ -131,7 +131,15 @@ class CloudflareStreamProvider(VideoProvider):
                 "scope": scope,
                 "category": category,
                 "label": label or "",
-                "operation_id": operation_id or ""
+                "operation_id": operation_id or "",
+                # P2 follow-up: lets the webhook update the EXACT asset_metadata
+                # row instead of a category-prefix regex. Needed because a
+                # category folder can now hold multiple raw objects (one per
+                # intro_video upload attempt, since the fix for the R2/Stream
+                # overwrite race gave each attempt its own key) — a prefix
+                # match would stamp one video's uid/status onto a DIFFERENT
+                # video's still-in-flight (or already-correct) metadata row.
+                "r2_key": r2_key,
             }
         }
 

@@ -59,7 +59,20 @@ async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
     // Step 5 — HTTP fetch
     let res;
     try {
-        res = await axios.get(url, { ...init, responseType: "blob" });
+        // Explicit circuitKey: without it, Request Manager's default grouping
+        // (method + first path segment) puts every /public/* call — this
+        // media fetch AND every unrelated /seen, /track, /links, /decision
+        // call firing concurrently on the same page — on ONE shared circuit.
+        // A multi-item share fires several of these fetches at once, so a
+        // couple of transient retries (each retry counts as a failure) tips
+        // the shared circuit's failureThreshold and short-circuits the
+        // REMAINING media fetches in the same batch — files silently drop
+        // out and the share falls back to link-only, while a single-item
+        // share rarely accumulates enough failures alone to trip it. Scoping
+        // media downloads to their own circuit isolates them from that
+        // unrelated background traffic without removing breaker protection
+        // for a genuinely broken media endpoint.
+        res = await axios.get(url, { ...init, responseType: "blob", circuitKey: "get:media-download" });
     } catch (e) {
         if (e?.response) {
             // Server responded with a non-2xx status.

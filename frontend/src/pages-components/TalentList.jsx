@@ -114,7 +114,7 @@ function TalentThumb({ src, alt }) {
 // ---------------------------------------------------------------------------
 // Single roster card — memoized to avoid re-renders on parent state changes
 // ---------------------------------------------------------------------------
-const TalentCard = React.memo(function TalentCard({
+export const TalentCard = React.memo(function TalentCard({
     t,
     checked,
     isSelectionMode,
@@ -272,23 +272,28 @@ const TalentCard = React.memo(function TalentCard({
                 </a>
             )}
 
-            {/* Card body — link or button depending on selection mode */}
-            {!isSelectionMode ? (
-                <Link
-                    to={`/admin/talents/${t.id}`}
-                    className="block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/30 rounded-xl"
-                >
-                    {cardContent}
-                </Link>
-            ) : (
-                <button
-                    type="button"
-                    onClick={() => onToggle(t.id)}
-                    className="block w-full text-left"
-                >
-                    {cardContent}
-                </button>
-            )}
+            {/* Card body — a single stable element regardless of selection
+                mode. Perf audit 2026-07-26: this used to swap between a
+                <Link> and a <button> depending on isSelectionMode. React
+                can't reconcile across different element types at the same
+                position, so entering/exiting selection mode forced a full
+                unmount+remount of every visible card (confirmed live via
+                MutationObserver: ~40 remove+add pairs — one per card — for
+                a single checkbox click). Keeping the same <Link> always and
+                toggling behavior via onClick lets React patch this in place
+                instead of tearing down and rebuilding the whole grid. */}
+            <Link
+                to={`/admin/talents/${t.id}`}
+                onClick={(e) => {
+                    if (isSelectionMode) {
+                        e.preventDefault();
+                        onToggle(t.id);
+                    }
+                }}
+                className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/30 rounded-xl"
+            >
+                {cardContent}
+            </Link>
         </div>
     );
 });
@@ -406,18 +411,21 @@ const TalentListRow = React.memo(function TalentListRow({
                     {/* Name & Tags */}
                     <div className="md:col-span-4 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                            {!isSelectionMode ? (
-                                <Link
-                                    to={`/admin/talents/${t.id}`}
-                                    className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 hover:text-black hover:underline truncate block"
-                                >
-                                    {t.name || "—"}
-                                </Link>
-                            ) : (
-                                <span className="font-semibold text-sm leading-snug tracking-tight text-neutral-800 truncate block">
-                                    {t.name || "—"}
-                                </span>
-                            )}
+                            {/* Same element always — see the identical fix
+                                (and its measured cause) on the Grid card's
+                                Link/button swap above. */}
+                            <Link
+                                to={`/admin/talents/${t.id}`}
+                                onClick={(e) => {
+                                    if (isSelectionMode) {
+                                        e.preventDefault();
+                                        onToggle(t.id);
+                                    }
+                                }}
+                                className={`font-semibold text-sm leading-snug tracking-tight text-neutral-800 truncate block ${!isSelectionMode ? "hover:text-black hover:underline" : ""}`}
+                            >
+                                {t.name || "—"}
+                            </Link>
                             
                             {/* Tags display in row */}
                             {(t.tags || []).length > 0 && (

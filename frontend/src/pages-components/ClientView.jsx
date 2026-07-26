@@ -2082,9 +2082,9 @@ function TalentDetail({
                 }),
             );
         }
-        images.forEach((m, i) =>
-            out.push({ m, label: `Portfolio Image ${i + 1}`, caption: `Portfolio Image ${i + 1}`, type: "image" }),
-        );
+        // No `caption` on images — portfolio images attach as files but must
+        // never surface as a named text line in the WhatsApp message.
+        images.forEach((m, i) => out.push({ m, label: `Portfolio Image ${i + 1}`, type: "image" }));
         return out;
     }, [intro, takes, images, vis.intro_video, vis.takes]);
 
@@ -2200,7 +2200,12 @@ function TalentDetail({
             const header = projectName
                 ? `${privatizeName(talent.name)} — ${projectName}`
                 : privatizeName(talent.name);
-            const caption = `${header}\n\n${entries.map((e) => e.caption || e.label).join("\n")}`;
+            // Only entries with an explicit `caption` (video items) get a text
+            // line; images have none, so they attach without ever appearing as
+            // a named entry. Improvement: skip the blank-line separator entirely
+            // for an images-only share instead of leaving a dangling empty line.
+            const lines = entries.map((e) => e.caption).filter(Boolean);
+            const caption = lines.length ? `${header}\n\n${lines.join("\n")}` : header;
             const res = await shareMediaViaWhatsApp({
                 slug,
                 talentId: talent.id,
@@ -2255,7 +2260,8 @@ function TalentDetail({
         if (entry) { runShare([entry]); return; }
         const label = shareLabelById[m.id] || "Media";
         const type = (m.resource_type === "video" || m.category === "video" || m.category?.startsWith("take")) ? "video" : "image";
-        runShare([{ m, label, caption: label, type }]);
+        // Same rule as shareableMedia: images never get a caption/text line.
+        runShare([{ m, label, caption: type === "image" ? undefined : label, type }]);
     }, [runShare, shareableMedia, shareLabelById]);
 
     const shareSelected = useCallback(() => {

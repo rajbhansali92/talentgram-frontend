@@ -142,6 +142,16 @@ _LIST_PROJECTION = {
     "commission_data": 0,   # financial terms
     "client_feedback": 0,   # internal client notes
     "whatsapp_group_name": 0,  # ops field (WhatsApp engine uses its own API)
+    # Perf audit 2026-07-26: measured 30.8% of a real 40-item page's payload
+    # (67KB/218KB) despite only 15% of items having any media at all. List
+    # cards render image_url/cover_thumbnail_url (denormalized scalars) and
+    # never walk media[] — confirmed via _enrich_list's fallback below, which
+    # already prefers the denormalized fields, and via a direct audit showing
+    # 0 of the talents with media lack that denormalized fallback. The only
+    # list consumer that ever read the full array (Quick View) now lazily
+    # hydrates it on open via GET /talents/{id}, mirroring the same pattern
+    # Pipeline cards already use (see talentPreviewCache.js).
+    "media": 0,
 }
 
 

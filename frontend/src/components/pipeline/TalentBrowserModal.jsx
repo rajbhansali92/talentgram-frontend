@@ -9,6 +9,7 @@ import { displayInstagramHandle, instagramProfileUrl } from "@/lib/mediaUtils";
 import { SKILLS_CATEGORIES } from "@/components/SkillsSelector";
 import LocationMultiSelect from "@/components/talent-directory/LocationMultiSelect";
 import HlsVideo from "@/components/HlsVideo";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 
 /* ---------------------------------------------------------------------
  * TalentBrowserModal — Elite Enterprise ATS-Grade Talent Browser
@@ -334,6 +335,35 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
         return "grid";
     });
     const [previewTalent, setPreviewTalent] = useState(null);
+
+    // Perf audit 2026-07-26: the list response no longer carries media[]
+    // (see backend/routers/talents.py's _LIST_PROJECTION — it was 30.8% of
+    // a real page's payload, unused by any list card). Quick View opens
+    // instantly with the partial list item, then lazily hydrates the full
+    // talent (media included) via GET /talents/{id} in the background —
+    // the exact pattern PipelineCard.jsx already uses for its Quick View
+    // (see talentPreviewCache.js), applied here for the first time.
+    const openPreview = useCallback((talent) => {
+        const cached = talentPreviewCache.getTalent(talent.id);
+        const initial = cached || talent;
+        setPreviewTalent(initial);
+
+        if (Array.isArray(initial.media)) return; // already hydrated — no request
+
+        talentPreviewCache
+            .hydrateTalent(talent.id, async () => {
+                const { data } = await adminApi.get(`/talents/${talent.id}`);
+                return data;
+            })
+            .then((full) => {
+                // Only patch if the user is still looking at THIS talent —
+                // they may have opened a different card meanwhile.
+                setPreviewTalent((prev) => (prev && prev.id === talent.id ? full : prev));
+            })
+            .catch((err) => {
+                console.error("Quick View hydration failed:", err);
+            });
+    }, []);
 
     const handleViewModeChange = useCallback((mode) => {
         setViewMode(mode);
@@ -1175,7 +1205,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                                         selected={isSelected}
                                                         alreadyInPipeline={alreadyInPipeline}
                                                         onToggle={toggleSelect}
-                                                        onPreview={setPreviewTalent}
+                                                        onPreview={openPreview}
                                                         isFocused={isFocused}
                                                         showIntelligence={filters.showIntelligence}
                                                         registerRef={registerCardRef}
@@ -1204,7 +1234,7 @@ function TalentBrowserModal({ open, onClose, projectId, existingTalentIds, onAdd
                                                         selected={isSelected}
                                                         alreadyInPipeline={alreadyInPipeline}
                                                         onToggle={toggleSelect}
-                                                        onPreview={setPreviewTalent}
+                                                        onPreview={openPreview}
                                                         densityMode={densityMode}
                                                         isFocused={isFocused}
                                                         showIntelligence={filters.showIntelligence}
@@ -1343,7 +1373,7 @@ const TalentListRow = memo(({ talent, selected, alreadyInPipeline, onToggle, onP
                 {/* Profile Image */}
                 <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-100 shrink-0 relative">
                     {imageUrl ? (
-                        <img src={imageUrl} alt="" className="w-full h-full object-cover" />
+                        <img src={imageUrl} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
                     ) : (
                         <div className="w-full h-full flex items-center justify-center bg-gray-200 text-[#333333] text-xs">?</div>
                     )}

@@ -21,6 +21,7 @@ Collection: ``casting_pipeline``. Document shape:
 Hydration is done with a single ``$in`` lookup on ``db.talents`` — no N+1
 regardless of pipeline size.
 """
+import asyncio
 import logging
 import uuid
 from typing import List, Optional
@@ -423,7 +424,14 @@ async def list_pipeline(
 
     talent_ids = list({r.get("talent_id") for r in rows if r.get("talent_id")})
 
+    # Perf audit 2026-07-26: the talent hydration and the submission-aware
+    # follow_up lookup are both keyed off talent_ids alone — neither depends
+    # on the other's result — but ran as two sequential round trips. Each
+    # Mongo round trip measured ~500-600ms in production (Railway<->Atlas
+    # cross-region latency), so running them concurrently halves that cost
+    # for every pipeline load.
     by_id: dict = {}
+    submitted_talent_ids: set = set()
     if talent_ids:
         talents_cursor = db.talents.find(
             {"id": {"$in": talent_ids}},
@@ -438,27 +446,28 @@ async def list_pipeline(
                 "media": 1,
             },
         )
-        for t in await talents_cursor.to_list(len(talent_ids)):
-            tid = t.get("id")
-            if tid:
-                by_id[tid] = _talent_merge_fields(t)
-
-    # Submission-aware follow_up computation (PATCH 3C).
-    #
-    # `follow_up` is a virtual, read-only lane — NOT a stored DB stage. A
-    # row is "in follow_up" when:
-    #     stage == ask_to_test  AND  talent has no submission for this project
-    #
-    # One query covers all rows. `talent_id` is intentionally chosen as the
-    # match key (not email) because pipeline rows and submissions are
-    # already linked-by-talent_id once a talent reaches a project.
-    submitted_talent_ids: set = set()
-    if talent_ids:
+        # Submission-aware follow_up computation (PATCH 3C).
+        #
+        # `follow_up` is a virtual, read-only lane — NOT a stored DB stage. A
+        # row is "in follow_up" when:
+        #     stage == ask_to_test  AND  talent has no submission for this project
+        #
+        # One query covers all rows. `talent_id` is intentionally chosen as the
+        # match key (not email) because pipeline rows and submissions are
+        # already linked-by-talent_id once a talent reaches a project.
         sub_cursor = db.submissions.find(
             {"project_id": project_id, "talent_id": {"$in": talent_ids}},
             {"_id": 0, "talent_id": 1},
         )
-        async for s in sub_cursor:
+        talent_docs, submission_docs = await asyncio.gather(
+            talents_cursor.to_list(len(talent_ids)),
+            sub_cursor.to_list(None),
+        )
+        for t in talent_docs:
+            tid = t.get("id")
+            if tid:
+                by_id[tid] = _talent_merge_fields(t)
+        for s in submission_docs:
             tid = s.get("talent_id")
             if tid:
                 submitted_talent_ids.add(tid)

@@ -1,4 +1,5 @@
 import React, { memo, useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { STAGE_LABELS, getStageLabel } from "./constants";
 import { 
     ChevronDown, 
@@ -37,13 +38,37 @@ const BulkActionBar = memo(function BulkActionBar({
     const visible = count > 0;
     const [busy, setBusy] = useState(false);
     const [showMoveDropdown, setShowMoveDropdown] = useState(false);
-    const dropdownRef = useRef(null);
+    const [menuPos, setMenuPos] = useState(null);
+    const dropdownRef = useRef(null); // the trigger button's wrapper
+    const menuRef = useRef(null); // the portaled menu content
 
-    // Click outside to close stage dropdown
+    // The menu is rendered via a portal into document.body (see the render
+    // below) instead of as a CSS-absolute child of this row. The row must
+    // scroll horizontally on narrow viewports (overflow-x-auto), and per the
+    // CSS spec overflow-x/overflow-y are coupled: any axis set to something
+    // other than "visible" forces the OTHER axis to compute as "auto" too —
+    // no amount of overflow-y-visible or !important can undo that. That
+    // silently clipped this dropdown to zero visible area on every
+    // viewport (confirmed live: the menu existed in the DOM, had
+    // visibility:visible/opacity:1, and its own click handlers fired
+    // correctly when invoked directly — it was simply never rendered
+    // on-screen, so "Move Stage" looked like a dead button to every user).
+    useEffect(() => {
+        if (!showMoveDropdown || !dropdownRef.current) return;
+        const rect = dropdownRef.current.getBoundingClientRect();
+        setMenuPos({ left: rect.left, bottom: window.innerHeight - rect.top + 8 });
+    }, [showMoveDropdown]);
+
+    // Click outside to close stage dropdown — must check both the trigger
+    // button (dropdownRef) and the portaled menu (menuRef), since a portal
+    // moves the menu to a different DOM subtree than its logical parent.
     useEffect(() => {
         if (!showMoveDropdown) return;
         const handleClickOutside = (e) => {
-            if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+            if (
+                dropdownRef.current && !dropdownRef.current.contains(e.target) &&
+                menuRef.current && !menuRef.current.contains(e.target)
+            ) {
                 setShowMoveDropdown(false);
             }
         };
@@ -147,8 +172,12 @@ const BulkActionBar = memo(function BulkActionBar({
                             <span>Move Stage</span>
                             <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showMoveDropdown ? "rotate-180" : ""}`} />
                         </button>
-                        {showMoveDropdown && (
-                            <div className="absolute bottom-full left-0 mb-2 z-50 bg-[#121212] border border-white/10 shadow-2xl rounded-xl py-1.5 min-w-[160px] flex flex-col gap-0.5">
+                        {showMoveDropdown && menuPos && createPortal(
+                            <div
+                                ref={menuRef}
+                                style={{ position: "fixed", left: menuPos.left, bottom: menuPos.bottom }}
+                                className="z-50 bg-[#121212] border border-white/10 shadow-2xl rounded-xl py-1.5 min-w-[160px] flex flex-col gap-0.5"
+                            >
                                 <div className="px-3 py-1 text-[9px] font-bold text-white/45 tracking-wider uppercase border-b border-white/5 mb-1.5">
                                     Move {count} talents to
                                 </div>
@@ -162,7 +191,8 @@ const BulkActionBar = memo(function BulkActionBar({
                                         {STAGE_LABELS[stage] || getStageLabel(stage)}
                                     </button>
                                 ))}
-                            </div>
+                            </div>,
+                            document.body
                         )}
                     </div>
 

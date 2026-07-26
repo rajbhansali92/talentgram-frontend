@@ -165,6 +165,7 @@ const PipelineColumn = memo(function PipelineColumn({
     }, [items.length]);
 
     React.useEffect(() => {
+        if (isCollapsed) return; // sentinel isn't rendered while collapsed — nothing to observe yet
         if (items.length <= visibleLimit) return;
         const sentinel = sentinelRef.current;
         if (!sentinel) return;
@@ -177,7 +178,17 @@ const PipelineColumn = memo(function PipelineColumn({
 
         observer.observe(sentinel);
         return () => observer.disconnect();
-    }, [items.length, visibleLimit]);
+        // isCollapsed must be a dependency: on mobile every stage starts
+        // collapsed (see PipelineBoard's mobileExpandedStages), so the sentinel
+        // doesn't exist in the DOM on first mount and this effect used to bail
+        // out via the `!sentinel` guard above — permanently, since neither
+        // items.length nor visibleLimit change when the user later expands the
+        // column. Desktop columns start expanded (collapsedStages also starts
+        // {}, but its isCollapsed default is the opposite), so the sentinel was
+        // already present on mount and never hit this bug — "Loading more
+        // candidates…" only ever hung on mobile. Re-running the effect when
+        // isCollapsed flips lets it find the now-mounted sentinel and attach.
+    }, [items.length, visibleLimit, isCollapsed]);
 
     // 2. useMemo hooks
     const displayMetrics = useMemo(() => {

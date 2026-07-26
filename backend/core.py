@@ -190,17 +190,25 @@ async def current_user(
     if not data or data.get("role") not in ("admin", "team"):
         raise HTTPException(status_code=401, detail="Invalid token")
         
-    # Session Revocation Check (P1)
+    # Session Revocation Check (P1). The revocation lookup and the user
+    # lookup are independent reads — running them concurrently instead of
+    # two sequential round trips matters here: this dependency runs on
+    # EVERY admin-plane request, and each round trip to Atlas measured
+    # ~500-600ms in production (Railway↔Atlas cross-region latency), so
+    # this alone was adding ~0.5s to every authenticated call app-wide.
     jti = data.get("jti")
-    if jti:
-        session = await db.sessions.find_one({"jti": jti})
-        if session and session.get("revoked") is True:
-            raise HTTPException(status_code=401, detail="Session has been revoked")
-
-    user = await db.users.find_one(
+    coros = [db.users.find_one(
         {"email": data.get("email")},
         {"_id": 0, "password_hash": 0, "invite_token": 0},
-    )
+    )]
+    if jti:
+        coros.append(db.sessions.find_one({"jti": jti}))
+    results = await asyncio.gather(*coros)
+    user = results[0]
+    session = results[1] if jti else None
+    if session and session.get("revoked") is True:
+        raise HTTPException(status_code=401, detail="Session has been revoked")
+
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     if user.get("status") == "disabled":

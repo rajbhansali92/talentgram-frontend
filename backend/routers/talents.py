@@ -1,4 +1,5 @@
 """Talent CRUD + media management."""
+import asyncio
 import logging
 import re
 import uuid
@@ -501,8 +502,16 @@ async def list_talents(
     cursor = db.talents.find(query, _LIST_PROJECTION).sort(sort_spec)
     if collation:
         cursor = cursor.collation(collation)
-    total = await db.talents.count_documents(query)
-    talents = await cursor.skip(skip).limit(page_size).to_list(page_size)
+    # count_documents and the find don't depend on each other — run them
+    # concurrently instead of two sequential round trips. The other two
+    # sort branches above already avoid this via a single $facet
+    # aggregation; this is the default (no sort_by) path every Browse
+    # Roster / Global Talent page load hits, measured at ~500-600ms per
+    # Mongo round trip in production.
+    total, talents = await asyncio.gather(
+        db.talents.count_documents(query),
+        cursor.skip(skip).limit(page_size).to_list(page_size),
+    )
     return _paginated([_enrich_list(t) for t in talents], total, p, s)
 
 

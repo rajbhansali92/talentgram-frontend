@@ -76,7 +76,36 @@ export function middleware(req: NextRequest) {
         }
         url.pathname = `/l${cleanPath}`;
     } else {
-        // Root / Landing domain
+        // Root / Landing domain (bare apex or www — the apex already 308s to
+        // www at the DNS/platform level before a request reaches here, so
+        // this branch mainly sees www.talentgramagency.com).
+        //
+        // Next.js route groups add no path segment, so (apply)/apply and
+        // (submit)/submit/[slug] render a normal 200 on THIS host too, not
+        // just on apply./submit. — but Cloudflare R2's CORS allowlist only
+        // permits apply.talentgramagency.com and submit.talentgramagency.com,
+        // so a video upload started from here fails with "R2 upload network
+        // error" while everything else on the page (including images, which
+        // go via Cloudinary/the backend, not a direct-to-R2 browser PUT)
+        // works fine — the failure is silent until the talent tries to
+        // record/upload video. Canonical-redirect these two paths to their
+        // real subdomain before any upload session can begin. Scoped to the
+        // real production hostname only (not localhost/preview) so local dev
+        // is unaffected.
+        if (cleanHostname === 'talentgramagency.com') {
+            if (url.pathname === '/apply' || url.pathname.startsWith('/apply/')) {
+                return NextResponse.redirect(
+                    new URL(`https://apply.talentgramagency.com${url.pathname}${url.search}`),
+                    308
+                );
+            }
+            if (url.pathname.startsWith('/submit/')) {
+                return NextResponse.redirect(
+                    new URL(`https://submit.talentgramagency.com${url.pathname}${url.search}`),
+                    308
+                );
+            }
+        }
         url.pathname = `${url.pathname}`;
     }
 

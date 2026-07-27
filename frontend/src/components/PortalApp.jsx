@@ -4,6 +4,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import PortalGateway from "@/pages/PortalGateway";
 import PortalHome from "@/pages/PortalHome";
 import PortalProjects from "@/pages/PortalProjects";
+import ProjectDetail from "@/pages/ProjectDetail";
 import PortalProfile from "@/pages/PortalProfile";
 import PortalSettings from "@/pages/PortalSettings";
 
@@ -26,6 +27,10 @@ export default function PortalApp() {
                 <Route element={<DashboardLayout />}>
                     <Route path="/portal/home" element={<PortalHome />} />
                     <Route path="/portal/projects" element={<PortalProjects />} />
+                    {/* Project Detail (Phase 2 item 4) — two path segments,
+                        so this never collides with the single-segment
+                        /portal/:slug login-gateway route above. */}
+                    <Route path="/portal/projects/:slug" element={<ProjectDetail />} />
                     <Route path="/portal/profile" element={<PortalProfile />} />
                     <Route path="/portal/settings" element={<PortalSettings />} />
                 </Route>

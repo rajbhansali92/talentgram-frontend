@@ -1,38 +1,38 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { ArrowLeft, ArrowUpRight, Calendar, Building2, User, DollarSign, Film, AlertCircle } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Calendar, Building2, User, DollarSign, Film, MapPin, Wallet, MessageCircleQuestion, Link2, ImageIcon, Video as VideoIcon, Clapperboard } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { api as axios, portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { getEngagementStatusDetails } from "@/lib/engagementStatus";
+import { formatTalentLocation } from "@/lib/sanitize";
+import { parseStoredLink } from "@/lib/workLinks";
+import MediaGrid from "@/components/shared/MediaGrid";
+import FeedbackRow from "@/components/shared/FeedbackRow";
 
 /**
- * Phase 2 item 4 — Project Detail (see docs/TALENT_DASHBOARD_ARCHITECTURE.md
- * and docs/TALENT_MIGRATION_PLAN.md). New wrapper around the existing
- * submission experience, not a replacement for it: /submit/{slug} remains
- * the canonical editor, reached from this page's Quick Actions.
+ * Phase 3 item 2 — Project Detail now renders the real canonical submission
+ * (see docs/TALENT_DASHBOARD_ARCHITECTURE.md). Structure: Project Header,
+ * Submission Status, Project Information, Submission Summary, Quick
+ * Actions. "Pending Items" is removed — deferred until Requirement Engine
+ * integration, per this task's explicit scope.
  *
- * Data sources — both pre-existing, unmodified:
- *   - GET /public/projects/{slug} (submissions.py) — public, no auth,
- *     already used elsewhere; returns project metadata + submission_requirements.
- *   - GET /portal/projects (portal.py) — same call PortalProjects.jsx makes;
- *     find this project's own card in the response for status/decision.
+ * Data sources, all pre-existing and unmodified:
+ *   - GET /public/projects/{slug} — Project Header/Information (unchanged
+ *     from Phase 2 item 4).
+ *   - GET /portal/projects — Submission Status (unchanged).
+ *   - GET /portal/projects/{slug}/submission (Phase 3 item 1) — the ONLY
+ *     source for Submission Summary. Nothing here is derived: every value
+ *     rendered below is a direct field of the canonical submission
+ *     document, exactly as build_talent_submission_view() returns it. No
+ *     Requirement Engine, no Readiness Engine, no computed status.
  *
- * Per this task's explicit scope, fetches independently rather than sharing
- * a data layer with PortalHome/PortalProjects (no DashboardDataContext yet).
- *
- * KNOWN GAP, not filled in this step (see the Phase 2 item 4 report):
- * "Pending Items" and "Submission Summary" per the target spec need the
- * submission's actual form_data/media (what's uploaded, availability,
- * budget response, etc.) to be meaningful. No endpoint reachable with the
- * portal_token returns that — GET /public/submissions/{sid} and
- * GET /public/projects/{slug}/submission/me both require a submitter JWT or
- * opaque access_token scoped to one specific project, which the Dashboard
- * doesn't hold for arbitrary engagements. Rather than run the real
- * Requirement Engine against an empty form (which would incorrectly mark
- * an already-submitted talent's requirements as "missing"), these two
- * sections show only the coarse status data that IS already available
- * (draft vs. submitted vs. decision) and are honest about the gap.
+ * "Project Answers" pairs submission.form_data.custom_answers (id -> answer)
+ * with project.custom_questions (id -> question text) for a readable label
+ * — both pieces of data are already fetched here; this is a direct lookup,
+ * not a derived/computed value, and applies no visibility filtering (that's
+ * a client-facing concern in _submission_to_client_shape, not relevant to
+ * a talent viewing their own answers).
  */
 export default function ProjectDetail() {
     const { slug } = useParams();
@@ -41,6 +41,7 @@ export default function ProjectDetail() {
 
     const [project, setProject] = useState(null);
     const [engagement, setEngagement] = useState(null); // this project's card from /portal/projects
+    const [submission, setSubmission] = useState(null); // canonical submission, or null if unavailable
     const [theme, setTheme] = useState("ongoing");
     const [loading, setLoading] = useState(true);
 
@@ -80,6 +81,19 @@ export default function ProjectDetail() {
 
                 setEngagement(found);
                 setTheme(foundTheme);
+
+                // Submission Summary source — independent fetch, per this
+                // task's scope. A 404 here just means no summary to show;
+                // it doesn't invalidate the rest of the page.
+                try {
+                    const subRes = await portalApi.get(`/portal/projects/${slug}/submission`);
+                    setSubmission(subRes.data);
+                } catch (subErr) {
+                    if (subErr?.response?.status !== 404) {
+                        console.error("Submission fetch error:", subErr);
+                    }
+                    setSubmission(null);
+                }
             } catch (err) {
                 console.error("Project detail fetch error:", err);
                 const status = err?.response?.status;
@@ -118,6 +132,36 @@ export default function ProjectDetail() {
 
     const statusDetails = getEngagementStatusDetails(engagement, theme);
     const isDraft = engagement.status === "draft";
+
+    // Everything below is read directly off `submission` — no computation,
+    // no filtering beyond "does this field/category have a value."
+    const fd = submission?.form_data || {};
+    const availability = fd.availability || {};
+    const budget = fd.budget || {};
+    const location = Array.isArray(fd.location) ? fd.location : [];
+    const workLinks = Array.isArray(fd.work_links) ? fd.work_links : [];
+    const media = Array.isArray(submission?.media) ? submission.media : [];
+    const portfolioImages = media.filter((m) => ["image", "indian", "western"].includes(m.category));
+    const introVideo = media.filter((m) => m.category === "intro_video");
+    const auditionTakes = media.filter((m) => ["take", "take_1", "take_2", "take_3"].includes(m.category));
+    const clientFeedback = Array.isArray(submission?.client_feedback) ? submission.client_feedback : [];
+
+    const customAnswers = fd.custom_answers && typeof fd.custom_answers === "object" ? fd.custom_answers : {};
+    const questionTextById = {};
+    for (const cq of project.custom_questions || []) {
+        if (cq?.id && cq?.question) questionTextById[cq.id] = cq.question;
+    }
+    const answeredQuestions = Object.entries(customAnswers).filter(([, v]) => v !== null && v !== undefined && v !== "");
+
+    const hasSummaryContent =
+        !!availability.status ||
+        !!budget.status ||
+        location.length > 0 ||
+        answeredQuestions.length > 0 ||
+        workLinks.length > 0 ||
+        portfolioImages.length > 0 ||
+        introVideo.length > 0 ||
+        auditionTakes.length > 0;
 
     return (
         <div className="flex-1 bg-[#fafafa] text-black" data-testid="project-detail-page">
@@ -209,30 +253,133 @@ export default function ProjectDetail() {
                     )}
                 </div>
 
-                {/* Pending Items — coarse status only, see file header for why */}
-                <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-2">
-                    <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2">
-                        Pending Items
-                    </h2>
-                    <div className="flex items-start gap-2 pt-1">
-                        <AlertCircle className="w-4 h-4 text-black/40 mt-0.5 shrink-0" />
-                        <p className="text-sm text-black/60">
-                            {isDraft
-                                ? "Your submission is still in progress. Open it to see exactly what's still needed."
-                                : "Your submission has been received — open it to review what you submitted."}
-                        </p>
-                    </div>
-                </div>
+                {/* Submission Summary — real canonical data, rendered as-is */}
+                {hasSummaryContent && (
+                    <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-5">
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2">
+                            Submission Summary
+                        </h2>
 
-                {/* Submission Summary — coarse, see file header for why */}
-                <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-2">
-                    <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2">
-                        Submission Summary
-                    </h2>
-                    <p className="text-sm text-black/60 pt-1">
-                        A detailed breakdown (media uploaded, availability, budget response) isn't available here yet — open your submission to see the full picture.
-                    </p>
-                </div>
+                        {(availability.status || budget.status || location.length > 0) && (
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                                {availability.status && (
+                                    <div className="flex items-start gap-2">
+                                        <Calendar className="w-4 h-4 text-black/40 mt-0.5 shrink-0" />
+                                        <div>
+                                            <div className="text-[10px] uppercase tracking-wider text-black/40">Availability</div>
+                                            <div className="text-black/80">{availability.status}</div>
+                                            {availability.note && <div className="text-black/50 text-xs mt-0.5">{availability.note}</div>}
+                                        </div>
+                                    </div>
+                                )}
+                                {budget.status && (
+                                    <div className="flex items-start gap-2">
+                                        <Wallet className="w-4 h-4 text-black/40 mt-0.5 shrink-0" />
+                                        <div>
+                                            <div className="text-[10px] uppercase tracking-wider text-black/40">Budget</div>
+                                            <div className="text-black/80">{budget.status}</div>
+                                            {budget.value && <div className="text-black/50 text-xs mt-0.5">{budget.value}</div>}
+                                        </div>
+                                    </div>
+                                )}
+                                {location.length > 0 && (
+                                    <div className="flex items-start gap-2">
+                                        <MapPin className="w-4 h-4 text-black/40 mt-0.5 shrink-0" />
+                                        <div>
+                                            <div className="text-[10px] uppercase tracking-wider text-black/40">Current Location</div>
+                                            <div className="text-black/80">{formatTalentLocation(location)}</div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {answeredQuestions.length > 0 && (
+                            <div className="flex flex-col gap-3">
+                                <div className="flex items-center gap-2 text-black/60">
+                                    <MessageCircleQuestion className="w-4 h-4" />
+                                    <span className="text-[10px] uppercase tracking-wider font-medium">Project Answers</span>
+                                </div>
+                                <div className="flex flex-col gap-3">
+                                    {answeredQuestions.map(([qid, answer]) => (
+                                        <div key={qid}>
+                                            <div className="text-xs text-black/50">{questionTextById[qid] || qid}</div>
+                                            <div className="text-sm text-black/80">{String(answer)}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {workLinks.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-2 text-black/60">
+                                    <Link2 className="w-4 h-4" />
+                                    <span className="text-[10px] uppercase tracking-wider font-medium">Work Links</span>
+                                </div>
+                                <div className="flex flex-col gap-1.5">
+                                    {workLinks.map((stored, idx) => {
+                                        const { label, url } = parseStoredLink(stored);
+                                        return (
+                                            <div key={idx} className="flex items-center gap-2 bg-black/[0.03] border border-black/[0.06] rounded-lg px-3 py-2 text-xs">
+                                                {label && <span className="text-black/60 font-medium shrink-0 max-w-[140px] truncate">{label}</span>}
+                                                <a href={url} target="_blank" rel="noopener noreferrer" className="text-black/50 hover:text-black font-mono truncate flex-1 min-w-0 underline underline-offset-2">
+                                                    {url}
+                                                </a>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {introVideo.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-2 text-black/60">
+                                    <VideoIcon className="w-4 h-4" />
+                                    <span className="text-[10px] uppercase tracking-wider font-medium">Introduction Video</span>
+                                </div>
+                                <MediaGrid items={introVideo} variant="video" />
+                            </div>
+                        )}
+
+                        {auditionTakes.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-2 text-black/60">
+                                    <Clapperboard className="w-4 h-4" />
+                                    <span className="text-[10px] uppercase tracking-wider font-medium">Audition Takes</span>
+                                </div>
+                                <MediaGrid items={auditionTakes} variant="video" />
+                            </div>
+                        )}
+
+                        {portfolioImages.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-2 text-black/60">
+                                    <ImageIcon className="w-4 h-4" />
+                                    <span className="text-[10px] uppercase tracking-wider font-medium">Portfolio</span>
+                                </div>
+                                <MediaGrid items={portfolioImages} variant="image" />
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Client Feedback — only ever approved+shared rows, exactly
+                    as the canonical submission already returns them. Hidden
+                    entirely if none exist. */}
+                {clientFeedback.length > 0 && (
+                    <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-4">
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2">
+                            Client Feedback
+                        </h2>
+                        <div className="flex flex-col gap-3">
+                            {clientFeedback.map((fb) => (
+                                <FeedbackRow key={fb.id} fb={fb} />
+                            ))}
+                        </div>
+                    </div>
+                )}
 
                 {/* Quick Actions */}
                 <div className="flex flex-col gap-3 sm:flex-row">

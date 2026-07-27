@@ -9,23 +9,48 @@ import { formatTalentLocation } from "@/lib/sanitize";
 import { parseStoredLink } from "@/lib/workLinks";
 import MediaGrid from "@/components/shared/MediaGrid";
 import FeedbackRow from "@/components/shared/FeedbackRow";
+import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
+import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
+import { REQUIREMENT_TIERS } from "@/lib/readinessStatus";
 
 /**
  * Phase 3 item 2 — Project Detail now renders the real canonical submission
  * (see docs/TALENT_DASHBOARD_ARCHITECTURE.md). Structure: Project Header,
- * Submission Status, Project Information, Submission Summary, Quick
- * Actions. "Pending Items" is removed — deferred until Requirement Engine
- * integration, per this task's explicit scope.
+ * Submission Status, Project Information, Requirements Checklist,
+ * Submission Summary, Quick Actions. "Pending Items" is removed — deferred
+ * until Requirement Engine integration, per that task's explicit scope.
  *
  * Data sources, all pre-existing and unmodified:
  *   - GET /public/projects/{slug} — Project Header/Information (unchanged
  *     from Phase 2 item 4).
  *   - GET /portal/projects — Submission Status (unchanged).
  *   - GET /portal/projects/{slug}/submission (Phase 3 item 1) — the ONLY
- *     source for Submission Summary. Nothing here is derived: every value
- *     rendered below is a direct field of the canonical submission
- *     document, exactly as build_talent_submission_view() returns it. No
- *     Requirement Engine, no Readiness Engine, no computed status.
+ *     source for Submission Summary AND the Requirements Checklist (Phase 3
+ *     item 3). Nothing here is derived: every value rendered below is a
+ *     direct field of the canonical submission document, exactly as
+ *     build_talent_submission_view() returns it, or the direct output of
+ *     the same Requirement/Readiness/Operational engines SubmissionPage.jsx
+ *     already uses — computeRequirementItems() + useSubmissionExperienceModel(),
+ *     imported unmodified. No forked engine, no Dashboard-specific
+ *     validation logic.
+ *
+ * Requirements Checklist: `useSubmissionExperienceModel({ project, form:
+ * submission.form_data, submission, activeUploads: {} })` — form and
+ * submission are the same canonical document (form = submission.form_data,
+ * exactly how SubmissionPage's own `form` state is initialized), so no
+ * adapter/reshaping was needed. `activeUploads: {}` is not a stand-in value
+ * — this page genuinely has zero uploads in flight, and the engine already
+ * treats an empty/missing activeUploads map as "nothing in progress" (see
+ * findActiveUploadStatus's `!activeUploads` guard in readinessStatus.js).
+ * Rendered via SubmissionReadinessPanel (the same presentational component
+ * SubmissionPage.jsx uses), passed `readinessModel` filtered to exclude
+ * HIDDEN-tier items (not `checklist`, which SubmissionPage passes and which
+ * is REQUIRED-only) — this task explicitly asks to also show Optional
+ * requirements, which is a different *slice* of the same already-computed
+ * output, not new computation. No onItemClick, no saveStatus passed — the
+ * component's own read-only rendering path (items still render as buttons
+ * but nothing happens on click, since no handler is attached; not modified
+ * to add an explicit "disabled" variant — see the Phase 3 item 3 report).
  *
  * "Project Answers" pairs submission.form_data.custom_answers (id -> answer)
  * with project.custom_questions (id -> question text) for a readable label
@@ -44,6 +69,20 @@ export default function ProjectDetail() {
     const [submission, setSubmission] = useState(null); // canonical submission, or null if unavailable
     const [theme, setTheme] = useState("ongoing");
     const [loading, setLoading] = useState(true);
+
+    // The same Requirement/Readiness/Operational engines SubmissionPage.jsx
+    // uses, called unconditionally per Rules of Hooks — safe with null
+    // project/submission before they load (computeRequirementItems reads
+    // project?.submission_requirements; every field access below is
+    // similarly optional-chained). See the file header for why `form` is
+    // just submission.form_data and `activeUploads: {}` is genuinely
+    // correct here, not a placeholder.
+    const experience = useSubmissionExperienceModel({
+        project,
+        form: submission?.form_data || {},
+        submission,
+        activeUploads: {},
+    });
 
     useEffect(() => {
         if (!token) {
@@ -153,6 +192,16 @@ export default function ProjectDetail() {
     }
     const answeredQuestions = Object.entries(customAnswers).filter(([, v]) => v !== null && v !== undefined && v !== "");
 
+    // Requirements Checklist: readinessModel is the engine's already-computed
+    // per-item output (requirement tier + satisfied + operational state) —
+    // filtering out HIDDEN-tier items is a display-slice choice (which rows
+    // to show), not a computation. SubmissionPage.jsx renders a different
+    // slice of this same output (`checklist`, REQUIRED-only); this task
+    // explicitly asks to also surface Optional requirements.
+    const checklistItems = (experience.readinessModel || []).filter(
+        (item) => item.requirement !== REQUIREMENT_TIERS.HIDDEN
+    );
+
     const hasSummaryContent =
         !!availability.status ||
         !!budget.status ||
@@ -252,6 +301,19 @@ export default function ProjectDetail() {
                         <p className="text-xs text-black/40">No additional project details provided.</p>
                     )}
                 </div>
+
+                {/* Requirements Checklist — the real Requirement/Readiness
+                    engine output, read-only. SubmissionReadinessPanel itself
+                    returns null when items.length === 0, so no extra guard
+                    is needed here. No onItemClick (no navigation/deep-link
+                    yet) and no saveStatus (no autosave concept on this
+                    read-only page) are passed. */}
+                <SubmissionReadinessPanel
+                    title="Requirements"
+                    items={checklistItems}
+                    progress={experience.overallProgress}
+                    testId="project-detail-readiness-panel"
+                />
 
                 {/* Submission Summary — real canonical data, rendered as-is */}
                 {hasSummaryContent && (

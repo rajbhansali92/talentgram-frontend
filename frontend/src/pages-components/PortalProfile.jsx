@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { normalizeInstagramHandle } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
+import LocationSelector from "@/components/LocationSelector";
 import { isoToDisplay } from "@/lib/dob";
 
 // ---------------------------------------------------------------------------
@@ -59,7 +60,10 @@ export default function PortalProfile() {
     const [profile, setProfile] = useState({
         name: "",
         phone: "",
-        location: "",
+        // Canonical structured shape ([{city, country}]) — matches
+        // TalentIn.location on the master schema and the Phase 1 portal
+        // normalization fix. Never a plain string; see LocationSelector below.
+        location: [],
         height: "",
         dob: "",
         bio: "",
@@ -86,7 +90,7 @@ export default function PortalProfile() {
                 setProfile({
                     name: data.name || "",
                     phone: data.phone || "",
-                    location: data.location || "",
+                    location: Array.isArray(data.location) ? data.location : [],
                     height: data.height || "",
                     dob: data.dob || "",
                     bio: data.bio || "",
@@ -210,16 +214,12 @@ export default function PortalProfile() {
                                         className="px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
                                     />
                                 </div>
-                                <div className="flex flex-col gap-1.5">
+                                <div className="flex flex-col gap-1.5 sm:col-span-2">
                                     <label className="text-xs text-black/60 font-medium">City / Location</label>
-                                    <input
-                                        type="text"
-                                        name="location"
-                                        value={profile.location || ""}
-                                        onChange={handleFieldChange}
-                                        placeholder="e.g. Mumbai, IN"
-                                        style={{ fontSize: "16px" }}
-                                        className="px-3 py-2 bg-white border border-black/15 rounded-lg text-black focus:border-black/50 focus:outline-none transition duration-150 h-[44px]"
+                                    <LocationSelector
+                                        value={profile.location}
+                                        onChange={(arr) => setProfile((prev) => ({ ...prev, location: arr }))}
+                                        testid="portal-profile-location"
                                     />
                                 </div>
                                 <div className="flex flex-col gap-1.5">

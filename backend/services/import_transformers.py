@@ -1,6 +1,9 @@
 import re
 from typing import Any, List, Optional, Dict
 
+from core import normalize_email
+
+
 def clean_placeholder(val: Any) -> Optional[str]:
     """Clean empty, whitespace-only, and typical placeholder values to None."""
     if val is None:
@@ -13,6 +16,19 @@ def clean_placeholder(val: Any) -> Optional[str]:
     if s.lower() in ("", "na", "n/a", "-", "blank", "none", "null", "undefined"):
         return None
     return s
+
+def transform_email(val: Any) -> Optional[str]:
+    """Clean placeholder junk, then apply the same canonical normalization
+    (trim + lowercase) every other talent-creation path already uses —
+    core.normalize_email(). Without this, a CSV-imported talent's email
+    could keep its original case with no normalized_email set at all,
+    breaking duplicate detection (import_duplicates.py, case-sensitive
+    match) and the same-value assumption that portal auth (current_portal_
+    talent) relies on when matching against submissions.talent_email."""
+    s = clean_placeholder(val)
+    if not s:
+        return None
+    return normalize_email(s)
 
 def transform_name(val: Any) -> Optional[str]:
     """Normalize full name to Title Case."""

@@ -12,7 +12,8 @@ from services.import_schema import IMPORT_FIELDS
 from services.import_transformers import (
     transform_name, transform_phone, transform_instagram,
     transform_height, transform_gender, transform_location,
-    transform_list, transform_integer, transform_boolean, clean_placeholder
+    transform_list, transform_integer, transform_boolean, clean_placeholder,
+    transform_email
 )
 from services.import_validators import validate_row
 from services.import_duplicates import check_duplicates
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 TRANSFORMERS = {
     "name": transform_name,
-    "email": clean_placeholder,
+    "email": transform_email,
     "phone": transform_phone,
     "alternate_contact_number": transform_phone,
     "age": transform_integer,
@@ -209,7 +210,11 @@ async def execute_talent_import(
             "social_links": {},
             "availability": "available"
         }
-        
+        # email is already normalized by transform_email (TRANSFORMERS["email"]);
+        # keep normalized_email in lockstep with it, same as every other
+        # talent-creation path (create_talent/update_talent/merge_talent_profile).
+        doc["normalized_email"] = doc.get("email")
+
         # Apply dynamic auto-labeling rules (Mumbai, Female, Tall)
         from services.import_transformers import apply_auto_label_rules
         doc = await apply_auto_label_rules(doc)

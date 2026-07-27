@@ -1218,7 +1218,7 @@ export default function SubmissionReviewCenter() {
 
                     
                     {/* Detail Panel Sub-header */}
-                    <div className="px-6 py-3 border-b border-black/[0.08] bg-[#fafaf9] flex items-center justify-between gap-4 shrink-0">
+                    <div className="px-3 sm:px-6 py-3 border-b border-black/[0.08] bg-[#fafaf9] flex flex-wrap lg:flex-nowrap items-center justify-between gap-2 lg:gap-4 shrink-0">
                         {/* Mobile Back control */}
                         <button
                             onClick={() => setIsMobileDetailOpen(false)}
@@ -1249,9 +1249,9 @@ export default function SubmissionReviewCenter() {
                         </div>
 
                         {/* Mode selectors */}
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-2 lg:gap-3 w-full lg:w-auto order-3 lg:order-none">
                             {viewMode === "recruiter" && (
-                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[10px] font-mono uppercase tracking-wider select-none">
+                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] sm:text-[10px] font-mono uppercase tracking-wider select-none shrink-0">
                                                                     <button
                                         type="button"
                                         onClick={() => {
@@ -1265,7 +1265,7 @@ export default function SubmissionReviewCenter() {
                                             setTalentPortfolioMedia(prev => prev.map(m => ({ ...m, client_visible: true, internal_only: false })));
                                             toast.success("All fields and media set to Visible");
                                         }}
-                                        className="px-2.5 py-1 hover:text-black text-black/55 transition-colors"
+                                        className="px-1.5 sm:px-2.5 py-1.5 lg:py-1 hover:text-black text-black/55 transition-colors whitespace-nowrap"
                                     >
                                         Show All
                                     </button>
@@ -1283,34 +1283,36 @@ export default function SubmissionReviewCenter() {
                                             setTalentPortfolioMedia(prev => prev.map(m => ({ ...m, client_visible: false, internal_only: false })));
                                             toast.success("All fields and media set to Hidden");
                                         }}
-                                        className="px-2.5 py-1 hover:text-black text-black/55 transition-colors"
+                                        className="px-1.5 sm:px-2.5 py-1.5 lg:py-1 hover:text-black text-black/55 transition-colors whitespace-nowrap"
                                     >
                                         Hide All
                                     </button>
                                 </div>
                             )}
-                            <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02]">
+                            <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] w-full lg:w-auto">
                                 <button
                                     type="button"
                                     onClick={() => setViewMode("original")}
                                     title="Read-only: the talent's original submission"
-                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${isOriginalMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                    className={`flex-1 lg:flex-none px-1.5 sm:px-3 py-1.5 lg:py-1 rounded-full text-[9px] sm:text-[10px] font-mono uppercase tracking-wider transition-all duration-200 whitespace-nowrap ${isOriginalMode ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
                                 >
-                                    Talent Submission
+                                    <span className="hidden sm:inline">Talent Submission</span>
+                                    <span className="sm:hidden">Talent</span>
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => setViewMode("recruiter")}
-                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${viewMode === "recruiter" ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                    className={`flex-1 lg:flex-none px-1.5 sm:px-3 py-1.5 lg:py-1 rounded-full text-[9px] sm:text-[10px] font-mono uppercase tracking-wider transition-all duration-200 whitespace-nowrap ${viewMode === "recruiter" ? "bg-white text-black shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
                                 >
                                     Recruiter
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => setViewMode("client")}
-                                    className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all duration-200 ${isPreviewMode ? "bg-amber-50 text-white shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
+                                    className={`flex-1 lg:flex-none px-1.5 sm:px-3 py-1.5 lg:py-1 rounded-full text-[9px] sm:text-[10px] font-mono uppercase tracking-wider transition-all duration-200 whitespace-nowrap ${isPreviewMode ? "bg-amber-50 text-white shadow-sm font-semibold" : "text-black/55 hover:text-black"}`}
                                 >
-                                    Client Preview
+                                    <span className="hidden sm:inline">Client Preview</span>
+                                    <span className="sm:hidden">Client</span>
                                 </button>
                             </div>
                         </div>

@@ -1,6 +1,6 @@
 """Talent Portal Endpoints for simplified localStorage-based entry and profile management."""
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from core import (
@@ -10,6 +10,7 @@ from core import (
     update_talent_cover_cache,
     normalize_instagram_handle,
     current_portal_talent,
+    TalentIn,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,12 @@ class PortalProfileUpdateIn(BaseModel):
     email: Optional[str] = None
     name: str
     phone: Optional[str] = None
-    location: Optional[str] = None
+    # Accepts a plain string (existing clients, e.g. current PortalProfile.jsx)
+    # or the structured [{city, country}] shape (LocationSelector-based
+    # clients). Always normalized to the structured shape before being
+    # persisted to db.talents — see `location` field_validator below. Reuses
+    # TalentIn's own location parser rather than duplicating the logic.
+    location: Optional[Union[str, List[Dict[str, str]]]] = None
     height: Optional[str] = None
     dob: Optional[str] = None
     bio: Optional[str] = None
@@ -41,6 +47,18 @@ class PortalProfileUpdateIn(BaseModel):
     def _normalize_ig(cls, v):
         """Auto-normalize any pasted Instagram URL/handle to a raw username."""
         return normalize_instagram_handle(v)
+
+    @field_validator('location', mode='before')
+    @classmethod
+    def _normalize_location(cls, v):
+        # Reuses TalentIn's own location parser so the portal never writes a
+        # shape to db.talents that diverges from the master schema
+        # (List[LocationItem] — see core.py:1726). Was previously typed as a
+        # plain string here, which silently overwrote the structured
+        # [{city, country}] value on db.talents with a raw string on every
+        # portal profile save — see docs/TALENT_MIGRATION_PLAN.md Phase 1
+        # item 1.
+        return TalentIn._normalize_location(v)
 
 
 @router.post("/portal/lookup")
@@ -90,16 +108,31 @@ async def portal_update_profile(
     # excluded from this $set even though the request model still accepts them
     # (kept for backwards-compat, mirroring how `email` is accepted-but-ignored).
     # Only the AUTO_UPDATE / talent-owned fields below are persisted.
-    update_fields = {
-        "phone": payload.phone,
-        "location": payload.location,
-        "bio": payload.bio,
-        "instagram_handle": payload.instagram_handle,
-        "work_links": [w.strip() for w in payload.work_links if w.strip()],
-        "interested_in": payload.interested_in,
-        "skills": payload.skills,
-        "last_portal_login": _now(),
-    }
+    #
+    # PATCH semantics: only fields the caller actually included in the request
+    # body are written — `exclude_unset` distinguishes "field omitted" (leave
+    # existing value untouched) from "field explicitly sent" (including an
+    # explicit `null`, which IS present in the input and therefore included
+    # here). Previously every field was pulled unconditionally from `payload`,
+    # so an omitted field silently fell back to the Pydantic default (None /
+    # empty list) and overwrote the stored value with it on every save.
+    #
+    # Explicit `null` clears a field only where the master schema itself
+    # allows it: `phone`/`bio`/`instagram_handle` are Optional[str] on
+    # TalentIn, so null is a legitimate cleared value; `location`'s own
+    # normalizer (above) already maps null to `[]`, matching TalentIn's
+    # default. `work_links`/`interested_in`/`skills` are plain (non-Optional)
+    # `List[str]` on this model, so Pydantic itself rejects an explicit null
+    # for those with a 422 before this handler ever runs — no extra
+    # field-specific rejection logic needed here.
+    provided = payload.model_dump(exclude_unset=True)
+    writable_fields = {"phone", "location", "bio", "instagram_handle", "work_links", "interested_in", "skills"}
+    update_fields = {k: v for k, v in provided.items() if k in writable_fields}
+
+    if "work_links" in update_fields:
+        update_fields["work_links"] = [w.strip() for w in update_fields["work_links"] if w.strip()]
+
+    update_fields["last_portal_login"] = _now()
 
     await db.talents.update_one({"id": talent["id"]}, {"$set": update_fields})
     await update_talent_cover_cache(talent["id"])

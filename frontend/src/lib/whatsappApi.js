@@ -147,6 +147,14 @@ export async function resetSession() {
   await adminApi.post("/whatsapp/session/reset");
 }
 
+// Agents + their routing config. Surfaces config_status ===
+// "INVALID_CONFIGURATION", which the worker sets when a mapped WhatsApp group
+// cannot be found in the connected account.
+export async function getWhatsAppAgents() {
+  const res = await adminApi.get("/agents/whatsapp/agents");
+  return res.data;
+}
+
 // --- CONFIG ---
 export async function getWaConfig() {
   const res = await adminApi.get("/whatsapp/config");

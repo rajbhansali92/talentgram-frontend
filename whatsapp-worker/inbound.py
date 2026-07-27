@@ -202,6 +202,17 @@ class KnownGroupsCache:
             self._groups = groups
             self._last_refresh = now
             logger.info("inbound: known-groups refreshed -> %s", groups)
+            # A refresh is the ONLY thing that re-arms a group previously
+            # proven missing (worker restart / Refresh Groups / config
+            # change). The group moves to _PENDING_REVALIDATION so it is
+            # probed exactly ONCE more; its DB flag is cleared only if that
+            # probe actually succeeds — never optimistically, so the
+            # dashboard never shows healthy while the group is still gone.
+            if _INVALID_GROUPS:
+                logger.info("inbound: revalidating previously invalid group(s) %s after refresh",
+                            sorted(_INVALID_GROUPS))
+                _PENDING_REVALIDATION.update(_INVALID_GROUPS)
+                _INVALID_GROUPS.clear()
         except Exception:
             logger.exception(
                 "inbound: failed to refresh known-groups from backend; "
@@ -576,6 +587,101 @@ def _record_latency(total_sec: float) -> None:
     )
 
 
+AGENT_CONFIG_COLLECTION = "whatsapp_agent_config"
+INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
+
+# ── INVALID_CONFIGURATION: single source of truth ───────────────────────
+# The DATABASE is authoritative: whatsapp_agent_config.config_status is what
+# the admin dashboard reads, and it is only ever written by
+# _mark_invalid_configuration / _clear_invalid_configuration below.
+#
+# The two sets here are a pure in-memory CACHE of that state, held only to
+# avoid re-searching a group we already know is missing (each such search
+# costs a full sidebar lookup plus a ~39 KB forensic DOM snapshot — measured
+# at ~500/hour, which filled the Atlas quota and blocked writes cluster-wide).
+# They never hold state the DB does not, so they cannot drift from it.
+#
+#   _INVALID_GROUPS       — skip these; refreshed from reality, not trusted.
+#   _PENDING_REVALIDATION — known-flagged in the DB and due one probe; a
+#                           successful open clears the DB flag.
+#
+# Revalidation happens on exactly three events, never on a timer:
+#   worker start        -> load_invalid_state() seeds from the DB
+#   Refresh Groups      -> KnownGroupsCache.get() moves invalid -> pending
+#   config change       -> same refresh path (and the API clears the flag too)
+_INVALID_GROUPS: set[str] = set()
+_PENDING_REVALIDATION: set[str] = set()
+
+
+async def load_invalid_state() -> None:
+    """Seed the cache from the DB at worker start so previously-flagged groups
+    are revalidated exactly once, and recover automatically if they now exist."""
+    _INVALID_GROUPS.clear()
+    _PENDING_REVALIDATION.clear()
+    try:
+        cursor = get_db()[AGENT_CONFIG_COLLECTION].find(
+            {"config_status": INVALID_CONFIGURATION}, {"config_error_group": 1}
+        )
+        async for doc in cursor:
+            group = doc.get("config_error_group")
+            if group:
+                _PENDING_REVALIDATION.add(group)
+    except Exception:
+        logger.exception("inbound: failed to load INVALID_CONFIGURATION state (will revalidate on refresh)")
+    if _PENDING_REVALIDATION:
+        logger.info("inbound: revalidating previously invalid group(s) %s on startup",
+                    sorted(_PENDING_REVALIDATION))
+
+
+async def _mark_invalid_configuration(group_name: str) -> None:
+    """Flag every agent mapped to a missing group as INVALID_CONFIGURATION.
+
+    Outbound sending already treats "group not in chat list" as terminal (the
+    job is failed). This loop had no equivalent, so it re-searched the group
+    every poll cycle forever. Persisted so the admin dashboard shows the
+    operator exactly which group is wrong, without reading worker logs.
+    """
+    _INVALID_GROUPS.add(group_name)
+    _PENDING_REVALIDATION.discard(group_name)
+    message = (
+        f"Configured WhatsApp group '{group_name}' could not be found.\n\n"
+        "Update whatsapp_agent_config.group_names or restore the group."
+    )
+    logger.error("inbound: %s", message.replace("\n\n", " "))
+    try:
+        await get_db()[AGENT_CONFIG_COLLECTION].update_many(
+            {"group_names": group_name},
+            {"$set": {
+                "config_status": INVALID_CONFIGURATION,
+                "config_error": message,
+                "config_error_group": group_name,
+                "config_error_at": _now(),
+            }},
+        )
+    except Exception:
+        logger.exception("inbound: failed to persist INVALID_CONFIGURATION for %r", group_name)
+
+
+async def _clear_invalid_configuration(group_name: str) -> None:
+    """The group opened successfully — clear the flag and resume polling.
+
+    Called only for a group that was actually flagged, so a healthy group
+    never issues a redundant write on its normal 2s poll cycle.
+    """
+    _INVALID_GROUPS.discard(group_name)
+    _PENDING_REVALIDATION.discard(group_name)
+    try:
+        await get_db()[AGENT_CONFIG_COLLECTION].update_many(
+            {"config_error_group": group_name, "config_status": INVALID_CONFIGURATION},
+            {"$unset": {"config_status": "", "config_error": "",
+                        "config_error_group": "", "config_error_at": ""}},
+        )
+        logger.info("inbound: group=%r found again — INVALID_CONFIGURATION cleared, polling resumed",
+                    group_name)
+    except Exception:
+        logger.exception("inbound: failed to clear INVALID_CONFIGURATION for %r", group_name)
+
+
 async def poll_once(
     session, http: httpx.AsyncClient, groups_cache: KnownGroupsCache,
     participants_cache: "GroupParticipantsCache",
@@ -585,6 +691,8 @@ async def poll_once(
         return
 
     for group_name in groups:
+        if group_name in _INVALID_GROUPS:
+            continue
         async with session.page_lock:
             page = session.page
             if page is None:
@@ -597,7 +705,13 @@ async def poll_once(
                 continue
             if status != "OPENED":
                 logger.info("inbound: group=%r not opened (status=%s) — skipping this cycle", group_name, status)
+                if status == "NOT_FOUND":
+                    await _mark_invalid_configuration(group_name)
                 continue
+            if group_name in _PENDING_REVALIDATION:
+                # Flagged in the DB, but it opened this time — the operator
+                # fixed the mapping or restored the group. Auto-recover.
+                await _clear_invalid_configuration(group_name)
 
             try:
                 new_messages = await _scan_group_for_new_messages(page, group_name, participants_cache)
@@ -695,6 +809,9 @@ async def inbound_listener_loop(session) -> None:
         return
 
     await _ensure_indexes()
+    # DB is authoritative: seed the cache so groups flagged by a previous
+    # process are revalidated once here, and recover with no manual cleanup.
+    await load_invalid_state()
     async with httpx.AsyncClient() as http:
         groups_cache = KnownGroupsCache(http)
         participants_cache = GroupParticipantsCache()

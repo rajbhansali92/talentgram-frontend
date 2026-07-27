@@ -96,6 +96,13 @@ def _serialise_config(doc: dict) -> dict:
         "security_mode": doc.get("security_mode") or "allowlist",
         "active": doc.get("active", True),
         "updated_at": doc.get("updated_at"),
+        # Set by the worker when a mapped group cannot be found in the
+        # connected WhatsApp account — a configuration error the operator
+        # must fix, surfaced so it is visible without reading worker logs.
+        "config_status": doc.get("config_status"),
+        "config_error": doc.get("config_error"),
+        "config_error_group": doc.get("config_error_group"),
+        "config_error_at": doc.get("config_error_at"),
     }
 
 
@@ -143,8 +150,13 @@ async def update_config(agent_id: str, payload: AgentConfigUpdate, _admin: dict 
         raise HTTPException(status_code=400, detail="No fields to update")
     from datetime import datetime, timezone
     upd["updated_at"] = datetime.now(timezone.utc)
+    # Correcting the config clears any INVALID_CONFIGURATION flag the worker
+    # raised, so the operator sees the error resolve as soon as they fix the
+    # mapping (the worker re-probes the group on its next groups refresh).
+    unset = {"config_status": "", "config_error": "",
+             "config_error_group": "", "config_error_at": ""}
     res = await db[registry.CONFIG_COLLECTION].update_one(
-        {"agent_id": agent_id}, {"$set": upd}, upsert=True
+        {"agent_id": agent_id}, {"$set": upd, "$unset": unset}, upsert=True
     )
     doc = await registry.get_agent_config(agent_id)
     return _serialise_config(doc)

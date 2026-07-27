@@ -12,7 +12,7 @@ import {
   getPipelineSummary,
   createBatch, getBatches, runBatchAction,
   getJobs, retryJob,
-  getSessionStatus, clearQrCode, resetSession,
+  getSessionStatus, clearQrCode, resetSession, getWhatsAppAgents,
   getWaConfig, updateWaConfig,
   getAuditLog,
   resolveTargets, getCrmContactTypes, validateManual,
@@ -176,6 +176,10 @@ function WESessionPanel() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [polling, setPolling] = useState(true);
+  // Agents whose configured WhatsApp group could not be found. The worker
+  // stops polling such a group entirely, so without this the operator would
+  // see a healthy session and silently receive nothing from that group.
+  const [invalidAgents, setInvalidAgents] = useState([]);
 
   const fetchSession = async () => {
     try {
@@ -185,6 +189,14 @@ function WESessionPanel() {
       console.error("Failed to load WhatsApp session status", err);
     } finally {
       setLoading(false);
+    }
+    try {
+      const agents = await getWhatsAppAgents();
+      setInvalidAgents(
+        (agents || []).filter((a) => a?.config?.config_status === "INVALID_CONFIGURATION")
+      );
+    } catch (err) {
+      console.error("Failed to load WhatsApp agent config", err);
     }
   };
 
@@ -256,6 +268,22 @@ function WESessionPanel() {
             </div>
           </div>
         )}
+
+        {invalidAgents.map((a) => (
+          <div key={a.agent_id} className="p-4 bg-amber-500/10 rounded-xl text-amber-800 text-xs flex gap-2"
+               data-testid={`agent-invalid-config-${a.agent_id}`}>
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+            <div>
+              <p className="font-semibold">Invalid Configuration — {a.name || a.agent_id}</p>
+              <p className="mt-0.5 opacity-90 leading-relaxed whitespace-pre-line">
+                {a.config?.config_error}
+              </p>
+              <p className="mt-1 opacity-70">
+                This group is no longer being polled. Messages sent to it are not being received.
+              </p>
+            </div>
+          </div>
+        ))}
 
         <div className="pt-4 space-y-3">
           <button

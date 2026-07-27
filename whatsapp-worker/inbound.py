@@ -199,18 +199,24 @@ class KnownGroupsCache:
             )
             resp.raise_for_status()
             groups = resp.json().get("groups") or []
+            # This method re-fetches on a TIMER, so "a refresh happened" is
+            # NOT evidence that anything changed — re-arming on every refresh
+            # would just be the old infinite retry at a slower cadence
+            # (measured: one failed lookup + snapshot every 120s). Re-arm only
+            # on a genuine configuration change: the mapped group list itself
+            # differs, or the operator cleared the flag through the admin UI
+            # (PUT /agents/whatsapp/config/{id} unsets it). Worker restart is
+            # handled separately by load_invalid_state().
+            list_changed = groups != self._groups
             self._groups = groups
             self._last_refresh = now
             logger.info("inbound: known-groups refreshed -> %s", groups)
-            # A refresh is the ONLY thing that re-arms a group previously
-            # proven missing (worker restart / Refresh Groups / config
-            # change). The group moves to _PENDING_REVALIDATION so it is
-            # probed exactly ONCE more; its DB flag is cleared only if that
-            # probe actually succeeds — never optimistically, so the
-            # dashboard never shows healthy while the group is still gone.
-            if _INVALID_GROUPS:
-                logger.info("inbound: revalidating previously invalid group(s) %s after refresh",
-                            sorted(_INVALID_GROUPS))
+            if _INVALID_GROUPS and (list_changed or await _flag_cleared_externally()):
+                logger.info("inbound: configuration changed — revalidating previously invalid "
+                            "group(s) %s", sorted(_INVALID_GROUPS))
+                # Probed exactly ONCE more; the DB flag is cleared only if
+                # that probe succeeds, never optimistically, so the dashboard
+                # never shows healthy while the group is still missing.
                 _PENDING_REVALIDATION.update(_INVALID_GROUPS)
                 _INVALID_GROUPS.clear()
         except Exception:
@@ -631,6 +637,26 @@ async def load_invalid_state() -> None:
     if _PENDING_REVALIDATION:
         logger.info("inbound: revalidating previously invalid group(s) %s on startup",
                     sorted(_PENDING_REVALIDATION))
+
+
+async def _flag_cleared_externally() -> bool:
+    """True when the operator cleared an INVALID_CONFIGURATION flag themselves.
+
+    Updating an agent's config through the admin API unsets the flag, which is
+    the operator's explicit "I fixed it, try again" signal — the DB is
+    authoritative, so the worker follows it rather than holding a stale
+    in-memory verdict.
+    """
+    try:
+        still_flagged = await get_db()[AGENT_CONFIG_COLLECTION].count_documents(
+            {"config_status": INVALID_CONFIGURATION,
+             "config_error_group": {"$in": list(_INVALID_GROUPS)}},
+            limit=1,
+        )
+        return still_flagged == 0
+    except Exception:
+        logger.exception("inbound: failed to check INVALID_CONFIGURATION flags")
+        return False
 
 
 async def _mark_invalid_configuration(group_name: str) -> None:

@@ -7,7 +7,13 @@ import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
 import { isoToDisplay } from "@/lib/dob";
 
 export default function PortalGateway() {
-    const { slug } = useParams();
+    const { slug: slugParam } = useParams();
+    // No :slug segment means this is the standalone Dashboard login entry
+    // (/portal/login) — reuse the existing "apply"-style project-less OTP/
+    // Google verification path (see auth.py's `slug == "portal"` branch)
+    // rather than requiring a real project context.
+    const isStandalone = !slugParam;
+    const slug = slugParam || "portal";
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const emailParam = searchParams.get("email");
@@ -43,6 +49,12 @@ export default function PortalGateway() {
             if (data.exists) {
                 // Set recognition payload
                 setRecognitionState(data.talent);
+            } else if (isStandalone) {
+                // No project context to send an unrecognized email to —
+                // building first-time onboarding from a bare dashboard login
+                // is out of scope here (see TALENT_MIGRATION_PLAN.md Phase 1
+                // item 2). Direct them back to a real entry point instead.
+                toast.error("We couldn't find an account for that email. Use your invite or project link to get started.");
             } else {
                 // New talent: proceed to submission flow prefilled
                 toast.success("Welcome! Directing you to the submission form.");
@@ -102,6 +114,21 @@ export default function PortalGateway() {
         }
     };
 
+    // Standalone Dashboard login only. Reuses the exact same client-side
+    // Google OAuth redirect construction as ApplicationPage.jsx's
+    // handleGoogleLogin — not a new auth mechanism, just a different `state`
+    // value so GoogleCallback.jsx routes the result back here instead of
+    // /apply. Backend already grants a portal_token for this state with no
+    // change needed (only OTP's verify endpoint required the new "portal"
+    // branch — see auth.py).
+    const handleGoogleLogin = () => {
+        const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "339414275037-rrm7uugj1t4gq2b02q9r51d9l6m39vbe.apps.googleusercontent.com";
+        const redirectUri = `${window.location.origin}/google-callback`;
+        const state = "portal";
+        const scope = "openid profile email";
+        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
+    };
+
     const handleUseAnotherEmail = () => {
         setRecognitionState(null);
         setOtpSent(false);
@@ -126,7 +153,7 @@ export default function PortalGateway() {
                     <form onSubmit={handleLookup} className="w-full flex flex-col items-center gap-6">
                         <div className="text-center flex flex-col gap-2">
                             <h1 className="text-2xl md:text-3xl font-medium tracking-tight text-black">
-                                Continue your Talentgram submission
+                                {isStandalone ? "Sign in to your Talentgram Dashboard" : "Continue your Talentgram submission"}
                             </h1>
                             <p className="text-sm text-black/50">
                                 Returning talents can continue instantly using their saved profile.
@@ -157,10 +184,29 @@ export default function PortalGateway() {
                                 {loading ? "Verifying..." : "Continue"}
                                 <ArrowRight className="w-4 h-4" strokeWidth={1.5} />
                             </button>
+
+                            {isStandalone && (
+                                <>
+                                    <div className="flex items-center gap-3 text-[10px] uppercase tracking-wider text-black/35">
+                                        <div className="flex-1 h-px bg-black/10" />
+                                        or
+                                        <div className="flex-1 h-px bg-black/10" />
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleGoogleLogin}
+                                        className="w-full inline-flex items-center justify-center gap-2 border border-black/15 hover:border-black/40 text-black px-6 py-3 rounded-lg text-sm font-medium transition-all duration-150 h-[48px]"
+                                    >
+                                        Continue with Google
+                                    </button>
+                                </>
+                            )}
                         </div>
 
                         <p className="text-[11px] text-black/40 text-center tracking-wide mt-2">
-                            New talents can continue using the same flow.
+                            {isStandalone
+                                ? "New here? Use your invite or project link to get started."
+                                : "New talents can continue using the same flow."}
                         </p>
                     </form>
                 ) : (

@@ -816,13 +816,20 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "talent": await _get_talent_profile_response(talent),
                 "portal_token": await _grant_portal_session(talent),
             }
+    elif slug == "portal":
+        # Standalone Dashboard login (no project context — see
+        # docs/TALENT_MIGRATION_PLAN.md Phase 1 item 2): skip the
+        # project/submission lookup entirely and fall straight through to
+        # the generic talent lookup below, identical to what an "apply"
+        # verification with no matching application already does.
+        pass
     else:
         project = await db.projects.find_one({"slug": slug})
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
         submission = await db.submissions.find_one({"project_id": project["id"], "talent_email": email})
-        
+
         if submission:
             token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
             await db.submissions.update_one({"id": submission["id"]}, {"$set": {"access_token": token}})

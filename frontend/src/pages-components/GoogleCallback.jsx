@@ -19,7 +19,7 @@ export default function GoogleCallback() {
 
         if (!code) {
             toast.error("Google authentication failed. No authorization code received.");
-            router.push(state ? `/submit/${state}` : "/");
+            router.push(state === "apply" ? "/apply" : state === "portal" ? "/portal/login" : state ? `/submit/${state}` : "/");
             return;
         }
 
@@ -37,6 +37,10 @@ export default function GoogleCallback() {
                 const getRedirectPath = (s) => {
                     if (!s) return "/";
                     if (s === "apply") return "/apply";
+                    // Standalone Dashboard login (PortalGateway's Google
+                    // button, state="portal") — see
+                    // docs/TALENT_MIGRATION_PLAN.md Phase 1 item 2.
+                    if (s === "portal") return "/portal/home";
                     return `/submit/${s}`;
                 };
 
@@ -100,11 +104,21 @@ export default function GoogleCallback() {
                     toast.success("Successfully authenticated with Google. Welcome to Talentgram!");
                 }
 
+                if (state === "portal" && !data.existing) {
+                    // No project to send an unrecognized email into (see the
+                    // matching PortalGateway.jsx standalone-lookup branch) —
+                    // send them back to try again rather than bouncing
+                    // through /portal/home with no session.
+                    toast.error("We couldn't find an account for that email. Use your invite or project link to get started.");
+                    router.push("/portal/login");
+                    return;
+                }
+
                 router.push(getRedirectPath(state));
             } catch (err) {
                 console.error("Google authentication error:", err);
                 toast.error(err?.response?.data?.detail || "Google authentication failed. Please try again.");
-                const redirectPath = state === "apply" ? "/apply" : (state ? `/submit/${state}` : "/");
+                const redirectPath = state === "apply" ? "/apply" : state === "portal" ? "/portal/login" : (state ? `/submit/${state}` : "/");
                 router.push(redirectPath);
             }
         };

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { ArrowLeft, Sparkles, Instagram, Save } from "lucide-react";
+import { Sparkles, Instagram, Save } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
@@ -165,23 +165,8 @@ export default function PortalProfile() {
     }
 
     return (
-        <div className="min-h-dvh bg-[#fafafa] text-black flex flex-col justify-between" data-testid="portal-profile-page">
+        <div className="flex-1 bg-[#fafafa] text-black flex flex-col justify-between" data-testid="portal-profile-page">
             <div>
-                {/* Global Luxury Header */}
-                <header className="bg-white border-b border-black/5 px-6 py-4 flex items-center justify-between">
-                    <Link to="/portal/home" className="flex items-center gap-2">
-                        <Logo size={64} forceVariant="black" />
-                        <span className="text-[10px] tracking-[0.12em] uppercase text-black/40 font-medium">Profile Settings</span>
-                    </Link>
-                    <Link 
-                        to="/portal/home"
-                        className="inline-flex items-center gap-1.5 text-xs text-black/60 hover:text-black transition-colors duration-150 px-3 py-1.5 border border-black/10 rounded-lg hover:border-black/30"
-                    >
-                        <ArrowLeft className="w-3.5 h-3.5" />
-                        Back to Portal
-                    </Link>
-                </header>
-
                 <main className="max-w-2xl mx-auto py-8 md:py-12 px-6">
                     <div className="flex flex-col gap-6 mb-8 text-left">
                         <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-black">

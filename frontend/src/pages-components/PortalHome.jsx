@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { User, MapPin, ArrowUpRight, LogOut, Edit3, Briefcase, Award, CheckCircle } from "lucide-react";
+import { User, MapPin, ArrowUpRight, Edit3, Briefcase, Award, CheckCircle } from "lucide-react";
 import Logo from "@/components/Logo";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { toast } from "sonner";
@@ -49,12 +49,9 @@ export default function PortalHome() {
         fetchPortalData();
     }, [token, navigate]);
 
-    const handleSignOut = () => {
-        localStorage.removeItem(PORTAL_TOKEN_KEY);
-        localStorage.removeItem("talentgram_portal_email");
-        toast.success("Signed out successfully");
-        navigate("/");
-    };
+    // Sign-out now lives in the shared DashboardLayout shell (see
+    // components/DashboardLayout.jsx) — this page no longer renders its own
+    // header/sign-out button.
 
     if (loading) {
         return (
@@ -71,23 +68,8 @@ export default function PortalHome() {
         projects.completed.length > 0;
 
     return (
-        <div className="min-h-dvh bg-[#fafafa] text-black flex flex-col justify-between" data-testid="portal-home-page">
+        <div className="flex-1 bg-[#fafafa] text-black flex flex-col justify-between" data-testid="portal-home-page">
             <div>
-                {/* Global Luxury Header */}
-                <header className="bg-white border-b border-black/5 px-6 md:px-12 py-4 flex items-center justify-between">
-                    <Link to="/portal/home" className="flex items-center gap-2">
-                        <Logo size={64} forceVariant="black" />
-                        <span className="text-[10px] tracking-[0.12em] uppercase text-black/40 font-medium">Talent Portal</span>
-                    </Link>
-                    <button 
-                        onClick={handleSignOut}
-                        className="inline-flex items-center gap-1.5 text-xs text-black/60 hover:text-black transition-colors duration-150 px-3 py-1.5 border border-black/10 rounded-lg hover:border-black/30"
-                    >
-                        <LogOut className="w-3.5 h-3.5" />
-                        Sign Out
-                    </button>
-                </header>
-
                 {/* Profile Summary Card */}
                 <section className="bg-white border-b border-black/5 py-8 md:py-12 px-6 md:px-12">
                     <div className="max-w-4xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-6">

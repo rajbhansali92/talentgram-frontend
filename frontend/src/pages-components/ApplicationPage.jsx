@@ -9,6 +9,7 @@ import {
     LEGACY_APP_DRAFT_KEY as LEGACY_LS_KEY,
     APP_DRAFT_TTL_MS as DRAFT_TTL_MS,
 } from "@/lib/applyDraft";
+import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken } from "@/lib/talentAuth";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
@@ -434,11 +435,7 @@ export default function ApplicationPage() {
     };
 
     const handleGoogleLogin = () => {
-        const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "339414275037-rrm7uugj1t4gq2b02q9r51d9l6m39vbe.apps.googleusercontent.com";
-        const redirectUri = `${window.location.origin}/google-callback`;
-        const state = "apply";
-        const scope = "openid profile email";
-        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
+        window.location.href = buildGoogleAuthUrl("apply");
     };
 
     const handleInlineLookup = async (e) => {
@@ -452,7 +449,7 @@ export default function ApplicationPage() {
 
         setGatewayLoading(true);
         try {
-            await axios.post("/auth/otp/send", { email: trimmedEmail });
+            await sendOtp(trimmedEmail);
             setOtpSent(true);
             toast.success("Verification code sent!");
         } catch (error) {
@@ -475,11 +472,7 @@ export default function ApplicationPage() {
         setOtpLoading(true);
         try {
             const trimmedEmail = gatewayEmail.trim().toLowerCase();
-            const { data } = await axios.post("/auth/otp/verify", {
-                email: trimmedEmail,
-                otp: code,
-                slug: "apply"
-            });
+            const data = await verifyOtp({ email: trimmedEmail, otp: code, slug: "apply" });
 
             if (data.existing) {
                 if (data.token && data.application_id) {
@@ -555,9 +548,7 @@ export default function ApplicationPage() {
             }
 
             // OTP proved ownership — persist the portal session token (Path B).
-            if (data.portal_token) {
-                localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
-            }
+            persistPortalToken(data);
             localStorage.setItem("talentgram_portal_email", trimmedEmail);
             setOtpSent(false);
         } catch (error) {
@@ -573,7 +564,7 @@ export default function ApplicationPage() {
         const trimmedEmail = gatewayEmail.trim().toLowerCase();
         setOtpResending(true);
         try {
-            await axios.post("/auth/otp/send", { email: trimmedEmail });
+            await sendOtp(trimmedEmail);
             toast.success("Verification code resent.");
         } catch (error) {
             console.error("OTP resend error:", error);
@@ -833,7 +824,7 @@ export default function ApplicationPage() {
                 setEmailGateUnlocked(false);
                 setGatewayEmail(verifyEmail);
                 try {
-                    await axios.post("/auth/otp/send", { email: verifyEmail });
+                    await sendOtp(verifyEmail);
                     setOtpSent(true);
                     toast.message("Please verify your email", {
                         description: "We've sent a one-time code to continue.",

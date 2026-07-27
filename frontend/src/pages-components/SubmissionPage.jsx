@@ -2,7 +2,8 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { api as axios, PORTAL_TOKEN_KEY, IMAGE_URL } from "@/lib/api";
+import { api as axios, IMAGE_URL } from "@/lib/api";
+import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken } from "@/lib/talentAuth";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
@@ -689,7 +690,7 @@ function SubmissionPage() {
                     );
                     if (data && data.exists) {
                         try {
-                            await axios.post("/auth/otp/send", { email: formatted });
+                            await sendOtp(formatted);
                             setOtpSent(true);
                             toast.message("Welcome back! Please verify your email", {
                                 description: "We've sent a 6-digit code to load your profile.",
@@ -993,7 +994,7 @@ function SubmissionPage() {
                 setEmailGateUnlocked(false);
                 setGatewayEmail(verifyEmail);
                 try {
-                    await axios.post("/auth/otp/send", { email: verifyEmail });
+                    await sendOtp(verifyEmail);
                     setOtpSent(true);
                     toast.message("Please verify your email", {
                         description: "We've sent a one-time code to continue.",
@@ -1084,7 +1085,7 @@ function SubmissionPage() {
                 setPrefillSuggestion(null);
                 setGatewayEmail(email);
                 try {
-                    await axios.post("/auth/otp/send", { email });
+                    await sendOtp(email);
                     setOtpSent(true);
                     toast.message("Welcome back! Please verify your email", {
                         description: "We've sent a 6-digit code to pre-fill your profile.",
@@ -1159,11 +1160,7 @@ function SubmissionPage() {
     };
 
     const handleGoogleLogin = () => {
-        const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "339414275037-rrm7uugj1t4gq2b02q9r51d9l6m39vbe.apps.googleusercontent.com";
-        const redirectUri = `${window.location.origin}/google-callback`;
-        const state = slug;
-        const scope = "openid profile email";
-        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
+        window.location.href = buildGoogleAuthUrl(slug);
     };
 
     const handleInlineLookup = async (e) => {
@@ -1177,7 +1174,7 @@ function SubmissionPage() {
 
         setGatewayLoading(true);
         try {
-            await axios.post("/auth/otp/send", { email: trimmedEmail });
+            await sendOtp(trimmedEmail);
             setOtpSent(true);
             toast.success("Verification code sent!");
         } catch (error) {
@@ -1200,11 +1197,7 @@ function SubmissionPage() {
         setOtpLoading(true);
         try {
             const trimmedEmail = gatewayEmail.trim().toLowerCase();
-            const { data } = await axios.post("/auth/otp/verify", {
-                email: trimmedEmail,
-                otp: code,
-                slug: slug
-            });
+            const data = await verifyOtp({ email: trimmedEmail, otp: code, slug });
 
             if (data.existing) {
                 if (data.token && data.submission_id) {
@@ -1226,9 +1219,7 @@ function SubmissionPage() {
             }
 
             // OTP proved ownership — persist the portal session token (Path B).
-            if (data.portal_token) {
-                localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
-            }
+            persistPortalToken(data);
             localStorage.setItem("talentgram_portal_email", trimmedEmail);
             setForm((f) => ({ ...f, email: trimmedEmail }));
             setPrefillEmail(trimmedEmail);
@@ -1247,7 +1238,7 @@ function SubmissionPage() {
         const trimmedEmail = gatewayEmail.trim().toLowerCase();
         setOtpResending(true);
         try {
-            await axios.post("/auth/otp/send", { email: trimmedEmail });
+            await sendOtp(trimmedEmail);
             toast.success("Verification code resent.");
         } catch (error) {
             console.error("OTP resend error:", error);

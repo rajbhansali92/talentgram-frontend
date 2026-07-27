@@ -3,8 +3,9 @@ import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Sparkles, MapPin, User, Mail, ChevronRight } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
-import { api as axios, PORTAL_TOKEN_KEY } from "@/lib/api";
+import { api as axios } from "@/lib/api";
 import { isoToDisplay } from "@/lib/dob";
+import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken } from "@/lib/talentAuth";
 
 export default function PortalGateway() {
     const { slug: slugParam } = useParams();
@@ -73,7 +74,7 @@ export default function PortalGateway() {
         if (!recognitionState || !recognitionState.email) return;
         setOtpBusy(true);
         try {
-            await axios.post("/auth/otp/send", { email: recognitionState.email });
+            await sendOtp(recognitionState.email);
             setOtpSent(true);
             toast.success("We sent a verification code to your email.");
         } catch (error) {
@@ -93,16 +94,12 @@ export default function PortalGateway() {
         }
         setOtpBusy(true);
         try {
-            const { data } = await axios.post("/auth/otp/verify", {
-                email: recognitionState.email,
-                otp: code,
-                slug,
-            });
+            const data = await verifyOtp({ email: recognitionState.email, otp: code, slug });
             if (!data?.portal_token) {
                 toast.error("Unable to open your portal. Please contact support.");
                 return;
             }
-            localStorage.setItem(PORTAL_TOKEN_KEY, data.portal_token);
+            persistPortalToken(data);
             localStorage.setItem("talentgram_portal_email", recognitionState.email);
             toast.success(`Welcome back, ${recognitionState.name}!`);
             navigate("/portal/home");
@@ -122,11 +119,7 @@ export default function PortalGateway() {
     // change needed (only OTP's verify endpoint required the new "portal"
     // branch — see auth.py).
     const handleGoogleLogin = () => {
-        const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "339414275037-rrm7uugj1t4gq2b02q9r51d9l6m39vbe.apps.googleusercontent.com";
-        const redirectUri = `${window.location.origin}/google-callback`;
-        const state = "portal";
-        const scope = "openid profile email";
-        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
+        window.location.href = buildGoogleAuthUrl("portal");
     };
 
     const handleUseAnotherEmail = () => {

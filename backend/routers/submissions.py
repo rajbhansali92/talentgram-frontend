@@ -61,6 +61,7 @@ from core import (
     rate_limit_ok,
     client_ip,
     sign_r2_media_if_needed,
+    build_talent_submission_view,
 )
 from drive_backup import (
     drive_enabled,
@@ -2292,12 +2293,10 @@ async def public_submission(sid: str, authorization: Optional[str] = Header(None
     sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
     if not sub:
         raise HTTPException(404, "Submission not found")
-    # Surface ONLY approved+shared client feedback. The talent never sees
-    # pending/rejected/admin_only rows. This is the single approved channel
-    # for client→talent communication (relay through admin moderation).
-    from routers.feedback import list_approved_feedback_for_talent
-    sub["client_feedback"] = await list_approved_feedback_for_talent(sid)
-    return sign_r2_media_if_needed(sub)
+    # Canonical talent-facing shape (feedback + signed media) — see
+    # build_talent_submission_view in core.py for the single place this
+    # logic lives.
+    return await build_talent_submission_view(sub)
 
 
 # --------------------------------------------------------------------------
@@ -2323,9 +2322,9 @@ async def get_my_submission_by_token(slug: str, atk: str):
     )
     if not sub:
         raise HTTPException(404, "Submission not found or token invalid")
-    from routers.feedback import list_approved_feedback_for_talent
-    sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
-    return sign_r2_media_if_needed(sub)
+    # Canonical talent-facing shape — see build_talent_submission_view in
+    # core.py.
+    return await build_talent_submission_view(sub)
 
 
 # --------------------------------------------------------------------------

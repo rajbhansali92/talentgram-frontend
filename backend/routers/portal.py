@@ -11,6 +11,7 @@ from core import (
     normalize_instagram_handle,
     current_portal_talent,
     TalentIn,
+    build_talent_submission_view,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,4 +191,31 @@ async def portal_projects(talent: dict = Depends(current_portal_talent)):
     except Exception as e:
         logger.error(f"Error fetching portal projects for {email}: {e}")
         raise HTTPException(status_code=500, detail="Database lookup failed")
+
+
+@router.get("/portal/projects/{slug}/submission")
+async def portal_submission(slug: str, talent: dict = Depends(current_portal_talent)):
+    """Read-only: the authenticated talent's own submission for one project.
+
+    Exists to unlock Dashboard consumers (Submission Summary, Smart
+    Checklist, Requirement/Readiness Engine — all frontend, none of that
+    logic lives here) with the same canonical submission representation
+    already used by the public submitter-JWT/access_token endpoints — see
+    build_talent_submission_view() in core.py, the single place responsible
+    for attaching feedback and signing R2 media. This endpoint adds no new
+    shaping, no new auth primitive: ownership is the same project_id +
+    talent_email match /portal/projects already uses.
+    """
+    project = await db.projects.find_one({"slug": slug}, {"_id": 0, "id": 1})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    email = (talent.get("email") or "").strip().lower()
+    sub = await db.submissions.find_one(
+        {"project_id": project["id"], "talent_email": email}, {"_id": 0}
+    )
+    if not sub:
+        raise HTTPException(status_code=404, detail="No submission found for this project")
+
+    return await build_talent_submission_view(sub)
 

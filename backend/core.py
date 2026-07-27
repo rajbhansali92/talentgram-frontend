@@ -3226,6 +3226,26 @@ def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:
     return doc
 
 
+async def build_talent_submission_view(sub: dict) -> dict:
+    """The single canonical talent-facing submission representation.
+
+    Not to be confused with `_submission_to_client_shape` (above) — that one
+    flattens + filters a submission for the *brand client's* review link
+    (`/l/{slug}`), respecting `field_visibility`. This one is for a talent
+    viewing their OWN submission: the raw stored document, unfiltered
+    (field_visibility gates client visibility, not the talent's own view of
+    their own data — same precedent both existing talent-facing endpoints
+    already follow), plus approved client feedback and resolved media URLs.
+
+    Every talent-facing submission read should call this — it's the only
+    place responsible for attaching feedback and signing R2 media, so a
+    future change to either only needs to happen here.
+    """
+    from routers.feedback import list_approved_feedback_for_talent
+    sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
+    return sign_r2_media_if_needed(sub)
+
+
 def get_client_ip(request: Request) -> str:
     x_forwarded_for = request.headers.get("x-forwarded-for")
     if x_forwarded_for:

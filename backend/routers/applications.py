@@ -317,62 +317,88 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
             if not (fd.get(field) or []) and (talent_val or []):
                 patch[f"form_data.{field}"] = talent_val
 
-    # Media sync logic
+    # Media hydration — ADDITIVE ONLY (Release Blocker fix, see
+    # docs/claude/08_DECISION_LOG.md D27). This function runs on every
+    # `GET /public/apply/{aid}` of a non-submitted draft (a plain page
+    # refresh, no user action) whenever the applicant's email matches an
+    # existing talent record. The previous implementation compared
+    # `len(app_media)` to `len(talent_media)` as a "has the Library
+    # changed" proxy and, on any mismatch, wholesale-replaced
+    # `app_doc.media` — but a count mismatch is also the completely normal
+    # state for a returning talent who has uploaded MORE photos to this
+    # application than exist in their Library. That heuristic could not
+    # tell "Library changed" apart from "applicant added their own
+    # photos", so it silently discarded the applicant's own uploads (no
+    # storage cleanup either — an orphan leak on top of the data loss).
+    #
+    # Root cause: application.media[] items carry no marker distinguishing
+    # "copied from the talent's Library" from "the applicant's own
+    # upload" — unlike submission.media[], which got an `origin` field in
+    # Phase 4.1 for exactly this reason. Rather than add a new marker
+    # field (a schema change), this reconciliation uses the fact that a
+    # hydrated item is ALWAYS created with the SAME `id` as its source
+    # talent.media item (see the copy below): an application media item
+    # is "already reflecting this Library item" if and only if some
+    # existing item shares that same id. So the fix is purely additive —
+    # copy any Library item not yet present (by id) into the draft, and
+    # NEVER remove or replace an existing item for any reason. This also
+    # makes it safe for already-hydrated drafts created before this fix
+    # shipped, with no migration needed: their hydrated items already
+    # share ids with `talent_media`, so they're recognized as "already
+    # present" and are neither duplicated nor touched.
     app_media = app_doc.get("media") or []
     talent_media = talent.get("media") or []
-    should_hydrate_media = False
+    existing_ids = {m.get("id") for m in app_media if m.get("id")}
 
-    if not app_media and talent_media:
-        should_hydrate_media = True
-    elif talent_media:
-        if len(app_media) != len(talent_media):
-            should_hydrate_media = True
-        else:
-            app_cats = sorted([m.get("category") for m in app_media if m.get("category")])
-            talent_mapped_cats = sorted([
-                _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
-                for m in talent_media
-                if _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
-            ])
-            if app_cats != talent_mapped_cats:
-                should_hydrate_media = True
-            elif force_refresh:
-                should_hydrate_media = True
-
-    if should_hydrate_media:
-        # Provider-agnostic field copy (Production Certification, Phase 4
-        # item 4 — same fix as core.sync_media_to_global_talent()): copy
-        # every field the talent's Library item has, except the deny-list
-        # below, instead of hand-picking fields. The old whitelist here
-        # silently dropped `provider`/`stream_uid`/`thumbnail_url`/`mime`,
-        # which breaks long-term lifecycle management (delete/cleanup) for
-        # any hydrated video — see core.is_media_asset_referenced() and
-        # safe_cleanup_media_storage(), which both need `stream_uid` to
-        # protect/clean up Cloudflare Stream assets correctly.
-        _HYDRATE_EXCLUDE_FIELDS = {
-            "id", "scope", "category",
-            "submission_id", "project_id", "application_id", "talent_id",
-            "source_submission_id", "source_submission_media_id",
-            "source_application_id", "source_application_media_id",
-            "origin", "label", "status", "failed_at", "failure_reason",
-            "client_visible", "internal_only", "client_cover", "created_at",
-        }
-        new_app_media = []
-        for m in talent_media:
-            a_cat = _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
-            if not a_cat:
-                continue
-            item = {k: v for k, v in m.items() if k not in _HYDRATE_EXCLUDE_FIELDS}
-            item.update({
-                "id": m.get("id") or str(uuid.uuid4()),
-                "category": a_cat,
-                "content_type": m.get("content_type", "application/octet-stream"),
-                "size": m.get("size", 0),
-                "created_at": m.get("created_at") or _now(),
-                "scope": "application",
-            })
-            new_app_media.append(item)
-        patch["media"] = new_app_media
+    # Provider-agnostic field copy (Production Certification, Phase 4 item
+    # 4 — same fix as core.sync_media_to_global_talent()): copy every
+    # field the talent's Library item has, except the deny-list below,
+    # instead of hand-picking fields. The old whitelist here silently
+    # dropped `provider`/`stream_uid`/`thumbnail_url`/`mime`, which breaks
+    # long-term lifecycle management (delete/cleanup) for any hydrated
+    # video — see core.is_media_asset_referenced() and
+    # safe_cleanup_media_storage(), which both need `stream_uid` to
+    # protect/clean up Cloudflare Stream assets correctly.
+    _HYDRATE_EXCLUDE_FIELDS = {
+        "id", "scope", "category",
+        "submission_id", "project_id", "application_id", "talent_id",
+        "source_submission_id", "source_submission_media_id",
+        "source_application_id", "source_application_media_id",
+        "origin", "label", "status", "failed_at", "failure_reason",
+        "client_visible", "internal_only", "client_cover", "created_at",
+    }
+    new_items = []
+    for m in talent_media:
+        mid = m.get("id")
+        if not mid or mid in existing_ids:
+            continue
+        # Guard against a mirror-then-rehydrate loop: `upload_application_media`
+        # unconditionally mirrors every fresh application upload into
+        # `talents.media` (sync_media_to_global_talent, a new id each time,
+        # tagged `source_application_media_id` back to the original). Without
+        # this check, that mirror would look like "a new Library item" on the
+        # very next reconciliation and get copied straight back into the
+        # application — duplicating the applicant's own upload under a second
+        # id. Skip any talent item that's just a mirror of something this
+        # application already has.
+        src_app_mid = m.get("source_application_media_id")
+        if src_app_mid and src_app_mid in existing_ids:
+            continue
+        a_cat = _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
+        if not a_cat:
+            continue
+        item = {k: v for k, v in m.items() if k not in _HYDRATE_EXCLUDE_FIELDS}
+        item.update({
+            "id": mid,
+            "category": a_cat,
+            "content_type": m.get("content_type", "application/octet-stream"),
+            "size": m.get("size", 0),
+            "created_at": m.get("created_at") or _now(),
+            "scope": "application",
+        })
+        new_items.append(item)
+    if new_items:
+        patch["media"] = app_media + new_items
 
     if t_updated:
         patch["talent_profile_updated_at"] = t_updated

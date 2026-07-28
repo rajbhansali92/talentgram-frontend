@@ -6,6 +6,17 @@ This timeline covers repository history through July 5, 2026. The project has no
 
 ---
 
+### 2026-07-28: Media Library Initiative (Phases 4.1–4.4 + Release Blocker Fix)
+
+| Field | Value |
+|---|---|
+| Commits | `d506543`, `3348f63`, `7df26fb`, `e97dd6b`, `dc2ea3f` |
+| Date | 2026-07-28 |
+| Purpose | Give every talent a reusable, talent-owned Global Media Library on top of the existing submission/application media pipelines, made production-safe |
+| Impact | Canonical prefill builder (`build_prefill_media()`) replacing three drifted implementations; talent-facing Media Library Manager (view/delete/set-cover/view-intro-video, `PortalProfile.jsx` + `routers/portal.py`); reference-aware deletion applied system-wide (`core.safe_cleanup_media_storage()`/`is_media_asset_referenced()`) after live-testing found five unconditional-destroy call sites beyond the Library's own two routes; provider-agnostic media copying (`core.MEDIA_COPY_EXCLUDE_FIELDS`) fixing a bug where mirrored Cloudflare Stream videos silently lost their `stream_uid` and could never be cleaned up again; six new sparse indexes (`media.public_id`/`media.stream_uid` on `talents`/`submissions`/`applications`) for the new reference-check hot path; and a release-blocker fix for a pre-existing `/apply` bug where an ordinary page refresh could wholesale-replace an applicant's own uploads. No breaking changes, no new environment variables, no destructive migrations. Full release notes, deployment checklist, and rollback checklist in [../MEDIA_LIBRARY_RELEASE.md](../MEDIA_LIBRARY_RELEASE.md). See D26/D27 in [08_DECISION_LOG.md](08_DECISION_LOG.md) and the "Media Library System" section in [04_MEDIA_RULES.md](04_MEDIA_RULES.md). One known, deliberately-unfixed limitation tracked in [07_OPEN_ISSUES.md](07_OPEN_ISSUES.md) #16 (Cloudflare Stream replace-leak, cost only, not correctness). |
+
+---
+
 ### 2026-07-05: Talent Invite Draft Storage Ownership (Email-Scoped)
 
 | Field | Value |

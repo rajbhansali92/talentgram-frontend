@@ -197,6 +197,54 @@ For video category: `$pull` existing video before pushing new one (single-slot b
 
 Called when submission/application media is deleted. Removes the mirrored copy from `db.talents` by matching `source_submission_media_id` or `source_application_media_id`.
 
+## Media Library System (Phase 4)
+
+Talents own a reusable **Global Media Library** (`db.talents.media[]`) on top of the sync rules above. This section is the architecture reference for that system — media ownership, why submissions are immutable snapshots even though they share storage with the Library, and the reference-aware deletion model that makes that safe. Built across four increments: 4.1 canonical prefill, 4.2 picker UI (origin badges), 4.3 the talent-owned Media Library Manager + reference-aware delete, 4.4 this production-certification pass (provider metadata + systemic delete-safety fixes). See D26 in [08_DECISION_LOG.md](08_DECISION_LOG.md) for the full incident writeup.
+
+### Media ownership: three collections, one physical asset
+
+`db.talents.media[]`, `db.submissions.media[]`, and `db.applications.media[]` each independently **own** media entries by value — a JSON dict with `url`/`public_id`/`resource_type`/etc. There is no foreign-key relationship between them; when media moves between collections, it is **copied**, never referenced. Two directions of copy exist:
+
+1. **Mirror** (submission/application → talent), `sync_media_to_global_talent()` in `core.py`. Fires on every original (never-yet-finalized) submission upload and at finalize, for syncable categories only (see the sync table above). Copies the SOURCE item's fields into a new dict with a fresh `id`, `scope: "talent"`, and `source_submission_media_id`/`source_application_media_id` linkage back to where it came from.
+2. **Prefill** (talent → new submission/application), `build_prefill_media()` in `submissions.py` (submissions) and the `should_hydrate_media` block in `applications.py`'s `_reconcile_draft_from_talent()` (applications). Copies a Library item's fields into a brand-new submission/application at start time, tagged `origin: "global"` (vs `"project"` for a genuinely fresh upload — see Phase 4.2's `ProjectOnlyBadge`).
+
+**The critical fact this whole section exists to document**: both copy directions are *shallow* — the new dict gets the exact same `public_id` (Cloudinary) or `stream_uid` (Cloudflare Stream) as the source. **The physical storage object is never duplicated.** A talent's Library photo and the submission it was prefilled into (or mirrored from) are, at the storage layer, literally the same file. This is intentional (avoids doubling storage cost on every reuse) but means every delete/replace operation on ANY of the three collections must ask "does anyone else still need this file" before touching storage — see Reference-Aware Deletion below.
+
+### Submission snapshots
+
+A submission's `media[]` is a **point-in-time snapshot**, not a live view of the talent's current Library. Editing/deleting from the Library after a submission is finalized never changes what that submission shows — to the talent, to admin review, or on a Client Review Link (`_submission_to_client_shape()` renders `submissions.media` directly, live-computed on every view but always from THAT submission's own array, never the talent's current Library state). This snapshot guarantee is what makes historical submissions, shortlists, and client-facing links trustworthy over time even as a talent curates their Library.
+
+The guarantee is enforced by two independent rules, not one:
+- **Sync only ever fires pre-finalize** (`has_been_submitted_once(sub) == False` — Issue 2 / rule in the sync table above). A resubmission/edit never touches `db.talents`.
+- **Reference-aware deletion** (below) means even a *destructive* action elsewhere (deleting the Library original, or removing a reused photo from a different submission) cannot destroy the storage object a finalized submission's snapshot still points at.
+
+### Reference-aware deletion
+
+Because storage is shared by value (see above), no delete path may unconditionally destroy a Cloudinary/Stream asset — it might still be needed by another collection's snapshot. Two functions in `core.py` centralize this, and **every** media-delete/replace call site in the backend goes through them:
+
+- **`is_media_asset_referenced(public_id, stream_uid)`** — queries `db.talents`, `db.submissions`, and `db.applications` (indexed on `media.public_id`/`media.stream_uid`, see the Performance note below) for any remaining document that still points at this asset. Returns `True` if any do.
+- **`safe_cleanup_media_storage(media, scope, parent_id, operation_id=None)`** — the ONLY function that should ever pair "check references" with "physically destroy." Calls `is_media_asset_referenced()`; only if nothing else references the asset does it delegate to `cleanup_media_storage()` (the actual multi-provider destroy: Cloudflare Stream by `stream_uid`, Cloudinary by `public_id`, R2 raw upload, `asset_metadata` tracking row).
+
+Call sites using `safe_cleanup_media_storage()` (not the raw `cleanup_media_storage()`): `delete_talent_media_item()` (Library delete, both the admin and talent-owned routes — see below), the submission single-slot video-replace path, the talent-owned submission media-delete endpoint (`DELETE /public/submissions/{sid}/media/{mid}`), the Cloudinary webhook's intro-video-replace cleanup, the application media-delete endpoint, and `sync_media_to_global_talent()`'s own Library-side video single-slot replace. **Do not duplicate the reference-check + cleanup pairing at a call site — always go through `safe_cleanup_media_storage()`.** The DB `$pull` that removes the collection's own reference always happens *before* the reference check, so a document never counts itself as a remaining reference to its own now-deleted entry.
+
+Exempt by design (not at risk, don't route through the wrapper): audition takes and voice-note feedback (`cloudinary_admin.py`'s project-level bulk-delete tools) are categorically never synced to `db.talents` (see "Audition Takes Never Sync" above) or shared with any other collection, so they're always safe to destroy unconditionally. The admin `run_storage_cleanup` health-cleanup tool builds its own independent, broader reference set (across `asset_metadata`/`submissions`/`talents`/`applications`/`feedback`) as part of its own orphan-detection logic — it is intentionally a separate mechanism, not a `safe_cleanup_media_storage()` caller.
+
+### The Media Library Manager (talent-facing)
+
+`routers/portal.py`: `DELETE /api/portal/media/{mid}` and `POST /api/portal/media/{mid}/cover`, authorized via `current_portal_talent` (the acting talent's id comes from the session token, never a URL parameter — a talent physically cannot address another talent's media). Both routes are thin wrappers around the exact same `core.delete_talent_media_item()` / `core.set_talent_cover_media()` the admin Talent Editor's `DELETE /talents/{tid}/media/{mid}` / `POST /talents/{tid}/cover/{mid}` routes call — one implementation, two authorization boundaries. Frontend: `frontend/src/pages-components/PortalProfile.jsx`'s "Media Library" section (view by category, delete, set cover, view intro video only — no upload/reorder/folders from this page, per the Version 1 scope decision).
+
+### Canonical prefill: `build_prefill_media()`
+
+The single source of truth (submissions.py) for turning a talent's Library media into the `prefill_media` a new submission starts with — replaces three previously independent, slightly-divergent implementations (`/public/prefill`, `start_submission`, `routers/auth.py`'s `_get_talent_profile_response`). Portfolio images come straight from `talent.media`, resource-type-checked so a miscategorized item can't leak into the wrong bucket. Intro video uses a 3-tier fallback: the talent's own Library → their most recent submission with a video → their most recent `/apply` application with a video. **Not yet consolidated**: `applications.py`'s own `_reconcile_draft_from_talent()` hydrate-media logic performs the equivalent talent→application copy independently, with its own category map (`_TALENT_TO_APP_CATEGORY`) — a fourth, still-separate implementation of the same "copy Library media by value" pattern. It received the same provider-metadata fix (below) but was not merged into `build_prefill_media()` in this pass (would be a genuine consolidation/redesign, not a certification-scope fix).
+
+### Provider metadata integrity
+
+Every copy operation above (mirror, prefill, application-hydrate) must preserve every field the source item carries, not a hand-picked subset — because lifecycle operations on the COPY (delete, reference-checking) need the exact same identifiers (`public_id`, `stream_uid`, `provider`, and whatever a future storage provider adds) the ORIGINAL had. Before the Phase 4.4 fix, `sync_media_to_global_talent()`'s mirror used a fixed whitelist that silently dropped `provider`/`stream_uid`/`thumbnail_url`/`poster_url`/`duration` — meaning a Cloudflare Stream intro video's Library copy had no way to ever be identified as a Stream asset again, so `is_media_asset_referenced()` and storage cleanup silently no-op'd for it forever (a real orphan-leak, confirmed live). The fix: mirror/hydrate now copy every field on the source item **except** an explicit deny-list of fields that describe the source document's ownership/location/processing-state (`id`, `scope`, `submission_id`, `origin`, `status`, `client_visible`, etc. — see the code comment in `sync_media_to_global_talent()` for the full, current list and rationale per field). A deny-list means a brand new provider-specific field added in the future is preserved automatically — no code change needed here when the next storage provider is added.
+
+### Performance: indexes for reference-checking
+
+`is_media_asset_referenced()` runs on every media delete/replace across the whole system (see the call-site list above) — at "thousands of submissions, years of accumulated media" scale this must be an indexed lookup, not a collection scan. Sparse indexes on `media.public_id` and `media.stream_uid` exist on `talents`, `submissions`, and `applications` (`core.py`'s `p0_indexes`, created idempotently at startup).
+
 ## Asset Metadata Tracking
 
 ### `db.asset_metadata` Collection

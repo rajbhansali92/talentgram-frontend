@@ -170,9 +170,14 @@ async def cloudinary_webhook(
                             {"$pull": {"media": {"id": {"$in": [pi["id"] for pi in prev_items]}}}}
                         )
                         for pi in prev_items:
-                            from core import cleanup_media_storage, remove_synced_media_from_global_talent
+                            from core import safe_cleanup_media_storage, remove_synced_media_from_global_talent
                             op_id = tags.get("operation_id") or str(uuid.uuid4())
-                            await cleanup_media_storage(pi, scope="submission", parent_id=parent_id, operation_id=op_id)
+                            # Reference-aware (Production Certification, Phase 4
+                            # item 4): `pi` (the video being replaced) may be a
+                            # prefilled/reused Library item — must not destroy
+                            # an asset the Library, or another submission,
+                            # still depends on.
+                            await safe_cleanup_media_storage(pi, scope="submission", parent_id=parent_id, operation_id=op_id)
                             if not already_submitted:
                                 await remove_synced_media_from_global_talent(sub_doc, pi["id"])
 

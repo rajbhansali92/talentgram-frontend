@@ -17,7 +17,6 @@ from core import (
     _now,
     _paginate_params,
     _paginated,
-    cloudinary_destroy,
     cloudinary_upload,
     upload_and_track_asset,
     compute_age,

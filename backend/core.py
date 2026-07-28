@@ -1322,6 +1322,43 @@ async def is_media_asset_referenced(public_id: Optional[str], stream_uid: Option
     return False
 
 
+async def safe_cleanup_media_storage(
+    media: dict,
+    scope: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    operation_id: Optional[str] = None,
+) -> None:
+    """Reference-aware wrapper around `cleanup_media_storage()`.
+
+    Production Certification (Phase 4 item 4) — the reference-aware
+    guard originally built only for the Media Library delete endpoints
+    (`delete_talent_media_item`) turned out to be needed everywhere a
+    submission/application media item can be physically destroyed, not
+    just there: `build_prefill_media()` copies a talent's Library item
+    INTO a new submission by value (same `public_id`/`stream_uid`), so a
+    talent removing (or replacing) a "reused" photo/video from a brand
+    new submission — an everyday `/submit` action, unrelated to the
+    Media Library page — could silently destroy their own Library
+    original, or a completely different historical submission, or a
+    live client review link. Same risk in reverse for `applications.py`'s
+    own talent-media hydration.
+
+    This is the ONE place that pairs "is it still referenced anywhere"
+    with "destroy it" — every call site that might touch a shared-by-value
+    asset (Library delete, submission media delete/replace, application
+    media delete/replace, webhook-driven replacement cleanup) must call
+    this instead of `cleanup_media_storage()` directly. Do not duplicate
+    the reference-check + cleanup pairing at the call site.
+    """
+    if not media:
+        return
+    pid = media.get("public_id")
+    stream_uid = media.get("stream_uid")
+    if (pid or stream_uid) and await is_media_asset_referenced(pid, stream_uid):
+        return
+    await cleanup_media_storage(media, scope=scope, parent_id=parent_id, operation_id=operation_id)
+
+
 async def delete_talent_media_item(tid: str, mid: str) -> None:
     """Delete one item from a talent's global Media Library (``talents.media[]``).
 
@@ -1345,12 +1382,8 @@ async def delete_talent_media_item(tid: str, mid: str) -> None:
     if not res.modified_count:
         raise HTTPException(404, "Media not found")
 
-    pid = target.get("public_id")
-    stream_uid = target.get("stream_uid")
-    if (pid or stream_uid) and not await is_media_asset_referenced(pid, stream_uid):
-        if pid:
-            rt = target.get("resource_type") or ("video" if target.get("category") == "video" else "image")
-            cloudinary_destroy(pid, resource_type=rt)
+    # Provider-aware, reference-checked cleanup — see safe_cleanup_media_storage().
+    await safe_cleanup_media_storage(target, scope="talent", parent_id=tid)
 
     # If the deleted item was the current cover, clear the cover ID reference first
     if talent.get("cover_media_id") == mid:
@@ -1547,6 +1580,20 @@ async def seed_admin() -> None:
          {"unique": True, "sparse": True, "name": "submissions_access_token_unique"}),
         ("applications", [("access_token", 1)],
          {"unique": True, "sparse": True, "name": "applications_access_token_unique"}),
+        # Production Certification (Phase 4 item 4, Performance Review):
+        # is_media_asset_referenced() (the reference-aware delete guard used
+        # by every media-delete path — Library, submission, application,
+        # single-slot replace) queries these three collections by
+        # media.public_id/media.stream_uid on EVERY delete. Without an
+        # index this is a full collection scan per call, on the exact
+        # collections expected to grow largest ("thousands of submissions,
+        # years of accumulated media").
+        ("talents", [("media.public_id", 1)], {"sparse": True, "name": "talents_media_public_id"}),
+        ("talents", [("media.stream_uid", 1)], {"sparse": True, "name": "talents_media_stream_uid"}),
+        ("submissions", [("media.public_id", 1)], {"sparse": True, "name": "submissions_media_public_id"}),
+        ("submissions", [("media.stream_uid", 1)], {"sparse": True, "name": "submissions_media_stream_uid"}),
+        ("applications", [("media.public_id", 1)], {"sparse": True, "name": "applications_media_public_id"}),
+        ("applications", [("media.stream_uid", 1)], {"sparse": True, "name": "applications_media_stream_uid"}),
     ]
     for coll, keys, opts in p0_indexes:
         try:
@@ -2786,6 +2833,11 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
       - media category is not in whitelisted categories
       - the same source-id has already been mirrored (idempotent)
       - no talent record exists for that email yet (will sync on next upload)
+      - the source item has no `url` yet (still processing — e.g. finalize
+        can race an in-flight Cloudflare Stream/Cloudinary video transcode;
+        mirroring a half-finished item would create a permanently-broken
+        Library entry, since the async webhook that later completes the
+        SOURCE item has no idea a mirror copy exists to also update)
     """
     cat_mapping = {
         "image": "portfolio",
@@ -2808,6 +2860,11 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
     source_id = media.get("id")
     if not source_id:
         return
+    if not media.get("url"):
+        # Still processing (video transcode/Stream copy not complete yet).
+        # See the no-op list above — mirroring now would freeze a broken
+        # item into the Library forever.
+        return
 
     talent = await db.talents.find_one({
         "$or": [
@@ -2828,22 +2885,58 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
            (m.get("source_application_media_id") == source_id):
             return
 
-    # Build the mirror item — preserves Cloudinary url + public_id so the
-    # global profile renders identically to the submission/application. New `id` is
-    # generated to keep talent.media ids unique across mirror sources.
+    # Build the mirror item. Provider-agnostic by construction (Production
+    # Certification, Phase 4 item 4 — Provider Metadata Integrity fix):
+    # copy EVERY field the source item has, except the deny-list below,
+    # rather than hand-picking a fixed set of fields to carry over. The
+    # previous whitelist-based copy silently dropped `provider`/
+    # `stream_uid`/`thumbnail_url`/`poster_url`/`duration` — which broke
+    # long-term lifecycle management (delete/cleanup) for any mirrored
+    # video, since Cloudflare Stream's real identifier (`stream_uid`) never
+    # reached the Library copy at all. A deny-list means any CURRENT or
+    # FUTURE provider-specific field (a new storage backend's own asset
+    # key, delivery id, etc.) survives the mirror automatically — no code
+    # change needed here when a new provider is added.
+    #
+    # Excluded fields describe the SOURCE document's ownership/location or
+    # its point-in-time processing state, not the physical asset itself, so
+    # they would be wrong (or actively unsafe) to carry onto a Library item:
+    #   - id/scope: the mirror gets its own id and is always scope="talent"
+    #   - submission_id/project_id/application_id/talent_id: parent linkage
+    #     that belongs to the SOURCE document, not the Library
+    #   - source_submission_*/source_application_*: recomputed below from
+    #     THIS sync call, not copied from the source (which wouldn't have
+    #     them anyway — they're mirror-only fields)
+    #   - origin: submission-only semantics ("global" vs "project" upload);
+    #     meaningless on a Library item
+    #   - label: audition-take-specific display text; takes are never
+    #     synced (excluded from cat_mapping) but kept in the deny-list for
+    #     clarity
+    #   - status/failed_at/failure_reason: describe the SOURCE upload's own
+    #     async pipeline at a point in time; irrelevant once mirrored (we
+    #     already only mirror items that have a real `url`, i.e. completed)
+    #   - client_visible/internal_only/client_cover: Client Review Link
+    #     visibility flags scoped to that specific submission's client
+    #     presentation — never appropriate on a talent-owned Library item
+    #   - category/created_at: set explicitly below instead of copied
+    _MIRROR_EXCLUDE_FIELDS = {
+        "id", "scope",
+        "submission_id", "project_id", "application_id", "talent_id",
+        "source_submission_id", "source_submission_media_id",
+        "source_application_id", "source_application_media_id",
+        "origin", "label",
+        "status", "failed_at", "failure_reason",
+        "client_visible", "internal_only", "client_cover",
+        "category", "created_at",
+    }
     is_app = media.get("scope") == "application" or "application_id" in media
-    mirror = {
+    mirror = {k: v for k, v in media.items() if k not in _MIRROR_EXCLUDE_FIELDS}
+    mirror.update({
         "id": str(uuid.uuid4()),
         "category": mapped_cat,
-        "url": url,
-        "public_id": pub_id,
-        "resource_type": media.get("resource_type"),
-        "mime": media.get("mime"),
-        "content_type": media.get("content_type"),
-        "size": media.get("size"),
         "created_at": media.get("created_at") or _now(),
         "scope": "talent",
-    }
+    })
     if is_app:
         mirror["source_application_id"] = submission.get("id")
         mirror["source_application_media_id"] = source_id
@@ -2867,7 +2960,12 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
     if mapped_cat == "video" and prev_videos:
         for pv in prev_videos:
             op_id = media.get("operation_id") or str(uuid.uuid4())
-            await cleanup_media_storage(pv, scope="talent", parent_id=talent["id"], operation_id=op_id)
+            # Reference-aware (Production Certification, Phase 4 item 4,
+            # release-readiness sweep): `pv` (the Library video being
+            # replaced by this new mirror) could itself still be prefilled
+            # into a different, still-in-progress submission draft — must
+            # not destroy an asset another submission still depends on.
+            await safe_cleanup_media_storage(pv, scope="talent", parent_id=talent["id"], operation_id=op_id)
     if not skip_cover_cache:
         await update_talent_cover_cache(talent["id"])
 

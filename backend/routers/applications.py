@@ -340,25 +340,38 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
                 should_hydrate_media = True
 
     if should_hydrate_media:
+        # Provider-agnostic field copy (Production Certification, Phase 4
+        # item 4 — same fix as core.sync_media_to_global_talent()): copy
+        # every field the talent's Library item has, except the deny-list
+        # below, instead of hand-picking fields. The old whitelist here
+        # silently dropped `provider`/`stream_uid`/`thumbnail_url`/`mime`,
+        # which breaks long-term lifecycle management (delete/cleanup) for
+        # any hydrated video — see core.is_media_asset_referenced() and
+        # safe_cleanup_media_storage(), which both need `stream_uid` to
+        # protect/clean up Cloudflare Stream assets correctly.
+        _HYDRATE_EXCLUDE_FIELDS = {
+            "id", "scope", "category",
+            "submission_id", "project_id", "application_id", "talent_id",
+            "source_submission_id", "source_submission_media_id",
+            "source_application_id", "source_application_media_id",
+            "origin", "label", "status", "failed_at", "failure_reason",
+            "client_visible", "internal_only", "client_cover", "created_at",
+        }
         new_app_media = []
         for m in talent_media:
             a_cat = _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
             if not a_cat:
                 continue
-            new_app_media.append({
+            item = {k: v for k, v in m.items() if k not in _HYDRATE_EXCLUDE_FIELDS}
+            item.update({
                 "id": m.get("id") or str(uuid.uuid4()),
                 "category": a_cat,
-                "url": m.get("url"),
-                "public_id": m.get("public_id"),
-                "resource_type": m.get("resource_type"),
                 "content_type": m.get("content_type", "application/octet-stream"),
-                "original_filename": m.get("original_filename"),
                 "size": m.get("size", 0),
                 "created_at": m.get("created_at") or _now(),
                 "scope": "application",
-                "duration": m.get("duration"),
-                "poster_url": m.get("poster_url"),
             })
+            new_app_media.append(item)
         patch["media"] = new_app_media
 
     if t_updated:
@@ -1279,9 +1292,13 @@ async def delete_application_media(
     from core import remove_synced_media_from_global_talent
     await remove_synced_media_from_global_talent(app_doc, mid)
     # Parity sprint: best-effort storage cleanup (mirrors submission delete).
+    # Reference-aware (Production Certification, Phase 4 item 4): `target_media`
+    # may be a talent-media item hydrated by value into this application (see
+    # the `should_hydrate_media` block above) — must not destroy an asset the
+    # talent's Library, or a submission, still depends on.
     if target_media:
-        from core import cleanup_media_storage
-        await cleanup_media_storage(target_media, scope="application", parent_id=aid)
+        from core import safe_cleanup_media_storage
+        await safe_cleanup_media_storage(target_media, scope="application", parent_id=aid)
 
     return {"ok": True}
 

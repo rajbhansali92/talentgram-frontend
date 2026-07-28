@@ -865,8 +865,13 @@ async def submission_upload(
     if category in single_slot and prev_items:
         # Defer old asset deletion until database update is verified
         for pi in prev_items:
-            from core import cleanup_media_storage, remove_synced_media_from_global_talent
-            await cleanup_media_storage(pi, scope="submission", parent_id=sid, operation_id=operation_id)
+            from core import safe_cleanup_media_storage, remove_synced_media_from_global_talent
+            # Reference-aware (Production Certification, Phase 4 item 4): `pi`
+            # may be a prefilled/reused item from the talent's Media Library
+            # (build_prefill_media() copies by value — same public_id/
+            # stream_uid), so replacing it here must not blindly destroy an
+            # asset the Library, or another submission, still depends on.
+            await safe_cleanup_media_storage(pi, scope="submission", parent_id=sid, operation_id=operation_id)
             if not was_finalized:
                 await remove_synced_media_from_global_talent(sub, pi["id"])
 
@@ -1178,9 +1183,13 @@ async def submission_delete_media(
         await remove_synced_media_from_global_talent(sub, mid)
     # Parity sprint: best-effort delete the backing storage (Stream/R2/Cloudinary)
     # + tracking row so deletes don't leave orphans. Never fails the user action.
+    # Reference-aware (Production Certification, Phase 4 item 4): `target_media`
+    # may be a prefilled/reused item from the talent's Media Library — removing
+    # it from THIS submission must not destroy an asset the Library, or another
+    # submission, still depends on.
     if target_media:
-        from core import cleanup_media_storage
-        await cleanup_media_storage(target_media, scope="submission", parent_id=sid)
+        from core import safe_cleanup_media_storage
+        await safe_cleanup_media_storage(target_media, scope="submission", parent_id=sid)
     return {"ok": True}
 
 

@@ -753,8 +753,15 @@ async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
     metadata_list = await db.asset_metadata.find({}).to_list(length=100000)
     submissions = await db.submissions.find({}).to_list(length=10000)
     talents = await db.talents.find({}).to_list(length=10000)
+    # Production Certification (Phase 4 item 4): applications.media was
+    # missing from this reference set. build_prefill_media()/the /apply
+    # hydrate-media logic both copy a talent's Library media BY VALUE (same
+    # public_id) into applications too, not just submissions — omitting
+    # `applications` here meant this health-cleanup tool could treat a
+    # still-in-use asset as "orphaned" and physically destroy it.
+    applications = await db.applications.find({}).to_list(length=10000)
     feedbacks = await db.feedback.find({}).to_list(length=10000)
-    
+
     db_referenced_ids = set()
     for doc in metadata_list:
         pid = doc.get("public_id")
@@ -767,6 +774,11 @@ async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
                 db_referenced_ids.add(pid)
     for tal in talents:
         for m in tal.get("media", []):
+            pid = m.get("public_id")
+            if pid:
+                db_referenced_ids.add(pid)
+    for app in applications:
+        for m in app.get("media", []):
             pid = m.get("public_id")
             if pid:
                 db_referenced_ids.add(pid)

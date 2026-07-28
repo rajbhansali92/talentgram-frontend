@@ -5,6 +5,8 @@ import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 import ProjectCard from "@/components/shared/ProjectCard";
+import EmptyProjectsState from "@/components/shared/EmptyProjectsState";
+import { sortByUrgency } from "@/lib/engagementStatus";
 
 /**
  * Phase 2 item 2 — Dashboard/Projects content separation (see
@@ -75,14 +77,7 @@ export default function PortalProjects() {
                 <h1 className="text-2xl font-semibold tracking-tight text-black">Projects</h1>
 
                 {!hasAnyProjects ? (
-                    /* Empty State */
-                    <div className="bg-white border border-black/5 rounded-2xl p-12 text-center flex flex-col items-center gap-4 max-w-lg mx-auto my-8">
-                        <Briefcase className="w-10 h-10 text-black/25" strokeWidth={1.5} />
-                        <h3 className="font-semibold text-lg text-black">No Synced Projects</h3>
-                        <p className="text-sm text-black/50 leading-relaxed">
-                            You haven't started any project submissions yet. When an agency invites you or you apply to open briefs, they will show up here dynamically.
-                        </p>
-                    </div>
+                    <EmptyProjectsState className="my-8" />
                 ) : (
                     /* Synced Sections */
                     <div className="flex flex-col gap-10">
@@ -115,7 +110,12 @@ export default function PortalProjects() {
                                     </span>
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {projects.ongoing.map((proj) => (
+                                    {/* UX audit finding: this group mixes drafts, awaiting-review,
+                                        retest, selected, and closed cards with no priority — a
+                                        `retest` (the one status needing the talent to act) could sit
+                                        buried among several others. `sortByUrgency` reuses the same
+                                        already-fetched `status` field, just reorders. */}
+                                    {sortByUrgency(projects.ongoing).map((proj) => (
                                         <ProjectCard key={proj.project_id} project={proj} theme="ongoing" />
                                     ))}
                                 </div>

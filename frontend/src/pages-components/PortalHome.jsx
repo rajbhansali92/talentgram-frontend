@@ -6,6 +6,8 @@ import { formatTalentLocation } from "@/lib/sanitize";
 import { toast } from "sonner";
 import { portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
 import ProjectCard from "@/components/shared/ProjectCard";
+import EmptyProjectsState from "@/components/shared/EmptyProjectsState";
+import { sortByUrgency } from "@/lib/engagementStatus";
 
 /**
  * Phase 2 item 2 — Dashboard/Projects content separation (see
@@ -86,17 +88,26 @@ export default function PortalHome() {
         projects.shortlisted.length > 0 ||
         projects.completed.length > 0;
 
-    // Continue Submission: the first ongoing engagement still in draft —
+    // Continue Submission: every ongoing engagement still in draft —
     // derived from the same /portal/projects data already fetched above,
-    // no new backend call.
-    const draftInProgress = projects.ongoing.find((p) => p.status === "draft");
+    // no new backend call. Still links to just the one most-recent draft
+    // (no drafts-only view exists to send a talent with several to), but
+    // the copy below now says so honestly instead of silently dropping the
+    // rest (UX audit finding: a second draft was invisible here otherwise).
+    const draftsInProgress = projects.ongoing.filter((p) => p.status === "draft");
+    const draftInProgress = draftsInProgress[0];
 
     // Recent projects summary: most-recently-updated across all groups,
-    // same data, client-side sort/slice only.
-    const recentProjects = [...projects.shortlisted, ...projects.ongoing, ...projects.completed]
-        .filter((p) => p.updated_at)
-        .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
-        .slice(0, 3);
+    // then re-sorted so a `retest` (the one status that needs the talent to
+    // act) always surfaces even if other cards were touched more recently —
+    // same already-fetched data, same existing recency sort, just reused
+    // via the shared `sortByUrgency` helper (UX audit finding: a retest
+    // could otherwise be silently excluded by `.slice(0, 3)`).
+    const recentProjects = sortByUrgency(
+        [...projects.shortlisted, ...projects.ongoing, ...projects.completed]
+            .filter((p) => p.updated_at)
+            .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+    ).slice(0, 3);
 
     return (
         <div className="flex-1 bg-[#fafafa] text-black flex flex-col justify-between" data-testid="portal-home-page">
@@ -174,7 +185,11 @@ export default function PortalHome() {
                             <div>
                                 <h2 className="text-xs font-semibold tracking-wider uppercase text-white/60 mb-1">Continue Submission</h2>
                                 <p className="text-base font-medium">{draftInProgress.project_title}</p>
-                                <p className="text-sm text-white/60">You have a draft in progress.</p>
+                                <p className="text-sm text-white/60">
+                                    {draftsInProgress.length > 1
+                                        ? `You have ${draftsInProgress.length} drafts in progress.`
+                                        : "You have a draft in progress."}
+                                </p>
                             </div>
                             <a
                                 href={`/submit/${draftInProgress.project_slug}`}
@@ -201,13 +216,7 @@ export default function PortalHome() {
                         </div>
 
                         {!hasAnyProjects ? (
-                            <div className="bg-white border border-black/5 rounded-2xl p-12 text-center flex flex-col items-center gap-4 max-w-lg mx-auto my-4">
-                                <Briefcase className="w-10 h-10 text-black/25" strokeWidth={1.5} />
-                                <h3 className="font-semibold text-lg text-black">No Synced Projects</h3>
-                                <p className="text-sm text-black/50 leading-relaxed">
-                                    You haven't started any project submissions yet. When an agency invites you or you apply to open briefs, they will show up here dynamically.
-                                </p>
-                            </div>
+                            <EmptyProjectsState />
                         ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 {recentProjects.map((proj) => (

@@ -41,3 +41,22 @@ export function getEngagementStatusDetails(project, theme) {
     }
     return { color: "bg-black/40", text: "Active" };
 }
+
+/**
+ * Dashboard UX audit (Phase 3 item 7) — with several ongoing engagements at
+ * once, a `retest` (the one status that genuinely needs the talent to act)
+ * could sit buried among drafts/awaiting-review/closed cards with no
+ * visual priority, ordered only by whatever the backend happened to return.
+ * This is a pure client-side reorder of cards the caller already fetched —
+ * same `status` field getEngagementStatusDetails() already reads, no new
+ * data, no new meaning assigned to any status. `Array.prototype.sort` is
+ * stable (ES2019+), so within each urgency tier the caller's existing
+ * order — e.g. already sorted by recency — is preserved.
+ */
+export function sortByUrgency(projects) {
+    return [...projects].sort((a, b) => {
+        const aUrgent = a.status === "retest" ? 0 : 1;
+        const bUrgent = b.status === "retest" ? 0 : 1;
+        return aUrgent - bUrgent;
+    });
+}

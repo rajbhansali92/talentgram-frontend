@@ -69,6 +69,12 @@ export default function ProjectDetail() {
     const [submission, setSubmission] = useState(null); // canonical submission, or null if unavailable
     const [theme, setTheme] = useState("ongoing");
     const [loading, setLoading] = useState(true);
+    // UX audit (Phase 3 item 6) — the Requirements checklist mixes every
+    // OPTIONAL field in with the handful of REQUIRED ones, adding a long run
+    // of inert rows before reaching the Submission Summary/CTA. Collapsed by
+    // default; reuses the exact same already-computed checklist items below,
+    // just a client-side display split — no new calculation, no engine change.
+    const [showOptionalFields, setShowOptionalFields] = useState(false);
 
     // The same Requirement/Readiness/Operational engines SubmissionPage.jsx
     // uses, called unconditionally per Rules of Hooks — safe with null
@@ -202,6 +208,29 @@ export default function ProjectDetail() {
         (item) => item.requirement !== REQUIREMENT_TIERS.HIDDEN
     );
 
+    // Same array, two display slices — required items are always the ones
+    // worth a talent's attention; optional ones are collapsed behind a
+    // toggle by default (UX audit finding: ~12+ inert "Optional" rows were
+    // adding scroll distance before the Submission Summary/CTA on projects
+    // with few required fields). No re-filtering of engine output beyond
+    // what this file already did for `checklistItems` itself.
+    const optionalChecklistItems = checklistItems.filter(
+        (item) => item.requirement !== REQUIREMENT_TIERS.REQUIRED
+    );
+    const visibleChecklistItems = showOptionalFields
+        ? checklistItems
+        : checklistItems.filter((item) => item.requirement === REQUIREMENT_TIERS.REQUIRED);
+
+    // Status-aware CTA label (reuses the same statusDetails/engagement.status
+    // this page already computed for the header pill — no new status
+    // lookup). Matches the wording SubmissionPage.jsx's own Hub already uses
+    // for a retest ("Update Submission"), so the two pages read consistently.
+    const ctaLabel = isDraft
+        ? "Continue Submission"
+        : engagement.status === "retest"
+            ? "Update Submission"
+            : "Open Submission";
+
     const hasSummaryContent =
         !!availability.status ||
         !!budget.status ||
@@ -220,13 +249,28 @@ export default function ProjectDetail() {
                     Back to Projects
                 </Link>
 
-                {/* Project Header */}
-                <div className="flex flex-col gap-2">
-                    <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-black">{project.brand_name}</h1>
-                    <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${statusDetails.color}`} />
-                        <span className="text-sm text-black/60 font-medium">{statusDetails.text}</span>
+                {/* Project Header — CTA duplicated here (UX audit finding:
+                    the only "Open/Continue Submission" action lived at the
+                    very bottom of a 2000px+ page, e.g. on this project a
+                    talent had to scroll ~7 screens on mobile before reaching
+                    it). Same href/label as the bottom Quick Actions button —
+                    one computed `ctaLabel`, rendered twice, not two actions. */}
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div className="flex flex-col gap-2">
+                        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-black">{project.brand_name}</h1>
+                        <div className="flex items-center gap-2">
+                            <span className={`w-2 h-2 rounded-full ${statusDetails.color}`} />
+                            <span className="text-sm text-black/60 font-medium">{statusDetails.text}</span>
+                        </div>
                     </div>
+                    <a
+                        href={`/submit/${slug}`}
+                        className="inline-flex items-center justify-center gap-1.5 bg-black text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-all duration-150 shrink-0 w-fit"
+                        data-testid="project-detail-cta-top"
+                    >
+                        {ctaLabel}
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                    </a>
                 </div>
 
                 {/* Submission Status */}
@@ -309,16 +353,36 @@ export default function ProjectDetail() {
                     canonical editor (`/submit/{slug}?focus={item.id}`) and
                     lets it scroll/highlight — this page never edits, it
                     only navigates. No saveStatus (no autosave concept on
-                    this read-only page) is passed. */}
+                    this read-only page) is passed.
+
+                    Optional items are collapsed by default (see
+                    `showOptionalFields` above) — same single panel
+                    instance either way, so its own "N of N required
+                    complete" summary (which only ever counts REQUIRED-tier
+                    items) is identical and correct regardless of toggle
+                    state; only which OPTIONAL rows are passed in changes. */}
                 <SubmissionReadinessPanel
                     title="Requirements"
-                    items={checklistItems}
+                    items={visibleChecklistItems}
                     onItemClick={(item) => {
                         window.location.href = `/submit/${slug}?focus=${encodeURIComponent(item.id)}`;
                     }}
                     progress={experience.overallProgress}
                     testId="project-detail-readiness-panel"
                 />
+                {optionalChecklistItems.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={() => setShowOptionalFields((v) => !v)}
+                        className="-mt-4 self-start text-xs text-black/50 hover:text-black transition-colors duration-150 inline-flex items-center gap-1"
+                        data-testid="toggle-optional-fields"
+                        aria-expanded={showOptionalFields}
+                    >
+                        {showOptionalFields
+                            ? "Hide optional fields"
+                            : `Show ${optionalChecklistItems.length} optional field${optionalChecklistItems.length === 1 ? "" : "s"}`}
+                    </button>
+                )}
 
                 {/* Submission Summary — real canonical data, rendered as-is */}
                 {hasSummaryContent && (
@@ -454,7 +518,7 @@ export default function ProjectDetail() {
                         href={`/submit/${slug}`}
                         className="flex-1 inline-flex items-center justify-center gap-2 bg-black text-white px-6 py-3 rounded-lg text-sm font-medium hover:opacity-90 transition-all duration-150"
                     >
-                        {isDraft ? "Continue Submission" : "Open Submission"}
+                        {ctaLabel}
                         <ArrowUpRight className="w-4 h-4" />
                     </a>
                 </div>

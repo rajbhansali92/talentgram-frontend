@@ -3499,6 +3499,9 @@ function SubmissionPage() {
                                                                         alt=""
                                                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                                                     />
+                                                                    {m.origin === "project" && (
+                                                                        <ProjectOnlyBadge className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
+                                                                    )}
                                                                     {/* Action overlay — hidden by default, revealed on
                                                                         hover (desktop) or tap (mobile). */}
                                                                     <div
@@ -3798,6 +3801,25 @@ function Info({ label, value, wide }) {
     );
 }
 
+// Media Library Picker UI (Phase 4 item 2) — the one small, subtle badge
+// used everywhere a media item's `origin` (Phase 4 item 1, additive-only
+// field) is "project". Never shown for `origin === "global"` (or missing,
+// e.g. pre-existing submissions) — absence of the badge is the signal that
+// an item is part of the talent's normal reusable media, per the product
+// vision. `className` lets each call site adapt contrast for its own
+// background (a white card vs. directly over a photo thumbnail) without
+// forking the component.
+function ProjectOnlyBadge({ className = "" }) {
+    return (
+        <span
+            data-testid="media-origin-badge-project"
+            className={`inline-flex items-center text-[9px] font-mono font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full whitespace-nowrap ${className}`}
+        >
+            Only in this project
+        </span>
+    );
+}
+
 function PremiumPortfolioGroup({
     label,
     hint,
@@ -3875,6 +3897,9 @@ function PremiumPortfolioGroup({
                                         alt=""
                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                     />
+                                    {m.origin === "project" && (
+                                        <ProjectOnlyBadge className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
+                                    )}
                                     <div
                                         className={`absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2 transition-opacity duration-200 ${
                                             isActionsVisible
@@ -4305,18 +4330,23 @@ function PremiumUploadSlot({
                                     <p className="text-[11px] text-[#333333] truncate max-w-[180px] font-mono">{media.original_filename || "video_file"}</p>
                                 </div>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => setIsVideoCollapsed(!isVideoCollapsed)}
-                                className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                title={isVideoCollapsed ? "Expand preview" : "Collapse preview"}
-                            >
-                                <ChevronDown
-                                    className={`h-4 w-4 transform transition-transform duration-200 ${
-                                        isVideoCollapsed ? "-rotate-90" : ""
-                                    }`}
-                                />
-                            </button>
+                            <div className="flex items-center gap-2 shrink-0">
+                                {media.origin === "project" && (
+                                    <ProjectOnlyBadge className="text-[#333333] bg-slate-100 border border-[#eaeaea]" />
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={() => setIsVideoCollapsed(!isVideoCollapsed)}
+                                    className="p-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                    title={isVideoCollapsed ? "Expand preview" : "Collapse preview"}
+                                >
+                                    <ChevronDown
+                                        className={`h-4 w-4 transform transition-transform duration-200 ${
+                                            isVideoCollapsed ? "-rotate-90" : ""
+                                        }`}
+                                    />
+                                </button>
+                            </div>
                         </div>
 
                         {!isVideoCollapsed && (
@@ -4346,7 +4376,7 @@ function PremiumUploadSlot({
                         <div className="flex flex-col gap-1.5 px-1">
                             {formatMediaTimestamp(media) && (
                                 <span className="text-[11px] text-[#333333] font-mono">
-                                    Previously uploaded · Last updated: {formatMediaTimestamp(media)}
+                                    Updated {formatMediaTimestamp(media)}
                                 </span>
                             )}
                         </div>

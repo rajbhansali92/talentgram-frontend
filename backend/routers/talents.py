@@ -29,6 +29,8 @@ from core import (
     video_poster_url,
     resolve_cover_media,
     update_talent_cover_cache,
+    delete_talent_media_item,
+    set_talent_cover_media,
     normalize_email,
     parse_height_to_inches,
     FOLLOWER_BUCKET_ORDER,
@@ -975,26 +977,7 @@ async def add_media(
 
 @router.delete("/talents/{tid}/media/{mid}")
 async def delete_media(tid: str, mid: str, admin: dict = Depends(current_admin)):
-    talent = await db.talents.find_one({"id": tid}, {"_id": 0, "media": 1, "cover_media_id": 1})
-    if not talent:
-        raise HTTPException(404, "Talent not found")
-    target = next((m for m in (talent.get("media") or []) if m.get("id") == mid), None)
-    if not target:
-        raise HTTPException(404, "Media not found")
-    res = await db.talents.update_one({"id": tid}, {"$pull": {"media": {"id": mid}}})
-    if not res.modified_count:
-        raise HTTPException(404, "Media not found")
-    pid = target.get("public_id")
-    if pid:
-        rt = target.get("resource_type") or ("video" if target.get("category") == "video" else "image")
-        cloudinary_destroy(pid, resource_type=rt)
-    # If the deleted item was the current cover, clear the cover ID reference first
-    if talent.get("cover_media_id") == mid:
-        await db.talents.update_one(
-            {"id": tid},
-            {"$set": {"cover_media_id": None}}
-        )
-    await update_talent_cover_cache(tid)
+    await delete_talent_media_item(tid, mid)
     return {"ok": True}
 
 
@@ -1208,10 +1191,6 @@ async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_ad
     Writes cover_media_id (the item id reference) AND cover_url/cover_thumbnail_url
     via update_talent_cover_cache.
     """
-    res = await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": mid}})
-    if not res.matched_count:
-        raise HTTPException(404, "Talent not found")
-    await update_talent_cover_cache(tid)
-    updated_talent = await db.talents.find_one({"id": tid}, {"cover_url": 1})
-    return {"ok": True, "cover_url": updated_talent.get("cover_url")}
+    cover_url = await set_talent_cover_media(tid, mid)
+    return {"ok": True, "cover_url": cover_url}
 

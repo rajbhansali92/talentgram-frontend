@@ -12,6 +12,8 @@ from core import (
     current_portal_talent,
     TalentIn,
     build_talent_submission_view,
+    delete_talent_media_item,
+    set_talent_cover_media,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,29 @@ async def portal_update_profile(
     
     updated = await db.talents.find_one({"id": talent["id"]}, {"_id": 0})
     return enrich_talent(updated)
+
+
+# ---------------------------------------------------------------------------
+# Media Library Manager (Phase 4 item 3) — talent-owned management of the
+# reusable Global Media Library (`talents.media[]`) already built by Phase
+# 4.1 (prefill foundation) and Phase 4.2 (picker UI). No new storage, sync,
+# or upload logic: both routes below call the exact same deletion/cover
+# helpers the pre-existing admin routes use (`routers/talents.py`), just
+# authorized via `current_portal_talent` instead of `current_admin` — the
+# talent's own id comes from their session token, never from the URL, so a
+# talent can only ever touch their own media.
+# ---------------------------------------------------------------------------
+
+@router.delete("/portal/media/{mid}")
+async def portal_delete_media(mid: str, talent: dict = Depends(current_portal_talent)):
+    await delete_talent_media_item(talent["id"], mid)
+    return {"ok": True}
+
+
+@router.post("/portal/media/{mid}/cover")
+async def portal_set_cover(mid: str, talent: dict = Depends(current_portal_talent)):
+    cover_url = await set_talent_cover_media(talent["id"], mid)
+    return {"ok": True, "cover_url": cover_url}
 
 
 @router.get("/portal/projects")

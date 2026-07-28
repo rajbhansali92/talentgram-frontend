@@ -1289,6 +1289,95 @@ async def update_talent_cover_cache(tid: str) -> None:
         )
 
 
+async def is_media_asset_referenced(public_id: Optional[str], stream_uid: Optional[str] = None) -> bool:
+    """True if any OTHER persistent record still points at this storage asset.
+
+    Architectural correction (Media Library Manager, Phase 4 item 3 —
+    reference-aware delete). `build_prefill_media()` and
+    `sync_media_to_global_talent()` copy media *by value*: a talent's
+    Global Library item and a submission/application's own media entry can
+    legitimately share the exact same Cloudinary `public_id` (or Cloudflare
+    Stream `stream_uid`) without either being a duplicate upload. Physically
+    destroying that storage object is only safe once NO document in any of
+    the three collections that own media by value still references it —
+    otherwise a historical submission, a shortlisted/selected snapshot, or
+    a live client review link (which renders `submissions.media` live, see
+    `_submission_to_client_shape`) silently goes dead.
+
+    Centralized here deliberately — every delete path (admin or talent)
+    must call this same check; it must never be re-implemented per route.
+    """
+    if not public_id and not stream_uid:
+        return False
+    ors = []
+    if public_id:
+        ors.append({"media.public_id": public_id})
+    if stream_uid:
+        ors.append({"media.stream_uid": stream_uid})
+    query = {"$or": ors} if len(ors) > 1 else ors[0]
+    for coll in (db.talents, db.submissions, db.applications):
+        hit = await coll.find_one(query, {"_id": 1})
+        if hit:
+            return True
+    return False
+
+
+async def delete_talent_media_item(tid: str, mid: str) -> None:
+    """Delete one item from a talent's global Media Library (``talents.media[]``).
+
+    Shared by the admin ``DELETE /talents/{tid}/media/{mid}`` route
+    (routers/talents.py) and the talent-owned Media Library Manager
+    (routers/portal.py) — only the caller's authorization differs. Raises
+    404 if the talent or the media item doesn't exist.
+
+    This ONLY ever removes the library reference itself; it never touches
+    the backing Cloudinary/Stream asset unless `is_media_asset_referenced()`
+    confirms no submission, application, or other talent record still
+    depends on it (reference-aware delete, Phase 4 item 3 correction).
+    """
+    talent = await db.talents.find_one({"id": tid}, {"_id": 0, "media": 1, "cover_media_id": 1})
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+    target = next((m for m in (talent.get("media") or []) if m.get("id") == mid), None)
+    if not target:
+        raise HTTPException(404, "Media not found")
+    res = await db.talents.update_one({"id": tid}, {"$pull": {"media": {"id": mid}}})
+    if not res.modified_count:
+        raise HTTPException(404, "Media not found")
+
+    pid = target.get("public_id")
+    stream_uid = target.get("stream_uid")
+    if (pid or stream_uid) and not await is_media_asset_referenced(pid, stream_uid):
+        if pid:
+            rt = target.get("resource_type") or ("video" if target.get("category") == "video" else "image")
+            cloudinary_destroy(pid, resource_type=rt)
+
+    # If the deleted item was the current cover, clear the cover ID reference first
+    if talent.get("cover_media_id") == mid:
+        await db.talents.update_one(
+            {"id": tid},
+            {"$set": {"cover_media_id": None}}
+        )
+    await update_talent_cover_cache(tid)
+
+
+async def set_talent_cover_media(tid: str, mid: str) -> Optional[str]:
+    """Set a talent's cover image, returning the resolved ``cover_url``.
+
+    Extracted verbatim from the admin ``POST /talents/{tid}/cover/{mid}``
+    route (routers/talents.py) — shared with the talent-owned Media
+    Library Manager (Phase 4 item 3). Writes ``cover_media_id`` (the item id
+    reference) AND ``cover_url``/``cover_thumbnail_url`` via
+    ``update_talent_cover_cache``.
+    """
+    res = await db.talents.update_one({"id": tid}, {"$set": {"cover_media_id": mid}})
+    if not res.matched_count:
+        raise HTTPException(404, "Talent not found")
+    await update_talent_cover_cache(tid)
+    updated_talent = await db.talents.find_one({"id": tid}, {"cover_url": 1})
+    return updated_talent.get("cover_url") if updated_talent else None
+
+
 def enrich_talent(doc: Optional[dict]) -> Optional[dict]:
     """Annotate a talent document for API responses.
 

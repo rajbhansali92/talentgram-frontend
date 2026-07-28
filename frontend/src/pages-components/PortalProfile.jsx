@@ -1,13 +1,32 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Sparkles, Instagram, Save, ImageIcon, Video as VideoIcon } from "lucide-react";
+import { Sparkles, Instagram, Save, ImageIcon, Video as VideoIcon, Star, Trash2, Play } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { portalApi, PORTAL_TOKEN_KEY, IMAGE_URL } from "@/lib/api";
 import { normalizeInstagramHandle, isVideo, thumbnailUrl, posterUrl } from "@/lib/mediaUtils";
 import SkillsSelector from "@/components/SkillsSelector";
 import LocationSelector from "@/components/LocationSelector";
+import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { isoToDisplay } from "@/lib/dob";
+
+function formatMediaDuration(sec) {
+    if (!sec) return null;
+    const s = Math.floor(sec % 60);
+    const m = Math.floor(sec / 60);
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+}
+
+// Media Library categories, grouped for talent-facing display (Media
+// Library Manager, Phase 4 item 3). Mirrors the same category keys the
+// admin Talent Editor already groups by (routers/talents.py's `category`
+// values) — no new taxonomy invented.
+const LIBRARY_IMAGE_CATEGORIES = [
+    { key: "indian", label: "Indian Look" },
+    { key: "western", label: "Western Look" },
+    { key: "portfolio", label: "Portfolio" },
+];
 
 // ---------------------------------------------------------------------------
 // Work-links helpers (shared with ApplicationPage)
@@ -77,9 +96,13 @@ export default function PortalProfile() {
         skills: [],
         // Read-only — same existing GET response, not part of the PUT payload.
         media: [],
+        cover_media_id: null,
     });
 
     const [linksDraft, setLinksDraft] = useState("");
+    const [mediaToDelete, setMediaToDelete] = useState(null);
+    const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+    const [coverSavingId, setCoverSavingId] = useState(null);
 
     const categoryOptions = ["Acting", "Modeling", "Influencer Campaigns"];
 
@@ -106,6 +129,7 @@ export default function PortalProfile() {
                     interested_in: data.interested_in || [],
                     skills: data.skills || [],
                     media: Array.isArray(data.media) ? data.media : [],
+                    cover_media_id: data.cover_media_id || null,
                 });
                 setLinksDraft(linksToText(data.work_links || []));
             } catch (err) {
@@ -167,6 +191,48 @@ export default function PortalProfile() {
             toast.error("An error occurred. Please try again.");
         } finally {
             setSaving(false);
+        }
+    };
+
+    // Media Library Manager (Phase 4 item 3) — talent-owned delete + cover.
+    // Reuses the exact same deletion/cover implementation the admin Talent
+    // Editor calls (core.py's delete_talent_media_item/set_talent_cover_media
+    // via the new /portal/media endpoints); this page only adds the UI.
+    const requestDeleteMedia = (mid) => {
+        setMediaToDelete(mid);
+        setConfirmDeleteOpen(true);
+    };
+
+    const confirmDeleteMedia = async () => {
+        if (!mediaToDelete) return;
+        const mid = mediaToDelete;
+        try {
+            await portalApi.delete(`/portal/media/${mid}`);
+            setProfile((prev) => ({
+                ...prev,
+                media: prev.media.filter((m) => m.id !== mid),
+                cover_media_id: prev.cover_media_id === mid ? null : prev.cover_media_id,
+            }));
+            toast.success("Media removed from your library");
+        } catch (err) {
+            toast.error(formatErrorDetail(err, "Failed to remove media"));
+            throw err;
+        } finally {
+            setConfirmDeleteOpen(false);
+            setMediaToDelete(null);
+        }
+    };
+
+    const handleSetCover = async (mid) => {
+        setCoverSavingId(mid);
+        try {
+            await portalApi.post(`/portal/media/${mid}/cover`);
+            setProfile((prev) => ({ ...prev, cover_media_id: mid }));
+            toast.success("Cover image updated");
+        } catch (err) {
+            toast.error(formatErrorDetail(err, "Failed to set cover image"));
+        } finally {
+            setCoverSavingId(null);
         }
     };
 
@@ -275,68 +341,127 @@ export default function PortalProfile() {
                             </div>
                         </div>
 
-                        {/* Portfolio — read-only display of existing talent media
-                            (image categories). Reuses IMAGE_URL/isVideo from
-                            lib/api + lib/mediaUtils; no new upload engine, no
-                            new endpoint — this is the same media[] array
-                            GET /portal/profile already returns. Upload
-                            capability is deferred to a later increment. */}
-                        <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-4">
+                        {/* Media Library — manageable view over existing talent
+                            media (Media Library Manager, Phase 4 item 3).
+                            Built on the same media[] array GET /portal/profile
+                            already returns (Phase 2 item 4's read-only
+                            display); this increment adds Delete and Set
+                            Cover, grouped by category. No uploads, no
+                            reordering, no folders — Version 1 scope only. */}
+                        <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-6">
                             <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2 flex items-center gap-2">
                                 <ImageIcon className="w-3.5 h-3.5" />
-                                Portfolio
+                                Media Library
                             </h2>
-                            {(() => {
-                                const portfolioImages = profile.media.filter((m) => !isVideo(m));
-                                if (portfolioImages.length === 0) {
-                                    return <p className="text-xs text-black/40">No portfolio images yet.</p>;
-                                }
+                            {LIBRARY_IMAGE_CATEGORIES.map((cat) => {
+                                const items = profile.media.filter(
+                                    (m) => (m.category === cat.key || (cat.key === "portfolio" && m.category === "image")) && !isVideo(m)
+                                );
                                 return (
-                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                        {portfolioImages.map((m) => (
-                                            <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-black/5 border border-black/5">
-                                                <img
-                                                    src={IMAGE_URL(m)}
-                                                    alt={m.category || "Portfolio image"}
-                                                    className="w-full h-full object-cover"
-                                                />
+                                    <div key={cat.key} className="flex flex-col gap-3">
+                                        <p className="text-xs font-semibold text-black/60">{cat.label}</p>
+                                        {items.length === 0 ? (
+                                            <p className="text-xs text-black/35 italic">No {cat.label.toLowerCase()} images yet.</p>
+                                        ) : (
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                                {items.map((m) => {
+                                                    const isCover = profile.cover_media_id === m.id;
+                                                    return (
+                                                        <div
+                                                            key={m.id}
+                                                            data-testid={`library-media-${m.id}`}
+                                                            className="relative group aspect-square rounded-lg overflow-hidden bg-black/5 border border-black/5"
+                                                        >
+                                                            <img
+                                                                src={IMAGE_URL(m)}
+                                                                alt={cat.label}
+                                                                className="w-full h-full object-cover"
+                                                            />
+                                                            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/40 flex items-center justify-center gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleSetCover(m.id)}
+                                                                    disabled={coverSavingId === m.id}
+                                                                    title="Set as cover image"
+                                                                    data-testid={`set-cover-${m.id}`}
+                                                                    className="p-1.5 bg-white/20 hover:bg-white/30 rounded-md transition-colors disabled:opacity-50"
+                                                                >
+                                                                    <Star className={`w-3.5 h-3.5 ${isCover ? "fill-white text-white" : "text-white"}`} />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => requestDeleteMedia(m.id)}
+                                                                    title="Delete"
+                                                                    data-testid={`delete-media-${m.id}`}
+                                                                    className="p-1.5 bg-white/20 hover:bg-red-600/80 rounded-md transition-colors"
+                                                                >
+                                                                    <Trash2 className="w-3.5 h-3.5 text-white" />
+                                                                </button>
+                                                            </div>
+                                                            {isCover && (
+                                                                <div className="absolute top-1 left-1 bg-black text-white text-[9px] px-1.5 py-0.5 tracking-widest uppercase rounded">
+                                                                    Cover
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
-                                        ))}
+                                        )}
                                     </div>
                                 );
-                            })()}
+                            })}
                         </div>
 
-                        {/* Media — read-only display of video items (intro
-                            video / takes). Same media[] array, same reuse
-                            rationale as Portfolio above. */}
+                        {/* Introduction Video — single-slot video from the
+                            same media[] array (category "video"/"intro_video").
+                            View + Delete only, no cover concept for video. */}
                         <div className="bg-white border border-black/5 rounded-2xl p-6 flex flex-col gap-4">
                             <h2 className="text-xs font-bold uppercase tracking-wider text-black/45 border-b border-black/5 pb-2 flex items-center gap-2">
                                 <VideoIcon className="w-3.5 h-3.5" />
-                                Media
+                                Introduction Video
                             </h2>
                             {(() => {
-                                const videos = profile.media.filter(isVideo);
-                                if (videos.length === 0) {
-                                    return <p className="text-xs text-black/40">No videos yet.</p>;
+                                const videoMedia = profile.media.filter(isVideo);
+                                if (videoMedia.length === 0) {
+                                    return <p className="text-xs text-black/40">No introduction video yet.</p>;
                                 }
+                                const m = videoMedia[0];
+                                const duration = formatMediaDuration(m.duration);
                                 return (
-                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                        {videos.map((m) => (
-                                            <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-black/90 border border-black/5 relative">
-                                                {posterUrl(m) || thumbnailUrl(m) ? (
-                                                    <img
-                                                        src={posterUrl(m) || thumbnailUrl(m)}
-                                                        alt={m.category || "Video"}
-                                                        className="w-full h-full object-cover opacity-80"
-                                                    />
-                                                ) : (
-                                                    <div className="w-full h-full flex items-center justify-center">
-                                                        <VideoIcon className="w-6 h-6 text-white/50" />
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
+                                    <div className="flex flex-col sm:flex-row gap-5 items-start sm:items-center">
+                                        <div className="relative w-full sm:w-56 aspect-video border border-black/5 rounded-lg overflow-hidden shrink-0 bg-black/90">
+                                            {posterUrl(m) || thumbnailUrl(m) ? (
+                                                <img
+                                                    src={posterUrl(m) || thumbnailUrl(m)}
+                                                    alt="Introduction video preview"
+                                                    className="w-full h-full object-cover opacity-80"
+                                                />
+                                            ) : (
+                                                <div className="w-full h-full flex items-center justify-center">
+                                                    <Play className="w-6 h-6 text-white/50" />
+                                                </div>
+                                            )}
+                                            {duration && (
+                                                <div className="absolute bottom-1.5 right-1.5 bg-black/75 text-[10px] text-white font-medium px-1.5 py-0.5 rounded">
+                                                    {duration}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            {duration && (
+                                                <p className="text-xs text-black/50">Duration: {duration}</p>
+                                            )}
+                                            <button
+                                                type="button"
+                                                onClick={() => requestDeleteMedia(m.id)}
+                                                data-testid={`delete-media-${m.id}`}
+                                                className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/10 hover:border-red-600/30 rounded-lg text-xs font-medium text-black/70 hover:text-red-600 transition-colors"
+                                            >
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                                Delete
+                                            </button>
+                                        </div>
                                     </div>
                                 );
                             })()}
@@ -532,6 +657,19 @@ export default function PortalProfile() {
             <footer className="w-full text-center text-[10px] tracking-[0.1em] uppercase text-black/40 py-8 bg-white border-t border-black/5">
                 <span>Editorial Fashion Casting Platform · © Talentgram</span>
             </footer>
+
+            <ConfirmDeleteDialog
+                open={confirmDeleteOpen}
+                title="Remove this media?"
+                description="This permanently removes it from your Media Library. It will not affect any projects you've already submitted."
+                confirmLabel="Remove media"
+                testid="portal-media-delete-dialog"
+                onCancel={() => {
+                    setConfirmDeleteOpen(false);
+                    setMediaToDelete(null);
+                }}
+                onConfirm={confirmDeleteMedia}
+            />
         </div>
     );
 }

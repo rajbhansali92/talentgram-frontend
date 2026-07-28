@@ -44,9 +44,12 @@ import {
     MessageSquare,
     ChevronDown,
     ArrowRight,
+    ArrowLeft,
     ChevronRight,
     User,
     Search,
+    Play,
+    Pause,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -1827,58 +1830,158 @@ function SubmissionPage() {
         );
     }
 
+    // Status system — reused as-is, only extended with the one value
+    // (`selected`) it was already missing (confirmed via
+    // draft-talent-migration's own `$in` query in server.py: submitted /
+    // updated / retest / shortlisted / selected / rejected / approved are
+    // all real values `submission.status` already takes; "selected" was
+    // simply never given a label here). No new status enum — this is
+    // completing coverage of the existing one, in the exact switch pattern
+    // that was already here.
+    const getStatusLabel = () => {
+        const status = submission?.status;
+        if (status === "updated") return "Resubmitted";
+        if (status === "retest") return "Retest Requested";
+        if (status === "approved") return "Approved";
+        if (status === "shortlisted") return "Shortlisted";
+        if (status === "selected") return "Selected";
+        if (status === "rejected") return "Closed";
+        return "Submitted";
+    };
+
+    const getStatusStyles = () => {
+        const status = submission?.status;
+        if (status === "retest") return "bg-rose-50 border border-rose-200 text-rose-700";
+        if (status === "approved" || status === "shortlisted" || status === "selected") return "bg-emerald-50 border border-emerald-200 text-emerald-700";
+        if (status === "rejected") return "bg-slate-100 border border-slate-200 text-slate-600";
+        return "bg-slate-50 border border-slate-200 text-[#333333]";
+    };
+
+    // Status-aware confirmation copy (P0‑2). Same switch, same status
+    // values, one more line per status — not a second status system.
+    const getStatusMessage = () => {
+        const status = submission?.status;
+        if (status === "retest") return "Action required. Please update the requested items and resubmit.";
+        if (status === "approved") return "Congratulations. Your submission has been approved.";
+        if (status === "shortlisted") return "Congratulations. Your submission has been shortlisted.";
+        if (status === "selected") return "Congratulations! You've been selected.";
+        if (status === "rejected") return "Thank you for your submission.";
+        if (status === "updated") return "Your updated submission has been received and is under review.";
+        return "Your submission has been received and is under review.";
+    };
+
+    const statusLabel = getStatusLabel();
+    const statusClass = getStatusStyles();
+    const statusMessage = getStatusMessage();
+
+    const lastUpdated = formatMediaTimestamp({
+        updated_at: submission?.updated_at,
+        created_at: submission?.created_at
+    });
+
+    // Hoisted so both the Hub and the edit-mode view below can render the
+    // *same* banner/feedback markup (P0‑1) — one JSX value, two read sites,
+    // never two copies. `feedback` reuses the existing
+    // `submission.client_feedback` field the Hub always fetched; no new
+    // fetch, no new shape.
+    const feedback = submission?.client_feedback || [];
+    const isRetest = submission?.status === "retest";
+
+    const retestBannerEl = isRetest && (
+        <div
+            className="mb-8 bg-rose-50/60 border border-rose-200 rounded-3xl p-6 text-left animate-in fade-in slide-in-from-top-4 duration-250"
+            role="alert"
+            data-testid="retest-banner"
+        >
+            <div className="flex items-start gap-3">
+                <span className="shrink-0 w-6 h-6 rounded-full bg-rose-500 text-white flex items-center justify-center font-bold text-xs shadow-sm mt-0.5">!</span>
+                <div>
+                    <h4 className="font-semibold text-sm text-rose-950">Action Required: Retest Request</h4>
+                    <p className="text-xs text-rose-800 leading-relaxed mt-1">
+                        The casting team has requested a retest or additional takes for your audition. Please review
+                        the feedback below, record your updates, and click "Update Submission" to submit your new takes.
+                    </p>
+                </div>
+            </div>
+        </div>
+    );
+
+    // Reordered ahead of the status/CTA card (P1‑5) — a talent should read
+    // *why* before deciding what to do about it, whether that's a retest or
+    // just checking in. Same feedback list, same empty state, same
+    // FeedbackRow — only its position on the page changed.
+    const feedbackSectionEl = (
+        <section
+            className="mb-10"
+            aria-label="Client feedback and reviews"
+            data-testid="talent-feedback-section"
+        >
+            <h2 className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-4">Client Feedback &amp; Reviews</h2>
+            {feedback.length === 0 ? (
+                <div
+                    className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-[#333333] border border-[#eaeaea]/60"
+                    data-testid="talent-feedback-empty"
+                >
+                    No reviews yet — the team will share notes here
+                    once a client responds.
+                </div>
+            ) : (
+                <div className="space-y-4">
+                    {feedback.map((f) => (
+                        <FeedbackRow key={f.id} fb={f} />
+                    ))}
+                </div>
+            )}
+        </section>
+    );
+
+    // Submitted Content Summary (P1‑4) — the exact same `experience.checklist`
+    // / `experience.overallProgress` the edit-mode form's own readiness panel
+    // already renders (useSubmissionExperienceModel, computed once above,
+    // unconditionally). No second calculation, no new engine — a read-only
+    // render of state that already existed.
+    const contentSummaryEl = experience.checklist.length > 0 && (
+        <div className="mb-10" data-testid="hub-content-summary">
+            <SubmissionReadinessPanel
+                title="What You've Submitted"
+                items={experience.checklist}
+                progress={experience.overallProgress}
+                testId="hub-readiness-panel"
+            />
+        </div>
+    );
+
+    // Dashboard back-link (P1‑3) — the Portal's own header pattern (a
+    // clickable Logo, see DashboardLayout.jsx) reused here as a plain
+    // anchor: `/submit/{slug}` is a separate Next.js route outside the
+    // Portal's react-router tree (same reasoning already established for
+    // ProjectDetail's Quick Actions link), so a hard `<a>` is the correct
+    // analog, not <NavLink>.
+    const dashboardLinkEl = (
+        <a
+            href="/portal/home"
+            className="inline-flex items-center gap-1.5 text-xs text-[#333333] hover:text-[#111111] transition-colors duration-150 w-fit"
+            data-testid="hub-dashboard-link"
+        >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Dashboard
+        </a>
+    );
+
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED / RETEST state — permanent Submission Hub dashboard
     if (isSubmitted && !editMode) {
-        const getStatusLabel = () => {
-            const status = submission?.status;
-            if (status === "updated") return "Resubmitted";
-            if (status === "retest") return "Retest Requested";
-            if (status === "approved") return "Approved";
-            if (status === "shortlisted") return "Shortlisted";
-            if (status === "rejected") return "Closed";
-            return "Submitted";
-        };
-
-        const getStatusStyles = () => {
-            const status = submission?.status;
-            if (status === "retest") return "bg-rose-50 border border-rose-200 text-rose-700";
-            if (status === "approved" || status === "shortlisted") return "bg-emerald-50 border border-emerald-200 text-emerald-700";
-            if (status === "rejected") return "bg-slate-100 border border-slate-200 text-slate-600";
-            return "bg-slate-50 border border-slate-200 text-[#333333]";
-        };
-
-        const statusLabel = getStatusLabel();
-        const statusClass = getStatusStyles();
-        
-        const lastUpdated = formatMediaTimestamp({
-            updated_at: submission?.updated_at,
-            created_at: submission?.created_at
-        });
-
-        const feedback = submission?.client_feedback || [];
-        
         return (
-            <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden">
+            <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden">
                 <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-[#0c2340]/20" />
                 <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
                 </div>
-                <div className="max-w-xl mx-auto px-4 sm:px-6 py-16 md:py-24 tg-fade-up">
-                    
-                    {submission?.status === "retest" && (
-                        <div className="mb-8 bg-rose-50/60 border border-rose-200 rounded-3xl p-6 text-left animate-in fade-in slide-in-from-top-4 duration-250">
-                            <div className="flex items-start gap-3">
-                                <span className="shrink-0 w-6 h-6 rounded-full bg-rose-500 text-white flex items-center justify-center font-bold text-xs shadow-sm mt-0.5">!</span>
-                                <div>
-                                    <h4 className="font-semibold text-sm text-rose-950">Action Required: Retest Request</h4>
-                                    <p className="text-xs text-rose-800 leading-relaxed mt-1">
-                                        The casting team has requested a retest or additional takes for your audition. Please check the feedback below, record your updates, and click the "Update Submission" button to submit your new takes.
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                    )}
+                <div className="max-w-xl md:max-w-2xl mx-auto px-4 sm:px-6 py-16 md:py-24 tg-fade-up">
+                    <div className="mb-8">{dashboardLinkEl}</div>
+
+                    {retestBannerEl}
+                    {feedbackSectionEl}
 
                     <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-10 border border-[#eaeaea]/60 shadow-[0_20px_40px_-12px_rgba(0,0,0,0.05)] text-center">
                         <div className="relative w-20 h-20 mx-auto mb-8">
@@ -1887,9 +1990,9 @@ function SubmissionPage() {
                                 <Check className="w-8 h-8 text-emerald-600" />
                             </div>
                         </div>
-                        
+
                         <div className="flex flex-col items-center gap-2 mb-6">
-                            <span className={`px-4 py-1.5 rounded-full text-[10px] tracking-[0.1em] uppercase font-mono font-semibold ${statusClass}`}>
+                            <span className={`px-4 py-1.5 rounded-full text-[10px] tracking-[0.1em] uppercase font-mono font-semibold ${statusClass}`} aria-live="polite">
                                 {statusLabel}
                             </span>
                             {lastUpdated && (
@@ -1908,10 +2011,9 @@ function SubmissionPage() {
                             <span className="font-medium text-[#111111]">
                                 {project.brand_name}
                             </span>{" "}
-                            has been received. The Talentgram team will review and
-                            reach out if you're shortlisted.
+                            — {statusMessage}
                         </p>
-                        
+
                         <div className="pt-4 border-t border-[#eaeaea]/50">
                             <button
                                 type="button"
@@ -1924,37 +2026,14 @@ function SubmissionPage() {
                         </div>
                     </div>
 
-                    {/* Client Feedback inbox — only approved+shared rows ever appear
-                        here. The relay is mediated by the team, so notes the talent
-                        sees have been reviewed. Order is approval-time ascending. */}
-                    <section
-                        className="mt-16"
-                        data-testid="talent-feedback-section"
-                    >
-                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333] mb-4">Client Feedback & Reviews</p>
-                        {feedback.length === 0 ? (
-                            <div
-                                className="bg-white/40 rounded-2xl p-6 text-[13px] leading-relaxed text-[#333333] border border-[#eaeaea]/60"
-                                data-testid="talent-feedback-empty"
-                            >
-                                No reviews yet — the team will share notes here
-                                once a client responds.
-                            </div>
-                        ) : (
-                            <div className="space-y-4">
-                                {feedback.map((f) => (
-                                    <FeedbackRow key={f.id} fb={f} />
-                                ))}
-                            </div>
-                        )}
-                    </section>
+                    {contentSummaryEl}
                 </div>
-            </div>
+            </main>
         );
     }
 
     return (
-        <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
+        <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
                 <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-[#0c2340]/10 mix-blend-multiply animate-blob" />
@@ -1965,10 +2044,18 @@ function SubmissionPage() {
                 <div className="absolute top-5 right-5 z-40">
                     <ThemeToggle size="sm" />
                 </div>
+                {isSubmitted && (
+                    <div className="absolute top-5 left-5 z-40">
+                        {dashboardLinkEl}
+                    </div>
+                )}
                 <div className="max-w-2xl mx-auto flex flex-col items-center text-center">
-                    {/* Centered Logo */}
+                    {/* Centered Logo — links back to the Dashboard, same as
+                        the Portal's own header (DashboardLayout.jsx) */}
                     <div className="mb-4">
-                        <Logo size={76} className="mx-auto" />
+                        <a href="/portal/home" data-testid="edit-mode-logo-link">
+                            <Logo size={76} className="mx-auto" />
+                        </a>
                     </div>
 
                     {/* Clickable Instagram icon */}
@@ -2009,6 +2096,21 @@ function SubmissionPage() {
             </header>
 
             <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10 pb-28 sm:pb-10">
+                {/* Retest context + client feedback (P0‑1) — the same
+                    banner/feedback JSX the Hub renders (hoisted above,
+                    before the Hub/edit-mode branch split), placed first in
+                    the edit flow so a returning talent reads *why* they're
+                    updating before they reach a single form field. Only
+                    shown when editing an existing submission — a brand-new
+                    talent (`!isSubmitted`) has no status or feedback to
+                    show yet. */}
+                {isSubmitted && (
+                    <div className="mb-8">
+                        {retestBannerEl}
+                        {feedbackSectionEl}
+                    </div>
+                )}
+
                 {/* SECTION 1 — Project Info */}
                 <section className="mb-8 bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-4">Audition Brief</p>
@@ -2019,10 +2121,16 @@ function SubmissionPage() {
                                 Talentgram × {project.brand_name}
                             </h1>
                         </div>
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                            <span>Draft Auto-Saved</span>
-                        </div>
+                        {/* P2 — only claim a draft exists once we actually
+                            know who's looking (email/Google gate passed).
+                            Showing this before identity is confirmed implied
+                            a draft already existed for a stranger. */}
+                        {emailGateUnlocked && (
+                            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                <span>Draft Auto-Saved</span>
+                            </div>
+                        )}
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5 border-t border-[#eaeaea]/50 pt-6">
                         <Info label="Character" value={project.character} />
@@ -3645,7 +3753,7 @@ function SubmissionPage() {
                     progress={experience.overallProgress}
                 />
             )}
-        </div>
+        </main>
     );
 }
 
@@ -4649,12 +4757,7 @@ function FeedbackRow({ fb }) {
                 </span>
             </div>
             {isVoice ? (
-                <audio
-                    src={fb.content_url}
-                    controls
-                    className="w-full"
-                    data-testid={`talent-feedback-audio-${fb.id}`}
-                />
+                <VoiceFeedbackPlayer src={fb.content_url} testId={`talent-feedback-audio-${fb.id}`} />
             ) : (
                 <p
                     className="text-[13px] leading-relaxed text-[#111111] whitespace-pre-wrap"
@@ -4663,6 +4766,73 @@ function FeedbackRow({ fb }) {
                     {fb.text}
                 </p>
             )}
+        </div>
+    );
+}
+
+// P2 — a bare native `<audio controls>` looked visually inconsistent with
+// the rest of the designed feedback card (and sat at a static 0:00/0:00
+// until pressed). Same single <audio> element underneath for actual
+// playback; only the chrome around it is custom. Scoped to this file's own
+// FeedbackRow only — components/shared/FeedbackRow.jsx (ProjectDetail's
+// copy) is untouched.
+function VoiceFeedbackPlayer({ src, testId }) {
+    const audioRef = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+
+    const togglePlay = () => {
+        const el = audioRef.current;
+        if (!el) return;
+        if (isPlaying) el.pause();
+        else el.play();
+    };
+
+    const formatTime = (s) => {
+        if (!Number.isFinite(s) || s < 0) return "0:00";
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return `${m}:${String(sec).padStart(2, "0")}`;
+    };
+
+    const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+
+    return (
+        <div
+            className="flex items-center gap-3 bg-slate-50/70 border border-slate-100 rounded-xl px-4 py-3"
+            data-testid={testId}
+        >
+            <button
+                type="button"
+                onClick={togglePlay}
+                aria-label={isPlaying ? "Pause voice note" : "Play voice note"}
+                className="shrink-0 w-9 h-9 rounded-full bg-[#0c2340] text-white flex items-center justify-center hover:opacity-90 active:scale-95 transition-all duration-150"
+            >
+                {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+            </button>
+            <div className="flex-1 min-w-0 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                <div
+                    className="h-full bg-[#0c2340] transition-[width] duration-150"
+                    style={{ width: `${progress}%` }}
+                />
+            </div>
+            <span className="shrink-0 text-[10px] font-mono text-[#333333] tabular-nums" style={{ fontVariantNumeric: "tabular-nums" }}>
+                {formatTime(currentTime)} / {formatTime(duration)}
+            </span>
+            <audio
+                ref={audioRef}
+                src={src}
+                className="hidden"
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
+                onEnded={() => setIsPlaying(false)}
+                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+                onTimeUpdate={(e) => {
+                    setCurrentTime(e.currentTarget.currentTime);
+                    setDuration(e.currentTarget.duration || 0);
+                }}
+            />
         </div>
     );
 }

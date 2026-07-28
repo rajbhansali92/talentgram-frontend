@@ -190,8 +190,8 @@ function getVideoMetadata(file) {
 }
 
 const logMemory = (stage) => {
-    console.log(`[MEMORY] ${stage}`);
-    console.log("[MEMORY]", {
+    devLog(`[MEMORY] ${stage}`);
+    devLog("[MEMORY]", {
         used: typeof performance !== "undefined" ? performance.memory?.usedJSHeapSize : undefined,
         total: typeof performance !== "undefined" ? performance.memory?.totalJSHeapSize : undefined
     });
@@ -216,9 +216,9 @@ async function getFFmpeg() {
             toBlobURL(`${base}${FFMPEG_CORE_ASSET_PATH}/ffmpeg-core.js`, "text/javascript"),
             toBlobURL(`${base}${FFMPEG_CORE_ASSET_PATH}/ffmpeg-core.wasm`, "application/wasm"),
         ]);
-        console.log("[FFMPEG] Initializing");
+        devLog("[FFMPEG] Initializing");
         await ffmpeg.load({ coreURL, wasmURL });
-        console.log("[FFMPEG] Loaded successfully");
+        devLog("[FFMPEG] Loaded successfully");
         _ffmpeg = ffmpeg;
         devLog(_hasInitializedOnce ? "[FFMPEG] Reinitialized" : "[FFMPEG] Initialized");
         emitFFmpegTelemetry("ffmpeg_initialized", { reinitialized: _hasInitializedOnce });
@@ -327,7 +327,7 @@ export async function compressVideo(file, { onProgress } = {}) {
         // Retrieve and log video characteristics before compression starts
         try {
             const { duration, width, height, size, codec } = await getVideoMetadata(file);
-            console.log("[VIDEO META]", {
+            devLog("[VIDEO META]", {
                 duration,
                 width,
                 height,
@@ -349,7 +349,7 @@ export async function compressVideo(file, { onProgress } = {}) {
         const outputName = `compress-${jobId}-output.mp4`;
 
         const onFFLog = ({ message }) => {
-            console.log("[FFMPEG LOG]", message);
+            devLog("[FFMPEG LOG]", message);
         };
 
         let compressStartTime = null;
@@ -358,7 +358,7 @@ export async function compressVideo(file, { onProgress } = {}) {
             if (!compressStartTime) {
                 compressStartTime = Date.now();
             }
-            console.log("[FFMPEG PROGRESS]", progress);
+            devLog("[FFMPEG PROGRESS]", progress);
             const pct = Math.max(2, Math.min(99, progress * 100));
             
             let estTimeRemaining = null;
@@ -389,17 +389,17 @@ export async function compressVideo(file, { onProgress } = {}) {
             notify("compress", 1);
             
             logMemory("before writeFile");
-            console.log("[FFMPEG] Writing input file", {
+            devLog("[FFMPEG] Writing input file", {
                 name: file.name,
                 size: file.size,
                 type: file.type
             });
             await ffmpeg.writeFile(inputName, await fetchFile(file));
-            console.log("[FFMPEG] Input file written");
+            devLog("[FFMPEG] Input file written");
             logMemory("after writeFile");
 
             logMemory("before exec");
-            console.log("[FFMPEG] Starting transcode");
+            devLog("[FFMPEG] Starting transcode");
             
             // Device profile and dynamic settings
             const profile = getCompressionProfile();
@@ -407,7 +407,7 @@ export async function compressVideo(file, { onProgress } = {}) {
             const isMobileOrTablet = profile.deviceType === "MOBILE" || profile.deviceType === "TABLET";
             const timeoutMs = isMobileOrTablet ? 180000 : 300000; // 3 min on mobile, 5 min on desktop
             
-            console.log(`[FFMPEG EXEC] Device type: ${profile.deviceType}, Profile: ${profile.profile}, CRF: ${crf}, Timeout: ${timeoutMs / 60000}m`);
+            devLog(`[FFMPEG EXEC] Device type: ${profile.deviceType}, Profile: ${profile.profile}, CRF: ${crf}, Timeout: ${timeoutMs / 60000}m`);
 
             const execPromise = ffmpeg.exec([
                 "-i", inputName,
@@ -436,8 +436,8 @@ export async function compressVideo(file, { onProgress } = {}) {
                 const result = await Promise.race([execPromise, timeoutPromise]);
                 clearTimeout(timerId);
                 
-                console.log("[FFMPEG] Transcode completed");
-                console.log("[FFMPEG EXIT]", result);
+                devLog("[FFMPEG] Transcode completed");
+                devLog("[FFMPEG EXIT]", result);
                 logMemory("after exec");
 
                 if (result !== 0) {
@@ -460,7 +460,7 @@ export async function compressVideo(file, { onProgress } = {}) {
             notify("compress", 100);
             
             const data = await ffmpeg.readFile(outputName);
-            console.log("[FFMPEG] Output size", data.length);
+            devLog("[FFMPEG] Output size", data.length);
             logMemory("after readFile");
 
             try {

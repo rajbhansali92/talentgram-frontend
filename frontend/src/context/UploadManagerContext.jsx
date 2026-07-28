@@ -275,7 +275,6 @@ export function UploadManagerProvider({ children }) {
                             publicId: res.data.public_id,
                         };
                         skipCompression = true;
-                        console.log("[R2 PIPELINE] R2 is active. Bypassing client-side FFmpeg compression.");
                     }
                 } catch (err) {
                     console.warn("[R2 PIPELINE WARNING] Signature pre-fetch failed:", err);
@@ -293,10 +292,8 @@ export function UploadManagerProvider({ children }) {
                     } else if (isMobileOrTablet && file.size > 300 * 1024 * 1024) {
                         skipCompression = true;
                         toast.info("Large video detected. Uploading directly.");
-                        console.log(`[FFMPEG BYPASS] Mobile video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 300MB. Direct upload activated.`);
                     } else if (!isMobileOrTablet && file.size > 700 * 1024 * 1024) {
                         skipCompression = true;
-                        console.log(`[FFMPEG BYPASS] Desktop video of size ${Math.round(file.size / 1024 / 1024)}MB exceeds 700MB. Direct upload activated.`);
                     }
                 } catch (err) {
                     console.error("Failed to check compression profile:", err);
@@ -335,7 +332,6 @@ export function UploadManagerProvider({ children }) {
                 }));
 
                 try {
-                    console.log("Compression started");
                     const { compressVideoIfNeeded } = await import("../lib/videoCompress");
                     compressedFile = await compressVideoIfNeeded(file, {
                         onProgress: (stage, pct, estTimeRemaining) => {
@@ -362,9 +358,7 @@ export function UploadManagerProvider({ children }) {
                             });
                         }
                     });
-                    console.log("Compression finished");
                     if (compressedFile) {
-                        console.log("Compressed size:", compressedFile.size);
                         fileToUpload = compressedFile;
                     }
                 } catch (err) {
@@ -394,11 +388,6 @@ export function UploadManagerProvider({ children }) {
                 scheduleIdleRecycle();
             }
         }
-
-        console.log("ORIGINAL", file.size);
-        console.log("COMPRESSED", compressedFile?.size);
-        console.log("UPLOADED", fileToUpload?.size);
-        console.log("Upload starting with:", fileToUpload?.size);
 
         // Phase 7 — the file may now need to wait for a network-transport
         // slot (separate pool from compression, still capped at
@@ -769,8 +758,21 @@ export function UploadManagerProvider({ children }) {
         });
     };
 
+    // Success Page UX Polish — a page that's done with uploads entirely
+    // (e.g. the Talent Invite success screen, once finalize succeeds) can
+    // clear the Upload Activity Panel outright instead of waiting for it to
+    // idle out on its own. Purely the same UI tally `completedCount` already
+    // documented as "a UI concern" above — resets it alongside the active-
+    // uploads map so `useUploadActivityModel`'s `isVisible` (entries.length
+    // > 0 || completedCount > 0) goes false. Does not touch uploadFile,
+    // retryUpload, or either concurrency gate.
+    const dismissAllUploads = () => {
+        setActiveUploads({});
+        setCompletedCount(0);
+    };
+
     return (
-        <UploadManagerContext.Provider value={{ activeUploads, retryQueue, uploadFile, retryUpload, dismissUpload, completedCount }}>
+        <UploadManagerContext.Provider value={{ activeUploads, retryQueue, uploadFile, retryUpload, dismissUpload, dismissAllUploads, completedCount }}>
             {children}
             <FloatingUploadManager
                 activeUploads={activeUploads}

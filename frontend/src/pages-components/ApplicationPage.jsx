@@ -43,6 +43,9 @@ import {
     Plus,
     User,
     ChevronRight,
+    Image as ImageIcon,
+    Briefcase,
+    Clock,
 } from "lucide-react";
 import {
     HEIGHT_OPTIONS,
@@ -89,7 +92,7 @@ export default function ApplicationPage() {
         skills: [],
     });
     const [media, setMedia] = useState([]);
-    const { activeUploads, uploadFile } = useUploadManager();
+    const { activeUploads, uploadFile, dismissAllUploads } = useUploadManager();
     const stickyFooterRef = useRef(null);
     useStickyFooterHeightVar(stickyFooterRef, "--tg-sticky-cta-h");
     const [saving, setSaving] = useState(false);
@@ -987,6 +990,13 @@ export default function ApplicationPage() {
                 { headers: { Authorization: `Bearer ${token}` } },
             );
             setFinalized(true);
+            // Success Page UX Polish — all uploads for this application are
+            // done by definition (finalize just succeeded); the floating
+            // Upload Activity Panel has nothing left to usefully report and
+            // would otherwise sit on top of the new success screen. Only
+            // clears the panel's own UI tally (see dismissAllUploads in
+            // UploadManagerContext) — no upload/retry/transport behavior.
+            dismissAllUploads();
             // Clear this identity's cached draft (and any legacy slot that was
             // never migrated). Other identities' slots are untouched.
             const finalizedEmail = normEmail(basics.email);
@@ -1356,42 +1366,88 @@ export default function ApplicationPage() {
 
     // --- Finalized ----------------------------------------------------------
     if (finalized) {
+        const dashboardBenefits = [
+            { icon: User, label: "Manage Profile" },
+            { icon: ImageIcon, label: "Media Library" },
+            { icon: Briefcase, label: "Future Projects" },
+            { icon: Clock, label: "Submission History" },
+        ];
         return (
             <div
                 className="min-h-dvh bg-[#faf9f6] text-[#1a1a1a] flex flex-col"
                 data-testid="application-success-page"
             >
                 <Header />
-                <div className="flex-1 flex items-center justify-center p-6">
-                    <div className="max-w-md text-center bg-white rounded-2xl p-8 md:p-10 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.08)] border border-[#eaeaea]">
-                        <div className="w-14 h-14 rounded-full bg-[#e6f7e6] text-[#2b6e2f] inline-flex items-center justify-center mb-6">
-                            <Check className="w-6 h-6" />
-                        </div>
-                        <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">
-                            {isEditMode ? "Saved" : "Submitted"}
-                        </p>
-                        <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a] mb-4">
-                            {isEditMode ? "Profile Updated" : `Thank you, ${basics.first_name}`}
-                        </h1>
-                        <p className="text-[#4a4a4a] text-sm leading-relaxed mb-4">
-                            {isEditMode 
-                                ? "Your changes have been saved."
-                                : "Your profile has been successfully submitted."
-                            }
-                        </p>
-                        {!isEditMode && (
-                            <div className="text-left bg-[#faf9f6] border border-[#eaeaea] rounded-xl p-4 mb-6">
-                                <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-2">
-                                    What happens next
-                                </p>
-                                <ul className="text-[#4a4a4a] text-sm leading-relaxed space-y-1.5">
-                                    <li>✓ Your application has been received.</li>
-                                    <li>✓ Our team reviews every application — usually within <strong>3–5 working days</strong>.</li>
-                                    <li>✓ We'll email you either way; if anything else is needed, we'll reach out directly.</li>
-                                </ul>
+                <div className="flex-1 flex items-center justify-center p-6 py-12">
+                    <div className="w-full max-w-md text-center">
+                        <Logo size={72} className="mx-auto mb-8" forceVariant="black" />
+                        <div className="bg-white rounded-2xl p-8 md:p-10 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.08)] border border-[#eaeaea]">
+                            <div className="w-14 h-14 rounded-full bg-[#e6f7e6] text-[#2b6e2f] inline-flex items-center justify-center mb-6">
+                                <Check className="w-6 h-6" />
                             </div>
-                        )}
-                        <div className="text-xs text-[#8b8b8b] font-medium mb-6">
+                            <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-3">
+                                {isEditMode ? "Saved" : "Profile Submitted"}
+                            </p>
+                            <h1 className="font-display text-3xl md:text-4xl tracking-tight text-[#1a1a1a] mb-4">
+                                {isEditMode ? "Profile Updated" : `Thank you, ${basics.first_name}!`}
+                            </h1>
+                            <p className="text-[#4a4a4a] text-sm leading-relaxed mb-4">
+                                {isEditMode
+                                    ? "Your changes have been saved to your profile."
+                                    : "Your profile has been submitted successfully and is now safely stored with Talentgram."
+                                }
+                            </p>
+                            {!isEditMode && (
+                                <div className="text-left bg-[#faf9f6] border border-[#eaeaea] rounded-xl p-4 mb-6">
+                                    <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-2">
+                                        What happens next
+                                    </p>
+                                    <ul className="text-[#4a4a4a] text-sm leading-relaxed space-y-1.5">
+                                        <li>✓ Your profile has been received.</li>
+                                        <li>✓ Our casting team carefully reviews every submission.</li>
+                                        <li>✓ Most reviews are completed within <strong>3–5 business days</strong>.</li>
+                                        <li>✓ If you're shortlisted, we'll reach out using your registered email or phone number.</li>
+                                    </ul>
+                                </div>
+                            )}
+
+                            <div className="text-left border-t border-[#eaeaea] pt-6 mt-2">
+                                <p className="text-[11px] tracking-[0.12em] uppercase text-[#6b6b6b] mb-2">
+                                    Next step
+                                </p>
+                                <p className="text-[#4a4a4a] text-sm leading-relaxed mb-5">
+                                    Head to your Talent Dashboard to keep everything up to date and stay ready for what's next.
+                                </p>
+
+                                <a
+                                    href="/portal/home"
+                                    data-testid="apply-success-dashboard-cta"
+                                    className="w-full bg-[#1a1a1a] text-white py-4 rounded-xl text-sm font-medium hover:bg-[#333] transition-colors duration-150 inline-flex items-center justify-center gap-2 min-h-[52px] active:scale-[0.98]"
+                                >
+                                    View My Talent Dashboard
+                                    <ArrowRight className="w-4 h-4" />
+                                </a>
+
+                                <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 mt-5">
+                                    {dashboardBenefits.map(({ icon: Icon, label }) => (
+                                        <div key={label} className="flex items-center gap-2 text-xs text-[#6b6b6b]">
+                                            <Icon className="w-3.5 h-3.5 text-[#b0aea6] shrink-0" />
+                                            {label}
+                                        </div>
+                                    ))}
+                                </div>
+
+                                <button
+                                    type="button"
+                                    onClick={() => window.close()}
+                                    data-testid="apply-success-done-btn"
+                                    className="w-full text-center text-xs text-[#8b8b8b] font-medium mt-6 py-2 hover:text-[#4a4a4a] transition-colors duration-150"
+                                >
+                                    Done
+                                </button>
+                            </div>
+                        </div>
+                        <div className="text-xs text-[#8b8b8b] font-medium mt-6">
                             Thank you for your interest in joining Talentgram.
                         </div>
                     </div>

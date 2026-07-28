@@ -1737,6 +1737,46 @@ function SubmissionPage() {
     const isSubmitted =
         submission && submission.status && submission.status !== "draft";
 
+    // Smart Checklist deep link — the one new entry point Project Detail
+    // (`/portal/projects/{slug}`) uses to jump into a specific requirement
+    // here. `?focus=<requirementId>` is the only new signal; resolving it
+    // reuses the exact same readinessModel lookup + focusRequirementItem
+    // path a readiness-panel click already uses inside this page — no new
+    // id/selector map. Split into two effects because a submitted project
+    // renders the read-only Submission Hub (no fields in the DOM) until
+    // `editMode` flips true; the jump effect waits for that flip before
+    // querying the DOM, using the existing "Update Submission" transition
+    // rather than a new one.
+    const focusParam = useMemo(
+        () => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("focus") : null),
+        [],
+    );
+    // `loading` only reflects the project fetch — the JWT/ATK resume effects
+    // above set `submission` on their own, unrelated timeline, so there's a
+    // real window where `loading` is already false but `submission` hasn't
+    // arrived yet. Reusing their own existing guards (`saved`, `LS_ATK_KEY`)
+    // to recognize that in-flight window, so the jump effect doesn't act on
+    // a false "not submitted" reading and fire before the Submission Hub
+    // takes over the page.
+    const resumePending = !submission && (!!saved?.token || !!(typeof window !== "undefined" && localStorage.getItem(LS_ATK_KEY(slug))));
+    const focusEditModeAppliedRef = useRef(false);
+    useEffect(() => {
+        if (!focusParam || focusEditModeAppliedRef.current || resumePending) return;
+        if (isSubmitted && !editMode) {
+            focusEditModeAppliedRef.current = true;
+            setEditMode(true);
+        }
+    }, [focusParam, isSubmitted, editMode, resumePending]);
+    const focusJumpDoneRef = useRef(false);
+    useEffect(() => {
+        if (!focusParam || focusJumpDoneRef.current || loading || resumePending) return;
+        if (isSubmitted && !editMode) return; // Submission Hub still showing — wait for the effect above
+        const target = experience.readinessModel.find((item) => item.id === focusParam);
+        if (!target) return;
+        focusJumpDoneRef.current = true;
+        focusRequirementItem(target);
+    }, [focusParam, isSubmitted, editMode, loading, resumePending, experience.readinessModel, focusRequirementItem]);
+
     // ---------------------------------------------------------------
     if (loading) {
         return (

@@ -303,14 +303,19 @@ export default function ProjectDetail() {
                 </div>
 
                 {/* Requirements Checklist — the real Requirement/Readiness
-                    engine output, read-only. SubmissionReadinessPanel itself
-                    returns null when items.length === 0, so no extra guard
-                    is needed here. No onItemClick (no navigation/deep-link
-                    yet) and no saveStatus (no autosave concept on this
-                    read-only page) are passed. */}
+                    engine output. SubmissionReadinessPanel itself returns
+                    null when items.length === 0, so no extra guard is
+                    needed here. Smart Checklist: onItemClick launches the
+                    canonical editor (`/submit/{slug}?focus={item.id}`) and
+                    lets it scroll/highlight — this page never edits, it
+                    only navigates. No saveStatus (no autosave concept on
+                    this read-only page) is passed. */}
                 <SubmissionReadinessPanel
                     title="Requirements"
                     items={checklistItems}
+                    onItemClick={(item) => {
+                        window.location.href = `/submit/${slug}?focus=${encodeURIComponent(item.id)}`;
+                    }}
                     progress={experience.overallProgress}
                     testId="project-detail-readiness-panel"
                 />

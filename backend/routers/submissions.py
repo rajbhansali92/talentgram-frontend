@@ -167,6 +167,111 @@ def deduplicate_media(media_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return deduped
 
 
+def _prefill_video_item(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape one talent/submission/application media item as a prefill
+    intro-video entry. Extracted so `build_prefill_media`'s three-tier
+    fallback below doesn't repeat this dict literal three times."""
+    return {
+        "id": m.get("id"),
+        "category": "intro_video",
+        "url": m.get("url"),
+        "public_id": m.get("public_id"),
+        "resource_type": m.get("resource_type") or "video",
+        "content_type": m.get("content_type") or "video/mp4",
+        "original_filename": m.get("original_filename"),
+        "size": m.get("size") or 0,
+        "created_at": m.get("created_at") or _now(),
+    }
+
+
+async def build_prefill_media(talent: Dict[str, Any], email: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Canonical prefill-media builder (Media Library Foundation, Phase 4
+    item 1). The single source of truth for turning a talent's Global
+    Profile media (`talent.media`) into the `prefill_media` list every
+    entry point returns — replaces three previously independent, slightly
+    divergent implementations that used to live separately in
+    `/public/prefill`, `start_submission`, and `routers/auth.py`'s
+    `_get_talent_profile_response`.
+
+    Portfolio-type images (indian/western/portfolio→image) come straight
+    from `talent.get("media")`, using the more defensive of the two
+    previously-diverging filters (checks `resource_type`/`content_type`,
+    not just category, so a miscategorized video item can never end up in
+    the images list).
+
+    The introduction video uses the richest resolution order, previously
+    found only in `start_submission`'s inline logic — every entry point
+    now gets the same fallback:
+      1. the talent's own Global Profile media (`talents.media`)
+      2. their most recently submitted project with a video
+      3. their most recent `/apply` application with a video
+
+    `email` is used only for tiers 2/3 (the `db.submissions`/
+    `db.applications` lookups) — pass it explicitly since not every
+    caller's talent projection happens to include the `email` field.
+    """
+    prefill_images: List[Dict[str, Any]] = []
+    for m in (talent.get("media") or []):
+        category = m.get("category")
+        if category == "portfolio":
+            category = "image"
+        resource_type = m.get("resource_type") or "image"
+        is_image = resource_type == "image" or (
+            category not in {"video", "intro_video"}
+            and not (m.get("content_type") or "").startswith("video/")
+        )
+        if is_image and m.get("url"):
+            prefill_images.append({
+                "id": m.get("id"),
+                "category": category or "image",
+                "url": m.get("url"),
+                "public_id": m.get("public_id"),
+                "resource_type": "image",
+                "content_type": m.get("content_type") or "image/jpeg",
+                "original_filename": m.get("original_filename"),
+                "size": m.get("size") or 0,
+                "created_at": m.get("created_at") or _now(),
+            })
+
+    # Intro video — priority 1: db.talents.media
+    latest_intro = None
+    for m in (talent.get("media") or []):
+        if m.get("category") in {"video", "intro_video"} and m.get("url"):
+            latest_intro = _prefill_video_item(m)
+            break
+
+    norm_email = normalize_email(email) if email else normalize_email(talent.get("email"))
+
+    # Priority 2: db.submissions
+    if not latest_intro and norm_email:
+        latest_sub = await db.submissions.find_one(
+            {"talent_email": norm_email, "media.category": {"$in": ["intro_video", "video"]}},
+            sort=[("submitted_at", -1), ("created_at", -1)]
+        )
+        if latest_sub:
+            for m in (latest_sub.get("media") or []):
+                if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                    latest_intro = _prefill_video_item(m)
+                    break
+
+    # Priority 3: db.applications
+    if not latest_intro and norm_email:
+        latest_app = await db.applications.find_one(
+            {"talent_email": norm_email, "media.category": {"$in": ["intro_video", "video"]}},
+            sort=[("created_at", -1)]
+        )
+        if latest_app:
+            for m in (latest_app.get("media") or []):
+                if m.get("category") in {"intro_video", "video"} and m.get("url"):
+                    latest_intro = _prefill_video_item(m)
+                    break
+
+    if latest_intro:
+        prefill_images.append(latest_intro)
+
+    return deduplicate_media(prefill_images)
+
+
 # --------------------------------------------------------------------------
 # Public (talent-facing) flow
 # --------------------------------------------------------------------------
@@ -257,43 +362,9 @@ async def prefill_for_email(
     first = parts[0] if parts else ""
     last = parts[1] if len(parts) > 1 else ""
 
-    # Image prefill: fetch existing image, indian, western look images from master profile
-    prefill_images = []
-    for m in (talent.get("media") or []):
-        category = m.get("category")
-        if category == "portfolio":
-            category = "image"
-        resource_type = m.get("resource_type") or "image"
-        is_image = resource_type == "image" or (category not in {"video", "intro_video"} and not (m.get("content_type") or "").startswith("video/"))
-        if is_image and m.get("url"):
-            prefill_images.append({
-                "id": m.get("id"),
-                "category": category or "image",
-                "url": m.get("url"),
-                "public_id": m.get("public_id"),
-                "resource_type": "image",
-                "content_type": m.get("content_type") or "image/jpeg",
-                "original_filename": m.get("original_filename"),
-                "size": m.get("size") or 0,
-                "created_at": m.get("created_at") or _now(),
-            })
-
-    # Intro video prefill: priority 1: db.talents.media
-    latest_intro = None
-    for m in (talent.get("media") or []):
-        if m.get("category") in {"video", "intro_video"} and m.get("url"):
-            latest_intro = {
-                "id": m.get("id"),
-                "category": "intro_video",
-                "url": m.get("url"),
-                "public_id": m.get("public_id"),
-                "resource_type": m.get("resource_type") or "video",
-                "content_type": m.get("content_type") or "video/mp4",
-                "original_filename": m.get("original_filename"),
-                "size": m.get("size") or 0,
-                "created_at": m.get("created_at") or _now(),
-            }
-            break
+    # Media Library Foundation (Phase 4 item 1): the one canonical prefill
+    # builder, shared with `start_submission` and `_get_talent_profile_response`.
+    prefill_media = await build_prefill_media(talent, email=email)
     return {
         "first_name": first,
         "last_name": last,
@@ -310,7 +381,7 @@ async def prefill_for_email(
         "work_links": talent.get("work_links") or [],
         "skills": talent.get("skills") or [],
         "image_url": _resolve_cover_url(talent),
-        "prefill_media": deduplicate_media(prefill_images + ([latest_intro] if latest_intro else [])),
+        "prefill_media": prefill_media,
     }
 
 
@@ -415,7 +486,7 @@ async def start_submission(
 
     fd = payload.form_data or {}
     talent_age = None
-    prefill_media = []
+    prefill_media: List[Dict[str, Any]] = []
     if email:
         talent_doc = await db.talents.find_one(
             {"$or": [
@@ -427,92 +498,10 @@ async def start_submission(
         )
         if talent_doc:
             talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
-            # Image prefill: fetch existing image, indian, western look images from master profile
-            for m in (talent_doc.get("media") or []):
-                category = m.get("category")
-                if category == "portfolio":
-                    category = "image"
-                if category in {"image", "indian", "western"} and m.get("url"):
-                    prefill_media.append({
-                        "id": m.get("id"),
-                        "category": category,
-                        "url": m.get("url"),
-                        "public_id": m.get("public_id"),
-                        "resource_type": m.get("resource_type") or "image",
-                        "content_type": m.get("content_type") or "image/jpeg",
-                        "original_filename": m.get("original_filename"),
-                        "size": m.get("size") or 0,
-                        "created_at": m.get("created_at") or _now(),
-                    })
-            
-            # Intro video prefill: priority 1: db.talents.media
-            latest_intro = None
-            for m in (talent_doc.get("media") or []):
-                if m.get("category") in {"video", "intro_video"} and m.get("url"):
-                    latest_intro = {
-                        "id": m.get("id"),
-                        "category": "intro_video",
-                        "url": m.get("url"),
-                        "public_id": m.get("public_id"),
-                        "resource_type": m.get("resource_type") or "video",
-                        "content_type": m.get("content_type") or "video/mp4",
-                        "original_filename": m.get("original_filename"),
-                        "size": m.get("size") or 0,
-                        "created_at": m.get("created_at") or _now(),
-                    }
-                    break
-
-            # Priority 2: db.submissions
-            if not latest_intro:
-                latest_sub = await db.submissions.find_one(
-                    {
-                        "talent_email": email,
-                        "media.category": {"$in": ["intro_video", "video"]}
-                    },
-                    sort=[("submitted_at", -1), ("created_at", -1)]
-                )
-                if latest_sub:
-                    for m in (latest_sub.get("media") or []):
-                        if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                            latest_intro = {
-                                "id": m.get("id"),
-                                "category": "intro_video",
-                                "url": m.get("url"),
-                                "public_id": m.get("public_id"),
-                                "resource_type": m.get("resource_type") or "video",
-                                "content_type": m.get("content_type") or "video/mp4",
-                                "original_filename": m.get("original_filename"),
-                                "size": m.get("size") or 0,
-                                "created_at": m.get("created_at") or _now(),
-                            }
-                            break
-            
-            if not latest_intro:
-                latest_app = await db.applications.find_one(
-                    {
-                        "talent_email": email,
-                        "media.category": {"$in": ["intro_video", "video"]}
-                    },
-                    sort=[("created_at", -1)]
-                )
-                if latest_app:
-                    for m in (latest_app.get("media") or []):
-                        if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                            latest_intro = {
-                                "id": m.get("id"),
-                                "category": "intro_video",
-                                "url": m.get("url"),
-                                "public_id": m.get("public_id"),
-                                "resource_type": m.get("resource_type") or "video",
-                                "content_type": m.get("content_type") or "video/mp4",
-                                "original_filename": m.get("original_filename"),
-                                "size": m.get("size") or 0,
-                                "created_at": m.get("created_at") or _now(),
-                            }
-                            break
-            
-            if latest_intro:
-                prefill_media.append(latest_intro)
+            # Media Library Foundation (Phase 4 item 1): the one canonical
+            # prefill builder, shared with `/public/prefill` and
+            # `_get_talent_profile_response` — see build_prefill_media().
+            prefill_media = await build_prefill_media(talent_doc, email=email)
 
     submitted_age_override_val = None
     override_active = fd.get("overrideAge") or fd.get("override_age")
@@ -529,6 +518,11 @@ async def start_submission(
 
     sid = str(uuid.uuid4())
     atk = make_access_token()
+    # Media Library Foundation (Phase 4 item 1): every item here came from
+    # build_prefill_media() (i.e. the talent's Global Profile), so it's
+    # tagged origin="global". Additive field only — never backfilled onto
+    # existing submissions, never migrated.
+    initial_media = [{**m, "origin": "global"} for m in deduplicate_media(prefill_media)]
     doc = {
         "id": sid,
         "project_id": project["id"],
@@ -541,7 +535,7 @@ async def start_submission(
         "field_visibility": fv_defaults,
         "submitted_age_override": submitted_age_override_val,
         "effective_age": effective_age_val,
-        "media": deduplicate_media(prefill_media),
+        "media": initial_media,
         "status": "draft",
         "decision": "pending",
         "access_token": atk,
@@ -789,6 +783,7 @@ async def submission_upload(
         "duration": result.get("duration"),
         "thumbnail_url": result.get("thumbnail_url") if (is_video and result.get("thumbnail_url")) else (media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image else None),
         "poster_url": result.get("thumbnail_url") if (is_video and result.get("thumbnail_url")) else (video_poster_url(result["public_id"]) if is_video else None),
+        "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
     }
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
@@ -1040,8 +1035,9 @@ async def submission_complete_upload(
         "duration": payload.duration,
         "thumbnail_url": poster_url if is_video else thumbnail_url,
         "poster_url": poster_url if is_video else None,
+        "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
     }
-    
+
     existing_takes = 0
     if category == "take":
         existing_takes = sum(
@@ -1283,6 +1279,7 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
         "thumbnail_url": video_poster_url(public_id),
         "poster_url": video_poster_url(public_id),
         "source": "direct_upload",
+        "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
     }
     if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
         media["label"] = (label or "").strip() or "Take"
@@ -1558,6 +1555,7 @@ async def video_complete(
             "poster_url": None,
             "status": "processing",
             "source": "direct_upload",
+            "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
         }
         if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
             media["label"] = (payload.label or "").strip() or "Take"
@@ -2939,6 +2937,7 @@ async def admin_add_media(
             media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"])
             if rt == "image" else None
         ),
+        "origin": "project",  # Media Library Foundation (Phase 4 item 1) — admin-added, stored only on this submission (see docstring above), never touches the Global Profile.
     }
 
     await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})

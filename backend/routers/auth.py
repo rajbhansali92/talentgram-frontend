@@ -579,48 +579,18 @@ async def _get_talent_profile_response(talent: dict) -> dict:
     name_parts = talent.get("name", "").split(" ", 1)
     first_name = name_parts[0] if name_parts else ""
     last_name = name_parts[1] if len(name_parts) > 1 else ""
-    
-    from routers.submissions import deduplicate_media
-    import datetime
-    
-    email = talent.get("email", "").strip().lower()
-    
-    # Image prefill: fetch existing image, indian, western look images from master profile
-    prefill_images = []
-    for m in (talent.get("media") or []):
-        category = m.get("category")
-        if category == "portfolio":
-            category = "image"
-        resource_type = m.get("resource_type") or "image"
-        is_image = resource_type == "image" or (category not in {"video", "intro_video"} and not (m.get("content_type") or "").startswith("video/"))
-        if is_image and m.get("url"):
-            prefill_images.append({
-                "id": m.get("id"),
-                "category": category or "image",
-                "url": m.get("url"),
-                "public_id": m.get("public_id"),
-                "resource_type": "image",
-                "content_type": m.get("content_type") or "image/jpeg",
-                "original_filename": m.get("original_filename"),
-                "size": m.get("size") or 0,
-                "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            })
 
-    # Intro video prefill: priority 1: db.talents.media
-    latest_intro = None
-    for m in (talent.get("media") or []):
-        if m.get("category") in {"video", "intro_video"} and m.get("url"):
-            latest_intro = {
-                "id": m.get("id"),
-                "category": "intro_video",
-                "url": m.get("url"),
-                "public_id": m.get("public_id"),
-                "resource_type": m.get("resource_type") or "video",
-                "content_type": m.get("content_type") or "video/mp4",
-                "original_filename": m.get("original_filename"),
-                "size": m.get("size") or 0,
-                "created_at": m.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            }
+    # Media Library Foundation (Phase 4 item 1): the one canonical prefill
+    # builder, shared with `/public/prefill` and `start_submission` — see
+    # build_prefill_media() in routers/submissions.py. This also gives the
+    # OTP/Google-auth paths the richer 3-tier intro-video fallback (talent
+    # profile → latest submission → latest application) that only
+    # `start_submission` had before.
+    from routers.submissions import build_prefill_media
+
+    email = talent.get("email", "").strip().lower()
+    prefill_media = await build_prefill_media(talent, email=email)
+
     return {
         "email": talent.get("email"),
         "first_name": first_name,
@@ -638,7 +608,7 @@ async def _get_talent_profile_response(talent: dict) -> dict:
         "skills": talent.get("skills", []),
         "work_links": talent.get("work_links", []),
         "image_url": _resolve_cover_url(talent),
-        "prefill_media": deduplicate_media(prefill_images + ([latest_intro] if latest_intro else [])),
+        "prefill_media": prefill_media,
     }
 
 @router.post("/auth/otp/send")

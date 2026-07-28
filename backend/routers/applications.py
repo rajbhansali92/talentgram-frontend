@@ -35,6 +35,7 @@ from core import (
     MAX_IMAGES_PER_CATEGORY,
     MAX_SUBMISSION_IMAGE_BYTES,
     MAX_SUBMISSION_VIDEO_BYTES,
+    MEDIA_COPY_EXCLUDE_FIELDS,
     ApplicationStartIn,
     SubmissionDecisionIn,
     SubmissionUpdateIn,
@@ -352,21 +353,16 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
 
     # Provider-agnostic field copy (Production Certification, Phase 4 item
     # 4 — same fix as core.sync_media_to_global_talent()): copy every
-    # field the talent's Library item has, except the deny-list below,
-    # instead of hand-picking fields. The old whitelist here silently
-    # dropped `provider`/`stream_uid`/`thumbnail_url`/`mime`, which breaks
-    # long-term lifecycle management (delete/cleanup) for any hydrated
-    # video — see core.is_media_asset_referenced() and
-    # safe_cleanup_media_storage(), which both need `stream_uid` to
-    # protect/clean up Cloudflare Stream assets correctly.
-    _HYDRATE_EXCLUDE_FIELDS = {
-        "id", "scope", "category",
-        "submission_id", "project_id", "application_id", "talent_id",
-        "source_submission_id", "source_submission_media_id",
-        "source_application_id", "source_application_media_id",
-        "origin", "label", "status", "failed_at", "failure_reason",
-        "client_visible", "internal_only", "client_cover", "created_at",
-    }
+    # field the talent's Library item has, except
+    # core.MEDIA_COPY_EXCLUDE_FIELDS, instead of hand-picking fields. The
+    # old whitelist here silently dropped `provider`/`stream_uid`/
+    # `thumbnail_url`/`mime`, which breaks long-term lifecycle management
+    # (delete/cleanup) for any hydrated video — see
+    # core.is_media_asset_referenced() and safe_cleanup_media_storage(),
+    # which both need `stream_uid` to protect/clean up Cloudflare Stream
+    # assets correctly. Shared with sync_media_to_global_talent()'s
+    # identical mirror logic (Release Preparation cleanup) rather than
+    # maintaining two copies of the same field list.
     new_items = []
     for m in talent_media:
         mid = m.get("id")
@@ -387,7 +383,7 @@ async def _reconcile_draft_from_talent(app_doc: Dict, talent: Dict, aid: str) ->
         a_cat = _TALENT_TO_APP_CATEGORY.get(m.get("category", ""))
         if not a_cat:
             continue
-        item = {k: v for k, v in m.items() if k not in _HYDRATE_EXCLUDE_FIELDS}
+        item = {k: v for k, v in m.items() if k not in MEDIA_COPY_EXCLUDE_FIELDS}
         item.update({
             "id": mid,
             "category": a_cat,

@@ -2818,6 +2818,38 @@ SYNC_TO_GLOBAL_CATEGORIES = {
     "image", "portfolio", "indian", "western", "video", "intro_video", "headshot", "headshots", "additional_portfolio"
 }
 
+# Shared deny-list for every "copy a media item by value into a different
+# owning document" operation (Release Preparation cleanup — this was two
+# independently-maintained but byte-identical sets: this module's own
+# sync_media_to_global_talent() mirror, and applications.py's
+# _reconcile_draft_from_talent() hydrate). Centralized so a future addition
+# only needs to change one place. Excluded fields describe the SOURCE
+# document's ownership/location/point-in-time processing state, not the
+# physical asset itself, so they'd be wrong (or unsafe) to carry onto a
+# copy in a different collection:
+#   - id/scope: every copy gets its own id and its own scope value
+#   - submission_id/project_id/application_id/talent_id: parent linkage
+#     that belongs to the SOURCE document
+#   - source_submission_*/source_application_*: recomputed by the caller
+#     for THIS copy, never taken from the source
+#   - origin: submission-only "global"/"project" upload semantics
+#   - label: audition-take-specific display text; takes are never copied
+#     by any of these paths, kept for clarity
+#   - status/failed_at/failure_reason: the SOURCE upload's own async
+#     pipeline state at a point in time; irrelevant once copied (both
+#     callers only copy items that already have a real `url`)
+#   - client_visible/internal_only/client_cover: Client Review Link
+#     visibility flags scoped to that specific submission
+#   - category/created_at: every caller sets these explicitly instead
+MEDIA_COPY_EXCLUDE_FIELDS = frozenset({
+    "id", "scope", "category",
+    "submission_id", "project_id", "application_id", "talent_id",
+    "source_submission_id", "source_submission_media_id",
+    "source_application_id", "source_application_media_id",
+    "origin", "label", "status", "failed_at", "failure_reason",
+    "client_visible", "internal_only", "client_cover", "created_at",
+})
+
 
 async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_cache: bool = False) -> None:
     """Mirror a submission's media into the global talent record.
@@ -2887,50 +2919,19 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
 
     # Build the mirror item. Provider-agnostic by construction (Production
     # Certification, Phase 4 item 4 — Provider Metadata Integrity fix):
-    # copy EVERY field the source item has, except the deny-list below,
-    # rather than hand-picking a fixed set of fields to carry over. The
-    # previous whitelist-based copy silently dropped `provider`/
-    # `stream_uid`/`thumbnail_url`/`poster_url`/`duration` — which broke
-    # long-term lifecycle management (delete/cleanup) for any mirrored
-    # video, since Cloudflare Stream's real identifier (`stream_uid`) never
-    # reached the Library copy at all. A deny-list means any CURRENT or
-    # FUTURE provider-specific field (a new storage backend's own asset
-    # key, delivery id, etc.) survives the mirror automatically — no code
-    # change needed here when a new provider is added.
-    #
-    # Excluded fields describe the SOURCE document's ownership/location or
-    # its point-in-time processing state, not the physical asset itself, so
-    # they would be wrong (or actively unsafe) to carry onto a Library item:
-    #   - id/scope: the mirror gets its own id and is always scope="talent"
-    #   - submission_id/project_id/application_id/talent_id: parent linkage
-    #     that belongs to the SOURCE document, not the Library
-    #   - source_submission_*/source_application_*: recomputed below from
-    #     THIS sync call, not copied from the source (which wouldn't have
-    #     them anyway — they're mirror-only fields)
-    #   - origin: submission-only semantics ("global" vs "project" upload);
-    #     meaningless on a Library item
-    #   - label: audition-take-specific display text; takes are never
-    #     synced (excluded from cat_mapping) but kept in the deny-list for
-    #     clarity
-    #   - status/failed_at/failure_reason: describe the SOURCE upload's own
-    #     async pipeline at a point in time; irrelevant once mirrored (we
-    #     already only mirror items that have a real `url`, i.e. completed)
-    #   - client_visible/internal_only/client_cover: Client Review Link
-    #     visibility flags scoped to that specific submission's client
-    #     presentation — never appropriate on a talent-owned Library item
-    #   - category/created_at: set explicitly below instead of copied
-    _MIRROR_EXCLUDE_FIELDS = {
-        "id", "scope",
-        "submission_id", "project_id", "application_id", "talent_id",
-        "source_submission_id", "source_submission_media_id",
-        "source_application_id", "source_application_media_id",
-        "origin", "label",
-        "status", "failed_at", "failure_reason",
-        "client_visible", "internal_only", "client_cover",
-        "category", "created_at",
-    }
+    # copy EVERY field the source item has, except MEDIA_COPY_EXCLUDE_FIELDS
+    # (defined above), rather than hand-picking a fixed set of fields to
+    # carry over. The previous whitelist-based copy silently dropped
+    # `provider`/`stream_uid`/`thumbnail_url`/`poster_url`/`duration` —
+    # which broke long-term lifecycle management (delete/cleanup) for any
+    # mirrored video, since Cloudflare Stream's real identifier
+    # (`stream_uid`) never reached the Library copy at all. A deny-list
+    # means any CURRENT or FUTURE provider-specific field (a new storage
+    # backend's own asset key, delivery id, etc.) survives the mirror
+    # automatically — no code change needed here when a new provider is
+    # added.
     is_app = media.get("scope") == "application" or "application_id" in media
-    mirror = {k: v for k, v in media.items() if k not in _MIRROR_EXCLUDE_FIELDS}
+    mirror = {k: v for k, v in media.items() if k not in MEDIA_COPY_EXCLUDE_FIELDS}
     mirror.update({
         "id": str(uuid.uuid4()),
         "category": mapped_cat,

@@ -946,13 +946,6 @@ export default function ApplicationPage() {
         setErrors(next);
 
         if (Object.keys(next).length > 0) {
-            // First/last name normally live off this screen (the identity
-            // gate), but the recovery section above renders whenever either
-            // is missing, so scroll/focus there like any other on-screen
-            // field instead of dead-ending on a toast with nothing to fix.
-            if (next.first_name || next.last_name) {
-                toast.error(next.first_name || next.last_name);
-            }
             const order = [
                 [next.first_name || next.last_name, identityRef],
                 [next.location, locationRef],
@@ -961,12 +954,27 @@ export default function ApplicationPage() {
                 [next.media, mediaRef],
             ];
             const firstInvalid = order.find(([msg]) => msg);
-            if (firstInvalid && firstInvalid[1].current) {
-                firstInvalid[1].current.scrollIntoView({ behavior: "smooth", block: "center" });
-                const focusable = firstInvalid[1].current.querySelector(
-                    "input, button, textarea, select, [tabindex]"
-                );
-                if (focusable) setTimeout(() => focusable.focus({ preventScroll: true }), 300);
+            if (firstInvalid) {
+                const [errorMsg, targetRef] = firstInvalid;
+                if (errorMsg) {
+                    toast.error(errorMsg);
+                }
+                if (targetRef && targetRef.current) {
+                    targetRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+
+                    // Temporary soft red highlight ring (~1 second)
+                    targetRef.current.classList.add("ring-2", "ring-[#d03a2a]", "ring-offset-2", "rounded-xl", "transition-all", "duration-300");
+                    setTimeout(() => {
+                        if (targetRef.current) {
+                            targetRef.current.classList.remove("ring-2", "ring-[#d03a2a]", "ring-offset-2", "rounded-xl");
+                        }
+                    }, 1200);
+
+                    const focusable = targetRef.current.querySelector(
+                        "input, button, textarea, select, [tabindex]"
+                    );
+                    if (focusable) setTimeout(() => focusable.focus({ preventScroll: true }), 300);
+                }
             }
             return;
         }

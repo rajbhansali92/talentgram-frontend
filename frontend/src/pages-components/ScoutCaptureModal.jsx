@@ -133,8 +133,8 @@ export default function ScoutCaptureModal({ onClose, onSaved, onRefresh }) {
 
     // -- save ---------------------------------------------------------------
     const handleSave = async () => {
-        if (!form.instagram_url && !form.instagram_username && !form.phone_number) {
-            toast.error("Need at least an Instagram link or phone number to save");
+        if (!form.instagram_url && !form.instagram_username && !form.phone_number && !form.full_name) {
+            toast.error("Need at least a name, Instagram link, or phone number to save");
             return;
         }
         setStage("saving");

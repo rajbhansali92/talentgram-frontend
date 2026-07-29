@@ -259,11 +259,9 @@ _IG_URL_RE = re.compile(
 )
 # Permissive phone candidate: + and digits with spaces/dashes/parens.
 _PHONE_FINDER = re.compile(r"(\+?\d[\d\s\-()]{6,18}\d)")
-# Manager indicators: strong role words anywhere, OR "contact"/"booking" only in
-# label form ("Contact:") so a talent's own "contact me on <number>" in a DM is
-# NOT misread as a manager line.
+# Manager indicators: strong role words anywhere, or explicit management contact labels.
 _MANAGER_RE = re.compile(
-    r"\b(managed\s+by|manager|mgmt|management|agent)\b|\b(contact|booking)\s*:",
+    r"\b(managed\s+by|manager|mgmt|management|agent)\b|\b(booking\s+agent|mgmt\s+contact|manager\s+contact)\s*:",
     re.I,
 )
 _LOC_EMOJI_RE = re.compile(r"📍\s*([A-Za-z][A-Za-z .,'-]{1,30})")
@@ -277,23 +275,23 @@ _NAME_NOISE = {
     "suggested", "for you", "view profile", "send message",
 }
 
-# Common Indian cities (+ a few metros) for location heuristics.
+# Common Indian cities (+ a few metros & aliases) for location heuristics.
 _CITIES = [
-    "mumbai", "delhi", "new delhi", "bangalore", "bengaluru", "hyderabad",
-    "chennai", "kolkata", "pune", "ahmedabad", "jaipur", "surat", "lucknow",
-    "kanpur", "nagpur", "indore", "thane", "bhopal", "visakhapatnam", "patna",
+    "mumbai", "bombay", "delhi", "new delhi", "delhi ncr", "ncr", "bangalore", "bengaluru", "hyderabad",
+    "chennai", "kolkata", "calcutta", "pune", "ahmedabad", "jaipur", "surat", "lucknow",
+    "kanpur", "nagpur", "indore", "thane", "navi mumbai", "bhopal", "visakhapatnam", "patna",
     "vadodara", "ghaziabad", "ludhiana", "agra", "nashik", "goa", "chandigarh",
-    "kochi", "cochin", "noida", "gurgaon", "gurugram", "coimbatore", "mysore",
+    "kochi", "cochin", "noida", "greater noida", "gurgaon", "gurugram", "coimbatore", "mysore",
     "mysuru", "guwahati", "dehradun", "udaipur", "rishikesh", "shimla",
 ]
 
 # Profession / category keywords (longer phrases first so they win).
 _CATEGORY_KEYWORDS = [
-    "fashion model", "content creator", "social media influencer",
-    "digital creator", "ugc creator", "make up artist", "makeup artist",
-    "fitness model", "actor", "actress", "model", "influencer", "creator",
-    "artist", "dancer", "singer", "musician", "photographer", "blogger",
-    "vlogger", "youtuber", "anchor", "host", "stylist", "designer",
+    "commercial actor", "theatre actor", "fashion model", "fitness model", "commercial model",
+    "content creator", "digital creator", "social media influencer", "ugc creator",
+    "make up artist", "makeup artist", "actor", "actress", "model", "influencer", "creator",
+    "artist", "dancer", "singer", "musician", "photographer", "videographer", "blogger",
+    "vlogger", "youtuber", "anchor", "host", "stylist", "fashion designer", "designer",
 ]
 
 
@@ -367,12 +365,27 @@ def extract_fields(lines: List[Dict[str, Any]], img_height: Optional[float] = No
         hm = _HANDLE_RE.search(joined)
         if hm:
             username, uname_conf = hm.group(1), 94
+        else:
+            bm = re.search(r"(?:ig|insta|instagram|handle|dm|booking|contact)s?\s*[:\-—]?\s*@?([A-Za-z0-9._]{2,30})", joined, re.I)
+            if bm:
+                username, uname_conf = bm.group(1), 88
+
     if not username:
-        # IG profile header shows the handle (no @) on the very top line, e.g.
-        # "anjalii_ee" / "priyajainofficial". Accept a top-area, single-token,
-        # all-lowercase handle pattern. A separator (./_/digit) raises confidence.
-        for l in lines[:3]:
+        # IG profile header shows the handle (no @) on top lines, e.g. "anjalii_ee".
+        # Skip UI status bar noise (9:41, LTE, 5G, Back, Search).
+        _STATUS_BAR_NOISE = {
+            "9:41", "10:00", "12:00", "5g", "4g", "lte", "wifi", "100%", "back", "<", ">",
+            "search", "edit", "instagram", "active now", "online", "chat", "message", "following"
+        }
+        for l in lines[:10]:
             t = l["text"].strip()
+            y = l.get("y", 0)
+            top_frac = (y / img_height) if img_height else 0.0
+            if top_frac > 0.35:
+                break
+            low_t = t.lower()
+            if low_t in _STATUS_BAR_NOISE or re.match(r"^\d{1,2}:\d{2}$", low_t) or low_t == "back":
+                continue
             if re.fullmatch(r"[a-z0-9](?:[a-z0-9._]{1,28})[a-z0-9_]", t):
                 has_sep = bool(re.search(r"[._0-9]", t))
                 username, uname_conf = t, (80 if has_sep else 72)
@@ -448,9 +461,9 @@ def extract_fields(lines: List[Dict[str, Any]], img_height: Optional[float] = No
             continue
         y = l.get("y", 0)
         top_frac = (y / img_height) if img_height else 1.0
-        if top_frac > 0.45:  # only trust names in the top ~45% of the image
+        if top_frac > 0.60:  # trust names in top ~60% of image height
             continue
-        name_conf = 82 if (top_frac <= 0.25 and t == t.title()) else 66
+        name_conf = 82 if (top_frac <= 0.35 and t == t.title()) else 66
         name_val = t
         break
     if name_val:

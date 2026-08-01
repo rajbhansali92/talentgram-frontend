@@ -270,9 +270,13 @@ body {
   /* Hide sticky submit footers when virtual keyboard is open.
      On mobile, sticky bottom-0 elements float above the keyboard,
      blocking content and causing layout jumps. We collapse them
-     when any input/textarea is focused. */
-  [data-testid="application-form-page"]:focus-within [data-sticky-footer],
-  [data-testid="submission-page"]:focus-within [data-sticky-footer] {
+     only while a real text-entry control (input/textarea) is focused —
+     NOT :focus-within on any descendant, which also fired for buttons and
+     Radix Select triggers (neither summons a keyboard) and could collapse
+     the footer mid-tap on the submit button itself, silently swallowing
+     the click. Verified via full focusable-control audit (2026-08-01). */
+  [data-testid="application-form-page"]:has(input:not([type="file"]):focus, textarea:focus) [data-sticky-footer],
+  [data-testid="submission-page"]:has(input:not([type="file"]):focus, textarea:focus) [data-sticky-footer] {
     position: relative;
     opacity: 0;
     pointer-events: none;

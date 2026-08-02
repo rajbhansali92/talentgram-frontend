@@ -468,6 +468,11 @@ async def start_submission(
 
     fd = payload.form_data or {}
     talent_age = None
+    # Phase 1 — Canonical Profile Monotonicity: record how fresh the
+    # canonical Talent Profile was at the moment this draft's form_data was
+    # captured, so finalize() can later tell whether the profile has since
+    # moved on (ADR Part 4 / Invariant #4). None when no talent exists yet.
+    talent_profile_snapshot_at = None
     if email:
         talent_doc = await db.talents.find_one(
             {"$or": [
@@ -475,10 +480,11 @@ async def start_submission(
                 {"email": email},
                 {"source.talent_email": email}
             ]},
-            {"age": 1, "dob": 1}
+            {"age": 1, "dob": 1, "updated_at": 1}
         )
         if talent_doc:
             talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+            talent_profile_snapshot_at = talent_doc.get("updated_at")
 
     submitted_age_override_val = None
     override_active = fd.get("overrideAge") or fd.get("override_age")
@@ -509,6 +515,7 @@ async def start_submission(
         "talent_phone": payload.phone,
         "alternate_contact_number": payload.alternate_contact_number,
         "form_data": fd,
+        "talent_profile_snapshot_at": talent_profile_snapshot_at,
         "field_visibility": fv_defaults,
         "submitted_age_override": submitted_age_override_val,
         "effective_age": effective_age_val,
@@ -2311,8 +2318,11 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         
         # Exception: Project-specific overrides for location must remain separate
         form_to_merge.pop("location", None)
-        
-        await merge_talent_profile(talent_doc, form_to_merge, "project_submission")
+
+        await merge_talent_profile(
+            talent_doc, form_to_merge, "project_submission",
+            snapshot_at=sub.get("talent_profile_snapshot_at"),
+        )
         await update_talent_cover_cache(talent_doc["id"])
     else:
         # Build a minimal talent record from the submission's form_data.
@@ -2385,7 +2395,10 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 if "phone" not in form_to_merge or not form_to_merge["phone"]:
                     form_to_merge["phone"] = sub.get("talent_phone")
                 form_to_merge.pop("location", None)
-                await merge_talent_profile(talent_doc, form_to_merge, "project_submission")
+                await merge_talent_profile(
+                    talent_doc, form_to_merge, "project_submission",
+                    snapshot_at=sub.get("talent_profile_snapshot_at"),
+                )
                 await update_talent_cover_cache(talent_doc["id"])
     if talent_doc:
         patch["talent_id"] = talent_doc["id"]

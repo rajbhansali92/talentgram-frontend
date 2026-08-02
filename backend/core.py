@@ -3091,13 +3091,40 @@ async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[d
     return await db.talents.find_one({"$or": ors})
 
 
-async def merge_talent_profile(existing_talent: dict, incoming_data: dict, source: str) -> dict:
+# Phase 1 — Canonical Profile Monotonicity: sentinel distinct from `None` so
+# merge_talent_profile can tell "caller never passed snapshot_at at all"
+# (today's unconditional-overwrite behavior, for Admin-sourced callers where
+# incoming_data is always freshly entered, never a stale snapshot) apart from
+# "caller passed snapshot_at=None" (a submission/application that opted into
+# the freshness check but has no recorded snapshot of its own -- the
+# fail-safe "stale" default, ADR Part 9).
+_NO_FRESHNESS_CHECK = object()
+
+
+async def merge_talent_profile(existing_talent: dict, incoming_data: dict, source: str, snapshot_at=_NO_FRESHNESS_CHECK) -> dict:
     """
     Implements Task 4 (Field-level merge policy) and Task 6 (Profile update audit trail).
     Merges incoming data into existing talent record.
+
+    Phase 1 — Canonical Profile Monotonicity (ADR Part 4 / Invariant #4):
+    `snapshot_at` is the caller's own record of how fresh `incoming_data` was
+    relative to the canonical profile when it was captured
+    (`submissions.talent_profile_snapshot_at` / `applications.talent_profile_updated_at`).
+    When a caller passes it, AUTO_UPDATE_FIELDS are only merged if `snapshot_at`
+    is not older than `existing_talent["updated_at"]` -- otherwise the
+    canonical profile has moved on since the snapshot was taken, so every
+    AUTO_UPDATE_FIELDS value is preserved instead of overwritten, and the skip
+    is logged as a conflict via the same audit mechanism REVIEW_FIELDS already
+    uses. Missing/None `snapshot_at` (once a caller has opted into the check)
+    is treated as stale -- the fail-safe direction. A talent with no recorded
+    `updated_at` at all has no evidence of a newer edit to protect, so the
+    merge proceeds. A caller that never passes `snapshot_at` (e.g. the
+    Admin-sourced `POST /talents` create-or-merge path) keeps today's
+    unconditional-overwrite behavior -- Admin-entered data is always fresh by
+    definition (ADR Part 4.1), so it is never subject to this check.
     """
     email = normalize_email(existing_talent.get("email") or incoming_data.get("email"))
-    
+
     update_patch = {}
     changed_fields = []
     old_values = {}
@@ -3110,16 +3137,41 @@ async def merge_talent_profile(existing_talent: dict, incoming_data: dict, sourc
         if existing_talent.get("email") != email:
             update_patch["email"] = email
 
+    # Phase 1: is incoming_data's AUTO_UPDATE_FIELDS content stale relative to
+    # the canonical profile's own clock? See docstring above for exact
+    # fail-safe semantics.
+    checking_freshness = snapshot_at is not _NO_FRESHNESS_CHECK
+    talent_updated_at = existing_talent.get("updated_at")
+    if not checking_freshness or talent_updated_at is None:
+        auto_update_is_fresh = True
+    elif snapshot_at is None:
+        auto_update_is_fresh = False
+    else:
+        auto_update_is_fresh = snapshot_at >= talent_updated_at
+
     # 1. AUTO_UPDATE_FIELDS
     for field in AUTO_UPDATE_FIELDS:
         incoming_val = incoming_data.get(field)
         if incoming_val not in (None, "", [], {}):
             existing_val = existing_talent.get(field)
             if existing_val != incoming_val:
-                update_patch[field] = incoming_val
-                changed_fields.append(field)
-                old_values[field] = existing_val
-                new_values[field] = incoming_val
+                # The freshness gate only matters when there is a populated
+                # existing value that could be clobbered -- filling a
+                # currently-empty field carries no data-loss risk regardless
+                # of snapshot age, exactly like REVIEW_FIELDS' own
+                # fill-if-empty rule below.
+                if auto_update_is_fresh or existing_val in (None, "", [], {}):
+                    update_patch[field] = incoming_val
+                    changed_fields.append(field)
+                    old_values[field] = existing_val
+                    new_values[field] = incoming_val
+                else:
+                    # Stale snapshot AND a populated existing value: preserve
+                    # the canonical value, log the conflict instead of
+                    # applying it.
+                    changed_fields.append(f"{field}_stale_conflict")
+                    old_values[f"{field}_stale_conflict"] = existing_val
+                    new_values[f"{field}_stale_conflict"] = incoming_val
 
     # 2. REVIEW_FIELDS
     for field in REVIEW_FIELDS:

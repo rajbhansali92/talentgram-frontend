@@ -1394,7 +1394,17 @@ async def _promote_application_to_talent(
     }
 
     async def _merge_into(talent_doc: dict) -> str:
-        await merge_talent_profile(talent_doc, form_to_merge, source)
+        # Phase 1 — Canonical Profile Monotonicity: gate on the application's
+        # own talent_profile_updated_at (already stamped by
+        # _reconcile_draft_from_talent while the application was still a
+        # draft) exactly like /submit's finalize does with its
+        # talent_profile_snapshot_at — same fail-safe semantics, same reason:
+        # form_to_merge is this application's own possibly-stale snapshot,
+        # regardless of whether a talent or an admin triggered this call.
+        await merge_talent_profile(
+            talent_doc, form_to_merge, source,
+            snapshot_at=app_doc.get("talent_profile_updated_at"),
+        )
         for m in app_doc.get("media", []) or []:
             await sync_media_to_global_talent(app_doc, m, skip_cover_cache=True)
         await update_talent_cover_cache(talent_doc["id"])

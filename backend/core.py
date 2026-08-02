@@ -3607,11 +3607,22 @@ async def build_talent_submission_view(sub: dict) -> dict:
     aggregated dialog on resume, not just right after upload.
     """
     from routers.feedback import list_approved_feedback_for_talent
-    from routers.submissions import build_prefill_media
+    from routers.submissions import build_prefill_media, has_been_submitted_once
 
     talent = await resolve_canonical_talent(email=sub.get("talent_email"))
     library_media = await build_prefill_media(talent, email=talent.get("email")) if talent else []
-    await reconcile_submission_media(sub, library_media)
+    # Phase 2 — Issue 2 fix: a submission that has ever been finalized
+    # (status "submitted" or "updated" — has_been_submitted_once(), the same
+    # test already used to protect the canonical Talent Profile from retest
+    # pollution) is a historical snapshot and must never be rewritten by a
+    # read. Mirrors the already-working applications.py:594 pattern
+    # (`status != "submitted"`) — reconciliation against the live Library
+    # only runs while the submission is still a mutable draft. finalize()'s
+    # own pre-freeze reconcile call (submissions.py) is unaffected: that is
+    # a write-endpoint action re-establishing a fresh snapshot at the moment
+    # of freezing, not a passive read.
+    if not has_been_submitted_once(sub):
+        await reconcile_submission_media(sub, library_media)
     sub["library_media"] = library_media
     sub["pending_media_consent"] = [
         m for m in (sub.get("media") or []) if m.get("profile_sync_status") == "pending"

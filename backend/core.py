@@ -3051,6 +3051,34 @@ def validate_talent_fields_classification():
         raise AssertionError(f"Missing merge policy classification for talent fields: {missing}")
 
 
+async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[dict]:
+    """Single canonical lookup for an existing Talent Profile (Talent Profile
+    Migration, Phase 2). Every live entry point (apply, submit, admin edit,
+    portal) must resolve "does this person already have a Talent Profile"
+    through this one function, so the match rule can never drift between
+    callers the way it had — `/apply` finalize and its edit endpoint were
+    each hand-rolling a narrower 2-field `$or` that silently missed talents
+    matchable only by `normalized_email`.
+
+    Keyword-only and additive by design: today only `email` is supported,
+    built as an `$or` of whichever identifiers are actually supplied. A
+    future identifier (e.g. `phone`) can be added as a new keyword-only
+    parameter that appends its own `$or` clauses, without touching any
+    existing call site that doesn't pass it.
+    """
+    ors: List[Dict[str, Any]] = []
+    norm_email = normalize_email(email) if email else None
+    if norm_email:
+        ors.extend([
+            {"normalized_email": norm_email},
+            {"email": norm_email},
+            {"source.talent_email": norm_email},
+        ])
+    if not ors:
+        return None
+    return await db.talents.find_one({"$or": ors})
+
+
 async def merge_talent_profile(existing_talent: dict, incoming_data: dict, source: str) -> dict:
     """
     Implements Task 4 (Field-level merge policy) and Task 6 (Profile update audit trail).

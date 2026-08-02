@@ -61,6 +61,9 @@ from core import (
     rate_limit_ok,
     client_ip,
     sign_r2_media_if_needed,
+    resolve_canonical_talent,
+    merge_talent_profile,
+    sync_media_to_global_talent,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -230,17 +233,7 @@ async def delete_admin_profile_config(id: str, admin: dict = Depends(current_tea
 
 
 async def _find_talent_by_email(email: str) -> Optional[Dict]:
-    email_norm = normalize_email(email)
-    if not email_norm:
-        return None
-    talent = await db.talents.find_one({
-        "$or": [
-            {"normalized_email": email_norm},
-            {"email": email_norm},
-            {"source.talent_email": email_norm},
-        ]
-    })
-    return talent
+    return await resolve_canonical_talent(email=email)
 
 
 # Maps talent.media[].category → application media category
@@ -656,10 +649,7 @@ async def update_application(
         if effective_age_val is None:
             email = app_doc.get("talent_email")
             if email:
-                talent_doc = await db.talents.find_one(
-                    {"$or": [{"email": email}, {"source.talent_email": email}]},
-                    {"age": 1, "dob": 1},
-                )
+                talent_doc = await resolve_canonical_talent(email=email)
                 if talent_doc:
                     effective_age_val = (
                         compute_age(talent_doc["dob"]) if talent_doc.get("dob")
@@ -1338,6 +1328,95 @@ async def edit_application(aid: str, authorization: Optional[str] = Header(None)
     return {"ok": True, "status": "draft"}
 
 
+async def _promote_application_to_talent(
+    app_doc: dict, admin_id: Optional[str], source: str
+) -> tuple[Optional[str], bool]:
+    """Create-or-merge this application's data into `db.talents` — the one
+    place that does so, used by both `finalize_application` (talent-initiated,
+    the normal path under the Talent Profile Migration Phase 2 policy: every
+    completed application becomes a Talent immediately) and
+    `set_application_decision` (a back-compat fallback for applications
+    finalized before this migration that have no `talent_id` yet). Mirrors
+    `/submit` finalize: field merge via `merge_talent_profile()` (protects
+    admin-owned REVIEW_FIELDS instead of silently overwriting them), media
+    via per-item `sync_media_to_global_talent()` (safe/additive — replaces
+    the old full-array `$set` that could wipe reusable media not part of
+    this one application). Returns (talent_id, merged).
+    """
+    email = normalize_email(app_doc.get("talent_email"))
+    if not email:
+        return None, False
+    fd = app_doc.get("form_data") or {}
+    dob = (fd.get("dob") or "").strip() or None
+
+    VALID_INTERESTS = {
+        "Acting", "Modeling", "Print Campaigns", "TV Commercials",
+        "Digital Ads", "Instagram Collaborations", "Influencer Campaigns",
+        "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
+        "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
+    }
+    raw_interests = fd.get("interested_in")
+    if not isinstance(raw_interests, list):
+        raw_interests = [raw_interests] if raw_interests else []
+    interested_in = [i for i in raw_interests if isinstance(i, str) and i.strip() in VALID_INTERESTS]
+
+    first_name = fd.get("first_name") or ""
+    last_name = fd.get("last_name") or ""
+    name_combined = f"{first_name} {last_name}".strip()
+
+    raw_work_links = fd.get("work_links")
+    if not isinstance(raw_work_links, list):
+        raw_work_links = [raw_work_links] if raw_work_links else []
+    work_links = [w for w in raw_work_links if isinstance(w, str) and w.strip()]
+
+    raw_skills = fd.get("skills")
+    if not isinstance(raw_skills, list):
+        raw_skills = [raw_skills] if raw_skills else []
+    skills = [s for s in raw_skills if isinstance(s, str) and s.strip()]
+
+    form_to_merge = {
+        "name": name_combined or app_doc.get("talent_name") or "Unnamed",
+        "email": email,
+        "normalized_email": email,
+        "phone": fd.get("phone") or app_doc.get("talent_phone") or None,
+        "alternate_contact_number": fd.get("alternate_contact_number") or app_doc.get("alternate_contact_number") or None,
+        "dob": dob,
+        "height": fd.get("height") or None,
+        "location": fd.get("location") or None,
+        "ethnicity": fd.get("ethnicity") or None,
+        "gender": fd.get("gender") or None,
+        "instagram_handle": normalize_instagram_handle(fd.get("instagram_handle") or None) if fd.get("instagram_handle") else None,
+        "instagram_followers": fd.get("instagram_followers") or None,
+        "bio": fd.get("bio") or None,
+        "work_links": work_links,
+        "skills": skills,
+        "interested_in": interested_in,
+    }
+
+    async def _merge_into(talent_doc: dict) -> str:
+        await merge_talent_profile(talent_doc, form_to_merge, source)
+        for m in app_doc.get("media", []) or []:
+            await sync_media_to_global_talent(app_doc, m, skip_cover_cache=True)
+        await update_talent_cover_cache(talent_doc["id"])
+        return talent_doc["id"]
+
+    existing_talent = await resolve_canonical_talent(email=email)
+    if existing_talent:
+        return await _merge_into(existing_talent), True
+
+    new_talent = _application_to_talent(app_doc, admin_id or "auto-application")
+    try:
+        await db.talents.insert_one(new_talent)
+        await update_talent_cover_cache(new_talent["id"])
+        return new_talent["id"], False
+    except DuplicateKeyError:
+        # Race: another finalize/approval for the same email won.
+        existing_talent = await resolve_canonical_talent(email=email)
+        if existing_talent:
+            return await _merge_into(existing_talent), True
+        return None, False
+
+
 @router.post("/public/apply/{aid}/finalize")
 async def finalize_application(aid: str, authorization: Optional[str] = Header(None)):
     await _check_app_token(authorization, aid)
@@ -1410,126 +1489,17 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
         {"$set": {"status": "submitted", "submitted_at": _now()}},
     )
 
-    # Fetch updated application document for talent sync
+    # Talent Profile Migration, Phase 2: every completed application becomes
+    # a canonical Talent Profile immediately — project decision (admin
+    # approve/reject) never gates whether a Talent exists.
     updated_app = await db.applications.find_one({"id": aid})
-    email = updated_app.get("talent_email")
-    if email:
-        email = email.lower().strip()
-        existing_talent = await db.talents.find_one(
-            {"$or": [{"email": email}, {"source.talent_email": email}]}
+    talent_id, merged = await _promote_application_to_talent(updated_app, None, "profile_application")
+    if talent_id:
+        await db.applications.update_one(
+            {"id": aid},
+            {"$set": {"talent_id": talent_id, "merged": merged}},
         )
-        if existing_talent:
-            fd = updated_app.get("form_data") or {}
-            dob = (fd.get("dob") or "").strip() or None
-            age = compute_age(dob) if dob else None
-
-            # Guard against regressing the global profile's media with a
-            # stale snapshot. This application's own media array was last
-            # refreshed from db.talents at talent_profile_updated_at (see
-            # _reconcile_draft_from_talent above); if db.talents.media has
-            # been updated more recently than that — e.g. a project
-            # submission via /submit synced newer photos/video in the
-            # meantime — this application predates that change and must
-            # not overwrite it. Non-media detail fields are unaffected.
-            talent_media_updated = existing_talent.get("updated_at")
-            app_media_snapshot = updated_app.get("talent_profile_updated_at")
-            media_is_stale = bool(
-                talent_media_updated
-                and app_media_snapshot
-                and talent_media_updated > app_media_snapshot
-            )
-
-            new_media = []
-            cover_mid = None
-            for m in updated_app.get("media", []) or []:
-                cat = m.get("category")
-                if cat == "image":
-                    new_cat = "portfolio"
-                elif cat == "indian":
-                    new_cat = "indian"
-                elif cat == "western":
-                    new_cat = "western"
-                elif cat == "intro_video":
-                    new_cat = "video"
-                else:
-                    continue
-                mid = m.get("id") or str(uuid.uuid4())
-                new_media.append({
-                    "id": mid,
-                    "category": new_cat,
-                    "url": m.get("url"),
-                    "public_id": m.get("public_id"),
-                    "resource_type": m.get("resource_type"),
-                    "content_type": m.get("content_type", "application/octet-stream"),
-                    "original_filename": m.get("original_filename"),
-                    "size": m.get("size", 0),
-                    "created_at": m.get("created_at") or _now(),
-                    "scope": "talent_portfolio",
-                    "talent_id": existing_talent["id"],
-                    "duration": m.get("duration"),
-                    "poster_url": m.get("poster_url"),
-                })
-                if new_cat in ("portfolio", "indian", "western") and not cover_mid:
-                    cover_mid = mid
-
-            VALID_INTERESTS = {
-                "Acting", "Modeling", "Print Campaigns", "TV Commercials",
-                "Digital Ads", "Instagram Collaborations", "Influencer Campaigns",
-                "Social Media Collaborations", "Fashion Campaigns", "Brand Shoots",
-                "Music Videos", "OTT / Film Projects", "Event Appearances", "Hosting / Anchoring",
-            }
-            raw_interests = fd.get("interested_in")
-            if not isinstance(raw_interests, list):
-                raw_interests = [raw_interests] if raw_interests else []
-            interested_in = [i for i in raw_interests if isinstance(i, str) and i.strip() in VALID_INTERESTS]
-
-            first_name = fd.get("first_name") or ""
-            last_name = fd.get("last_name") or ""
-            name_combined = f"{first_name} {last_name}".strip()
-
-            raw_work_links = fd.get("work_links")
-            if not isinstance(raw_work_links, list):
-                raw_work_links = [raw_work_links] if raw_work_links else []
-            work_links = [w for w in raw_work_links if isinstance(w, str) and w.strip()]
-
-            raw_skills = fd.get("skills")
-            if not isinstance(raw_skills, list):
-                raw_skills = [raw_skills] if raw_skills else []
-            skills = [s for s in raw_skills if isinstance(s, str) and s.strip()]
-
-            update = {
-                "name": name_combined or updated_app.get("talent_name") or "Unnamed",
-                "phone": (fd.get("phone") or updated_app.get("talent_phone") or None),
-                "alternate_contact_number": (fd.get("alternate_contact_number") or updated_app.get("alternate_contact_number") or None),
-                "age": age,
-                "dob": dob,
-                "height": fd.get("height") or None,
-                "height_inches": parse_height_to_inches(fd.get("height")),
-                "location": fd.get("location") or None,
-                "ethnicity": fd.get("ethnicity") or None,
-                "gender": fd.get("gender") or None,
-                "instagram_handle": normalize_instagram_handle(fd.get("instagram_handle") or None) if fd.get("instagram_handle") else None,
-                "instagram_followers": fd.get("instagram_followers") or None,
-                "bio": fd.get("bio") or None,
-                "work_links": work_links,
-                "skills": skills,
-                "cover_media_id": cover_mid,
-                "interested_in": interested_in,
-                "media": new_media,
-            }
-            # F1: never let blank/empty application values overwrite populated
-            # master data. The master is the source of truth; an application
-            # that omits a field (or carries no media) must preserve the
-            # existing master value rather than wiping it. Drop empties so only
-            # the latest *valid* values are written.
-            update = {k: v for k, v in update.items() if v not in (None, "", [], {})}
-            if media_is_stale:
-                update.pop("media", None)
-                update.pop("cover_media_id", None)
-            if update:
-                await db.talents.update_one({"id": existing_talent["id"]}, {"$set": update})
-                await update_talent_cover_cache(existing_talent["id"])
-    return {"ok": True}
+    return {"ok": True, "talent_id": talent_id, "merged": merged}
 
 
 # --------------------------------------------------------------------------
@@ -1623,116 +1593,27 @@ async def set_application_decision(
     if app_doc.get("decision") == payload.decision:
         return {"ok": True, "talent_id": app_doc.get("talent_id"), "merged": app_doc.get("merged", True)}
 
-    # Persist decision
+    # Persist decision. Talent Profile Migration, Phase 2: project decision
+    # (approve/reject) never gates whether a Talent exists — the canonical
+    # Talent Profile is created/merged at finalize time now, for every
+    # completed application, regardless of how it's later decided.
     await db.applications.update_one(
         {"id": aid},
         {"$set": {"decision": payload.decision, "decided_at": _now(), "decided_by": admin["id"]}},
     )
 
-    # On approval, copy into master Talents DB (merge if email already exists)
-    if payload.decision == "approved":
-        talent = _application_to_talent(app_doc, admin["id"])
-        email = talent["email"]
-        # Broad email-based dedup: match any talent whose top-level email OR
-        # source.talent_email matches (covers manual adds, prior applications, and
-        # legacy project-forwarded submissions).
-        existing = await db.talents.find_one(
-            {"$or": [
-                {"normalized_email": email},
-                {"email": email},
-                {"source.talent_email": email}
-            ]}
-        )
-        if existing:
-            from core import merge_talent_profile
-            existing_media = existing.get("media", [])
-            incoming_categories = {m.get("category") for m in talent["media"] if m.get("category")}
-            new_media = [x for x in existing_media if x.get("category") not in incoming_categories]
-            for m in talent["media"]:
-                new_media.append(m)
-            
-            await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
-            existing["media"] = new_media
-            
-            # Merge fields (Task 4 & 6)
-            await merge_talent_profile(existing, talent, "application_approval")
-            
-            await update_talent_cover_cache(existing["id"])
+    # Back-compat fallback only: an application finalized before this
+    # migration (or missing talent_id for any other reason) has no linked
+    # Talent yet. Promote it now, via the exact same helper finalize uses,
+    # so there is still only one implementation of this operation.
+    if payload.decision == "approved" and not app_doc.get("talent_id"):
+        talent_id, merged = await _promote_application_to_talent(app_doc, admin["id"], "application_approval")
+        if talent_id:
             await db.applications.update_one(
-                {"id": aid}, {"$set": {"talent_id": existing["id"], "merged": True}}
+                {"id": aid}, {"$set": {"talent_id": talent_id, "merged": merged}}
             )
-            return {"ok": True, "talent_id": existing["id"], "merged": True}
-        else:
-            try:
-                await db.talents.insert_one(talent)
-                await update_talent_cover_cache(talent["id"])
-                await db.applications.update_one(
-                    {"id": aid}, {"$set": {"talent_id": talent["id"], "merged": False}}
-                )
-                return {"ok": True, "talent_id": talent["id"], "merged": False}
-            except DuplicateKeyError:
-                existing = await db.talents.find_one(
-                    {"$or": [
-                        {"normalized_email": email},
-                        {"email": email},
-                        {"source.talent_email": email}
-                    ]}
-                )
-                if existing:
-                    from core import merge_talent_profile
-                    existing_media = existing.get("media", [])
-                    new_media = list(existing_media)
-                    for m in talent["media"]:
-                        is_dup = False
-                        in_pub = m.get("public_id")
-                        in_url = m.get("url")
-                        in_sec = m.get("secure_url") or in_url
-                        in_id = m.get("asset_id") or m.get("id")
-                        in_src_app = m.get("source_application_media_id")
-                        in_src_sub = m.get("source_submission_media_id")
-                        
-                        for x in existing_media:
-                            x_pub = x.get("public_id")
-                            x_url = x.get("url")
-                            x_sec = x.get("secure_url") or x_url
-                            x_id = x.get("asset_id") or x.get("id")
-                            x_src_app = x.get("source_application_media_id")
-                            x_src_sub = x.get("source_submission_media_id")
-                            
-                            if in_pub and x_pub == in_pub:
-                                is_dup = True
-                                break
-                            if in_url and (x_url == in_url or x_sec == in_url):
-                                is_dup = True
-                                break
-                            if in_sec and (x_url == in_sec or x_sec == in_sec):
-                                is_dup = True
-                                break
-                            if in_id and x_id == in_id:
-                                is_dup = True
-                                break
-                            if in_src_app and in_src_app == x_src_app:
-                                is_dup = True
-                                break
-                            if in_src_sub and in_src_sub == x_src_sub:
-                                is_dup = True
-                                break
-                                
-                        if not is_dup:
-                            new_media.append(m)
-                    
-                    await db.talents.update_one({"id": existing["id"]}, {"$set": {"media": new_media}})
-                    existing["media"] = new_media
-                    
-                    await merge_talent_profile(existing, talent, "application_approval")
-                    
-                    await update_talent_cover_cache(existing["id"])
-                    await db.applications.update_one(
-                        {"id": aid}, {"$set": {"talent_id": existing["id"], "merged": True}}
-                    )
-                    return {"ok": True, "talent_id": existing["id"], "merged": True}
-                raise
-    return {"ok": True}
+            return {"ok": True, "talent_id": talent_id, "merged": merged}
+    return {"ok": True, "talent_id": app_doc.get("talent_id"), "merged": app_doc.get("merged", False)}
 
 
 def _application_to_talent(app_doc: dict, admin_id: str) -> dict:

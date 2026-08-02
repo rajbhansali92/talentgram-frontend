@@ -1552,6 +1552,22 @@ async def seed_admin() -> None:
     # P0 production indexes — 6 collections.
     # Each is idempotent; create_index is a no-op if already present.
     p0_indexes = [
+        # Phase 3 (Canonical Architecture Redesign, Implementation Roadmap
+        # v1.0): `id` (the UUID primary-key field every endpoint looks up
+        # by — find_one({"id": ...}) — distinct from Mongo's own `_id`) had
+        # no index on any of these three collections, forcing a full
+        # collection scan on the single most common query shape in the
+        # entire backend. Confirmed via explain() before this change.
+        ("talents", [("id", 1)], {"name": "talents_id"}),
+        ("submissions", [("id", 1)], {"name": "submissions_id"}),
+        ("applications", [("id", 1)], {"name": "applications_id"}),
+        # Phase 3: resolve_canonical_talent()'s $or (normalized_email/email/
+        # source.talent_email) could not use an index-per-branch plan
+        # because source.talent_email had none — MongoDB falls back to a
+        # full collection scan for the whole $or when any one branch is
+        # unindexed, even though the other two branches are individually
+        # indexed. Confirmed via explain() before this change.
+        ("talents", [("source.talent_email", 1)], {"sparse": True, "name": "talents_source_talent_email"}),
         ("submissions", [("project_id", 1), ("created_at", -1)], {}),
         ("submissions", [("talent_email", 1), ("project_id", 1)], {}),
         # Phase 0: enforce one submission per (project, talent_email).

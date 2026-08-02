@@ -3442,6 +3442,64 @@ def sign_r2_media_if_needed(doc: dict, is_application: bool = False) -> dict:
     return doc
 
 
+async def reconcile_submission_media(sub: dict, library_media: List[dict]) -> bool:
+    """Talent Profile Migration, Phase 3 — keep a draft submission's
+    library-derived media honest against the live Talent Profile.
+
+    A submission's own `db.talents`-sourced items are copies (by value —
+    see the new-endpoint docstring in submissions.py), so once copied they
+    would otherwise sit frozen until finalize. That's wrong for an
+    in-progress DRAFT: it hasn't earned historical-snapshot immutability
+    yet (that only starts at finalize), so it should keep tracking the
+    canonical profile until the moment it's actually submitted — closing
+    the pre-existing gap where submissions, unlike applications
+    (`_reconcile_draft_from_talent`), had no draft-reconciliation-on-read.
+
+    Walks every `sub["media"]` item carrying `source_talent_media_id` and
+    compares it against `library_media` (build_prefill_media()'s live
+    output, i.e. the current canonical profile). If the source item's
+    descriptive fields drifted (re-processed video, updated thumbnail),
+    refreshes the copy. If the source item no longer exists (deleted from
+    the profile), flags it `removed_from_profile=True` — it is NEVER
+    silently dropped; the frontend decides whether to keep it for this
+    submission or remove it.
+
+    Persists any change back to `db.submissions` so a caller reading the
+    document directly afterward (finalize) sees the reconciled state too,
+    not just this function's in-memory return value. Returns True if
+    anything changed.
+    """
+    media = sub.get("media") or []
+    lib_by_id = {m["id"]: m for m in library_media}
+    # Fields that describe the physical asset itself — refreshed from the
+    # source when they drift. Never touches the copy's own id/category/
+    # scope/origin/source_talent_media_id/created_at.
+    REFRESH_FIELDS = ("url", "public_id", "resource_type", "content_type", "size", "original_filename")
+
+    changed = False
+    for m in media:
+        src_id = m.get("source_talent_media_id")
+        if not src_id:
+            continue
+        lib_item = lib_by_id.get(src_id)
+        if lib_item is None:
+            if not m.get("removed_from_profile"):
+                m["removed_from_profile"] = True
+                changed = True
+            continue
+        if m.get("removed_from_profile"):
+            m["removed_from_profile"] = False
+            changed = True
+        for field in REFRESH_FIELDS:
+            if lib_item.get(field) != m.get(field):
+                m[field] = lib_item.get(field)
+                changed = True
+
+    if changed:
+        await db.submissions.update_one({"id": sub["id"]}, {"$set": {"media": media}})
+    return changed
+
+
 async def build_talent_submission_view(sub: dict) -> dict:
     """The single canonical talent-facing submission representation.
 
@@ -3456,8 +3514,19 @@ async def build_talent_submission_view(sub: dict) -> dict:
     Every talent-facing submission read should call this — it's the only
     place responsible for attaching feedback and signing R2 media, so a
     future change to either only needs to happen here.
+
+    Talent Profile Migration, Phase 3: also the one place that computes
+    `library_media` (live, never stored — see build_prefill_media()) and
+    reconciles any already-selected library items against it.
     """
     from routers.feedback import list_approved_feedback_for_talent
+    from routers.submissions import build_prefill_media
+
+    talent = await resolve_canonical_talent(email=sub.get("talent_email"))
+    library_media = await build_prefill_media(talent, email=talent.get("email")) if talent else []
+    await reconcile_submission_media(sub, library_media)
+    sub["library_media"] = library_media
+
     sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
     return sign_r2_media_if_needed(sub)
 

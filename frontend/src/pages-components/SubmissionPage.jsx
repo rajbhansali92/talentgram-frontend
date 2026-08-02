@@ -441,6 +441,16 @@ function SubmissionPage() {
     const fieldRefs = useRef({}); // { fieldId: HTMLElement }
 
     const [submission, setSubmission] = useState(null);
+    // Talent Profile Migration, Phase 3 — the talent's reusable Talent
+    // Profile media, computed live server-side (build_prefill_media()) and
+    // never auto-injected into `submission.media` anymore. Populated from
+    // `/public/prefill` at email blur and refreshed from every
+    // GET/resume/from-library response afterward (see
+    // applySubmissionResponse below) so it stays honest against admin edits
+    // made mid-draft.
+    const [libraryMedia, setLibraryMedia] = useState([]);
+    const [libraryBusyId, setLibraryBusyId] = useState(null);
+    const [dismissedRemovedWarnings, setDismissedRemovedWarnings] = useState(() => new Set());
     // Sprint 1 — autosave indicator. "idle" | "saving" | "saved". Driven by the
     // debounced draft-persistence effect below so it reflects real save activity.
     const [saveStatus, setSaveStatus] = useState("idle");
@@ -734,7 +744,7 @@ function SubmissionPage() {
                     `/public/submissions/${saved.id}`,
                     { headers: { Authorization: `Bearer ${saved.token}` } },
                 );
-                setSubmission(data);
+                applySubmissionResponse(data);
                 if (data.form_data) {
                     setForm((f) => {
                         const fd = data.form_data;
@@ -783,7 +793,7 @@ function SubmissionPage() {
                     const next = { id: data.id, token: atk };
                     localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
                     setSaved(next);
-                    setSubmission(data);
+                    applySubmissionResponse(data);
                     if (data.form_data) {
                         const fd = data.form_data;
                         setForm((f) => ({
@@ -830,6 +840,18 @@ function SubmissionPage() {
                 : {},
         [saved],
     );
+
+    // Every GET/resume/from-library response is shaped by the backend's
+    // build_talent_submission_view(), which now always includes a live
+    // `library_media` — apply it alongside `submission` wherever a response
+    // is applied so the picker stays in sync. A no-op wherever the response
+    // doesn't carry the field (e.g. the bare start_submission response).
+    const applySubmissionResponse = (data) => {
+        setSubmission(data);
+        if (data && Object.prototype.hasOwnProperty.call(data, "library_media")) {
+            setLibraryMedia(data.library_media || []);
+        }
+    };
 
     // Sprint 1 — parallel cm labels for the height options. Each entry keeps the
     // canonical feet/inches `value` and only adds a centimetre display label, so
@@ -985,7 +1007,7 @@ function SubmissionPage() {
                 localStorage.setItem(LS_ATK_KEY(slug), data.access_token);
             }
             setSaved(next);
-            setSubmission(data);
+            applySubmissionResponse(data);
             setCollapsedSections((prev) => ({ ...prev, uploads: false }));
             toast.success("✓ Details saved successfully.");
             return next;
@@ -1056,12 +1078,16 @@ function SubmissionPage() {
                     ? f.skills
                     : (data.skills || []),
         }));
+        // Talent Profile Migration, Phase 3: reusable media is no longer
+        // auto-injected into the submission. It's surfaced as `libraryMedia`
+        // for the "My Saved Media" picker — the talent explicitly chooses
+        // what applies to THIS project (see toggleLibraryMedia). This is
+        // superseded the moment the draft actually loads/resumes (the
+        // server's `library_media`, via applySubmissionResponse), so this is
+        // just the earliest-possible (pre-submission-creation) population.
         if (data.prefill_media) {
-            setSubmission((s) => ({
-                ...(s || {}),
-                media: data.prefill_media || [],
-            }));
-            
+            setLibraryMedia(data.prefill_media || []);
+
             // Debugging requirement:
             console.log("[DEBUG] Talent found");
             console.log("[DEBUG] Profile loaded");
@@ -1389,7 +1415,7 @@ function SubmissionPage() {
             token: saved?.token,
             endpoint: saved ? `/public/submissions/${saved.id}/upload` : null,
             onSuccess: (data) => {
-                setSubmission(data);
+                applySubmissionResponse(data);
             },
             onBeforeUpload: async () => {
                 let currentSaved = saved;
@@ -1419,7 +1445,7 @@ function SubmissionPage() {
                 { label },
                 authCfg,
             );
-            setSubmission(data);
+            applySubmissionResponse(data);
         } catch (err) {
             toast.error(err?.response?.data?.detail || "Could not rename");
         }
@@ -1455,6 +1481,35 @@ function SubmissionPage() {
         });
 
     const showImagesSection = (requirements.portfolio_image_visibility !== REQUIREMENT_TIERS.HIDDEN) || (requirements.portfolio_indian_visibility !== REQUIREMENT_TIERS.HIDDEN) || (requirements.portfolio_western_visibility !== REQUIREMENT_TIERS.HIDDEN);
+
+    // Talent Profile Migration, Phase 3 — "My Saved Media" picker
+    // derivations. `media` already contains every item actually in this
+    // submission (uploaded OR chosen from the Library — they render
+    // identically below, by design); these just work out selection state
+    // for the picker itself.
+    const selectedLibrarySourceIds = new Set(
+        media.filter((m) => m.source_talent_media_id).map((m) => m.source_talent_media_id),
+    );
+    // Items that WERE chosen from the Library but whose source has since
+    // been deleted from the Talent Profile (reconciled server-side on every
+    // resume/GET — see build_talent_submission_view). They no longer appear
+    // in `libraryMedia` (their source is gone), so they're tracked
+    // separately here and rendered as their own warning card.
+    const removedFromProfileItems = media.filter(
+        (m) => m.source_talent_media_id && m.removed_from_profile,
+    );
+    const LIBRARY_CATEGORIES = [
+        { key: "intro_video", label: "Intro" },
+        { key: "image", label: "Portfolio" },
+        { key: "indian", label: "Indian" },
+        { key: "western", label: "Western" },
+    ];
+    const libraryByCategory = Object.fromEntries(
+        LIBRARY_CATEGORIES.map(({ key }) => [key, libraryMedia.filter((m) => m.category === key)]),
+    );
+    const removedByCategory = Object.fromEntries(
+        LIBRARY_CATEGORIES.map(({ key }) => [key, removedFromProfileItems.filter((m) => m.category === key)]),
+    );
 
     const activeConditionalVideoRules = useMemo(() => {
         if (!project || !Array.isArray(project.conditional_video_rules)) return [];
@@ -1530,10 +1585,77 @@ function SubmissionPage() {
                 `/public/submissions/${saved.id}`,
                 authCfg,
             );
-            setSubmission(data);
+            applySubmissionResponse(data);
         } catch {
             toast.error("Could not remove file");
         }
+    };
+
+    // Talent Profile Migration, Phase 3 — "My Saved Media" picker actions.
+    // Selecting/deselecting a Library item is a reference operation: POST
+    // .../media/from-library copies by value server-side (same public_id/
+    // url, no upload), and deselecting reuses the existing DELETE endpoint
+    // exactly like removing any other media item.
+    const toggleLibraryMedia = async (item, isSelected) => {
+        let currentSaved = saved;
+        if (!currentSaved) {
+            const err = validateStep1();
+            if (err) {
+                toast.error("Please complete the required Profile fields first.");
+                setCollapsedSections((prev) => ({ ...prev, profile: false }));
+                return;
+            }
+            currentSaved = await startSubmissionDirect();
+            if (!currentSaved) return;
+        }
+        const cfg = { headers: { Authorization: `Bearer ${currentSaved.token}` } };
+        setLibraryBusyId(item.id);
+        try {
+            if (isSelected) {
+                const existing = media.find((m) => m.source_talent_media_id === item.id);
+                if (existing) {
+                    await axios.delete(
+                        `/public/submissions/${currentSaved.id}/media/${existing.id}`,
+                        cfg,
+                    );
+                    const { data } = await axios.get(
+                        `/public/submissions/${currentSaved.id}`,
+                        cfg,
+                    );
+                    applySubmissionResponse(data);
+                }
+            } else {
+                const { data } = await axios.post(
+                    `/public/submissions/${currentSaved.id}/media/from-library`,
+                    { talent_media_id: item.id },
+                    cfg,
+                );
+                applySubmissionResponse(data);
+            }
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Could not update selection");
+        } finally {
+            setLibraryBusyId(null);
+        }
+    };
+
+    const selectAllLibraryMedia = async () => {
+        const toAdd = libraryMedia.filter((item) => !selectedLibrarySourceIds.has(item.id));
+        for (const item of toAdd) {
+            // Sequential, not parallel — each call reads-then-writes the
+            // submission's own media array (cap checks, single-slot
+            // replace), so firing them in parallel would race against the
+            // same document.
+            // eslint-disable-next-line no-await-in-loop
+            await toggleLibraryMedia(item, false);
+        }
+    };
+
+    const dismissRemovedWarning = (mid) => {
+        // "Keep for this submission" — the item is already in
+        // submission.media; keeping it needs no backend call, just hiding
+        // the warning locally.
+        setDismissedRemovedWarnings((prev) => new Set(prev).add(mid));
     };
 
     const replaceMediaFile = async (oldMedia, file) => {
@@ -1616,7 +1738,7 @@ function SubmissionPage() {
                     }
                 },
             );
-            setSubmission(data);
+            applySubmissionResponse(data);
             setEditMode(false);
             // Once the user finalises, clear the local draft — the
             // canonical state lives on the backend now.
@@ -3273,6 +3395,121 @@ function SubmissionPage() {
 
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
+
+                                {libraryMedia.length > 0 && (
+                                    <div
+                                        className="mb-6 bg-indigo-50/40 border border-indigo-100 rounded-2xl p-4"
+                                        data-testid="library-media-section"
+                                    >
+                                        <div className="flex items-center justify-between gap-3 mb-3">
+                                            <div>
+                                                <h3 className="font-display text-lg font-bold text-slate-900">
+                                                    My Saved Media
+                                                </h3>
+                                                <p className="text-xs text-slate-500 mt-0.5">
+                                                    From your Talent Profile — choose what applies to this project. No re-upload needed.
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={selectAllLibraryMedia}
+                                                className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-full border border-indigo-200 bg-white hover:bg-indigo-50 transition-colors"
+                                                data-testid="library-select-all"
+                                            >
+                                                Select All
+                                            </button>
+                                        </div>
+
+                                        {LIBRARY_CATEGORIES.map(({ key, label }) => {
+                                            const items = libraryByCategory[key];
+                                            const removedItems = removedByCategory[key].filter(
+                                                (m) => !dismissedRemovedWarnings.has(m.id),
+                                            );
+                                            if (items.length === 0 && removedItems.length === 0) return null;
+                                            return (
+                                                <div key={key} className="mb-4 last:mb-0">
+                                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
+                                                        {label}
+                                                    </p>
+                                                    <div className="flex flex-wrap gap-3">
+                                                        {items.map((item) => {
+                                                            const isSelected = selectedLibrarySourceIds.has(item.id);
+                                                            const isBusy = libraryBusyId === item.id;
+                                                            return (
+                                                                <button
+                                                                    key={item.id}
+                                                                    type="button"
+                                                                    disabled={isBusy}
+                                                                    onClick={() => toggleLibraryMedia(item, isSelected)}
+                                                                    data-testid={`library-item-${item.id}`}
+                                                                    data-selected={isSelected ? "true" : "false"}
+                                                                    className={`relative w-24 h-24 rounded-xl overflow-hidden border-2 transition-all ${
+                                                                        isSelected ? "border-emerald-500" : "border-transparent"
+                                                                    } ${isBusy ? "opacity-50" : ""}`}
+                                                                    title={isSelected ? "Selected — click to remove from this submission" : "Not selected — click to use for this submission"}
+                                                                >
+                                                                    {item.category === "intro_video" ? (
+                                                                        <div className="w-full h-full bg-slate-900 flex items-center justify-center">
+                                                                            <Video className="w-6 h-6 text-white/70" />
+                                                                        </div>
+                                                                    ) : (
+                                                                        <img
+                                                                            src={thumbnailUrl(item)}
+                                                                            alt=""
+                                                                            className="w-full h-full object-cover"
+                                                                        />
+                                                                    )}
+                                                                    <div
+                                                                        className={`absolute top-1 right-1 w-5 h-5 rounded-full flex items-center justify-center ${
+                                                                            isSelected
+                                                                                ? "bg-emerald-500"
+                                                                                : "bg-white/85 border border-slate-300"
+                                                                        }`}
+                                                                    >
+                                                                        {isBusy ? (
+                                                                            <Loader2 className="w-3 h-3 animate-spin text-slate-500" />
+                                                                        ) : (
+                                                                            isSelected && <Check className="w-3 h-3 text-white" />
+                                                                        )}
+                                                                    </div>
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                    {removedItems.map((m) => (
+                                                        <div
+                                                            key={m.id}
+                                                            className="mt-2 flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3"
+                                                            data-testid={`removed-from-profile-${m.id}`}
+                                                        >
+                                                            <span className="text-xs text-amber-800">
+                                                                This media has been removed from your Talent Profile.
+                                                            </span>
+                                                            <div className="flex gap-2 shrink-0">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => dismissRemovedWarning(m.id)}
+                                                                    className="text-xs px-2.5 py-1 rounded-full border border-amber-300 bg-white hover:bg-amber-50 transition-colors"
+                                                                    data-testid={`keep-removed-${m.id}`}
+                                                                >
+                                                                    Keep for this submission
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => removeMedia(m.id)}
+                                                                    className="text-xs px-2.5 py-1 rounded-full border border-red-300 bg-white text-red-600 hover:bg-red-50 transition-colors"
+                                                                    data-testid={`remove-removed-${m.id}`}
+                                                                >
+                                                                    Remove from this submission
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
 
                                 {requirements.intro_video !== REQUIREMENT_TIERS.HIDDEN && (
                                     <PremiumUploadSlot

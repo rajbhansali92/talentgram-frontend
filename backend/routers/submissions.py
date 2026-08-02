@@ -62,6 +62,7 @@ from core import (
     client_ip,
     sign_r2_media_if_needed,
     build_talent_submission_view,
+    resolve_canonical_talent,
 )
 from drive_backup import (
     drive_enabled,
@@ -465,7 +466,6 @@ async def start_submission(
 
     fd = payload.form_data or {}
     talent_age = None
-    prefill_media: List[Dict[str, Any]] = []
     if email:
         talent_doc = await db.talents.find_one(
             {"$or": [
@@ -473,14 +473,10 @@ async def start_submission(
                 {"email": email},
                 {"source.talent_email": email}
             ]},
-            {"age": 1, "dob": 1, "media": 1}
+            {"age": 1, "dob": 1}
         )
         if talent_doc:
             talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
-            # Media Library Foundation (Phase 4 item 1): the one canonical
-            # prefill builder, shared with `/public/prefill` and
-            # `_get_talent_profile_response` — see build_prefill_media().
-            prefill_media = await build_prefill_media(talent_doc, email=email)
 
     submitted_age_override_val = None
     override_active = fd.get("overrideAge") or fd.get("override_age")
@@ -497,11 +493,11 @@ async def start_submission(
 
     sid = str(uuid.uuid4())
     atk = make_access_token()
-    # Media Library Foundation (Phase 4 item 1): every item here came from
-    # build_prefill_media() (i.e. the talent's Global Profile), so it's
-    # tagged origin="global". Additive field only — never backfilled onto
-    # existing submissions, never migrated.
-    initial_media = [{**m, "origin": "global"} for m in deduplicate_media(prefill_media)]
+    # Talent Profile Migration, Phase 3: a new submission starts with NO
+    # media. Reusable media is no longer auto-injected — the talent sees
+    # it via `library_media` (computed live, see GET .../submissions/{sid})
+    # and explicitly picks what applies to THIS project via
+    # POST .../media/from-library. No silent synchronization.
     doc = {
         "id": sid,
         "project_id": project["id"],
@@ -514,7 +510,7 @@ async def start_submission(
         "field_visibility": fv_defaults,
         "submitted_age_override": submitted_age_override_val,
         "effective_age": effective_age_val,
-        "media": initial_media,
+        "media": [],
         "status": "draft",
         "decision": "pending",
         "access_token": atk,
@@ -1172,6 +1168,118 @@ async def submission_delete_media(
     return {"ok": True}
 
 
+class MediaFromLibraryIn(BaseModel):
+    talent_media_id: str
+
+
+@router.post("/public/submissions/{sid}/media/from-library")
+async def submission_add_media_from_library(
+    sid: str, payload: MediaFromLibraryIn, authorization: Optional[str] = Header(None)
+):
+    """Talent Profile Migration, Phase 3 — attach an existing reusable Talent
+    Profile media item to THIS submission by reference. No upload, no new
+    Cloudinary/Stream asset: the new submission media item shares the exact
+    same `public_id`/`url`/`resource_type` as the source, and carries
+    `source_talent_media_id` back to it (a live pointer, reconciled on every
+    resume — see `build_talent_submission_view`). Mirrors the single-slot and
+    per-category-cap rules `submission_upload` already enforces for real
+    uploads, so a talent can't use the picker to bypass them.
+    """
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    talent = await resolve_canonical_talent(email=sub.get("talent_email"))
+    if not talent:
+        raise HTTPException(404, "No Talent Profile found for this submission")
+
+    # Ownership check: build_prefill_media() only ever returns items from
+    # THIS resolved talent's own `media[]` — an id that isn't in that list
+    # either belongs to someone else or doesn't exist. Reusing the same
+    # canonical builder every other prefill path uses means there is no
+    # second, divergent notion of "what's in my library" to keep in sync.
+    library_media = await build_prefill_media(talent, email=talent.get("email"))
+    lib_item = next((m for m in library_media if m.get("id") == payload.talent_media_id), None)
+    if not lib_item:
+        raise HTTPException(404, "Media not found in your Talent Profile")
+
+    category = lib_item.get("category")
+    single_slot = {"intro_video", "take_1", "take_2", "take_3"}
+
+    if category in PORTFOLIO_IMAGE_CATEGORIES:
+        existing = sum(1 for m in (sub.get("media") or []) if m.get("category") == category)
+        if existing >= MAX_IMAGES_PER_CATEGORY:
+            label_name = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
+            raise HTTPException(400, f"{label_name} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
+
+    old_slot_items = [m for m in (sub.get("media") or []) if m.get("category") == category] if category in single_slot else []
+
+    new_item = {k: v for k, v in lib_item.items() if k != "id"}
+    new_item.update({
+        "id": str(uuid.uuid4()),
+        "source_talent_media_id": lib_item["id"],
+        "origin": "global",
+        "created_at": _now(),
+    })
+
+    was_finalized = has_been_submitted_once(sub)
+    push_patch: Dict[str, Any] = {"$push": {"media": new_item}}
+    if was_finalized:
+        proj = await db.projects.find_one(
+            {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1}
+        )
+        re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
+        set_patch = {"status": "updated", "updated_at": _now()}
+        if re_approval:
+            set_patch["decision"] = "pending"
+        push_patch["$set"] = set_patch
+
+    # Atomically guarded push: the filter only matches if no item with this
+    # source_talent_media_id exists RIGHT NOW. A plain read-then-decide
+    # check (read `sub`, decide, then write) has a window where two
+    # concurrent requests (two browser tabs, a double-fire) both see "not
+    # yet selected" and both push — this closes that race at the database
+    # level instead. If another concurrent request already added it,
+    # matched_count is 0 and this is a no-op: re-fetch and return the
+    # (already correct) current state rather than duplicating.
+    result = await db.submissions.update_one(
+        {"id": sid, "media.source_talent_media_id": {"$ne": lib_item["id"]}},
+        push_patch,
+    )
+    if result.matched_count == 0:
+        fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+        return await build_talent_submission_view(fresh_sub)
+
+    # Item copied FROM talents.media already exists there by construction —
+    # mirroring it back via sync_media_to_global_talent() would be a
+    # guaranteed no-op (its own dedup check matches on the shared
+    # public_id), so it's deliberately not called here.
+
+    if category in single_slot and old_slot_items:
+        # Now safe to evict whatever else was occupying the single slot —
+        # excluded by the NEW item's own (freshly generated) id, so this can
+        # never remove what was just pushed above regardless of timing.
+        await db.submissions.update_one(
+            {"id": sid},
+            {"$pull": {"media": {"category": category, "id": {"$ne": new_item["id"]}}}},
+        )
+        from core import safe_cleanup_media_storage
+        for pi in old_slot_items:
+            # Reference-aware: `pi` may itself be a Library reference (no
+            # physical delete needed) or a real upload (safe to clean up
+            # once nothing else points at it) — safe_cleanup_media_storage
+            # checks is_media_asset_referenced() either way.
+            await safe_cleanup_media_storage(pi, scope="submission", parent_id=sid)
+            if not was_finalized:
+                await remove_synced_media_from_global_talent(sub, pi["id"])
+
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return await build_talent_submission_view(fresh_sub)
+
+
 # ==========================================================================
 # Architecture C — direct browser→Cloudinary audition-video upload
 # (feature-flagged; images & all other flows unchanged)
@@ -1811,6 +1919,19 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
+
+    # Talent Profile Migration, Phase 3: the immutable snapshot about to be
+    # frozen must reflect the current Talent Profile for anything still
+    # library-derived, and `removed_from_profile` must be accurate at the
+    # moment of freeze — not whatever it happened to say when the talent
+    # last opened the page.
+    from core import reconcile_submission_media
+    finalize_talent = await resolve_canonical_talent(email=sub.get("talent_email"))
+    if finalize_talent:
+        finalize_library_media = await build_prefill_media(finalize_talent, email=finalize_talent.get("email"))
+        if await reconcile_submission_media(sub, finalize_library_media):
+            sub = await db.submissions.find_one({"id": sid})
+
     form = sub.get("form_data") or {}
     project = await db.projects.find_one({"id": sub["project_id"]})
     if not project:

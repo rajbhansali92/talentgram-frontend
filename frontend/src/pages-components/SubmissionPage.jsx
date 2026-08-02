@@ -451,6 +451,16 @@ function SubmissionPage() {
     const [libraryMedia, setLibraryMedia] = useState([]);
     const [libraryBusyId, setLibraryBusyId] = useState(null);
     const [dismissedRemovedWarnings, setDismissedRemovedWarnings] = useState(() => new Set());
+    // Talent Profile Migration, Phase 4 — every reusable-category item
+    // (intro_video/image/indian/western) the talent has JUST uploaded but
+    // not yet said "only this project" or "update my Talent Profile" about.
+    // Populated from `submission.pending_media_consent` (see
+    // applySubmissionResponse below) — the backend is the single source of
+    // truth for what's pending, this is never computed client-side.
+    const [pendingMediaConsent, setPendingMediaConsent] = useState([]);
+    const [mediaConsentSubmitting, setMediaConsentSubmitting] = useState(false);
+    // Default selection is "only this project" per spec — nothing auto-updates.
+    const [mediaConsentChoice, setMediaConsentChoice] = useState("only_this_project");
     // Sprint 1 — autosave indicator. "idle" | "saving" | "saved". Driven by the
     // debounced draft-persistence effect below so it reflects real save activity.
     const [saveStatus, setSaveStatus] = useState("idle");
@@ -850,6 +860,9 @@ function SubmissionPage() {
         setSubmission(data);
         if (data && Object.prototype.hasOwnProperty.call(data, "library_media")) {
             setLibraryMedia(data.library_media || []);
+        }
+        if (data && Object.prototype.hasOwnProperty.call(data, "pending_media_consent")) {
+            setPendingMediaConsent(data.pending_media_consent || []);
         }
     };
 
@@ -1511,6 +1524,27 @@ function SubmissionPage() {
         LIBRARY_CATEGORIES.map(({ key }) => [key, removedFromProfileItems.filter((m) => m.category === key)]),
     );
 
+    // Talent Profile Migration, Phase 4 — the aggregated consent summary
+    // ("1 Intro Video, 3 Portfolio Images"). `pendingMediaConsent` already
+    // comes from the server as the exact current pending set (see
+    // build_talent_submission_view's pending_media_consent) — this is pure
+    // display grouping, no client-side "is this reusable" logic duplicated.
+    const PENDING_CONSENT_LABELS = {
+        intro_video: ["Intro Video", "Intro Videos"],
+        image: ["Portfolio Image", "Portfolio Images"],
+        indian: ["Indian Look Image", "Indian Look Images"],
+        western: ["Western Look Image", "Western Look Images"],
+    };
+    const pendingConsentSummary = Object.entries(
+        pendingMediaConsent.reduce((acc, m) => {
+            acc[m.category] = (acc[m.category] || 0) + 1;
+            return acc;
+        }, {}),
+    ).map(([category, count]) => {
+        const [singular, plural] = PENDING_CONSENT_LABELS[category] || [category, category];
+        return `${count} ${count === 1 ? singular : plural}`;
+    });
+
     const activeConditionalVideoRules = useMemo(() => {
         if (!project || !Array.isArray(project.conditional_video_rules)) return [];
         return project.conditional_video_rules.filter((rule) => {
@@ -1656,6 +1690,33 @@ function SubmissionPage() {
         // submission.media; keeping it needs no backend call, just hiding
         // the warning locally.
         setDismissedRemovedWarnings((prev) => new Set(prev).add(mid));
+    };
+
+    // Talent Profile Migration, Phase 4 — one decision resolves EVERY
+    // currently-pending item in a single call (see
+    // apply_media_consent_decision() server-side), whether the talent
+    // uploaded 1 intro video, 3 images, or a mix.
+    const submitMediaConsent = async (decision) => {
+        if (!saved?.id) return;
+        setMediaConsentSubmitting(true);
+        try {
+            const { data } = await axios.post(
+                `/public/submissions/${saved.id}/media-consent`,
+                { decision },
+                authCfg,
+            );
+            applySubmissionResponse(data);
+            setMediaConsentChoice("only_this_project");
+            toast.success(
+                decision === "update_profile"
+                    ? "Your Talent Profile has been updated."
+                    : "Saved for this project only.",
+            );
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Could not save your choice");
+        } finally {
+            setMediaConsentSubmitting(false);
+        }
     };
 
     const replaceMediaFile = async (oldMedia, file) => {
@@ -3992,6 +4053,69 @@ function SubmissionPage() {
                     mode="sticky"
                     progress={experience.overallProgress}
                 />
+            )}
+
+            {/* Talent Profile Migration, Phase 4 — reusable-media consent.
+                No backdrop-dismiss / no close button: the talent must make an
+                explicit choice (default is pre-selected to "only this
+                project", so simply confirming never auto-updates anything).
+                They can still navigate away and resume later — resuming
+                re-shows this exact dialog (pendingMediaConsent comes fresh
+                from the server on every load), it is never lost. */}
+            {pendingMediaConsent.length > 0 && (
+                <div
+                    className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+                    data-testid="media-consent-dialog"
+                >
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+                        <h3 className="font-display text-xl font-bold text-slate-950 mb-2">
+                            You uploaded {pendingConsentSummary.join(", ")}
+                        </h3>
+                        <p className="text-sm text-slate-600 mb-5">
+                            How would you like to use {pendingMediaConsent.length === 1 ? "it" : "them"}?
+                        </p>
+
+                        <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 hover:bg-slate-50 cursor-pointer mb-2">
+                            <input
+                                type="radio"
+                                name="media-consent-choice"
+                                checked={mediaConsentChoice === "only_this_project"}
+                                onChange={() => setMediaConsentChoice("only_this_project")}
+                                className="mt-1"
+                                data-testid="media-consent-only-project"
+                            />
+                            <span className="text-sm text-slate-800 font-medium">Use only for this project</span>
+                        </label>
+
+                        <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 hover:bg-slate-50 cursor-pointer mb-5">
+                            <input
+                                type="radio"
+                                name="media-consent-choice"
+                                checked={mediaConsentChoice === "update_profile"}
+                                onChange={() => setMediaConsentChoice("update_profile")}
+                                className="mt-1"
+                                data-testid="media-consent-update-profile"
+                            />
+                            <span className="text-sm text-slate-800">
+                                <span className="font-medium">Update my Talent Profile</span>
+                                <br />
+                                <span className="text-xs text-slate-500">
+                                    Updating your Talent Profile will also update your Dashboard and future project prefills.
+                                </span>
+                            </span>
+                        </label>
+
+                        <button
+                            type="button"
+                            disabled={mediaConsentSubmitting}
+                            onClick={() => submitMediaConsent(mediaConsentChoice)}
+                            className="w-full py-3 rounded-full bg-slate-950 text-white font-medium text-sm hover:bg-slate-800 transition-colors disabled:opacity-50"
+                            data-testid="media-consent-confirm"
+                        >
+                            {mediaConsentSubmitting ? "Saving…" : "Confirm"}
+                        </button>
+                    </div>
+                </div>
             )}
         </main>
     );

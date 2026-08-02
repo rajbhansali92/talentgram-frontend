@@ -1757,6 +1757,11 @@ MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
 SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3", "image", "indian", "western"}
 LEGACY_TAKE_CATEGORIES = {"take_1", "take_2", "take_3"}
 PORTFOLIO_IMAGE_CATEGORIES = {"image", "indian", "western"}
+# Talent Profile Migration, Phase 4 — categories that MAY become the
+# canonical Talent Profile (db.talents.media) if the talent consents.
+# Audition takes (take/take_1..3) are never in this set and never reach the
+# consent dialog — they are always project-only, no exceptions.
+REUSABLE_MEDIA_CATEGORIES = {"intro_video", "image", "indian", "western"}
 MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
@@ -2841,6 +2846,12 @@ SYNC_TO_GLOBAL_CATEGORIES = {
 #   - client_visible/internal_only/client_cover: Client Review Link
 #     visibility flags scoped to that specific submission
 #   - category/created_at: every caller sets these explicitly instead
+#   - profile_sync_status (Talent Profile Migration, Phase 4): the
+#     submission-upload's own "pending/synced/declined" consent bookkeeping.
+#     Meaningless outside that one submission's media array — a canonical
+#     db.talents.media item (or an application draft hydrated from one)
+#     must never carry it, or a later reader could mistake the CANONICAL
+#     copy for something still awaiting consent.
 MEDIA_COPY_EXCLUDE_FIELDS = frozenset({
     "id", "scope", "category",
     "submission_id", "project_id", "application_id", "talent_id",
@@ -2848,6 +2859,7 @@ MEDIA_COPY_EXCLUDE_FIELDS = frozenset({
     "source_application_id", "source_application_media_id",
     "origin", "label", "status", "failed_at", "failure_reason",
     "client_visible", "internal_only", "client_cover", "created_at",
+    "profile_sync_status",
 })
 
 
@@ -3500,6 +3512,24 @@ async def reconcile_submission_media(sub: dict, library_media: List[dict]) -> bo
     return changed
 
 
+def mark_reusable_media_pending(media_item: dict) -> None:
+    """Talent Profile Migration, Phase 4 — the one place that decides which
+    freshly-uploaded categories need consent before they can ever reach
+    db.talents.media. Mutates `media_item` in place; every submission-upload
+    construction site calls this instead of deciding for itself, so the
+    reusable-category list only lives in one place (REUSABLE_MEDIA_CATEGORIES
+    above).
+
+    A tagged item is `profile_sync_status="pending"` until the talent answers
+    the consent dialog — see apply_media_consent_decision() in
+    routers/submissions.py, the only place that ever resolves it. Audition
+    takes (take/take_1..3) are never tagged; they were never eligible to
+    sync to the profile and this changes nothing about them.
+    """
+    if media_item.get("category") in REUSABLE_MEDIA_CATEGORIES:
+        media_item["profile_sync_status"] = "pending"
+
+
 async def build_talent_submission_view(sub: dict) -> dict:
     """The single canonical talent-facing submission representation.
 
@@ -3518,6 +3548,11 @@ async def build_talent_submission_view(sub: dict) -> dict:
     Talent Profile Migration, Phase 3: also the one place that computes
     `library_media` (live, never stored — see build_prefill_media()) and
     reconciles any already-selected library items against it.
+
+    Talent Profile Migration, Phase 4: also surfaces `pending_media_consent`
+    — every media item still awaiting the talent's "only this project" vs
+    "update my Talent Profile" answer — so the frontend can show the
+    aggregated dialog on resume, not just right after upload.
     """
     from routers.feedback import list_approved_feedback_for_talent
     from routers.submissions import build_prefill_media
@@ -3526,6 +3561,9 @@ async def build_talent_submission_view(sub: dict) -> dict:
     library_media = await build_prefill_media(talent, email=talent.get("email")) if talent else []
     await reconcile_submission_media(sub, library_media)
     sub["library_media"] = library_media
+    sub["pending_media_consent"] = [
+        m for m in (sub.get("media") or []) if m.get("profile_sync_status") == "pending"
+    ]
 
     sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
     return sign_r2_media_if_needed(sub)

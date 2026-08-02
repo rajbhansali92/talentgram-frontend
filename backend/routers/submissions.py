@@ -63,6 +63,8 @@ from core import (
     sign_r2_media_if_needed,
     build_talent_submission_view,
     resolve_canonical_talent,
+    REUSABLE_MEDIA_CATEGORIES,
+    mark_reusable_media_pending,
 )
 from drive_backup import (
     drive_enabled,
@@ -762,6 +764,11 @@ async def submission_upload(
     }
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
+    # Talent Profile Migration, Phase 4 — a reusable-category upload no
+    # longer auto-syncs to the Talent Profile (see the removed sync call
+    # below). It's flagged pending until the talent explicitly consents via
+    # POST /media-consent. Audition takes are untouched — never flagged.
+    mark_reusable_media_pending(media)
 
     if category in single_slot:
         await db.submissions.update_one(
@@ -822,20 +829,14 @@ async def submission_upload(
         brand = (project or {}).get("brand_name") or sub.get("project_slug") or "Unknown"
         enqueue_drive_upload(db, media, updated, brand, data)
 
-    # ------------------------------------------------------------------
-    # Phase 3 v37i — mirror image-category media into the global talent
-    # record so the talent's profile (/admin/talents/:id) reflects every
-    # portfolio image they've uploaded across all projects. Idempotent
-    # via source_submission_media_id; no-op for intro_video/take.
-    #
-    # Issue 2: only mirror into the global profile while this is still an
-    # ORIGINAL submission-in-progress. If the submission was already
-    # finalized (`was_finalized`), this upload is a resubmission/edit and
-    # must NOT touch the global Talent Profile — neither adding the new
-    # asset nor removing the original's mirrored media below.
-    # ------------------------------------------------------------------
-    if not was_finalized:
-        await sync_media_to_global_talent(updated, media)
+    # Talent Profile Migration, Phase 4 — no more auto-mirroring into the
+    # global talent record here. A reusable-category item was just flagged
+    # `profile_sync_status="pending"` above; it only reaches db.talents.media
+    # if the talent explicitly chooses "Update my Talent Profile" via
+    # POST /media-consent (or, as a retry safety net, in finalize()'s
+    # existing bulk sync pass). Audition takes were never mirrored either
+    # way. The old unconditional sync call that used to live here is gone —
+    # this endpoint no longer decides whether the profile changes.
 
     if category in single_slot and prev_items:
         # Defer old asset deletion until database update is verified
@@ -1021,10 +1022,13 @@ async def submission_complete_upload(
     existing_takes = 0
     if category == "take":
         existing_takes = sum(
-            1 for m in sub.get("media", []) 
+            1 for m in sub.get("media", [])
             if m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
         )
         media["label"] = (payload.label or "").strip() or f"Take {existing_takes + 1}"
+    # Talent Profile Migration, Phase 4 — see submission_upload() for the
+    # full rationale; flagged pending instead of auto-syncing below.
+    mark_reusable_media_pending(media)
 
     tid = sub.get("talent_id")
     tname = sub.get("talent_name")
@@ -1081,10 +1085,8 @@ async def submission_complete_upload(
 
     await db.submissions.update_one({"id": sid}, patch)
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
-    # Issue 2: original submissions only — resubmission uploads must never
-    # mirror into the global Talent Profile.
-    if not was_finalized:
-        await sync_media_to_global_talent(updated, media)
+    # Talent Profile Migration, Phase 4 — no auto-sync here anymore; see
+    # submission_upload() for the full rationale.
 
     if was_finalized:
         brand = (proj or {}).get("brand_name") or sub.get("project_slug") or "Project"
@@ -1280,6 +1282,85 @@ async def submission_add_media_from_library(
     return await build_talent_submission_view(fresh_sub)
 
 
+MEDIA_CONSENT_DECISIONS = {"only_this_project", "update_profile"}
+
+
+async def apply_media_consent_decision(sub: dict, decision: str) -> int:
+    """Talent Profile Migration, Phase 4 — the single place a consent
+    decision is ever applied. Every reusable-category upload, regardless of
+    which of the four construction sites created it (submission_upload,
+    submission_upload_complete, attach_video_media, video_complete's R2
+    branch), lands here as one batch: whatever is currently
+    `profile_sync_status="pending"` on this submission gets resolved by
+    ONE decision, in one call — a batch of 5 uploads is one decision, not
+    five, satisfying "the dialog must appear only once per submission
+    session, aggregate them".
+
+    "update_profile": syncs each pending item into db.talents.media via the
+    exact same sync_media_to_global_talent() every other path already used
+    — no duplicated sync logic. Preserves the pre-existing "retest never
+    touches the global profile" rule (Issue 2) that every other upload path
+    already enforces: if this submission was already finalized once, the
+    decision is still recorded, but the actual sync is skipped, exactly
+    matching how a plain re-upload during a retest already behaves today.
+
+    "only_this_project": marks them resolved without ever touching
+    db.talents — nothing syncs, nothing changes on the profile.
+
+    Returns the number of items resolved (0 if nothing was pending, e.g. a
+    stale/duplicate client call after the talent already answered).
+    """
+    media = sub.get("media") or []
+    pending = [m for m in media if m.get("profile_sync_status") == "pending"]
+    if not pending:
+        return 0
+
+    if decision == "update_profile" and not has_been_submitted_once(sub):
+        for m in pending:
+            await sync_media_to_global_talent(sub, m, skip_cover_cache=True)
+            m["profile_sync_status"] = "synced"
+        talent = await resolve_canonical_talent(email=sub.get("talent_email"))
+        if talent:
+            await update_talent_cover_cache(talent["id"])
+    else:
+        # Either an explicit "only this project" choice, or "update_profile"
+        # requested during a retest (Issue 2 — never honored, same as every
+        # other upload path). Either way: no sync, just mark resolved.
+        for m in pending:
+            m["profile_sync_status"] = "declined"
+
+    await db.submissions.update_one({"id": sub["id"]}, {"$set": {"media": media}})
+    return len(pending)
+
+
+class MediaConsentIn(BaseModel):
+    decision: str
+
+
+@router.post("/public/submissions/{sid}/media-consent")
+async def submission_media_consent(
+    sid: str, payload: MediaConsentIn, authorization: Optional[str] = Header(None)
+):
+    """Talent Profile Migration, Phase 4 — the talent's answer to "how would
+    you like to use this media?" for every currently-pending reusable
+    upload on this submission. See apply_media_consent_decision() for what
+    actually happens; this endpoint is just the auth + validation wrapper.
+    """
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    if payload.decision not in MEDIA_CONSENT_DECISIONS:
+        raise HTTPException(400, "Invalid decision")
+    sub = await db.submissions.find_one({"id": sid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    await apply_media_consent_decision(sub, payload.decision)
+
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return await build_talent_submission_view(fresh_sub)
+
+
 # ==========================================================================
 # Architecture C — direct browser→Cloudinary audition-video upload
 # (feature-flagged; images & all other flows unchanged)
@@ -1379,6 +1460,14 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
     }
     if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
         media["label"] = (label or "").strip() or "Take"
+    # Talent Profile Migration, Phase 4 — this helper has never called
+    # sync_media_to_global_talent(); it relied entirely on finalize()'s bulk
+    # catch-all to ever reach db.talents.media. Under the consent model that
+    # catch-all now only applies once the talent has explicitly chosen
+    # "Update my Talent Profile" — flag intro_video here too so this upload
+    # path can't silently bypass consent just because it never had a sync
+    # call of its own.
+    mark_reusable_media_pending(media)
 
     # Single-slot replacement for intro_video (cannot mix $pull and $push on the
     # same field in one update, so pull first).
@@ -1655,6 +1744,11 @@ async def video_complete(
         }
         if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
             media["label"] = (payload.label or "").strip() or "Take"
+        # Talent Profile Migration, Phase 4 — same as attach_video_media():
+        # this R2/Cloudflare-Stream registration path has never called
+        # sync_media_to_global_talent() either; flag it pending so consent
+        # is still required regardless of which upload path created it.
+        mark_reusable_media_pending(media)
 
         # Single-slot replacement for intro_video: Defer physical deletion until transcode webhook completes
         operation_id = str(uuid.uuid4())
@@ -1931,6 +2025,18 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         finalize_library_media = await build_prefill_media(finalize_talent, email=finalize_talent.get("email"))
         if await reconcile_submission_media(sub, finalize_library_media):
             sub = await db.submissions.find_one({"id": sid})
+
+    # Talent Profile Migration, Phase 4: a submission cannot be finalized
+    # while a reusable upload's fate ("only this project" vs "update my
+    # Talent Profile") is still unanswered — the talent must resolve every
+    # pending item via POST /media-consent first. This is the deterministic
+    # gate: nothing can slip through un-consented just because the talent
+    # never got to (or dismissed) the dialog.
+    if any(m.get("profile_sync_status") == "pending" for m in (sub.get("media") or [])):
+        raise HTTPException(
+            400,
+            "Please choose how to use your new photo/video uploads before submitting.",
+        )
 
     form = sub.get("form_data") or {}
     project = await db.projects.find_one({"id": sub["project_id"]})
@@ -2292,6 +2398,19 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
     # Original submissions only — a resubmission/edit must never mirror its
     # media into the global Talent Profile (Issue 2).
     if not is_retest and finalized_sub and talent_doc:
+        # Talent Profile Migration, Phase 4: a "declined" reusable item
+        # (talent chose "only this project") must not participate in either
+        # step below — not the category wipe, and not the resync. Without
+        # this filter, declining would still silently wipe the EXISTING
+        # canonical media in that category, which is exactly the kind of
+        # auto-update the consent flow exists to prevent. Items with no
+        # profile_sync_status (audition takes, from-library selections) are
+        # unaffected — same as before Phase 4.
+        syncable_media = [
+            m for m in (finalized_sub.get("media") or [])
+            if m.get("profile_sync_status") != "declined"
+        ]
+
         # Enforce replacement policy: clear existing canonical media for the incoming categories
         incoming_categories = set()
         cat_mapping = {
@@ -2305,7 +2424,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             "headshots": "headshot",
             "additional_portfolio": "additional_portfolio"
         }
-        for m in finalized_sub.get("media") or []:
+        for m in syncable_media:
             cat = m.get("category")
             if cat in cat_mapping:
                 incoming_categories.add(cat_mapping[cat])
@@ -2317,7 +2436,7 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             )
 
         # P2-A: skip the per-item cover recompute (O(N²)); recompute once after.
-        for m in finalized_sub.get("media") or []:
+        for m in syncable_media:
             await sync_media_to_global_talent(finalized_sub, m, skip_cover_cache=True)
         await update_talent_cover_cache(talent_doc["id"])
 

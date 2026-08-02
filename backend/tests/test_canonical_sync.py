@@ -76,6 +76,50 @@ async def test_canonical_prefill_no_fallbacks():
 
 
 @pytest.mark.asyncio
+async def test_canonical_prefill_no_video_no_fallback():
+    """Talent Profile Migration Phase 1: when the talent's own profile has NO
+    video, prefill must NOT resurrect a video from a historical submission or
+    application — it must simply have no intro video."""
+    email = "test@talent.com"
+    token = make_token({"role": "submitter", "email": email, "sid": "sub-123"}, days=1)
+
+    mock_talent = {
+        "id": "talent-123",
+        "name": "Deeya Damini",
+        "email": email,
+        "normalized_email": email,
+        "media": [],  # no video on the canonical profile
+    }
+    mock_db.talents.find_one = AsyncMock(return_value=mock_talent)
+    # These represent stale historical records that must be ignored now that
+    # build_prefill_media() no longer falls back to them for intro video.
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sub-123",
+        "project_slug": "test-slug",
+        "talent_email": email,
+        "media": [{"id": "stale-video", "category": "video", "url": "http://stale/project-a.mp4"}],
+    })
+    mock_db.submissions.update_one = AsyncMock()
+    mock_db.applications.find_one = AsyncMock(return_value={
+        "id": "app-999",
+        "talent_email": email,
+        "media": [{"id": "stale-app-video", "category": "intro_video", "url": "http://stale/project-b.mp4"}],
+    })
+    mock_db.applications.update_one = AsyncMock()
+    mock_db.projects.find_one = AsyncMock(return_value={"id": "test-slug"})
+
+    resp = client.get(
+        f"/api/public/prefill?email={email}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    video_items = [m for m in data["prefill_media"] if m["category"] == "intro_video"]
+    assert video_items == [], f"expected no intro video, got stale fallback: {video_items}"
+
+
+@pytest.mark.asyncio
 async def test_category_mapping_invite_link():
     """Verify that all media categories map correctly without being dropped in the Invite Link flow."""
     from routers.applications import _reconcile_draft_from_talent

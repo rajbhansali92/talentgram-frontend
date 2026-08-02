@@ -199,16 +199,18 @@ async def build_prefill_media(talent: Dict[str, Any], email: Optional[str] = Non
     not just category, so a miscategorized video item can never end up in
     the images list).
 
-    The introduction video uses the richest resolution order, previously
-    found only in `start_submission`'s inline logic — every entry point
-    now gets the same fallback:
-      1. the talent's own Global Profile media (`talents.media`)
-      2. their most recently submitted project with a video
-      3. their most recent `/apply` application with a video
+    The introduction video is derived ONLY from the talent's own Global
+    Profile media (`talents.media`) — never from a prior submission or
+    application. Falling back to historical submission/application video
+    was a bug (Talent Profile Migration, Phase 1): it could resurface a
+    video from Project A when prefilling Project B even after the talent
+    replaced their profile video, violating "always the current profile,
+    never a historical project." If the profile has no video, prefill
+    simply has no video — the talent picks one via the media library
+    (Phase 3/4) or uploads fresh.
 
-    `email` is used only for tiers 2/3 (the `db.submissions`/
-    `db.applications` lookups) — pass it explicitly since not every
-    caller's talent projection happens to include the `email` field.
+    `email` is accepted for signature compatibility with existing callers
+    but is no longer used by this function.
     """
     prefill_images: List[Dict[str, Any]] = []
     for m in (talent.get("media") or []):
@@ -233,38 +235,15 @@ async def build_prefill_media(talent: Dict[str, Any], email: Optional[str] = Non
                 "created_at": m.get("created_at") or _now(),
             })
 
-    # Intro video — priority 1: db.talents.media
+    # Intro video — always and only from the talent's current Global Profile
+    # (talents.media). No fallback to db.submissions/db.applications: a
+    # historical project's video must never resurface as another project's
+    # prefill (Talent Profile Migration, Phase 1 fix).
     latest_intro = None
     for m in (talent.get("media") or []):
         if m.get("category") in {"video", "intro_video"} and m.get("url"):
             latest_intro = _prefill_video_item(m)
             break
-
-    norm_email = normalize_email(email) if email else normalize_email(talent.get("email"))
-
-    # Priority 2: db.submissions
-    if not latest_intro and norm_email:
-        latest_sub = await db.submissions.find_one(
-            {"talent_email": norm_email, "media.category": {"$in": ["intro_video", "video"]}},
-            sort=[("submitted_at", -1), ("created_at", -1)]
-        )
-        if latest_sub:
-            for m in (latest_sub.get("media") or []):
-                if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                    latest_intro = _prefill_video_item(m)
-                    break
-
-    # Priority 3: db.applications
-    if not latest_intro and norm_email:
-        latest_app = await db.applications.find_one(
-            {"talent_email": norm_email, "media.category": {"$in": ["intro_video", "video"]}},
-            sort=[("created_at", -1)]
-        )
-        if latest_app:
-            for m in (latest_app.get("media") or []):
-                if m.get("category") in {"intro_video", "video"} and m.get("url"):
-                    latest_intro = _prefill_video_item(m)
-                    break
 
     if latest_intro:
         prefill_images.append(latest_intro)

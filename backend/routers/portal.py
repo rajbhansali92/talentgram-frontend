@@ -135,6 +135,16 @@ async def portal_update_profile(
     if "work_links" in update_fields:
         update_fields["work_links"] = [w.strip() for w in update_fields["work_links"] if w.strip()]
 
+    # Phase 0 — Canonical Metadata Foundation: stamp updated_at only when a
+    # writable field's value actually differs from what's currently stored,
+    # mirroring merge_talent_profile()'s diff-based stamping discipline
+    # (core.py) — a resave of identical values (or a bare login-refresh with
+    # no field changes) must not advance the canonical clock, or the
+    # freshness comparison a stale-draft finalize relies on becomes
+    # meaningless.
+    if any(talent.get(k) != v for k, v in update_fields.items()):
+        update_fields["updated_at"] = _now()
+
     update_fields["last_portal_login"] = _now()
 
     await db.talents.update_one({"id": talent["id"]}, {"$set": update_fields})

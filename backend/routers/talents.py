@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 from core import (
     APP_NAME,
+    AUTO_UPDATE_FIELDS,
+    REVIEW_FIELDS,
     BulkDeleteIn,
     TalentIn,
     TalentOut,
@@ -787,16 +789,12 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
         if clash:
             raise HTTPException(409, "Another talent already has this email")
 
-    # Track changes for the audit log
-    AUTO_UPDATE_FIELDS = {
-        "instagram_handle", "instagram_followers", "location", "bio",
-        "skills", "work_links", "interested_in", "languages", "phone",
-        "alternate_contact_number"
-    }
-    REVIEW_FIELDS = {
-        "dob", "gender", "height", "ethnicity"
-    }
-
+    # Track changes for the audit log. AUTO_UPDATE_FIELDS/REVIEW_FIELDS are
+    # the single canonical definition imported from core.py (Phase 0 —
+    # Canonical Metadata Foundation) — this endpoint previously hand-rolled
+    # its own local copy that silently omitted cover_media_id/
+    # needs_location_review (AUTO_UPDATE_FIELDS) and name (REVIEW_FIELDS),
+    # so edits to those three fields were never audited.
     changed_fields = []
     old_values = {}
     new_values = {}
@@ -814,6 +812,13 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
         changed_fields.append("email")
         old_values["email"] = existing.get("email")
         new_values["email"] = email
+
+    # Phase 0 — Canonical Metadata Foundation: stamp updated_at only when a
+    # canonical field actually changed, mirroring merge_talent_profile()'s
+    # own diff-based stamping discipline (core.py) — an admin re-save of
+    # identical values must not advance the canonical clock.
+    if changed_fields:
+        update["updated_at"] = _now()
 
     try:
         res = await db.talents.update_one({"id": tid}, {"$set": update})

@@ -2938,6 +2938,14 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
     # Strict deduplication: check if this media asset already exists by public_id, url, or source-id
     pub_id = media.get("public_id")
     url = media.get("url")
+    dedup_or = [
+        {"source_submission_media_id": source_id},
+        {"source_application_media_id": source_id},
+    ]
+    if pub_id:
+        dedup_or.append({"public_id": pub_id})
+    if url:
+        dedup_or.append({"url": url})
     for m in (talent.get("media") or []):
         if (pub_id and m.get("public_id") == pub_id) or \
            (url and m.get("url") == url) or \
@@ -2981,10 +2989,25 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
             {"$pull": {"media": {"category": "video"}}}
         )
 
-    await db.talents.update_one(
-        {"id": talent["id"]},
+    # Phase 6 (race elimination): the dedup check above reads a SNAPSHOT of
+    # talent.media that can go stale between the read and this write — e.g.
+    # a double-fired consent decision calling this function twice
+    # concurrently for the SAME source item, both passing the in-memory
+    # check before either has written. The previous unconditional $push
+    # here ran regardless of what had changed since the read, producing two
+    # mirror copies of the same source item. Folding the dedup condition
+    # into the update's own filter makes the check-and-insert a single
+    # atomic operation: the $push only applies if, at the moment Mongo
+    # evaluates it, no element still matches the same criteria used above.
+    # A concurrent winner's push satisfies that criteria first, so this
+    # call's filter then fails to match and modified_count is 0 — the
+    # loser makes no change and skips every side effect below.
+    result = await db.talents.update_one(
+        {"id": talent["id"], "media": {"$not": {"$elemMatch": {"$or": dedup_or}}}},
         {"$push": {"media": mirror}, "$set": {"updated_at": _now()}},
     )
+    if result.modified_count == 0:
+        return
 
     if mapped_cat == "video" and prev_videos:
         for pv in prev_videos:

@@ -1961,6 +1961,27 @@ class TalentOut(TalentIn):
     id: str
     media: List[MediaItem] = Field(default_factory=list)
     created_at: str
+    # Phase 7 (Admin stale-overwrite fix): expose the canonical clock so a
+    # client can round-trip it as expected_updated_at on its next PUT
+    # /talents/{tid} — additive only, no existing consumer reads this today.
+    updated_at: Optional[str] = None
+
+
+class TalentUpdateIn(TalentIn):
+    """PUT /talents/{tid} payload — identical to TalentIn plus one optional
+    freshness token. Phase 7 (Admin stale-overwrite fix): the admin edit
+    page loads a talent, holds it in local state for an arbitrary amount of
+    time, then submits the ENTIRE form on save. `expected_updated_at` is
+    that snapshot's own `updated_at`, letting the endpoint tell "this
+    payload was assembled from data at least as fresh as the canonical
+    record" apart from "this payload predates a newer canonical edit" —
+    the exact same distinction `merge_talent_profile()`'s `snapshot_at`
+    already makes for submission/application merges (ADR Part 4, Phase 1).
+    Omitted entirely (older client) preserves today's unconditional-write
+    behavior, exactly like merge_talent_profile()'s own
+    `_NO_FRESHNESS_CHECK` sentinel for callers that never opt in. Only used
+    by this one endpoint — TalentIn/create_talent are untouched."""
+    expected_updated_at: Optional[str] = None
 
 
 class LinkIn(BaseModel):
@@ -3075,9 +3096,9 @@ APPEND_FIELDS = {
 }
 
 IGNORE_FIELDS = {
-    "id", "email", "normalized_email", "created_at", "source", 
-    "image_url", "cover_thumbnail_url", "cover_url", "media_count", 
-    "first_submission_at", "last_submission_at", "total_submissions", 
+    "id", "email", "normalized_email", "created_at", "updated_at", "source",
+    "image_url", "cover_thumbnail_url", "cover_url", "media_count",
+    "first_submission_at", "last_submission_at", "total_submissions",
     "age"
 }
 

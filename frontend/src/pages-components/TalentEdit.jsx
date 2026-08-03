@@ -328,11 +328,22 @@ export default function TalentEdit() {
                       ? parseInt(talent.age, 10)
                       : null,
                 work_links: (talent.work_links || []).filter(Boolean),
+                // Admin stale-overwrite fix: tell the server how fresh this
+                // form's snapshot was, so a save that's been sitting open
+                // since before a newer Dashboard edit can't silently
+                // clobber it (see routers/talents.py update_talent()).
+                expected_updated_at: talent.updated_at,
             };
             if (isEdit) {
-                await adminApi.put(`/talents/${id}`, payload);
+                const { data } = await adminApi.put(`/talents/${id}`, payload);
                 talentPreviewCache.invalidateTalent(id);
-                setOriginalTalent(payload);
+                // Adopt the server's own updated_at (not the stale local
+                // snapshot) so a second save in the same session is judged
+                // against the clock this save just advanced, not the one
+                // it was loaded with.
+                const saved = { ...payload, updated_at: data?.updated_at ?? payload.updated_at };
+                setTalent(saved);
+                setOriginalTalent(saved);
                 setIsEditing(false);
                 toast.success("Saved");
             } else {

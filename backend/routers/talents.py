@@ -16,6 +16,7 @@ from core import (
     BulkDeleteIn,
     TalentIn,
     TalentOut,
+    TalentUpdateIn,
     _now,
     _paginate_params,
     _paginated,
@@ -755,8 +756,9 @@ async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
 
 
 @router.put("/talents/{tid}", response_model=TalentOut)
-async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(current_team_or_admin)):
-    update = payload.model_dump()
+async def update_talent(tid: str, payload: TalentUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    expected_updated_at = payload.expected_updated_at
+    update = payload.model_dump(exclude={"expected_updated_at"})
     # Sanitize and validate age / dob
     dob = update.get("dob")
     if dob:
@@ -795,11 +797,46 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
     # its own local copy that silently omitted cover_media_id/
     # needs_location_review (AUTO_UPDATE_FIELDS) and name (REVIEW_FIELDS),
     # so edits to those three fields were never audited.
+    #
+    # Phase 7 (Admin stale-overwrite fix): the admin edit page can hold a
+    # loaded talent in local state indefinitely before saving, so `update`
+    # here may be a stale snapshot even though this specific request just
+    # arrived. Gate AUTO_UPDATE_FIELDS by the same monotonicity rule
+    # merge_talent_profile() already uses (ADR Part 4 / Phase 1): only
+    # apply a differing value if the admin's snapshot is at least as fresh
+    # as the canonical record, or the canonical value is currently empty
+    # (filling an empty field carries no data-loss risk). A stale, rejected
+    # value is popped out of `update` (so the canonical value survives the
+    # $set) and logged as `{field}_stale_conflict`, exactly like
+    # merge_talent_profile()'s own conflict marker.
+    #
+    # REVIEW_FIELDS are unaffected — admin remains the unconditional
+    # authority for those, same as before this fix.
+    existing_updated_at = existing.get("updated_at")
+    if expected_updated_at is None or existing_updated_at is None:
+        admin_snapshot_is_fresh = True
+    else:
+        admin_snapshot_is_fresh = expected_updated_at >= existing_updated_at
+
     changed_fields = []
     old_values = {}
     new_values = {}
 
-    for field in AUTO_UPDATE_FIELDS | REVIEW_FIELDS:
+    for field in AUTO_UPDATE_FIELDS:
+        incoming_val = update.get(field)
+        existing_val = existing.get(field)
+        if existing_val != incoming_val:
+            if admin_snapshot_is_fresh or existing_val in (None, "", [], {}):
+                changed_fields.append(field)
+                old_values[field] = existing_val
+                new_values[field] = incoming_val
+            else:
+                update.pop(field, None)
+                changed_fields.append(f"{field}_stale_conflict")
+                old_values[f"{field}_stale_conflict"] = existing_val
+                new_values[f"{field}_stale_conflict"] = incoming_val
+
+    for field in REVIEW_FIELDS:
         incoming_val = update.get(field)
         existing_val = existing.get(field)
         if existing_val != incoming_val:
@@ -816,8 +853,10 @@ async def update_talent(tid: str, payload: TalentIn, admin: dict = Depends(curre
     # Phase 0 — Canonical Metadata Foundation: stamp updated_at only when a
     # canonical field actually changed, mirroring merge_talent_profile()'s
     # own diff-based stamping discipline (core.py) — an admin re-save of
-    # identical values must not advance the canonical clock.
-    if changed_fields:
+    # identical values (or one whose only "changes" were stale-conflicts
+    # rejected above) must not advance the canonical clock.
+    real_change = any(not f.endswith("_stale_conflict") for f in changed_fields)
+    if real_change:
         update["updated_at"] = _now()
 
     try:

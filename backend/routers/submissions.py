@@ -1292,22 +1292,32 @@ async def apply_media_consent_decision(sub: dict, decision: str) -> int:
     pending = [m for m in media if m.get("profile_sync_status") == "pending"]
     if not pending:
         return 0
+    pending_ids = [m["id"] for m in pending]
 
     if decision == "update_profile" and not has_been_submitted_once(sub):
         for m in pending:
             await sync_media_to_global_talent(sub, m, skip_cover_cache=True)
-            m["profile_sync_status"] = "synced"
         talent = await resolve_canonical_talent(email=sub.get("talent_email"))
         if talent:
             await update_talent_cover_cache(talent["id"])
+        new_status = "synced"
     else:
         # Either an explicit "only this project" choice, or "update_profile"
         # requested during a retest (Issue 2 — never honored, same as every
         # other upload path). Either way: no sync, just mark resolved.
-        for m in pending:
-            m["profile_sync_status"] = "declined"
+        new_status = "declined"
 
-    await db.submissions.update_one({"id": sub["id"]}, {"$set": {"media": media}})
+    # Phase 5 (consent-decision atomicity): targeted array-filter update on
+    # only the items just resolved, instead of a whole-array read-modify-write
+    # $set. Matches the atomic-per-item pattern every other mutator in this
+    # file already uses ($push/$pull) — closes the race window where a
+    # concurrent write to submission.media (e.g. a new upload landing between
+    # this function's read and its write) could be silently lost.
+    await db.submissions.update_one(
+        {"id": sub["id"]},
+        {"$set": {"media.$[elem].profile_sync_status": new_status}},
+        array_filters=[{"elem.id": {"$in": pending_ids}}],
+    )
     return len(pending)
 
 

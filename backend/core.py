@@ -3107,6 +3107,79 @@ async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[d
     return await db.talents.find_one({"$or": ors})
 
 
+def build_minimal_talent_from_form(
+    form: dict,
+    *,
+    email: Optional[str],
+    talent_name: Optional[str],
+    talent_phone: Optional[str],
+    alternate_contact_number: Optional[str],
+    reference_id: str,
+    notes: str,
+    created_by: str,
+    include_skills: bool,
+    include_updated_at: bool,
+) -> dict:
+    """Phase 4 (consolidation): shared minimal-talent constructor for the two
+    "auto-create a Talent from an audition submission" call sites in
+    submissions.py (`finalize()` and `set_decision()`'s fallback path), which
+    were previously two independently hand-maintained dict literals.
+
+    `include_skills`/`include_updated_at` are NOT new behavior — they encode a
+    genuine pre-existing difference between the two call sites (set_decision's
+    auto-created talent never had a `skills` or `updated_at` field), preserved
+    here rather than silently unified.
+    """
+    full_name = (
+        f"{(form.get('first_name') or '').strip()} "
+        f"{(form.get('last_name') or '').strip()}"
+    ).strip() or talent_name or "Unnamed"
+    age_val = None
+    if form.get("age") not in (None, ""):
+        try:
+            age_val = int(form["age"])
+        except Exception:
+            age_val = None
+    new_talent: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "name": full_name,
+        "email": email or None,
+        "normalized_email": email or None,
+        "phone": (form.get("phone") or talent_phone or None),
+        "alternate_contact_number": (form.get("alternate_contact_number") or alternate_contact_number or None),
+        "age": age_val,
+        "dob": (form.get("dob") or None),
+        "height": (form.get("height") or None),
+        "height_inches": parse_height_to_inches(form.get("height")),
+        "location": (form.get("location") or None),
+        "ethnicity": (form.get("ethnicity") or None),
+        "gender": (form.get("gender") or None),
+        "instagram_handle": normalize_instagram_handle(form.get("instagram_handle") or None),
+        "instagram_followers": (form.get("instagram_followers") or None),
+        "bio": (form.get("bio") or None),
+    }
+    if include_skills:
+        new_talent["skills"] = [s for s in (form.get("skills") or []) if isinstance(s, str) and s.strip()]
+    new_talent["work_links"] = [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()]
+    new_talent["notes"] = notes
+    # Phase 0 — `source` is ALWAYS an object with the exact shape
+    # {type, talent_email, reference_id} so the merge $or lookup
+    # works symmetrically across all entry points.
+    new_talent["source"] = {
+        "type": "audition_submission",
+        "talent_email": email or None,
+        "reference_id": reference_id,
+    }
+    new_talent["media"] = []  # keep global media separate (spec: media must NOT merge)
+    new_talent["cover_media_id"] = None
+    new_talent["status"] = "SUBMITTED"
+    new_talent["created_at"] = _now()
+    if include_updated_at:
+        new_talent["updated_at"] = _now()
+    new_talent["created_by"] = created_by
+    return new_talent
+
+
 # Phase 1 — Canonical Profile Monotonicity: sentinel distinct from `None` so
 # merge_talent_profile can tell "caller never passed snapshot_at at all"
 # (today's unconditional-overwrite behavior, for Admin-sourced callers where

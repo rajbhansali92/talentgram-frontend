@@ -42,7 +42,6 @@ from core import (
     upload_and_track_asset,
     compute_age,
     compute_effective_age,
-    parse_height_to_inches,
     current_admin,
     current_team_or_admin,
     db,
@@ -50,7 +49,6 @@ from core import (
     decode_submitter,
     make_access_token,
     make_token,
-    normalize_instagram_handle,
     remove_synced_media_from_global_talent,
     sync_media_to_global_talent,
     media_url,
@@ -63,6 +61,7 @@ from core import (
     sign_r2_media_if_needed,
     build_talent_submission_view,
     resolve_canonical_talent,
+    build_minimal_talent_from_form,
     REUSABLE_MEDIA_CATEGORIES,
     mark_reusable_media_pending,
 )
@@ -718,24 +717,10 @@ async def submission_upload(
         asset_type = "profile_image"
         
     keep_orig = (asset_type != "audition_video")
-    
-    tid = sub.get("talent_id")
-    tname = sub.get("talent_name")
-    if not tid:
-        norm_email = normalize_email(sub.get("talent_email"))
-        if norm_email:
-            talent_doc = await db.talents.find_one({
-                "$or": [
-                    {"normalized_email": norm_email},
-                    {"email": norm_email},
-                    {"source.talent_email": norm_email}
-                ]
-            })
-            if talent_doc:
-                tid = talent_doc.get("id")
-                tname = talent_doc.get("name")
-    if not tid:
-        tid = "unknown_talent"
+
+    # Phase 4 (consolidation): was an inline copy of the same lookup
+    # _resolve_submission_talent() already implements; zero behavior change.
+    tid, tname = await _resolve_submission_talent(sub)
 
     result = await upload_and_track_asset(
         data,
@@ -1037,24 +1022,10 @@ async def submission_complete_upload(
     # full rationale; flagged pending instead of auto-syncing below.
     mark_reusable_media_pending(media)
 
-    tid = sub.get("talent_id")
-    tname = sub.get("talent_name")
-    if not tid:
-        norm_email = normalize_email(sub.get("talent_email"))
-        if norm_email:
-            talent_doc = await db.talents.find_one({
-                "$or": [
-                    {"normalized_email": norm_email},
-                    {"email": norm_email},
-                    {"source.talent_email": norm_email}
-                ]
-            })
-            if talent_doc:
-                tid = talent_doc.get("id")
-                tname = talent_doc.get("name")
-    if not tid:
-        tid = "unknown_talent"
-        
+    # Phase 4 (consolidation): was an inline copy of the same lookup
+    # _resolve_submission_talent() already implements; zero behavior change.
+    tid, tname = await _resolve_submission_talent(sub)
+
     asset_type = "profile_image"
     if is_video:
         asset_type = "intro_video" if category == "intro_video" else "audition_video"
@@ -1399,19 +1370,19 @@ class VideoCompleteIn(BaseModel):
 
 async def _resolve_submission_talent(sub: dict):
     """Resolve (talent_id, talent_name) for a submission — same logic as the
-    Railway upload path so the Cloudinary folder is identical."""
+    Railway upload path so the Cloudinary folder is identical.
+
+    Phase 4 (Canonical Architecture Redesign, consolidation): the lookup
+    below used to inline its own copy of the three-clause canonical $or;
+    now calls the single shared resolve_canonical_talent() (core.py) —
+    identical query, identical no-projection full-document return shape,
+    zero behavior change."""
     tid = sub.get("talent_id")
     tname = sub.get("talent_name")
     if not tid:
         norm_email = normalize_email(sub.get("talent_email"))
         if norm_email:
-            t = await db.talents.find_one({
-                "$or": [
-                    {"normalized_email": norm_email},
-                    {"email": norm_email},
-                    {"source.talent_email": norm_email},
-                ]
-            })
+            t = await resolve_canonical_talent(email=norm_email)
             if t:
                 tid = t.get("id")
                 tname = t.get("name")
@@ -2326,51 +2297,18 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         await update_talent_cover_cache(talent_doc["id"])
     else:
         # Build a minimal talent record from the submission's form_data.
-        full_name = (
-            f"{(form.get('first_name') or '').strip()} "
-            f"{(form.get('last_name') or '').strip()}"
-        ).strip() or sub.get("talent_name") or "Unnamed"
-        age_val = None
-        if form.get("age") not in (None, ""):
-            try:
-                age_val = int(form["age"])
-            except Exception:
-                age_val = None
-        new_talent = {
-            "id": str(uuid.uuid4()),
-            "name": full_name,
-            "email": email or None,
-            "normalized_email": email or None,
-            "phone": (form.get("phone") or sub.get("talent_phone") or None),
-            "alternate_contact_number": (form.get("alternate_contact_number") or sub.get("alternate_contact_number") or None),
-            "age": age_val,
-            "dob": (form.get("dob") or None),
-            "height": (form.get("height") or None),
-            "height_inches": parse_height_to_inches(form.get("height")),
-            "location": (form.get("location") or None),
-            "ethnicity": (form.get("ethnicity") or None),
-            "gender": (form.get("gender") or None),
-            "instagram_handle": normalize_instagram_handle(form.get("instagram_handle") or None),
-            "instagram_followers": (form.get("instagram_followers") or None),
-            "bio": (form.get("bio") or None),
-            "skills": [s for s in (form.get("skills") or []) if isinstance(s, str) and s.strip()],
-            "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
-            "notes": f"Auto-created from audition submission for project {sub.get('project_id')}",
-            # Phase 0 — `source` is ALWAYS an object with the exact shape
-            # {type, talent_email, reference_id} so the merge $or lookup
-            # works symmetrically across all entry points.
-            "source": {
-                "type": "audition_submission",
-                "talent_email": email or None,
-                "reference_id": sid,
-            },
-            "media": [],                 # keep global media separate (spec: media must NOT merge)
-            "cover_media_id": None,
-            "status": "SUBMITTED",
-            "created_at": _now(),
-            "updated_at": _now(),
-            "created_by": "auto-audition",
-        }
+        new_talent = build_minimal_talent_from_form(
+            form,
+            email=email,
+            talent_name=sub.get("talent_name"),
+            talent_phone=sub.get("talent_phone"),
+            alternate_contact_number=sub.get("alternate_contact_number"),
+            reference_id=sid,
+            notes=f"Auto-created from audition submission for project {sub.get('project_id')}",
+            created_by="auto-audition",
+            include_skills=True,
+            include_updated_at=True,
+        )
         try:
             await db.talents.insert_one(new_talent)
             await update_talent_cover_cache(new_talent["id"])
@@ -2767,46 +2705,18 @@ async def set_decision(
         if not talent_doc:
             # Build a minimal talent record from the submission's form_data.
             form = sub.get("form_data") or {}
-            full_name = (
-                f"{(form.get('first_name') or '').strip()} "
-                f"{(form.get('last_name') or '').strip()}"
-            ).strip() or sub.get("talent_name") or "Unnamed"
-            age_val = None
-            if form.get("age") not in (None, ""):
-                try:
-                    age_val = int(form["age"])
-                except Exception:
-                    age_val = None
-            new_talent = {
-                "id": str(uuid.uuid4()),
-                "name": full_name,
-                "email": email or None,
-                "normalized_email": email or None,
-                "phone": (form.get("phone") or sub.get("talent_phone") or None),
-            "alternate_contact_number": (form.get("alternate_contact_number") or sub.get("alternate_contact_number") or None),
-                "age": age_val,
-                "dob": (form.get("dob") or None),
-                "height": (form.get("height") or None),
-            "height_inches": parse_height_to_inches(form.get("height")),
-                "location": (form.get("location") or None),
-                "ethnicity": (form.get("ethnicity") or None),
-                "gender": (form.get("gender") or None),
-                "instagram_handle": normalize_instagram_handle(form.get("instagram_handle") or None),
-                "instagram_followers": (form.get("instagram_followers") or None),
-                "bio": (form.get("bio") or None),
-                "work_links": [w for w in (form.get("work_links") or []) if isinstance(w, str) and w.strip()],
-                "notes": f"Auto-created from decision on submission {sid} for project {pid}",
-                "source": {
-                    "type": "audition_submission",
-                    "talent_email": email or None,
-                    "reference_id": sid,
-                },
-                "media": [],
-                "cover_media_id": None,
-                "status": "SUBMITTED",
-                "created_at": _now(),
-                "created_by": "auto-decision-sync",
-            }
+            new_talent = build_minimal_talent_from_form(
+                form,
+                email=email,
+                talent_name=sub.get("talent_name"),
+                talent_phone=sub.get("talent_phone"),
+                alternate_contact_number=sub.get("alternate_contact_number"),
+                reference_id=sid,
+                notes=f"Auto-created from decision on submission {sid} for project {pid}",
+                created_by="auto-decision-sync",
+                include_skills=False,
+                include_updated_at=False,
+            )
             try:
                 await db.talents.insert_one(new_talent)
                 await update_talent_cover_cache(new_talent["id"])

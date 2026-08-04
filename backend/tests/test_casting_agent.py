@@ -1162,18 +1162,20 @@ async def test_natural_language_move_ambiguous_and_unresolvable_project():
         await _seed_pipeline_row(project_a, t1, "hold")
         await _seed_pipeline_row(project_b, t1, "hold")
 
-        # "Overlap Brand <suffix>" doesn't exactly or substring-match
-        # either project (it's a substring of neither and vice versa) —
-        # it's close to BOTH via fuzzy, which is always a suggestion to
-        # confirm/retype, never a silent or numbered pick (project fuzzy
-        # matches never auto-resolve or claim definitive candidacy).
+        # "Overlap Brand <suffix>" doesn't exactly match either project,
+        # but every one of its tokens is present in BOTH candidates' own
+        # tokens (order-independent token-subset match — see
+        # resolve_project_by_name's tier 4) — a real, precise match tier,
+        # just ambiguous between the two, so it's a proper numbered
+        # disambiguation list rather than a vaguer fuzzy "did you mean".
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"Move Overlap Talent to Approved in Overlap Brand {suffix}.",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Did you mean" in r.reply
+        assert "I found multiple projects." in r.reply
+        assert "Reply with the number." in r.reply
         assert f"Overlap Brand Alpha {suffix}" in r.reply
         assert f"Overlap Brand Beta {suffix}" in r.reply
 
@@ -1714,4 +1716,692 @@ async def test_voice_transcript_with_filler_words():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Conversational Engine Sprint — conversation-state and contextual
+# reasoning coverage (clarification by name/ordinal, token-fuzzy project
+# matching, honorific/partial talent matching, long multi-turn context
+# retention, voice confidence gate, pagination, correction-after-ambiguity,
+# interrupted conversations, undo after a multi-turn move, pronoun
+# resolution, query-level clarification continuation).
+# ---------------------------------------------------------------------------
+async def test_clarification_by_project_name():
+    """An ambiguous project list continues when the reply is the literal
+    project NAME, not just a number — same pending operation, no restart."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    p1 = await _seed_project(brand_name=f"Bajaj Apache {uuid.uuid4().hex[:6]}")
+    p2 = await _seed_project(brand_name=f"Bajaj Pulsar {uuid.uuid4().hex[:6]}")
+    label1 = (await db.projects.find_one({"id": p1}))["brand_name"]
+    label2 = (await db.projects.find_one({"id": p2}))["brand_name"]
+    t = await _seed_talent(f"NameContinuation {uuid.uuid4().hex[:6]}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(p1, t, "hold")
+        await _seed_pipeline_row(p2, t, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {(await db.talents.find_one({'id': t}))['name']} to Approved in Bajaj",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label2,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Project\n{label2}" in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "approved"
+        assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t}))["stage"] == "hold"
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_clarification_by_partial_project_name():
+    """Same as above, but resolved by a PARTIAL, reordered project name
+    ("Pulsar Guy" for "Bajaj Pulsar - Main Guy") — token-subset matching."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"Bajaj Apache - Main Guy {tag}")
+    p2 = await _seed_project(brand_name=f"Bajaj Pulsar - Main Guy {tag}")
+    label2 = (await db.projects.find_one({"id": p2}))["brand_name"]
+    t = await _seed_talent(f"PartialNameTalent {tag}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(p1, t, "hold")
+        await _seed_pipeline_row(p2, t, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {(await db.talents.find_one({'id': t}))['name']} to Approved in Bajaj Main Guy {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Pulsar Guy {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label2}" in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="go ahead",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_clarification_by_ordinal_word():
+    """"The third one" / "first" resolve a numbered disambiguation list
+    exactly like a bare number would."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"Ordinal Alpha {tag}")
+    p2 = await _seed_project(brand_name=f"Ordinal Beta {tag}")
+    p3 = await _seed_project(brand_name=f"Ordinal Gamma {tag}")
+    label3 = (await db.projects.find_one({"id": p3}))["brand_name"]
+    t = await _seed_talent(f"OrdinalTalent {tag}")
+    talent_ids = [t]
+    try:
+        for pid in (p1, p2, p3):
+            await _seed_pipeline_row(pid, t, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {(await db.talents.find_one({'id': t}))['name']} to Approved in Ordinal {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+        # Alphabetical: Alpha < Beta < Gamma -> Gamma is #3 ("the third one").
+        assert r.reply.index(f"Ordinal Alpha {tag}") < r.reply.index(f"Ordinal Beta {tag}") < r.reply.index(label3)
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="the third one",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label3}" in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1", sender_name="Raj", sender_is_group_member=True,
+        )
+        # "1" now answers the real move confirmation (Approve), not the
+        # earlier disambiguation — proves the pending operation moved on.
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p3, "talent_id": t}))["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2, p3], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_fuzzy_project_matching_token_variations():
+    """Every phrasing from the spec resolves to the same project when it's
+    the only token-plausible candidate: full name minus hyphen, reordered,
+    partial, and a single distinctive token."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    target = await _seed_project(brand_name=f"Bajaj Pulsar - Main Guy {tag}")
+    other = await _seed_project(brand_name=f"Toyota Glanza {tag}")
+    t = await _seed_talent(f"FuzzyProjectTalent {tag}")
+    talent_ids = [t]
+    queries = [
+        f"Bajaj Pulsar Main Guy {tag}",
+        f"Pulsar Main Guy {tag}",
+        f"Main Guy {tag}",
+        f"Bajaj Main Guy {tag}",
+        f"Pulsar {tag}",
+        f"Pulsar Guy {tag}",
+    ]
+    try:
+        for q in queries:
+            await _seed_pipeline_row(target, t, "hold")
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"Move {(await db.talents.find_one({'id': t}))['name']} to Approved in {q}",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Project" in r.reply and f"Bajaj Pulsar - Main Guy {tag}" in r.reply, (q, r.reply)
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="yes",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Done." in r.reply, (q, r.reply)
+            await db.casting_pipeline.delete_many({"project_id": target, "talent_id": t})
+    finally:
+        await _cleanup(phone, project_ids=[target, other], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_fuzzy_talent_matching_honorific_and_partial():
+    """"Mr Prajal" / "Tushir" / "Prajal Kumar" all resolve to the one
+    "Prajal Tushir" — honorific stripping + existing best-token fuzzy."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"Honorific Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent("Prajal Tushir")
+    talent_ids = [t]
+    try:
+        for query in ("Mr Prajal", "Tushir", "Prajal Kumar"):
+            await _seed_pipeline_row(project_id, t, "hold")
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"Move {query} to Approved in {label}",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "• Prajal Tushir" in r.reply, (query, r.reply)
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Done." in r.reply, (query, r.reply)
+            await db.casting_pipeline.delete_many({"project_id": project_id, "talent_id": t})
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_long_multi_turn_conversation_context_retention():
+    """The exact worked scenario: Project N -> Show Approved -> Move 7 to
+    Locked -> Yes -> Show again -> Move 2 and 5 -> Approved -> Yes — 10+
+    messages, never repeating the project or pipeline name."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Multiturn Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    names = [f"MT{n:02d} {tag}" for n in range(1, 9)]  # 8 talents, sorts by name
+    talent_ids = []
+    for name in names:
+        tid = await _seed_talent(name)
+        talent_ids.append(tid)
+        await _seed_pipeline_row(project_id, tid, "approved")
+    try:
+        # 1. "Show ongoing projects" -> find our project's live ordinal.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show ongoing projects",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        ordinal = next(
+            int(line.split(".", 1)[0]) for line in r.reply.splitlines() if line.strip().endswith(label)
+        )
+
+        # 2. "Project N"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Project {ordinal}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert label in r.reply
+
+        # 3. "Show Approved" — no project repeated.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show Approved",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label}" in r.reply
+        assert names[6] in r.reply  # MT07 is ordinal 7 (alphabetical)
+
+        # 4. "Move 7 to Locked" — no project/pipeline repeated.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Move 7 to Locked",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"• {names[6]}" in r.reply
+
+        # 5. "Yes"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_ids[6]}))["stage"] == "locked"
+
+        # 6. "Show again" — replays the Approved pipeline, now missing #7.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show again",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label}" in r.reply
+        assert "Pipeline\nApproved" in r.reply
+        assert "Total Talents: 7" in r.reply
+
+        # 7. "Move 2 and 5" — no project/pipeline repeated, no stage yet.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Move 2 and 5",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "pipeline" in r.reply.lower()  # asked which stage
+
+        # 8. "Locked" answers the pending stage question (not "Approved" —
+        # ordinals 2 and 5 came from the APPROVED listing itself, so moving
+        # them back to Approved would correctly be a no-op "already there";
+        # a different destination keeps the scenario semantically live).
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Locked",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"• {names[1]}" in r.reply and f"• {names[4]}" in r.reply
+
+        # 9. "Yes"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_ids[1]}))["stage"] == "locked"
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_ids[4]}))["stage"] == "locked"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_voice_low_confidence_confirmation_flow():
+    """A low-confidence transcript is held behind "I heard: ... Is that
+    correct?" — "yes" feeds the ORIGINAL transcript through the normal
+    pipeline; "no" cancels cleanly; an unrecognized reply re-asks."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"Voice Conf Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"VoiceConfTalent {uuid.uuid4().hex[:6]}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(project_id, t, "hold")
+        name = (await db.talents.find_one({"id": t}))["name"]
+        transcript = f"Move {name} to Approved in {label}"
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=transcript,
+            sender_name="Raj", sender_is_group_member=True, transcript_confidence=0.3,
+        )
+        assert r.handled
+        assert "I heard:" in r.reply and transcript in r.reply and "Is that correct?" in r.reply
+
+        # Unrecognized reply re-asks rather than silently failing.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="what",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Is that correct?" in r.reply
+
+        # "Yes" feeds the transcript through the normal pipeline.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"• {name}" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "approved"
+
+        # A second low-confidence transcript, this time rejected with "no".
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Move {name} to Hold",
+            sender_name="Raj", sender_is_group_member=True, transcript_confidence=0.1,
+        )
+        assert "Is that correct?" in r.reply
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="no",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "type your message" in r.reply.lower()
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_voice_note_without_transcript_replies_gracefully():
+    """No STT engine is wired up yet — a voice note with no transcript at
+    all gets a clear reply instead of being silently dropped."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="",
+            sender_name="Raj", sender_is_group_member=True, media_type="voice_note",
+        )
+        assert r.handled
+        assert "can't listen to voice notes yet" in r.reply.lower()
+    finally:
+        await _cleanup(phone)
+        await _restore_config(original)
+
+
+async def test_pagination_next_previous_page():
+    """A pipeline with 45 talents pages at 30 per message; Next/Previous/
+    Page N all page through the SAME stable number_map."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Pagination Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    names = [f"PG{n:03d} {tag}" for n in range(1, 46)]  # 45 talents
+    talent_ids = []
+    for name in names:
+        tid = await _seed_talent(name)
+        talent_ids.append(tid)
+        await _seed_pipeline_row(project_id, tid, "hold")
+    try:
+        await _seed_number_map_for_project(phone, project_id, label)
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show Hold",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Total Talents: 45" in r.reply
+        assert names[0] in r.reply  # PG001 on page 1
+        assert names[29] in r.reply  # PG030 on page 1
+        assert names[30] not in r.reply  # PG031 not yet shown
+        assert "Showing 1-30 of 45" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Next",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert names[30] in r.reply  # PG031 now visible
+        assert names[0] not in r.reply
+        assert "Showing 31-45 of 45" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Next",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "last page" in r.reply.lower()
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Previous",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert names[0] in r.reply  # back to page 1
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Page 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert names[30] in r.reply
+
+        # Ordinal stability survives pagination — "Move 31" on page 2
+        # still refers to the same talent shown there.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Move 31 to Approved",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"• {names[30]}" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_correction_after_ambiguity_keeps_pending_operation():
+    """An unmatched free-text reply to an ambiguous list doesn't discard
+    the pending move — a follow-up correct reply still completes it."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"Correction Alpha {tag}")
+    p2 = await _seed_project(brand_name=f"Correction Beta {tag}")
+    label2 = (await db.projects.find_one({"id": p2}))["brand_name"]
+    t = await _seed_talent(f"CorrectionTalent {tag}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(p1, t, "hold")
+        await _seed_pipeline_row(p2, t, "hold")
+        name = (await db.talents.find_one({"id": t}))["name"]
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {name} to Approved in Correction {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        # A reply that matches NEITHER option — re-prompted, nothing lost.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Zzzargled Nonsense",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        # Still no move has happened yet.
+        assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t}))["stage"] == "hold"
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "hold"
+
+        # The correct reply still resolves the SAME pending move.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label2,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label2}" in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_interrupted_conversation_fresh_trigger_replaces_pending():
+    """A fresh MOVE command mid-clarification fully replaces the pending
+    one — the original talent is left untouched."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"Interrupt Alpha {tag}")
+    p2 = await _seed_project(brand_name=f"Interrupt Beta {tag}")
+    other_project = await _seed_project(brand_name=f"Interrupt Other {tag}")
+    other_label = (await db.projects.find_one({"id": other_project}))["brand_name"]
+    t1 = await _seed_talent(f"InterruptedTalent {tag}")
+    t2 = await _seed_talent(f"FreshTalent {tag}")
+    talent_ids = [t1, t2]
+    try:
+        await _seed_pipeline_row(p1, t1, "hold")
+        await _seed_pipeline_row(p2, t1, "hold")
+        await _seed_pipeline_row(other_project, t2, "hold")
+        name1 = (await db.talents.find_one({"id": t1}))["name"]
+        name2 = (await db.talents.find_one({"id": t2}))["name"]
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {name1} to Approved in Interrupt {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        # A completely different, unrelated fresh MOVE command.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {name2} to Locked in {other_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"• {name2}" in r.reply
+        assert "I found multiple projects." not in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": other_project, "talent_id": t2}))["stage"] == "locked"
+        # The original, interrupted move never happened.
+        assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t1}))["stage"] == "hold"
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t1}))["stage"] == "hold"
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2, other_project], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_undo_after_multiturn_disambiguated_move():
+    """Undo works correctly for a move that only completed after a
+    multi-turn clarification."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"UndoMT Alpha {tag}")
+    p2 = await _seed_project(brand_name=f"UndoMT Beta {tag}")
+    label2 = (await db.projects.find_one({"id": p2}))["brand_name"]
+    t = await _seed_talent(f"UndoMTTalent {tag}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(p1, t, "hold")
+        await _seed_pipeline_row(p2, t, "hold")
+        name = (await db.talents.find_one({"id": t}))["name"]
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {name} to Approved in UndoMT {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label2}" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "approved"
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="undo",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Undo complete." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "hold"
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_pronoun_reference_across_commands():
+    """"Move Sarah to Hold" then "Approve her" — the pronoun refers to
+    whoever was just discussed, no name repeated."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Pronoun Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"PronounSarah {tag}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(project_id, t, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Move PronounSarah {tag} to Hold in {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "• PronounSarah" in r.reply
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "hold"
+
+        # Pronoun follow-up — no name, no project repeated.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Approve her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "• PronounSarah" in r.reply
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "approved"
+
+        # Bare verb command (no name, no stored ambiguity pending), still
+        # referring to the same last-discussed talent.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Lock",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "• PronounSarah" in r.reply
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "locked"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_query_ambiguous_project_continuation():
+    """A QUERY (read-only) hitting an ambiguous project also stays alive
+    for a stateful reply — auto_confirm intents get the same continuation
+    MOVE already had."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"QueryAmbig Alpha {tag}")
+    p2 = await _seed_project(brand_name=f"QueryAmbig Beta {tag}")
+    label2 = (await db.projects.find_one({"id": p2}))["brand_name"]
+    t = await _seed_talent(f"QueryAmbigTalent {tag}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(p2, t, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Show Hold for QueryAmbig {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Which project did you mean?" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label2,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Project\n{label2}" in r.reply
+        assert "Pipeline\nHold" in r.reply
+        assert f"QueryAmbigTalent {tag}" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
         await _restore_config(original)

@@ -132,6 +132,14 @@ _CONFIRM_APPROVE = {
 _CONFIRM_EDIT = {"2", "edit", "change"}
 _CONFIRM_CANCEL = {"3", "cancel", "no", "n", "stop"}
 
+# A speech-to-text transcript below this confidence is held for an
+# explicit "I heard: ... Is that correct?" confirmation before it's fed
+# into any intent's NLU (see dispatcher.handle_inbound_message's
+# transcript_confidence gate). No STT engine is wired up yet — this
+# constant, and the gate it drives, exist so one can plug in later without
+# any change to the conversation engine itself.
+VOICE_CONFIDENCE_THRESHOLD = 0.6
+
 
 def parse_confirmation_reply(text: str) -> Optional[str]:
     """Returns "approve" / "edit" / "cancel", or None if unrecognized.

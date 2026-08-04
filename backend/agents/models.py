@@ -36,6 +36,15 @@ class ExecResult:
     message: str  # WhatsApp reply text
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None  # short machine-readable code, e.g. "duplicate_phone"
+    # Set True by an auto_confirm intent's executor when `message` is a
+    # clarification question rather than a completed result — the domain
+    # module has already stashed whatever state it needs (e.g. in
+    # session_context) to interpret the next reply via parse_edits_async.
+    # Tells the dispatcher to keep the conversation alive (step="editing")
+    # instead of clearing it, the same continuation mechanism casting.move
+    # already gets via build_confirmation. Default False preserves every
+    # existing auto_confirm executor's behaviour unchanged.
+    needs_clarification: bool = False
 
 
 @dataclass

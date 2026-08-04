@@ -54,6 +54,11 @@ from agents.modules import casting_pipeline_nlu as nlu
 
 AGENT_ID = "casting-agent"
 UNDO_WINDOW_MINUTES = 5
+# Talents shown per page of a pipeline listing — the FULL, stable list is
+# always stored in number_map (ordinals never change with the page shown),
+# this only limits what's rendered in one WhatsApp message. See
+# _render_talent_page / _handle_paginate.
+PAGE_SIZE = 30
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +220,7 @@ def _extract_query_fields(text: str) -> Dict[str, str]:
 
 async def _resolve_project_ref(
     ordinal: Optional[int], name_query: Optional[str], session: Optional[dict]
-) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+) -> Tuple[Optional[Dict[str, str]], Optional[str], Optional[List[str]]]:
     """Resolve which project a message is about. Precedence, strictly:
 
       1. An explicit project NAME in this message ("... for Google - Film
@@ -228,32 +233,42 @@ async def _resolve_project_ref(
          resolved against the session's last-shown project listing.
       3. The session's stored current project, only when the message
          named nothing explicit at all.
+
+    Returns (project, error_message, ambiguous_labels) — ambiguous_labels
+    is set only when error_message is itself a "which one?" clarification
+    the caller should let the user resolve with a short, stateful reply
+    (see _query_parse_edits_async) instead of repeating the whole command.
     """
     if name_query:
         projects = await _fetch_ongoing_projects()
         match = nlu.resolve_project_by_name(name_query, projects)
         if match.project:
-            return match.project, None
+            return match.project, None, None
         if match.ambiguous:
             numbered = "\n".join(f"- {o}" for o in match.ambiguous)
-            return None, f"Which project did you mean?\n{numbered}"
-        return None, match.error or f'I couldn\'t find a project matching "{name_query}".'
+            return None, f"Which project did you mean?\n{numbered}", match.ambiguous
+        if match.suggestions:
+            bullets = "\n".join(f"• {s}" for s in match.suggestions)
+            return None, (
+                f"I couldn't find a project matching:\n\n{name_query}\n\nDid you mean:\n\n{bullets}"
+            ), None
+        return None, match.error or f'I couldn\'t find a project matching "{name_query}".', None
 
     if ordinal is not None:
         number_map = (session or {}).get("number_map") or {}
         if number_map.get("type") != "projects":
-            return None, 'I don\'t have a project list open. Send "Show ongoing projects" first.'
+            return None, 'I don\'t have a project list open. Send "Show ongoing projects" first.', None
         items = number_map.get("items") or []
         match = next((it for it in items if it.get("ordinal") == ordinal), None)
         if not match:
-            return None, "Project doesn't exist."
-        return {"id": match["id"], "label": match["label"]}, None
+            return None, "Project doesn't exist.", None
+        return {"id": match["id"], "label": match["label"]}, None, None
 
     current_id = (session or {}).get("current_project_id")
     current_label = (session or {}).get("current_project_label")
     if not current_id:
-        return None, 'I don\'t know which project. Send "Project N" or "Show ongoing projects" first.'
-    return {"id": current_id, "label": current_label or ""}, None
+        return None, 'I don\'t know which project. Send "Project N" or "Show ongoing projects" first.', None
+    return {"id": current_id, "label": current_label or ""}, None, None
 
 
 async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryIntent) -> ExecResult:
@@ -276,13 +291,34 @@ async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryInten
     return ExecResult(ok=True, message="\n".join(lines))
 
 
+async def _ask_project_clarification(
+    ctx: ExecContext, err: str, ambiguous: List[str], resume: Dict[str, Any]
+) -> ExecResult:
+    """Shared by every query handler that hits an ambiguous project name —
+    stores a numbered disambiguation + enough of the original query
+    (`resume`) to finish it once the reply resolves which project was
+    meant (see _query_parse_edits_async / _query_executor's resume-marker
+    handling), instead of dead-ending or making the user repeat the whole
+    command."""
+    options = [{"label": o, "value": o} for o in ambiguous]
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone,
+        pending_disambiguation={
+            "kind": "project", "field_key": "query_text", "options": options, "resume": resume,
+        },
+    )
+    return ExecResult(ok=False, error="ambiguous_project", message=err, needs_clarification=True)
+
+
 async def _handle_project_detail(
     ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent
 ) -> ExecResult:
-    project, err = await _resolve_project_ref(
+    project, err, ambiguous = await _resolve_project_ref(
         classification.project_ordinal, classification.project_name_query, session
     )
     if err:
+        if ambiguous:
+            return await _ask_project_clarification(ctx, err, ambiguous, {"query_kind": "project_detail"})
         return ExecResult(ok=False, error="project_not_found", message=err)
     if not await _project_exists(project["id"]):
         return ExecResult(ok=False, error="project_not_found", message="Project doesn't exist.")
@@ -307,17 +343,118 @@ async def _handle_project_detail(
     return ExecResult(ok=True, message="\n".join(lines))
 
 
+def _render_talent_page(project_label: str, stage: str, items: List[Dict[str, Any]], page: int) -> str:
+    """Renders one page of an already-sorted, already-numbered talent list
+    — the header/ordinals are identical regardless of which page is shown
+    (ordinals are 1-based into the FULL list, not restarted per page), so
+    "Move 34" on page 2 indexes the same talent it would if the whole list
+    had been shown in one message."""
+    total = len(items)
+    header = [
+        "Project", project_label, "", "Pipeline", nlu.stage_label(stage), "",
+        f"Total Talents: {total}", "", "━━━━━━━━━━━━━━", "",
+    ]
+    if not items:
+        return "\n".join(header) + "No talents in this pipeline."
+
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    if page < 1 or page > total_pages:
+        return f"Page {page} doesn't exist — this pipeline has {total_pages} page(s)."
+
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+    lines = header + [f'{it["ordinal"]}. {it["label"]}' for it in page_items]
+    if total > PAGE_SIZE:
+        end = start + len(page_items)
+        lines.append("")
+        lines.append(f"Showing {start + 1}-{end} of {total} — reply Next for more.")
+    return "\n".join(lines)
+
+
+async def _handle_replay(ctx: ExecContext, session: Optional[dict]) -> ExecResult:
+    """"Show again" / "again" / "repeat" / "open it" / "show it" — replays
+    whatever the session currently holds via a FRESH live query (not a
+    cached echo), so ordinals/counts stay correct even after an
+    intervening move."""
+    current_stage = (session or {}).get("current_stage")
+    current_project_id = (session or {}).get("current_project_id")
+    if current_stage:
+        return await _handle_pipeline_query(ctx, session, nlu.QueryIntent(kind="pipeline", stage_key=current_stage))
+    if current_project_id:
+        return await _handle_project_detail(ctx, session, nlu.QueryIntent(kind="project_detail"))
+    return await _handle_list_projects(ctx, nlu.QueryIntent(kind="list_projects"))
+
+
+async def _handle_paginate(
+    ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent
+) -> ExecResult:
+    """"Next"/"Previous"/"Page N"/"More"/"Show N more" — pages through the
+    already-shown, already-stable number_map (no new DB fetch, no change
+    to which talent each ordinal refers to)."""
+    number_map = (session or {}).get("number_map") or {}
+    if number_map.get("type") != "talents":
+        return ExecResult(
+            ok=False, error="nothing_to_paginate",
+            message='Nothing to page through yet. Send "Show <Pipeline>" first.',
+        )
+    items = number_map.get("items") or []
+    total = len(items)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    current_page = (session or {}).get("current_page") or 1
+    project_label = (session or {}).get("current_project_label") or ""
+    stage = (session or {}).get("current_stage") or ""
+
+    direction = classification.paginate_direction
+    if direction == "page":
+        target_page = classification.paginate_page or 1
+    elif direction == "previous":
+        target_page = current_page - 1
+    else:  # "next" (also covers "show N more" — see PAGE_SIZE's docstring)
+        target_page = current_page + 1
+
+    if target_page < 1:
+        return ExecResult(ok=True, message="You're already on the first page.")
+    if target_page > total_pages:
+        return ExecResult(ok=True, message=f"You're on the last page ({total_pages} total).")
+
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, current_page=target_page)
+    return ExecResult(ok=True, message=_render_talent_page(project_label, stage, items, target_page))
+
+
 async def _handle_pipeline_query(
     ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent
 ) -> ExecResult:
     if classification.stage_ambiguous:
-        options = "\n".join(f"- {o}" for o in classification.stage_ambiguous)
-        return ExecResult(ok=False, error="ambiguous_stage", message=f"Which pipeline did you mean?\n{options}")
+        options = [{"label": o, "value": o} for o in classification.stage_ambiguous]
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            pending_disambiguation={
+                "kind": "stage", "field_key": "query_text", "options": options,
+                "resume": {
+                    "query_kind": "pipeline_stage_pending",
+                    "project_ordinal": classification.project_ordinal,
+                    "project_name_query": classification.project_name_query,
+                    "count_only": classification.count_only,
+                },
+            },
+        )
+        bullets = "\n".join(f"- {o}" for o in classification.stage_ambiguous)
+        return ExecResult(
+            ok=False, error="ambiguous_stage",
+            message=f"Which pipeline did you mean?\n{bullets}", needs_clarification=True,
+        )
 
-    project, err = await _resolve_project_ref(
+    project, err, ambiguous = await _resolve_project_ref(
         classification.project_ordinal, classification.project_name_query, session
     )
     if err:
+        if ambiguous:
+            resume = {
+                "query_kind": "pipeline",
+                "stage_key": classification.stage_key,
+                "count_only": classification.count_only,
+            }
+            return await _ask_project_clarification(ctx, err, ambiguous, resume)
         return ExecResult(ok=False, error="project_not_found", message=err)
     if not await _project_exists(project["id"]):
         return ExecResult(ok=False, error="project_not_found", message="Project doesn't exist.")
@@ -352,32 +489,62 @@ async def _handle_pipeline_query(
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=stage,
         number_map={"type": "talents", "items": items},
+        current_page=1,
     )
-
-    header = [
-        "Project",
-        project["label"],
-        "",
-        "Pipeline",
-        nlu.stage_label(stage),
-        "",
-        f"Total Talents: {len(items)}",
-        "",
-        "━━━━━━━━━━━━━━",
-        "",
-    ]
-    if not items:
-        return ExecResult(ok=True, message="\n".join(header) + "No talents in this pipeline.")
-    lines = header + [f'{it["ordinal"]}. {it["label"]}' for it in items]
-    return ExecResult(ok=True, message="\n".join(lines))
+    return ExecResult(ok=True, message=_render_talent_page(project["label"], stage, items, 1))
 
 
 _IMPLICIT_COUNT_RE = re.compile(r"\b(how many|left|remaining)\b", re.IGNORECASE)
+
+# Set by _query_parse_edits_async when a pending project/stage
+# disambiguation (see _ask_project_clarification / the stage_ambiguous
+# branch of _handle_pipeline_query) has just been resolved — tells
+# _query_executor to bypass classify_query entirely and resume the
+# ORIGINAL query (stored in session.pending_disambiguation["resume"])
+# with the now-resolved value, rather than re-parsing free text.
+_QUERY_RESUME_MARKER = "__query_resume__"
+
+
+async def _resume_pending_query(session: Optional[dict], ctx: ExecContext) -> ExecResult:
+    pending = (session or {}).get("pending_disambiguation") or {}
+    resume = pending.get("resume") or {}
+    resolved_value = pending.get("resolved_value")
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+
+    query_kind = resume.get("query_kind")
+    if query_kind == "project_detail":
+        classification = nlu.QueryIntent(kind="project_detail", project_name_query=resolved_value)
+        return await _handle_project_detail(ctx, session, classification)
+    if query_kind == "pipeline":
+        classification = nlu.QueryIntent(
+            kind="pipeline", project_name_query=resolved_value,
+            stage_key=resume.get("stage_key"), count_only=bool(resume.get("count_only")),
+        )
+        return await _handle_pipeline_query(ctx, session, classification)
+    if query_kind == "pipeline_stage_pending":
+        stage_match = nlu.match_stage_phrase(resolved_value or "", list(PIPELINE_STAGE_ORDER))
+        classification = nlu.QueryIntent(
+            kind="pipeline",
+            project_ordinal=resume.get("project_ordinal"),
+            project_name_query=resume.get("project_name_query"),
+            stage_key=stage_match.key,
+            count_only=bool(resume.get("count_only")),
+        )
+        return await _handle_pipeline_query(ctx, session, classification)
+
+    return ExecResult(
+        ok=False, error="unrecognized_query",
+        message='I didn\'t understand that.\nTry "Show ongoing projects", "Project 3", or "Show Approved".',
+    )
 
 
 async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     raw_text = collected.get("query_text", "")
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+
+    if raw_text == _QUERY_RESUME_MARKER:
+        return await _resume_pending_query(session, ctx)
+
     classification = nlu.classify_query(raw_text, list(PIPELINE_STAGE_ORDER))
 
     if (
@@ -397,11 +564,42 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return await _handle_project_detail(ctx, session, classification)
     if classification.kind == "pipeline":
         return await _handle_pipeline_query(ctx, session, classification)
+    if classification.kind == "replay":
+        return await _handle_replay(ctx, session)
+    if classification.kind == "paginate":
+        return await _handle_paginate(ctx, session, classification)
     return ExecResult(
         ok=False,
         error="unrecognized_query",
         message='I didn\'t understand that.\nTry "Show ongoing projects", "Project 3", or "Show Approved".',
     )
+
+
+async def _query_parse_edits_async(
+    text: str, collected: Dict[str, str], fields: List[FieldSpec], ctx: ExecContext
+) -> Dict[str, str]:
+    """Interprets an "editing"-step reply while a query's project/stage
+    ambiguity is pending (see _ask_project_clarification and
+    _handle_pipeline_query's stage_ambiguous branch) — a number, ordinal
+    word, or free-text label match against the pending options resumes the
+    original query via _QUERY_RESUME_MARKER (see _resume_pending_query),
+    without the user repeating the whole command."""
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    stripped = (text or "").strip()
+    if not pending:
+        return {}
+
+    options = pending.get("options") or []
+    idx = nlu.resolve_option_reply(stripped, options)
+    if idx is None:
+        return {}
+    resolved_value = options[idx - 1]["value"]
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone,
+        pending_disambiguation={**pending, "resolved_value": resolved_value},
+    )
+    return {"query_text": _QUERY_RESUME_MARKER}
 
 
 QUERY_INTENT = IntentDefinition(
@@ -411,6 +609,7 @@ QUERY_INTENT = IntentDefinition(
     executor=_query_executor,
     extract_fields=_extract_query_fields,
     auto_confirm=True,
+    parse_edits_async=_query_parse_edits_async,
 )
 
 
@@ -539,12 +738,31 @@ async def _resolve_move_selection(
     if not selector.ok:
         return None, selector.error, None
 
+    # Pronoun ("him"/"her"/"this one", or a bare-stage command like
+    # "Already Tested" with nobody named) — resolves against whoever was
+    # most recently and unambiguously discussed, in THEIR project (the
+    # pronoun already fully identifies both; project_query/session context
+    # is not consulted for this resolution, same as a disambiguation pick).
+    pronoun_project_id: Optional[str] = None
+    pronoun_project_label: str = ""
+    if selector.name_query == nlu.PRONOUN_LAST_MARKER:
+        last_id = (session or {}).get("last_talent_id")
+        last_label = (session or {}).get("last_talent_label") or "them"
+        last_project_id = (session or {}).get("last_talent_project_id")
+        last_project_label = (session or {}).get("last_talent_project_label") or ""
+        if not last_id or not last_project_id:
+            return None, 'I\'m not sure who you mean — try naming them, e.g. "Move Sarah to Hold".', None
+        selector = nlu.SelectorResult(ok=True, resolved_id=last_id, resolved_label=last_label)
+        pronoun_project_id, pronoun_project_label = last_project_id, last_project_label
+
     project_query = (collected.get("project_query") or "").strip()
     force_global = project_query == nlu.FORCE_GLOBAL_MARKER
     if force_global:
         project_query = ""
 
-    if force_global:
+    if pronoun_project_id:
+        project_id, project_label = pronoun_project_id, pronoun_project_label
+    elif force_global:
         project_id, project_label = None, ""
     elif project_query:
         projects = await _fetch_ongoing_projects()
@@ -558,9 +776,13 @@ async def _resolve_move_selection(
             return None, msg, {"kind": "project", "field_key": "project_query", "options": options}
         elif match.suggestions:
             bullets = "\n".join(f"• {s}" for s in match.suggestions)
-            return None, f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}", None
+            return None, (
+                f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
+            ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
         else:
-            return None, match.error or f'I couldn\'t find a project matching "{project_query}".', None
+            return None, (
+                match.error or f'I couldn\'t find a project matching "{project_query}".'
+            ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
     else:
         project_id = (session or {}).get("current_project_id")
         project_label = (session or {}).get("current_project_label") or ""
@@ -596,7 +818,7 @@ async def _resolve_move_selection(
             return None, (
                 "I need to know the project for a multi-talent move — "
                 'please include it, e.g. "Move X and Y to Approved in PROJECT".'
-            ), None
+            ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
         if not selector.name_query and not selector.resolved_id:
             return None, 'I don\'t know which project. Send "Project N" first, or name the project.', None
         candidates = await _fetch_global_candidates()
@@ -630,9 +852,15 @@ async def _resolve_move_selection(
                 ), {"kind": "retry_global", "field_key": "project_query", "options": []}
 
         if not project_id and selector.name_query and resolved.error == "No matching talent.":
-            return None, f'"{selector.name_query}" wasn\'t found in any active project.', None
+            return None, (
+                f'"{selector.name_query}" wasn\'t found in any active project.'
+            ), {"kind": "free_text_retry", "field_key": "talent_selector", "options": []}
 
-        return None, resolved.error, None
+        # Every other resolution failure (whatever led here) stays
+        # continuable on the talent field too — a garbage retry doesn't
+        # discard the pending move, it just asks again (see
+        # _move_parse_edits_async's free_text_retry fallback).
+        return None, resolved.error, {"kind": "free_text_retry", "field_key": "talent_selector", "options": []}
 
     if not project_id:
         # Resolved via the global fallback — the match itself tells us
@@ -693,6 +921,24 @@ async def _split_by_current_stage(resolved: ResolvedMove) -> SplitMove:
     return SplitMove(actionable_ids, actionable_labels, already_labels, from_stages, previous_stage_by_id)
 
 
+async def _remember_last_talent(ctx: ExecContext, resolved: "ResolvedMove") -> None:
+    """Tracks "whoever we're currently discussing" for pronoun resolution
+    ("him"/"her"/"this one", or a bare-stage command like "Already
+    Tested") — only meaningful for a SINGLE-talent resolution (a bulk move
+    has no single referent). Called both while still confirming (so a
+    pronoun works mid-clarification, referring to who's being discussed
+    right now) and after a completed move (so it survives across separate
+    commands too, e.g. "Move Sarah to Hold" then later "Approve her")."""
+    if len(resolved.talent_ids) == 1:
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            last_talent_id=resolved.talent_ids[0],
+            last_talent_label=resolved.talent_labels[0],
+            last_talent_project_id=resolved.project_id,
+            last_talent_project_label=resolved.project_label,
+        )
+
+
 async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     resolved, err, disambiguation = await _resolve_move_selection(collected, session)
@@ -720,6 +966,7 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
     # unrelated "editing" turn (for a totally different reason) can't be
     # misread as answering an already-settled disambiguation.
     await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await _remember_last_talent(ctx, resolved)
 
     split = await _split_by_current_stage(resolved)
     if not split.actionable_ids:
@@ -764,6 +1011,8 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         # last few seconds), fail cleanly rather than trying to restart a
         # clarification sub-flow mid-approval.
         return ExecResult(ok=False, error="move_resolution_failed", message=err)
+
+    await _remember_last_talent(ctx, resolved)
 
     if collected.get("project_query"):
         # An explicit project named in a natural-language move ("... in
@@ -892,11 +1141,16 @@ async def _move_parse_edits_async(
             if parse_confirmation_reply(stripped) == "approve":
                 await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
                 return {"project_query": nlu.FORCE_GLOBAL_MARKER}
-        elif stripped.isdigit():
-            n = int(stripped)
-            if 1 <= n <= len(options) and field_key:
+        elif field_key and options:
+            # A number, an ordinal word ("the third one", "last"), or a
+            # free-text match against the option's own label ("Main Guy",
+            # "Bajaj Pulsar - Main Guy") — see resolve_option_reply for the
+            # full escalation. Returns None (never guesses) rather than
+            # picking a close-but-not-clearly-unique option.
+            idx = nlu.resolve_option_reply(stripped, options)
+            if idx is not None:
                 await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
-                return {field_key: options[n - 1]["value"]}
+                return {field_key: options[idx - 1]["value"]}
 
     explicit = parse_edit_instructions(text, fields)
     if explicit:
@@ -1036,7 +1290,7 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
 
 UNDO_INTENT = IntentDefinition(
     intent_id="casting.undo",
-    triggers=["undo"],
+    triggers=["undo", "undo that"],
     fields=[],
     executor=_undo_executor,
     auto_confirm=True,

@@ -301,6 +301,38 @@ async def _extract_message_info(page, full_selector: str, index: int) -> dict:
         return {"prePlainText": None, "phone": None}
 
 
+async def _is_voice_note_msg(page, full_selector: str, index: int) -> bool:
+    """Best-effort: does this (textless) message bubble render as a voice
+    note? No STT engine is wired up to actually transcribe it (see
+    backend/agents/dispatcher.py's transcript_confidence/media_type
+    interface) — this only distinguishes "a voice note we can't listen to
+    yet" from any other textless bubble (a reaction, a system message, an
+    unsupported media type) so the former gets a graceful reply instead of
+    being silently dropped like every textless bubble was before. Checks
+    several of WhatsApp Web's known voice-note markers defensively, same
+    spirit as this file's other DOM-shape checks — a build where none of
+    these match just falls back to the old silent-drop behaviour for that
+    message, not an error."""
+    try:
+        return await page.evaluate(
+            """([sel, idx]) => {
+                const els = document.querySelectorAll(sel);
+                if (idx >= els.length) return false;
+                const el = els[idx];
+                return !!(
+                    el.querySelector('[data-testid="audio-play"]') ||
+                    el.querySelector('[data-icon="audio-play"]') ||
+                    el.querySelector('[data-testid="ptt-canvas"]') ||
+                    el.querySelector('audio')
+                );
+            }""",
+            [full_selector, index],
+        )
+    except Exception:
+        logger.exception("inbound: _is_voice_note_msg failed at index %d", index)
+        return False
+
+
 async def _direction_diag(page, css_selector: str, index: int) -> dict:
     """Diagnostic-only mirror of sender._is_outgoing_msg's ancestor walk — logs
     what it actually saw (classNames + data-id at each level, checkmark count)
@@ -465,9 +497,20 @@ async def _scan_group_for_new_messages(
 
         if await _already_processed(message_id):
             continue
+
+        media_type = None
         if not text:
-            await _mark_processed(message_id)
-            continue
+            if await _is_voice_note_msg(page, full_sel, i):
+                # Can't transcribe it (no STT engine wired up), but it's
+                # worth a graceful reply instead of the old silent drop —
+                # forward it with media_type set and empty text so the
+                # backend can tell the user plainly. Every OTHER textless
+                # bubble (reactions, system messages, unrecognized media)
+                # keeps the old silent-drop behaviour, unchanged.
+                media_type = "voice_note"
+            else:
+                await _mark_processed(message_id)
+                continue
 
         sender_name = None
         if pre_plain:
@@ -507,6 +550,7 @@ async def _scan_group_for_new_messages(
             "sender_phone": phone,
             "sender_is_group_member": is_member,
             "raw_pre_plain_text": pre_plain,
+            "media_type": media_type,
         })
 
     return new_messages
@@ -514,7 +558,8 @@ async def _scan_group_for_new_messages(
 
 async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phone: str,
                          sender_name: Optional[str], text: str, message_id: str,
-                         sender_is_group_member: Optional[bool] = None) -> Optional[dict]:
+                         sender_is_group_member: Optional[bool] = None,
+                         media_type: Optional[str] = None) -> Optional[dict]:
     t0 = time.monotonic()
     try:
         resp = await http.post(
@@ -527,6 +572,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                 "text": text,
                 "message_id": message_id,
                 "sender_is_group_member": sender_is_group_member,
+                "media_type": media_type,
             },
             timeout=20.0,
         )
@@ -790,6 +836,7 @@ async def poll_once(
                     text=msg["text"],
                     message_id=msg["message_id"],
                     sender_is_group_member=msg["sender_is_group_member"],
+                    media_type=msg.get("media_type"),
                 ))
                 done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
                 ack_sent_sec = None

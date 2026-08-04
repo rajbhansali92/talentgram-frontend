@@ -39,6 +39,15 @@ class InboundMessageIn(BaseModel):
     # only meaningful for agents configured with security_mode="group_members".
     # None means "transport couldn't tell" and is treated as not-a-member.
     sender_is_group_member: Optional[bool] = None
+    # Voice transport interface — no transport populates these yet (no STT
+    # engine is wired up), but the conversation engine already understands
+    # both: a transcript's confidence score (gates a low-confidence
+    # transcript behind an "Is that correct?" confirmation), and
+    # media_type="voice_note" for a voice note that couldn't be
+    # transcribed at all (with empty `text`) so the user gets a clear
+    # reply instead of the message being silently dropped.
+    transcript_confidence: Optional[float] = None
+    media_type: Optional[str] = None
 
 
 @router.get("/known-groups")
@@ -75,6 +84,8 @@ async def inbound_message(
         text=payload.text,
         sender_name=payload.sender_name,
         sender_is_group_member=payload.sender_is_group_member,
+        transcript_confidence=payload.transcript_confidence,
+        media_type=payload.media_type,
     )
     return {"handled": result.handled, "reply": result.reply}
 

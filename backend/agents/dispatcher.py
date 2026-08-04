@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from agents import audit, conversation, registry
+from agents import audit, conversation, registry, session_context
 from agents.confirmation import (
     CANCELLED_MESSAGE,
     EDIT_PROMPT,
@@ -24,6 +24,7 @@ from agents.confirmation import (
 )
 from agents.models import DispatchResult, ExecContext
 from agents.parser import (
+    VOICE_CONFIDENCE_THRESHOLD,
     clean_voice_transcript,
     detect_trigger,
     extract_initial_fields,
@@ -139,7 +140,16 @@ async def _collect_or_advance(
     )
     if intent.auto_confirm:
         exec_result = await intent.executor(collected, ctx)
-        await conversation.clear_conversation(agent.agent_id, phone)
+        if exec_result.needs_clarification:
+            # The executor's reply is a clarification question, not a
+            # completed result — it has already stashed whatever it needs
+            # (e.g. in session_context) to interpret the next free-text
+            # reply via parse_edits_async. Keep the conversation alive in
+            # "editing" step instead of clearing it, same continuation
+            # mechanism casting.move gets via build_confirmation.
+            await conversation.update_conversation(agent.agent_id, phone, step="editing")
+        else:
+            await conversation.clear_conversation(agent.agent_id, phone)
         return DispatchResult(handled=True, reply=exec_result.message)
 
     await conversation.update_conversation(
@@ -157,6 +167,17 @@ async def handle_inbound_message(
     text: str,
     sender_name: Optional[str] = None,
     sender_is_group_member: Optional[bool] = None,
+    # Voice transport interface — no speech-to-text engine is wired up yet
+    # (see whatsapp-worker/inbound.py's voice-note detection), but the
+    # conversation engine already supports both ends of it: pass a
+    # transcript's confidence score once one exists and a low-confidence
+    # transcript is held for an explicit "I heard: ... Is that correct?"
+    # before touching any intent's NLU; pass media_type="voice_note" (with
+    # no `text`) for a voice note that couldn't be transcribed at all, so
+    # the user gets a clear reply instead of the message being silently
+    # dropped.
+    transcript_confidence: Optional[float] = None,
+    media_type: Optional[str] = None,
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
@@ -186,6 +207,71 @@ async def handle_inbound_message(
                 error="sender_not_allowlisted",
             )
             return DispatchResult(handled=False)
+
+        # --- Voice transport interface (see this function's docstring-ish
+        # param comments above and parser.VOICE_CONFIDENCE_THRESHOLD) ---
+        if media_type == "voice_note" and not raw_message.strip():
+            # No transcript at all — no STT engine exists yet. Tell the
+            # user plainly rather than silently dropping the message (the
+            # old behaviour: whatsapp-worker used to just skip a textless
+            # bubble). Touches no conversation/session state, so any
+            # in-flight operation survives untouched.
+            await audit.log_turn(
+                agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                raw_message=raw_message, error="voice_note_unsupported",
+            )
+            return DispatchResult(
+                handled=True,
+                reply="I can't listen to voice notes yet — please type your message instead.",
+            )
+
+        voice_session = await session_context.get_session(agent.agent_id, phone)
+        pending_transcript = (voice_session or {}).get("pending_voice_transcript")
+        if pending_transcript:
+            action = parse_confirmation_reply(working_message)
+            if action == "approve":
+                await session_context.update_session(
+                    agent.agent_id, phone,
+                    pending_voice_transcript=None, pending_voice_confidence=None,
+                )
+                # Substitute the now-confirmed transcript as THIS turn's
+                # message and fall through to normal processing below — it
+                # composes correctly whether or not another conversation is
+                # already in flight (fresh-trigger-always-restarts, or fed
+                # into whatever step that conversation is in).
+                raw_message = pending_transcript
+                working_message = clean_voice_transcript(raw_message)
+            elif action in ("cancel", "edit"):
+                await session_context.update_session(
+                    agent.agent_id, phone,
+                    pending_voice_transcript=None, pending_voice_confidence=None,
+                )
+                await audit.log_turn(
+                    agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                    raw_message=raw_message, confirmation_action="voice_transcript_rejected",
+                )
+                return DispatchResult(handled=True, reply="No problem — please type your message instead.")
+            else:
+                return DispatchResult(
+                    handled=True,
+                    reply=(
+                        f'Please reply 1 for Yes or 2 for No.\n\nI heard:\n\n"{pending_transcript}"'
+                        f"\n\nIs that correct?\n\n1. Yes\n2. No"
+                    ),
+                )
+        elif transcript_confidence is not None and transcript_confidence < VOICE_CONFIDENCE_THRESHOLD:
+            await session_context.update_session(
+                agent.agent_id, phone,
+                pending_voice_transcript=raw_message, pending_voice_confidence=transcript_confidence,
+            )
+            await audit.log_turn(
+                agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                raw_message=raw_message, confirmation_action="voice_transcript_pending",
+            )
+            return DispatchResult(
+                handled=True,
+                reply=f'I heard:\n\n"{raw_message}"\n\nIs that correct?\n\n1. Yes\n2. No',
+            )
 
         conv = await conversation.get_conversation(agent.agent_id, phone)
         if conv and conversation.is_expired(conv):
@@ -260,9 +346,16 @@ async def handle_inbound_message(
             )
             if intent.auto_confirm:
                 # Nothing to approve — reply immediately and don't leave a
-                # lingering "confirming" conversation behind.
+                # lingering "confirming" conversation behind, UNLESS the
+                # executor is asking a clarification question (see
+                # ExecResult.needs_clarification) — then keep it alive in
+                # "editing" step so the next free-text reply can continue
+                # it via parse_edits_async, same as casting.move.
                 exec_result = await intent.executor(collected, ctx)
-                await conversation.clear_conversation(agent.agent_id, phone)
+                if exec_result.needs_clarification:
+                    await conversation.update_conversation(agent.agent_id, phone, step="editing")
+                else:
+                    await conversation.clear_conversation(agent.agent_id, phone)
                 await audit.log_turn(
                     agent_id=agent.agent_id,
                     group_name=group_name,

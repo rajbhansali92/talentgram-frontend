@@ -1589,7 +1589,25 @@ async def seed_admin() -> None:
         ("link_actions", [("link_id", 1)], {"name": "link_actions_link_id"}),
         ("talents", [("name", 1)], {"name": "talents_name"}),
         ("casting_pipeline", [("project_id", 1), ("created_at", 1)], {"name": "pipeline_project_created_at"}),
+        # WhatsApp Casting Pipeline agent (backend/agents/modules/casting_pipeline.py):
+        # _fetch_stage_candidates filters by (project_id, stage) on every
+        # "Show <Pipeline>" — one of the most common calls — but the only
+        # existing index on this collection is (project_id, created_at),
+        # so MongoDB narrows to the project via that index and then
+        # filters the remaining rows for stage in memory. Real production
+        # latency measurement (railway logs, inbound: TIMING lines) showed
+        # backend request time dominated by sequential Mongo round-trips;
+        # this is the single hottest unindexed query shape found.
+        ("casting_pipeline", [("project_id", 1), ("stage", 1)], {"name": "pipeline_project_stage"}),
         ("projects", [("slug", 1)], {"unique": True, "name": "proj_slug_unique"}),
+        # routers/whatsapp.py already indexes (status, created_at) — covers
+        # the `status` filter but not a `brand_name` sort. casting-agent's
+        # _fetch_ongoing_projects ({"status": "ongoing"}, sorted by
+        # brand_name) runs on nearly every command (project listing,
+        # project-name resolution, global talent search); this index lets
+        # Mongo satisfy both the filter and the sort from the index
+        # instead of sorting the matched set in memory.
+        ("projects", [("status", 1), ("brand_name", 1)], {"name": "projects_status_brand_name"}),
         # Persistent access_token lookup — sparse so docs without the field
         # are ignored, unique so two submissions can't share a token.
         ("submissions", [("access_token", 1)],

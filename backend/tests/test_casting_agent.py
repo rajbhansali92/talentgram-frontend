@@ -2098,14 +2098,16 @@ async def test_voice_note_without_transcript_replies_gracefully():
         await _restore_config(original)
 
 
-async def test_pagination_next_previous_page():
-    """A pipeline with 45 talents pages at 30 per message; Next/Previous/
-    Page N all page through the SAME stable number_map."""
+async def test_full_talent_list_no_pagination():
+    """Pagination was tried and explicitly reverted — a pipeline listing
+    (even a large one) always returns the complete, alphabetically sorted,
+    stably numbered list in ONE message. No "Showing X-Y of Z", no
+    "Next"/"Previous" framing, no truncation."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project(brand_name=f"Pagination Brand {tag}")
+    project_id = await _seed_project(brand_name=f"NoPagination Brand {tag}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
     names = [f"PG{n:03d} {tag}" for n in range(1, 46)]  # 45 talents
     talent_ids = []
@@ -2121,44 +2123,19 @@ async def test_pagination_next_previous_page():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert "Total Talents: 45" in r.reply
-        assert names[0] in r.reply  # PG001 on page 1
-        assert names[29] in r.reply  # PG030 on page 1
-        assert names[30] not in r.reply  # PG031 not yet shown
-        assert "Showing 1-30 of 45" in r.reply
+        for name in names:
+            assert name in r.reply, f"{name} missing from single-message listing"
+        assert "45. " in r.reply  # last ordinal present in the same message
+        assert "Showing" not in r.reply
+        assert "reply Next" not in r.reply.lower()
 
+        # Ordinal 45 (the very last one) is directly usable — no separate
+        # page to fetch first.
         r = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="Next",
+            group_name=group, sender_phone=phone, text="Move 45 to Approved",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert names[30] in r.reply  # PG031 now visible
-        assert names[0] not in r.reply
-        assert "Showing 31-45 of 45" in r.reply
-
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="Next",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "last page" in r.reply.lower()
-
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="Previous",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert names[0] in r.reply  # back to page 1
-
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="Page 2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert names[30] in r.reply
-
-        # Ordinal stability survives pagination — "Move 31" on page 2
-        # still refers to the same talent shown there.
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="Move 31 to Approved",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert f"• {names[30]}" in r.reply
+        assert f"• {names[44]}" in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
         await _restore_config(original)
@@ -2404,4 +2381,383 @@ async def test_query_ambiguous_project_continuation():
         assert f"QueryAmbigTalent {tag}" in r.reply
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Feedback Sprint — bare-number project selection, Add-to-pipeline (Ask To
+# Test), full-list rendering already covered by
+# test_full_talent_list_no_pagination above.
+# ---------------------------------------------------------------------------
+async def test_bare_number_selects_project():
+    """A bare number right after "Show ongoing projects" opens that
+    project directly — the session already has the mapping, no need to
+    repeat "Project N"."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"BareNumber Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show ongoing projects",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        ordinal = next(
+            int(line.split(".", 1)[0]) for line in r.reply.splitlines() if line.strip().endswith(label)
+        )
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=str(ordinal),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Project" in r.reply and label in r.reply
+        assert "Total Talents:" in r.reply
+
+        # Out of range still errors clearly rather than silently doing
+        # nothing or crashing.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show ongoing projects",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="99999",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "doesn't exist" in r.reply.lower()
+    finally:
+        await _cleanup(phone, project_ids=[project_id])
+        await _restore_config(original)
+
+
+async def test_bare_number_ignored_without_projects_list():
+    """A bare number with no "projects" number_map in session (e.g. never
+    listed projects, or the last number_map was a talent list) is
+    unrelated chatter, not silently misinterpreted."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"BareNumberTalents Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"BareNumberTalent {uuid.uuid4().hex[:6]}")
+    try:
+        await _seed_pipeline_row(project_id, t, "hold")
+        await _seed_number_map_for_project(phone, project_id, label)
+
+        # Show a TALENT list — number_map.type becomes "talents", not
+        # "projects".
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show Hold",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        # Not interpreted as "Project 1" — no active conversation, no
+        # trigger, wrong map type, so it's silently ignored (unrelated
+        # chatter), same as any other unrecognized bare message.
+        assert not r.handled
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_add_single_talent_creates_ask_to_test_entry():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"AddSingle Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"AddSingleTalent {uuid.uuid4().hex[:6]}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add {(await db.talents.find_one({'id': t}))['name']} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        assert "Pipeline:" in r.reply and "Ask To Test" in r.reply
+        assert "1 → Approve" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert "Added 1 talent to Ask To Test." in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc is not None and doc["stage"] == "ask_to_test"
+
+        # Adding again reports it's already there instead of duplicating.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add {(await db.talents.find_one({'id': t}))['name']} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "already in the" in r.reply and "pipeline" in r.reply
+        assert "No changes were made." in r.reply
+        count = await db.casting_pipeline.count_documents({"project_id": project_id, "talent_id": t})
+        assert count == 1
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_add_multi_talent_commas_and_newlines():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AddMulti Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t1 = await _seed_talent(f"AddMultiOne {tag}")
+    t2 = await _seed_talent(f"AddMultiTwo {tag}")
+    t3 = await _seed_talent(f"AddMultiThree {tag}")
+    talent_ids = [t1, t2, t3]
+    try:
+        # Comma + "and" form, single line.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add AddMultiOne {tag}, AddMultiTwo {tag} and AddMultiThree {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        for tid in talent_ids:
+            name = (await db.talents.find_one({"id": tid}))["name"]
+            assert name in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Added 3 talents to Ask To Test." in r.reply
+        for tid in talent_ids:
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert doc is not None and doc["stage"] == "ask_to_test"
+
+        # Clean up for the newline-form half of this test.
+        await db.casting_pipeline.delete_many({"project_id": project_id})
+
+        # One-name-per-line form.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add\nAddMultiOne {tag}\nAddMultiTwo {tag}\nAddMultiThree {tag}\nto\n{label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="go ahead",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Added 3 talents to Ask To Test." in r.reply
+        for tid in talent_ids:
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert doc is not None and doc["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_add_fuzzy_typo_names():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"AddFuzzy Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent("Prajal Tushir")
+    try:
+        for query in ("Prajel", "Prjal", "Prajal Kumar"):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"Add {query} to {label}",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Prajal Tushir" in r.reply, (query, r.reply)
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Done." in r.reply, (query, r.reply)
+            await db.casting_pipeline.delete_many({"project_id": project_id, "talent_id": t})
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_add_ambiguous_talent_continuation():
+    """Multiple similar-named talents -> numbered clarification -> a bare
+    reply resolves it and the ADD continues without repeating the command."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AddAmbigTalent Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    p1 = await _seed_talent(f"Prajal Shah {tag}")
+    p2 = await _seed_talent(f"Prajal Mehta {tag}")
+    talent_ids = [p1, p2]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Prajal {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple matching talents." in r.reply
+        assert f"Prajal Shah {tag}" in r.reply and f"Prajal Mehta {tag}" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        assert f"Prajal Mehta {tag}" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="yes",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p2})) is not None
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p1})) is None
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_add_ambiguous_project_continuation():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"AddAmbigProj Alpha {tag}")
+    p2 = await _seed_project(brand_name=f"AddAmbigProj Beta {tag}")
+    label2 = (await db.projects.find_one({"id": p2}))["brand_name"]
+    t = await _seed_talent(f"AddAmbigProjTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add {(await db.talents.find_one({'id': t}))['name']} to AddAmbigProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label2,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        assert label2 in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t})) is not None
+        assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t})) is None
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_add_talent_not_found():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"AddNotFound Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Zzzargled Nonexistent Person to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "No matching talent found." in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id])
+        await _restore_config(original)
+
+
+async def test_add_requires_project_when_omitted():
+    """Add never defaults the destination project from session context —
+    it's always asked for explicitly if omitted, since it's a real write."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"AddNoProject Brand {uuid.uuid4().hex[:6]}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"AddNoProjectTalent {uuid.uuid4().hex[:6]}")
+    try:
+        await _seed_number_map_for_project(phone, project_id, label)
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add {(await db.talents.find_one({'id': t}))['name']}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "which project" in r.reply.lower()
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        assert label in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_add_does_not_affect_move_workflow():
+    """Regression guard: the "add" trigger and casting.add intent coexist
+    cleanly with an in-progress MOVE conversation — a fresh "add" mid-move
+    replaces the pending move (same "fresh trigger always restarts" rule
+    as any other trigger), it doesn't corrupt or silently merge with it."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AddMoveCoexist Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    move_talent = await _seed_talent(f"MoveCoexistTalent {tag}")
+    add_talent = await _seed_talent(f"AddCoexistTalent {tag}")
+    talent_ids = [move_talent, add_talent]
+    try:
+        await _seed_pipeline_row(project_id, move_talent, "hold")
+
+        move_name = (await db.talents.find_one({"id": move_talent}))["name"]
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move {move_name} to Approved in {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"• {move_name}" in r.reply
+
+        add_name = (await db.talents.find_one({"id": add_talent}))["name"]
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add {add_name} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        assert add_name in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert "Added 1 talent to Ask To Test." in r.reply
+
+        # The original move never happened — cleanly replaced, not merged.
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": move_talent}))["stage"] == "hold"
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": add_talent}))["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
         await _restore_config(original)

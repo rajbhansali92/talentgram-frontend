@@ -536,7 +536,21 @@ def resolve_against_candidates(selector: SelectorResult, candidates: List[Candid
             return ResolvedTalents(ok=False, error="No matching talent.")
 
         top_c, top_s = scored[0]
-        second_s = scored[1][1] if len(scored) > 1 else 0.0
+        if len(scored) == 1:
+            # Only one candidate cleared even the base "worth suggesting"
+            # cutoff — there is nothing for it to be AMBIGUOUS with, so
+            # the higher autocorrect+margin bar (which exists purely to
+            # protect against two confusable near-ties) doesn't apply.
+            # Resolving here isn't "guessing": every move/add still shows
+            # a confirmation with this exact name before anything is
+            # written, which is the real safety net — the alternative
+            # (an "I found multiple matching talents" list with a single
+            # option) is strictly worse UX for zero extra safety.
+            return ResolvedTalents(
+                ok=True, talent_ids=[top_c.id], talent_labels=[top_c.label],
+                resolved_project_id=top_c.project_id, resolved_project_label=top_c.project_label,
+            )
+        second_s = scored[1][1]
         if top_s >= _NAME_AUTOCORRECT_CUTOFF and (top_s - second_s) > _NAME_AMBIGUITY_MARGIN:
             return ResolvedTalents(
                 ok=True, talent_ids=[top_c.id], talent_labels=[top_c.label],
@@ -817,6 +831,56 @@ def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Add-to-pipeline command extraction — "Add <name(s)> to <project>" always
+# targets Ask To Test (no stage field at all — casting_pipeline.py's
+# ADD_INTENT hardcodes it, never asks). Supports both the single-line form
+# ("Add Prajal, Arya to Toyota Glanza") and the one-name-per-line form:
+#   Add
+#   Prajal
+#   Angela Kumar
+#   Arya
+#   to
+#   Toyota Glanza
+# ---------------------------------------------------------------------------
+ADD_TRIGGERS = ["add"]
+
+_ADD_TRIGGER_RE = re.compile(r"^\s*add\b[\s:]*", re.IGNORECASE)
+# Tolerant of a comma (from the newline-join below) OR plain whitespace on
+# either side of the connector, so both message shapes above resolve to
+# the same project tail.
+_PROJECT_IN_ADD_RE = re.compile(r"[,\s]*\b(?:to|in|for)\b[,\s]*(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def extract_add_fields(text: str) -> Dict[str, str]:
+    """IntentDefinition.extract_fields-compatible: {field_key: raw_value}
+    for casting.add. Strips the "add" trigger from the first non-blank
+    line, joins any remaining lines with ", " — turning the one-name-per-
+    line form into the exact same comma-separated shape
+    "Add Prajal, Arya to Toyota Glanza" already has — then extracts the
+    trailing "to"/"in"/"for" project reference, leaving whatever's left as
+    the talent selector text (fed to parse_talent_selector unchanged,
+    which already understands comma/"and"-separated multi-name lists)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return {}
+    lines[0] = _ADD_TRIGGER_RE.sub("", lines[0], count=1).strip()
+    if not lines[0]:
+        lines = lines[1:]
+    remainder = ", ".join(lines)
+
+    out: Dict[str, str] = {}
+    proj_m = _PROJECT_IN_ADD_RE.search(remainder)
+    if proj_m:
+        project_candidate = proj_m.group(1).strip(" .!?,")
+        if project_candidate:
+            out["project_query"] = project_candidate
+            remainder = remainder[:proj_m.start()]
+
+    out["talent_selector"] = remainder.strip(" .!?,")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Query classification — everything read-only routes through ONE intent;
 # this decides which flavour of read the message actually is.
 # ---------------------------------------------------------------------------
@@ -824,9 +888,9 @@ QUERY_TRIGGERS = [
     "show", "current", "open", "list", "view", "what",
     "how many", "who", "pending", "project", "projects",
     "summary", "p",  # "Summary Project 5" / bare "P5" (see parser.detect_trigger's glued-digit rule)
-    # Conversational follow-ups — replay the last listing, or page through
-    # a long one, without repeating the project/pipeline.
-    "again", "repeat", "next", "more", "previous", "prev", "page",
+    # "Show again"/"repeat" — replay the last listing without repeating
+    # the project/pipeline.
+    "again", "repeat",
 ]
 
 # Matches "Project 5", "project #5", and the "P5" / "P 5" shorthand alike.
@@ -851,43 +915,22 @@ _FOR_PROJECT_RE = re.compile(r"\b(?:for|of)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _REPLAY_RE = re.compile(
     r"^\s*(?:show\s+(?:it\s+)?again|open\s+it|show\s+it|again|repeat)[\s.!?]*$", re.IGNORECASE
 )
-# Pagination through an already-shown, already-stable number_map — no new
-# DB fetch, no change to the stored-numbering guarantee (see
-# casting_pipeline.py's _handle_paginate).
-_PAGINATE_SHOW_N_MORE_RE = re.compile(r"^\s*show\s+(\d+)\s+more[\s.!?]*$", re.IGNORECASE)
-_PAGINATE_PAGE_N_RE = re.compile(r"^\s*page\s+(\d+)[\s.!?]*$", re.IGNORECASE)
-_PAGINATE_NEXT_RE = re.compile(r"^\s*(?:next(?:\s+page)?|more|show\s+more)[\s.!?]*$", re.IGNORECASE)
-_PAGINATE_PREV_RE = re.compile(r"^\s*(?:previous(?:\s+page)?|prev(?:ious)?)[\s.!?]*$", re.IGNORECASE)
 
 
 @dataclass
 class QueryIntent:
-    kind: str  # "list_projects" | "project_detail" | "pipeline" | "replay" | "paginate" | "unrecognized"
+    kind: str  # "list_projects" | "project_detail" | "pipeline" | "replay" | "unrecognized"
     project_ordinal: Optional[int] = None
     project_name_query: Optional[str] = None
     stage_key: Optional[str] = None
     stage_ambiguous: Optional[List[str]] = None
     count_only: bool = False
-    # "paginate" kind only:
-    paginate_direction: Optional[str] = None  # "next" | "previous" | "page"
-    paginate_page: Optional[int] = None        # explicit target page, for "Page N"
-    paginate_more_count: Optional[int] = None  # explicit count, for "Show N more"
 
 
 def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
     stripped = (text or "").strip()
     if _REPLAY_RE.match(stripped):
         return QueryIntent(kind="replay")
-    m = _PAGINATE_SHOW_N_MORE_RE.match(stripped)
-    if m:
-        return QueryIntent(kind="paginate", paginate_direction="next", paginate_more_count=int(m.group(1)))
-    m = _PAGINATE_PAGE_N_RE.match(stripped)
-    if m:
-        return QueryIntent(kind="paginate", paginate_direction="page", paginate_page=int(m.group(1)))
-    if _PAGINATE_NEXT_RE.match(stripped):
-        return QueryIntent(kind="paginate", paginate_direction="next")
-    if _PAGINATE_PREV_RE.match(stripped):
-        return QueryIntent(kind="paginate", paginate_direction="previous")
 
     project_ref = None
     m = _PROJECT_REF_RE.search(text)

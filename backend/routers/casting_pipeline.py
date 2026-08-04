@@ -503,6 +503,65 @@ async def list_pipeline(
 # ---------------------------------------------------------------------------
 # POST /api/projects/{project_id}/pipeline/add
 # ---------------------------------------------------------------------------
+async def add_talents_to_pipeline(project_id: str, talent_ids: List[str], stage: str) -> dict:
+    """Add every (project_id, talent_id) pair not already present (in ANY
+    stage) to the pipeline at `stage`. `stage` must already be normalised/
+    validated by the caller — this function owns only the write, so both
+    the REST endpoint below and the WhatsApp Casting Pipeline agent's Add
+    executor share one path with no duplicated logic, same pattern as
+    `bulk_move_by_talent_ids`. Idempotent: an already-present pair is
+    skipped, never duplicated or silently moved to a new stage — reported
+    back as `skipped` so the caller can tell the user distinctly."""
+    clean_ids: List[str] = []
+    seen = set()
+    for raw in talent_ids:
+        if not isinstance(raw, str):
+            continue
+        cid = raw.strip()
+        if cid and cid not in seen:
+            seen.add(cid)
+            clean_ids.append(cid)
+    if not clean_ids:
+        return {"added": 0, "skipped": 0, "added_docs": [], "skipped_ids": []}
+
+    # One round-trip to find existing pairs — cheaper than per-id `update_one`
+    # with upsert because the duplicate set is usually small.
+    existing_cursor = db.casting_pipeline.find(
+        {"project_id": project_id, "talent_id": {"$in": clean_ids}},
+        {"_id": 0, "talent_id": 1},
+    )
+    existing_ids = {
+        d["talent_id"] for d in await existing_cursor.to_list(len(clean_ids))
+    }
+
+    now = _now()
+    new_docs = [
+        {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "talent_id": tid,
+            "stage": stage,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for tid in clean_ids
+        if tid not in existing_ids
+    ]
+
+    if new_docs:
+        await db.casting_pipeline.insert_many(new_docs)
+        # Strip Mongo's mutated _id before returning so the response is JSON-safe.
+        for d in new_docs:
+            d.pop("_id", None)
+
+    return {
+        "added": len(new_docs),
+        "skipped": len(existing_ids),
+        "added_docs": new_docs,
+        "skipped_ids": sorted(existing_ids),
+    }
+
+
 @router.post("/{project_id}/pipeline/add", status_code=status.HTTP_201_CREATED)
 async def add_to_pipeline(
     project_id: str,
@@ -518,25 +577,6 @@ async def add_to_pipeline(
     if not await _project_exists(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Normalise + dedup input ids in one pass.
-    raw_ids = payload.talent_ids or []
-    talent_ids = []
-    seen = set()
-    for raw in raw_ids:
-        if not isinstance(raw, str):
-            continue
-        cid = raw.strip()
-        if cid and cid not in seen:
-            seen.add(cid)
-            talent_ids.append(cid)
-
-    if not talent_ids:
-        return {"success": True, "added": 0, "skipped": 0, "data": []}
-
-    # Stage normalisation: accept legacy aliases (e.g. `sent` → `approved`),
-    # validate against the canonical registry, fall back to default if
-    # caller omits the field. Reject explicitly unknown stages with 400
-    # so a typo doesn't silently create rows in the default lane.
     if payload.stage is None:
         stage = DEFAULT_STAGE
     else:
@@ -548,41 +588,12 @@ async def add_to_pipeline(
             )
         stage = normalised
 
-    # One round-trip to find existing pairs — cheaper than per-id `update_one`
-    # with upsert because the duplicate set is usually small.
-    existing_cursor = db.casting_pipeline.find(
-        {"project_id": project_id, "talent_id": {"$in": talent_ids}},
-        {"_id": 0, "talent_id": 1},
-    )
-    existing_ids = {
-        d["talent_id"] for d in await existing_cursor.to_list(len(talent_ids))
-    }
-
-    now = _now()
-    new_docs = [
-        {
-            "id": str(uuid.uuid4()),
-            "project_id": project_id,
-            "talent_id": tid,
-            "stage": stage,
-            "created_at": now,
-            "updated_at": now,
-        }
-        for tid in talent_ids
-        if tid not in existing_ids
-    ]
-
-    if new_docs:
-        await db.casting_pipeline.insert_many(new_docs)
-        # Strip Mongo's mutated _id before returning so the response is JSON-safe.
-        for d in new_docs:
-            d.pop("_id", None)
-
+    result = await add_talents_to_pipeline(project_id, payload.talent_ids or [], stage)
     return {
         "success": True,
-        "added": len(new_docs),
-        "skipped": len(existing_ids),
-        "data": new_docs,
+        "added": result["added"],
+        "skipped": result["skipped"],
+        "data": result["added_docs"],
     }
 
 

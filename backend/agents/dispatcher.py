@@ -12,6 +12,7 @@ every stage below it (agents/modules/*) knows nothing about WhatsApp.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from agents import audit, conversation, registry, session_context
@@ -189,12 +190,21 @@ async def handle_inbound_message(
     # audit log — the audit trail always shows exactly what was received.
     working_message = clean_voice_transcript(raw_message)
 
+    # Coarse, always-on timing for the backend-side portion of a turn —
+    # real production latency (railway logs on the worker) showed backend
+    # request time as roughly half the total, but with no breakdown of
+    # WHERE inside the backend it went. This gives that breakdown for free
+    # going forward without needing another guess-and-check profiling pass.
+    t0 = time.monotonic()
+    dispatched_agent_id: Optional[str] = None
+
     try:
         resolved = await registry.resolve_agent_for_group(group_name)
         if not resolved:
             # Messages from groups no agent owns are silently ignored.
             return DispatchResult(handled=False)
         agent, config = resolved
+        dispatched_agent_id = agent.agent_id
 
         if not registry.is_sender_allowed(
             config, phone, is_group_member=sender_is_group_member
@@ -285,13 +295,32 @@ async def handle_inbound_message(
             intent = fresh_intent or (
                 registry.get_intent(agent, conv["intent_id"]) if conv else None
             )
+            bare_reply_resolution = None
+            if intent is None and conv is None and agent.resolve_bare_reply:
+                # Truly fresh (no conversation, no trigger match) — give the
+                # agent one last chance to interpret this against whatever
+                # it already has in session_context (e.g. "14" against a
+                # just-shown numbered project list). Never reached while a
+                # conversation is active, so this can't collide with an
+                # in-progress intent's own "reply with a number" handling.
+                bare_ctx = ExecContext(
+                    agent_id=agent.agent_id, group_name=group_name,
+                    sender_phone=phone, sender_name=sender_name,
+                )
+                bare_reply_resolution = await agent.resolve_bare_reply(working_message, bare_ctx)
+                if bare_reply_resolution is not None:
+                    intent, _ = bare_reply_resolution
+
             if intent is None:
                 # No active conversation and this message doesn't open one
                 # — unrelated chatter in the group, ignore.
                 return DispatchResult(handled=False)
 
-            extractor = intent.extract_fields or (lambda t: extract_initial_fields(intent, t))
-            initial_raw = extractor(working_message)
+            if bare_reply_resolution is not None:
+                _, initial_raw = bare_reply_resolution
+            else:
+                extractor = intent.extract_fields or (lambda t: extract_initial_fields(intent, t))
+                initial_raw = extractor(working_message)
             collected: dict = {}
             initial_errors: list = []
             for field in intent.fields:
@@ -487,4 +516,10 @@ async def handle_inbound_message(
         return DispatchResult(
             handled=True,
             reply="Something went wrong on our end. Please try again in a moment.",
+        )
+    finally:
+        dispatch_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "dispatch_timing agent=%s group=%r dispatch_ms=%d",
+            dispatched_agent_id, group_name, dispatch_ms,
         )

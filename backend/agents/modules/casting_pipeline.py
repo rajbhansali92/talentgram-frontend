@@ -22,6 +22,7 @@ of truth), so a stage added there later works in this agent immediately.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from dataclasses import dataclass, field as dataclass_field
@@ -35,6 +36,7 @@ from routers.casting_pipeline import (
     PIPELINE_STAGE_ORDER,
     PIPELINE_STAGES,
     _normalise_stage,
+    add_talents_to_pipeline,
     bulk_move_by_talent_ids,
     get_stage_counts,
 )
@@ -54,11 +56,6 @@ from agents.modules import casting_pipeline_nlu as nlu
 
 AGENT_ID = "casting-agent"
 UNDO_WINDOW_MINUTES = 5
-# Talents shown per page of a pipeline listing — the FULL, stable list is
-# always stored in number_map (ordinals never change with the page shown),
-# this only limits what's rendered in one WhatsApp message. See
-# _render_talent_page / _handle_paginate.
-PAGE_SIZE = 30
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +317,18 @@ async def _handle_project_detail(
         if ambiguous:
             return await _ask_project_clarification(ctx, err, ambiguous, {"query_kind": "project_detail"})
         return ExecResult(ok=False, error="project_not_found", message=err)
-    if not await _project_exists(project["id"]):
+    # Three independent reads — run concurrently instead of as three
+    # sequential round trips. All are read-only, so overlapping them (and
+    # discarding counts/last_updated's results in the rare case the
+    # project turns out not to exist) is safe.
+    project_exists, counts, last_updated = await asyncio.gather(
+        _project_exists(project["id"]),
+        get_stage_counts(project["id"]),
+        _fetch_last_updated(project["id"]),
+    )
+    if not project_exists:
         return ExecResult(ok=False, error="project_not_found", message="Project doesn't exist.")
-
-    counts = await get_stage_counts(project["id"])
     total_talents = sum(counts.values())
-    last_updated = await _fetch_last_updated(project["id"])
 
     lines = ["Project", "", project["label"], "", f"Total Talents: {total_talents}", "", "Pipelines", ""]
     for i, stage in enumerate(PIPELINE_STAGE_ORDER, start=1):
@@ -343,12 +346,10 @@ async def _handle_project_detail(
     return ExecResult(ok=True, message="\n".join(lines))
 
 
-def _render_talent_page(project_label: str, stage: str, items: List[Dict[str, Any]], page: int) -> str:
-    """Renders one page of an already-sorted, already-numbered talent list
-    — the header/ordinals are identical regardless of which page is shown
-    (ordinals are 1-based into the FULL list, not restarted per page), so
-    "Move 34" on page 2 indexes the same talent it would if the whole list
-    had been shown in one message."""
+def _render_talent_list(project_label: str, stage: str, items: List[Dict[str, Any]]) -> str:
+    """Renders the FULL, stable, alphabetically-numbered talent list in one
+    message — no truncation, no paging, regardless of size (WhatsApp
+    handles long messages fine)."""
     total = len(items)
     header = [
         "Project", project_label, "", "Pipeline", nlu.stage_label(stage), "",
@@ -356,18 +357,7 @@ def _render_talent_page(project_label: str, stage: str, items: List[Dict[str, An
     ]
     if not items:
         return "\n".join(header) + "No talents in this pipeline."
-
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    if page < 1 or page > total_pages:
-        return f"Page {page} doesn't exist — this pipeline has {total_pages} page(s)."
-
-    start = (page - 1) * PAGE_SIZE
-    page_items = items[start:start + PAGE_SIZE]
-    lines = header + [f'{it["ordinal"]}. {it["label"]}' for it in page_items]
-    if total > PAGE_SIZE:
-        end = start + len(page_items)
-        lines.append("")
-        lines.append(f"Showing {start + 1}-{end} of {total} — reply Next for more.")
+    lines = header + [f'{it["ordinal"]}. {it["label"]}' for it in items]
     return "\n".join(lines)
 
 
@@ -383,42 +373,6 @@ async def _handle_replay(ctx: ExecContext, session: Optional[dict]) -> ExecResul
     if current_project_id:
         return await _handle_project_detail(ctx, session, nlu.QueryIntent(kind="project_detail"))
     return await _handle_list_projects(ctx, nlu.QueryIntent(kind="list_projects"))
-
-
-async def _handle_paginate(
-    ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent
-) -> ExecResult:
-    """"Next"/"Previous"/"Page N"/"More"/"Show N more" — pages through the
-    already-shown, already-stable number_map (no new DB fetch, no change
-    to which talent each ordinal refers to)."""
-    number_map = (session or {}).get("number_map") or {}
-    if number_map.get("type") != "talents":
-        return ExecResult(
-            ok=False, error="nothing_to_paginate",
-            message='Nothing to page through yet. Send "Show <Pipeline>" first.',
-        )
-    items = number_map.get("items") or []
-    total = len(items)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    current_page = (session or {}).get("current_page") or 1
-    project_label = (session or {}).get("current_project_label") or ""
-    stage = (session or {}).get("current_stage") or ""
-
-    direction = classification.paginate_direction
-    if direction == "page":
-        target_page = classification.paginate_page or 1
-    elif direction == "previous":
-        target_page = current_page - 1
-    else:  # "next" (also covers "show N more" — see PAGE_SIZE's docstring)
-        target_page = current_page + 1
-
-    if target_page < 1:
-        return ExecResult(ok=True, message="You're already on the first page.")
-    if target_page > total_pages:
-        return ExecResult(ok=True, message=f"You're on the last page ({total_pages} total).")
-
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, current_page=target_page)
-    return ExecResult(ok=True, message=_render_talent_page(project_label, stage, items, target_page))
 
 
 async def _handle_pipeline_query(
@@ -489,9 +443,8 @@ async def _handle_pipeline_query(
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=stage,
         number_map={"type": "talents", "items": items},
-        current_page=1,
     )
-    return ExecResult(ok=True, message=_render_talent_page(project["label"], stage, items, 1))
+    return ExecResult(ok=True, message=_render_talent_list(project["label"], stage, items))
 
 
 _IMPLICIT_COUNT_RE = re.compile(r"\b(how many|left|remaining)\b", re.IGNORECASE)
@@ -566,8 +519,6 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return await _handle_pipeline_query(ctx, session, classification)
     if classification.kind == "replay":
         return await _handle_replay(ctx, session)
-    if classification.kind == "paginate":
-        return await _handle_paginate(ctx, session, classification)
     return ExecResult(
         ok=False,
         error="unrecognized_query",
@@ -802,8 +753,13 @@ async def _resolve_move_selection(
             for it in (number_map.get("items") or [])
         ]
     elif project_id:
-        candidates = await _fetch_project_candidates(project_id, project_label)
-        if not await _project_exists(project_id):
+        # Independent reads — run concurrently rather than as two
+        # sequential round trips.
+        candidates, project_ok = await asyncio.gather(
+            _fetch_project_candidates(project_id, project_label),
+            _project_exists(project_id),
+        )
+        if not project_ok:
             return None, "Project doesn't exist.", None
     else:
         # No explicit project in this message and none active in stored
@@ -1175,6 +1131,264 @@ MOVE_INTENT = IntentDefinition(
 
 
 # ---------------------------------------------------------------------------
+# casting.add — "Add <name(s)> to <project>" creates a NEW pipeline entry
+# (never moves an existing one) always in Ask To Test; never asks which
+# pipeline. Talent resolution is GLOBAL (the whole talents database, not
+# scoped to any project's existing pipeline — a brand new addition may
+# have no pipeline row anywhere yet), everything else — project
+# resolution, disambiguation continuation, fuzzy/typo tolerance — reuses
+# the exact same building blocks casting.move already uses.
+# ---------------------------------------------------------------------------
+ADD_TALENT_SELECTOR_FIELD = FieldSpec(
+    key="talent_selector",
+    label="Talent(s)",
+    question="Who should I add?",
+    validate=_validate_selector,
+    aliases=["talent", "talents", "who"],
+)
+
+ADD_PROJECT_QUERY_FIELD = FieldSpec(
+    key="project_query",
+    label="Project",
+    question="Which project should I add them to?",
+    validate=_validate_project_query,
+    aliases=["project", "for", "in", "to"],
+    required=True,  # unlike MOVE's optional project_query — every Add spec
+    # example names the project explicitly; a mistaken add is a real DB
+    # write into someone's roster, so it's never defaulted from session
+    # context, always asked if omitted.
+)
+
+
+async def _fetch_all_talent_candidates() -> List[nlu.Candidate]:
+    """Every talent in the database (id+name only) — the search space for
+    Add, since a talent being added fresh may have no pipeline row in ANY
+    project yet, unlike Move's candidates which are always scoped to an
+    existing pipeline. Capped at 20000, same cap _fetch_global_candidates
+    already uses for its own whole-database-ish scan."""
+    cursor = db.talents.find({}, {"_id": 0, "id": 1, "name": 1}).limit(20000)
+    docs = await cursor.to_list(20000)
+    return [nlu.Candidate(id=d["id"], label=d.get("name") or "Unknown") for d in docs]
+
+
+@dataclass
+class ResolvedAdd:
+    project_id: str
+    project_label: str
+    talent_ids: List[str]
+    talent_labels: List[str]
+
+
+async def _resolve_add_selection(
+    collected: dict, session: Optional[dict]
+) -> Tuple[Optional[ResolvedAdd], Optional[str], Optional[Dict[str, Any]]]:
+    """Mirrors _resolve_move_selection's shape (project resolution incl.
+    ambiguous/suggestion/free_text_retry payloads; talent resolution incl.
+    ambiguous_candidates payload) but against the global talent candidate
+    set instead of a project's pipeline rows, and with no stage/ordinal/
+    number_map concept at all — Add never has a "displayed list" to index
+    into."""
+    selector_text = collected.get("talent_selector") or ""
+    selector = nlu.parse_talent_selector(selector_text)
+    if not selector.ok:
+        return None, selector.error, None
+    if selector.ordinals or selector.everyone:
+        # No numbered listing exists for Add to index into — defensive,
+        # not reachable via extract_add_fields's own grammar.
+        return None, 'Please name who to add, e.g. "Add Prajal Tushir to Toyota Glanza".', None
+
+    project_query = (collected.get("project_query") or "").strip()
+    if not project_query:
+        return None, 'Which project? e.g. "Add Prajal Tushir to Toyota Glanza".', None
+
+    projects = await _fetch_ongoing_projects()
+    match = nlu.resolve_project_by_name(project_query, projects)
+    if match.project:
+        project_id = match.project["id"]
+        project_label = match.project["label"]
+    elif match.ambiguous:
+        options = [{"label": o, "value": o} for o in match.ambiguous]
+        msg = nlu.format_numbered_options("I found multiple projects.", [[o] for o in match.ambiguous])
+        return None, msg, {"kind": "project", "field_key": "project_query", "options": options}
+    elif match.suggestions:
+        bullets = "\n".join(f"• {s}" for s in match.suggestions)
+        return None, (
+            f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
+        ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
+    else:
+        return None, (
+            match.error or f'I couldn\'t find a project matching "{project_query}".'
+        ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
+
+    candidates, project_ok = await asyncio.gather(
+        _fetch_all_talent_candidates(),
+        _project_exists(project_id),
+    )
+    if not project_ok:
+        return None, "Project doesn't exist.", None
+
+    resolved = nlu.resolve_against_candidates(selector, candidates)
+    if not resolved.ok:
+        if resolved.ambiguous_candidates:
+            options = [
+                {"id": c.id, "label": c.label, "value": f"{nlu.RESOLVED_TALENT_MARKER}{c.id}|{c.label}"}
+                for c in resolved.ambiguous_candidates
+            ]
+            return None, resolved.error, {"kind": "talent", "field_key": "talent_selector", "options": options}
+        if resolved.error == "No matching talent.":
+            return None, "No matching talent found.", {
+                "kind": "free_text_retry", "field_key": "talent_selector", "options": [],
+            }
+        return None, resolved.error, {"kind": "free_text_retry", "field_key": "talent_selector", "options": []}
+
+    return ResolvedAdd(
+        project_id=project_id, project_label=project_label,
+        talent_ids=resolved.talent_ids, talent_labels=resolved.talent_labels,
+    ), None, None
+
+
+@dataclass
+class SplitAdd:
+    actionable_ids: List[str]
+    actionable_labels: List[str]
+    already_labels: List[str]
+
+
+async def _split_by_existing_membership(resolved: ResolvedAdd) -> SplitAdd:
+    """Live check: which of the resolved talents already have a pipeline
+    row (in ANY stage) for this project right now? Those are reported,
+    never silently duplicated — mirrors MOVE's _split_by_current_stage."""
+    rows = await db.casting_pipeline.find(
+        {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
+        {"_id": 0, "talent_id": 1},
+    ).to_list(len(resolved.talent_ids))
+    existing_ids = {r["talent_id"] for r in rows}
+    actionable_ids: List[str] = []
+    actionable_labels: List[str] = []
+    already_labels: List[str] = []
+    for tid, label in zip(resolved.talent_ids, resolved.talent_labels):
+        if tid in existing_ids:
+            already_labels.append(label)
+        else:
+            actionable_ids.append(tid)
+            actionable_labels.append(label)
+    return SplitAdd(actionable_ids, actionable_labels, already_labels)
+
+
+async def _build_add_confirmation(collected: dict, ctx: ExecContext) -> str:
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    resolved, err, disambiguation = await _resolve_add_selection(collected, session)
+
+    if err:
+        if disambiguation:
+            await session_context.update_session(
+                AGENT_ID, ctx.sender_phone, pending_disambiguation=disambiguation
+            )
+            await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
+        else:
+            await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        return err
+
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await _remember_last_talent(ctx, resolved)
+
+    split = await _split_by_existing_membership(resolved)
+    if not split.actionable_ids:
+        if len(resolved.talent_ids) == 1:
+            return (
+                f"{resolved.talent_labels[0]} is already in the {resolved.project_label} pipeline."
+                "\n\nNo changes were made."
+            )
+        return "Everyone named is already in this pipeline.\n\nNo changes were made."
+
+    lines = ["You are about to add", ""]
+    if len(split.actionable_labels) == 1:
+        lines.append(split.actionable_labels[0])
+    else:
+        lines.extend(f"• {name}" for name in split.actionable_labels)
+    if split.already_labels:
+        lines.append("")
+        lines.append(f"(already in this pipeline, skipped: {', '.join(split.already_labels)})")
+    lines += [
+        "", "to", "", resolved.project_label, "",
+        "Pipeline:", "Ask To Test", "",
+        "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel",
+    ]
+    return "\n".join(lines)
+
+
+async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    resolved, err, _disambiguation = await _resolve_add_selection(collected, session)
+    if err:
+        return ExecResult(ok=False, error="add_resolution_failed", message=err)
+
+    await _remember_last_talent(ctx, resolved)
+    if collected.get("project_query"):
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            current_project_id=resolved.project_id, current_project_label=resolved.project_label,
+        )
+
+    split = await _split_by_existing_membership(resolved)
+    if not split.actionable_ids:
+        if len(resolved.talent_ids) == 1:
+            return ExecResult(
+                ok=False, error="already_in_pipeline",
+                message=(
+                    f"{resolved.talent_labels[0]} is already in the {resolved.project_label} pipeline."
+                    "\n\nNo changes were made."
+                ),
+            )
+        return ExecResult(ok=False, error="nothing_to_add", message="Everyone named is already in this pipeline.\n\nNo changes were made.")
+
+    result = await add_talents_to_pipeline(resolved.project_id, split.actionable_ids, "ask_to_test")
+    added = result["added"]
+
+    lines = [
+        "Done.", "",
+        "Project", resolved.project_label, "",
+        f"Added {added} talent{'' if added == 1 else 's'} to Ask To Test.", "",
+    ]
+    lines.extend(f"• {name}" for name in split.actionable_labels)
+    if split.already_labels:
+        lines.append("")
+        lines.append(f"({len(split.already_labels)} already in this pipeline — skipped)")
+
+    collected["project"] = resolved.project_label
+    collected["talents_added"] = split.actionable_labels[:50]
+
+    return ExecResult(
+        ok=True,
+        message="\n".join(lines).rstrip(),
+        data={
+            "project_id": resolved.project_id,
+            "talent_ids": split.actionable_ids,
+            "added": added,
+        },
+    )
+
+
+ADD_INTENT = IntentDefinition(
+    intent_id="casting.add",
+    triggers=nlu.ADD_TRIGGERS,
+    fields=[ADD_TALENT_SELECTOR_FIELD, ADD_PROJECT_QUERY_FIELD],
+    executor=_add_executor,
+    extract_fields=nlu.extract_add_fields,
+    build_confirmation=_build_add_confirmation,
+    # Reused verbatim from MOVE — it only ever reads session's
+    # pending_disambiguation (agent+phone scoped, not intent-specific) and
+    # resolves a numbered/ordinal/label reply or a free-text retry against
+    # whichever field_key is pending; Add's disambiguation shapes ("kind":
+    # "project"/"talent"/"free_text_retry") are the exact same ones MOVE
+    # produces, and Add never produces a "retry_global" kind, so that
+    # branch simply never fires here.
+    parse_edits_async=_move_parse_edits_async,
+    summary_title="You are about to add:",
+)
+
+
+# ---------------------------------------------------------------------------
 # casting.undo — restore the last move within its window. auto_confirm:
 # there's nothing to approve here (the approval already happened for the
 # original move) — UNDO is itself the confirmed action, a fixed 5-minute-
@@ -1297,11 +1511,30 @@ UNDO_INTENT = IntentDefinition(
 )
 
 
+async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[IntentDefinition, Dict[str, str]]]:
+    """A bare number with no active conversation, right after "Show ongoing
+    projects" (or any other handler that populated a "projects" number_map)
+    — the session already knows the mapping, so "14" should open Project 14
+    exactly like "Project 14" would, without making the user repeat the
+    word. Scoped to projects only (talent-list numbers already work today
+    via an explicit "Move N ..." command, which has its own richer
+    selector grammar this isn't trying to replace)."""
+    stripped = (text or "").strip()
+    if not stripped.isdigit():
+        return None
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    number_map = (session or {}).get("number_map") or {}
+    if number_map.get("type") != "projects":
+        return None
+    return QUERY_INTENT, {"query_text": f"Project {stripped}"}
+
+
 CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
     module="casting_pipeline",
-    intents=[QUERY_INTENT, MOVE_INTENT, UNDO_INTENT],
+    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UNDO_INTENT],
+    resolve_bare_reply=_resolve_bare_reply,
 )
 
 

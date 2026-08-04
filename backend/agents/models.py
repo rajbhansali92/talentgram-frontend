@@ -8,7 +8,7 @@ knows about any specific domain.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -123,6 +123,22 @@ class AgentDefinition:
     name: str  # human-readable, e.g. "Talentgram CRM"
     module: str  # the backend module this agent is scoped to, e.g. "marketing"
     intents: List[IntentDefinition]
+    # Last-resort interpreter for a message that opened no conversation and
+    # matched no intent trigger (dispatcher.py calls this ONLY in that
+    # exact case — never while a conversation is active, so it can't
+    # collide with an in-progress intent's own "reply with a number"
+    # continuation, e.g. a pending MOVE disambiguation). Lets an agent
+    # interpret a bare reply (e.g. "14") against whatever it already has
+    # in session_context (e.g. a just-shown numbered project list) without
+    # requiring the user to repeat a trigger word. Returns
+    # (intent, collected_fields) to dispatch as if that intent had just
+    # been freshly triggered with those fields already extracted, or None
+    # to fall through to the normal "unrelated chatter, ignore" behaviour.
+    # None (the default) means "no such fallback" — every existing agent
+    # (including crm-agent) is unaffected.
+    resolve_bare_reply: Optional[
+        Callable[[str, "ExecContext"], Awaitable[Optional["Tuple[IntentDefinition, Dict[str, str]]"]]]
+    ] = None
 
 
 @dataclass

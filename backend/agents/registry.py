@@ -58,20 +58,34 @@ def _norm_group_name(name: str) -> str:
     return " ".join((name or "").strip().split()).lower()
 
 
-async def seed_agent_config(agent_id: str, *, group_names: List[str], allowed_senders: Optional[List[str]] = None) -> None:
+async def seed_agent_config(
+    agent_id: str,
+    *,
+    group_names: List[str],
+    allowed_senders: Optional[List[str]] = None,
+    security_mode: Optional[str] = None,
+) -> None:
     """Seed a default config doc for an agent if one doesn't exist yet.
-    Never overwrites an existing (possibly admin-edited) config."""
+    Never overwrites an existing (possibly admin-edited) config.
+
+    `security_mode` is optional and omitted from the doc when None, so
+    existing callers (e.g. crm-agent, which relies on the "allowlist"
+    default applied by is_sender_allowed) are unaffected — only an agent
+    that explicitly wants "group_members" access needs to pass it."""
     existing = await db[CONFIG_COLLECTION].find_one({"agent_id": agent_id})
     if existing:
         return
-    await db[CONFIG_COLLECTION].insert_one({
+    doc = {
         "agent_id": agent_id,
         "group_names": group_names,
         "allowed_senders": allowed_senders or [],
         "active": True,
         "created_at": _now(),
         "updated_at": _now(),
-    })
+    }
+    if security_mode is not None:
+        doc["security_mode"] = security_mode
+    await db[CONFIG_COLLECTION].insert_one(doc)
     logger.info("seeded whatsapp_agent_config for %s: groups=%s", agent_id, group_names)
 
 

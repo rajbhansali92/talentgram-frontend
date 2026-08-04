@@ -62,11 +62,26 @@ def _render_question(template: str, collected: dict) -> str:
         return template
 
 
-async def _collect_or_advance(agent, intent, conv: dict, text: str) -> DispatchResult:
+async def _render_confirmation(intent, collected: dict, ctx: ExecContext) -> str:
+    """Renders the "did I get this right?" message. Delegates to the
+    intent's own `build_confirmation` hook when it supplies one (needed for
+    confirmations that must resolve data the sync, DB-free validate/
+    extract_fields hooks can't reach, e.g. a talent selector against the
+    current session's live listing); otherwise the generic, domain-agnostic
+    renderer — unchanged behaviour for every intent that doesn't opt in."""
+    if intent.build_confirmation:
+        return await intent.build_confirmation(collected, ctx)
+    return build_confirmation_message(intent, collected)
+
+
+async def _collect_or_advance(
+    agent, intent, conv: dict, text: str, *, sender_name: Optional[str] = None
+) -> DispatchResult:
     """Handle one turn while the conversation is in "collecting" or
     "editing" step. Returns the reply; caller is responsible for the
     audit log entry."""
     collected = dict(conv.get("collected") or {})
+    phone = conv["phone"]
 
     if conv["step"] == "editing":
         edit_parser = intent.parse_edits or parse_edit_instructions
@@ -82,7 +97,7 @@ async def _collect_or_advance(agent, intent, conv: dict, text: str) -> DispatchR
                 return DispatchResult(handled=True, reply=result.error)
             collected[key] = result.value
         await conversation.update_conversation(
-            agent.agent_id, conv["phone"], collected=collected, step="collecting"
+            agent.agent_id, phone, collected=collected, step="collecting"
         )
     else:
         # "collecting": this message answers the question for the next
@@ -94,21 +109,33 @@ async def _collect_or_advance(agent, intent, conv: dict, text: str) -> DispatchR
                 return DispatchResult(handled=True, reply=result.error)
             collected[missing.key] = result.value
             await conversation.update_conversation(
-                agent.agent_id, conv["phone"], collected=collected
+                agent.agent_id, phone, collected=collected
             )
 
     still_missing = next_missing_field(intent, collected)
     if still_missing:
         await conversation.update_conversation(
-            agent.agent_id, conv["phone"], collected=collected, step="collecting"
+            agent.agent_id, phone, collected=collected, step="collecting"
         )
         return DispatchResult(handled=True, reply=_render_question(still_missing.question, collected))
 
+    ctx = ExecContext(
+        agent_id=agent.agent_id,
+        group_name=conv.get("group_name") or "",
+        sender_phone=phone,
+        sender_name=sender_name,
+        conversation_id=str(conv.get("_id") or ""),
+    )
+    if intent.auto_confirm:
+        exec_result = await intent.executor(collected, ctx)
+        await conversation.clear_conversation(agent.agent_id, phone)
+        return DispatchResult(handled=True, reply=exec_result.message)
+
     await conversation.update_conversation(
-        agent.agent_id, conv["phone"], collected=collected, step="confirming"
+        agent.agent_id, phone, collected=collected, step="confirming"
     )
     return DispatchResult(
-        handled=True, reply=build_confirmation_message(intent, collected)
+        handled=True, reply=await _render_confirmation(intent, collected, ctx)
     )
 
 
@@ -194,11 +221,49 @@ async def handle_inbound_message(
             if missing:
                 question = _render_question(missing.question, collected)
                 reply = ("\n\n".join(initial_errors) + "\n\n" + question) if initial_errors else question
-            else:
-                await conversation.update_conversation(
-                    agent.agent_id, phone, collected=collected, step="confirming"
+                await audit.log_turn(
+                    agent_id=agent.agent_id,
+                    group_name=group_name,
+                    sender_phone=phone,
+                    raw_message=raw_message,
+                    conversation_id=str(conv.get("_id") or ""),
+                    parsed_intent=intent.intent_id,
+                    parsed_fields=collected,
+                    validation_errors=initial_errors or None,
                 )
-                reply = build_confirmation_message(intent, collected)
+                return DispatchResult(handled=True, reply=reply)
+
+            ctx = ExecContext(
+                agent_id=agent.agent_id,
+                group_name=group_name,
+                sender_phone=phone,
+                sender_name=sender_name,
+                conversation_id=str(conv.get("_id") or ""),
+            )
+            if intent.auto_confirm:
+                # Nothing to approve — reply immediately and don't leave a
+                # lingering "confirming" conversation behind.
+                exec_result = await intent.executor(collected, ctx)
+                await conversation.clear_conversation(agent.agent_id, phone)
+                await audit.log_turn(
+                    agent_id=agent.agent_id,
+                    group_name=group_name,
+                    sender_phone=phone,
+                    raw_message=raw_message,
+                    conversation_id=str(conv.get("_id") or ""),
+                    parsed_intent=intent.intent_id,
+                    parsed_fields=collected,
+                    validation_errors=initial_errors or None,
+                    confirmation_action="auto",
+                    execution_result=exec_result.message,
+                    error=exec_result.error,
+                )
+                return DispatchResult(handled=True, reply=exec_result.message)
+
+            await conversation.update_conversation(
+                agent.agent_id, phone, collected=collected, step="confirming"
+            )
+            reply = await _render_confirmation(intent, collected, ctx)
             await audit.log_turn(
                 agent_id=agent.agent_id,
                 group_name=group_name,
@@ -283,7 +348,9 @@ async def handle_inbound_message(
             return DispatchResult(handled=True, reply=UNRECOGNIZED_CONFIRMATION_REPLY)
 
         # step in ("collecting", "editing")
-        result = await _collect_or_advance(agent, intent, conv, raw_message)
+        result = await _collect_or_advance(
+            agent, intent, conv, raw_message, sender_name=sender_name
+        )
         await audit.log_turn(
             agent_id=agent.agent_id,
             group_name=group_name,

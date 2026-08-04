@@ -30,6 +30,14 @@ async def ensure_agents_ready() -> None:
         group_names=["Talentgram CRM"],
         allowed_senders=[],  # intentionally empty — an admin must explicitly allowlist senders
     )
+    await registry.seed_agent_config(
+        "casting-agent",
+        group_names=["Talentgram Casting Pipeline"],
+        allowed_senders=[],
+        # Anyone currently in the WhatsApp group can approve a move — an
+        # explicit choice for this agent, not the allowlist default.
+        security_mode="group_members",
+    )
 
     try:
         await db["whatsapp_conversations"].create_index(
@@ -37,6 +45,18 @@ async def ensure_agents_ready() -> None:
         )
         await db["whatsapp_conversations"].create_index(
             "expires_at", expireAfterSeconds=0, name="conversations_ttl"
+        )
+        await db["whatsapp_agent_sessions"].create_index(
+            [("agent_id", 1), ("phone", 1)], unique=True, name="agent_phone_unique"
+        )
+        await db["whatsapp_agent_sessions"].create_index(
+            "expires_at", expireAfterSeconds=0, name="sessions_ttl"
+        )
+        await db["whatsapp_agent_undo"].create_index(
+            [("agent_id", 1), ("phone", 1)], unique=True, name="agent_phone_unique"
+        )
+        await db["whatsapp_agent_undo"].create_index(
+            "expires_at", expireAfterSeconds=0, name="undo_ttl"
         )
         await db["whatsapp_agent_audit_log"].create_index([("timestamp", -1)])
         await db["whatsapp_agent_audit_log"].create_index([("agent_id", 1), ("timestamp", -1)])

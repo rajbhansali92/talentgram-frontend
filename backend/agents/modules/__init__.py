@@ -6,9 +6,9 @@ owns" requirement). Importing this package triggers every module's
 `register()` call — see `agents.modules.register_all()`, invoked once at
 app startup from server.py.
 """
-from . import crm
+from . import crm, casting_pipeline
 
-_MODULES = [crm]
+_MODULES = [crm, casting_pipeline]
 
 
 def register_all() -> None:

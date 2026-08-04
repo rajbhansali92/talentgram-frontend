@@ -24,7 +24,7 @@ regardless of pipeline size.
 import asyncio
 import logging
 import uuid
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -809,6 +809,45 @@ async def delete_pipeline_entry(
 # Bulk Actions Endpoints
 # ---------------------------------------------------------------------------
 
+async def bulk_move_by_talent_ids(project_id: str, talent_ids: List[str], stage: str) -> dict:
+    """Move every (project_id, talent_id) pipeline row named in `talent_ids`
+    to `stage`. `stage` must already be normalised/validated by the caller
+    — this function owns only the write, so both the REST endpoint below
+    and the WhatsApp Casting Pipeline agent's move executor share one
+    update_many path with no duplicated logic."""
+    clean_ids = [tid.strip() for tid in talent_ids if isinstance(tid, str) and tid.strip()]
+    if not clean_ids:
+        return {"moved": 0, "matched": 0}
+
+    res = await db.casting_pipeline.update_many(
+        {"project_id": project_id, "talent_id": {"$in": clean_ids}},
+        {"$set": {"stage": stage, "updated_at": _now()}},
+    )
+    logger.info(
+        "pipeline.bulk-move project=%s stage=%s requested=%d matched=%d modified=%d",
+        project_id, stage, len(clean_ids), res.matched_count, res.modified_count,
+    )
+    return {"moved": res.modified_count, "matched": res.matched_count}
+
+
+async def get_stage_counts(project_id: str) -> Dict[str, int]:
+    """Live per-stage talent counts for a project, seeded with every
+    canonical stage at 0 so a stage nobody has used yet still appears —
+    needed for the WhatsApp "Project N" overview, which must show the full,
+    current stage vocabulary (PIPELINE_STAGE_ORDER) rather than only
+    stages already in use. Legacy `sent` rows fold into `approved`, same
+    as every other read path in this file."""
+    counts: Dict[str, int] = {stage: 0 for stage in PIPELINE_STAGE_ORDER}
+    cursor = db.casting_pipeline.aggregate([
+        {"$match": {"project_id": project_id}},
+        {"$group": {"_id": "$stage", "count": {"$sum": 1}}},
+    ])
+    async for row in cursor:
+        stage = _normalise_stage(row.get("_id")) or row.get("_id")
+        counts[stage] = counts.get(stage, 0) + row.get("count", 0)
+    return counts
+
+
 @router.post("/{project_id}/pipeline/bulk-move")
 async def bulk_move_pipeline(
     project_id: str,
@@ -822,23 +861,8 @@ async def bulk_move_pipeline(
             status_code=400,
             detail=f"Invalid stage. Must be one of: {PIPELINE_STAGE_ORDER}",
         )
-    talent_ids = [tid.strip() for tid in payload.talent_ids if isinstance(tid, str) and tid.strip()]
-    if not talent_ids:
-        return {"success": True, "moved": 0, "matched": 0}
-
-    res = await db.casting_pipeline.update_many(
-        {"project_id": project_id, "talent_id": {"$in": talent_ids}},
-        {"$set": {"stage": target_stage, "updated_at": _now()}},
-    )
-    logger.info(
-        "pipeline.bulk-move project=%s stage=%s requested=%d matched=%d modified=%d",
-        project_id, target_stage, len(talent_ids), res.matched_count, res.modified_count,
-    )
-    return {
-        "success": True,
-        "moved": res.modified_count,
-        "matched": res.matched_count,
-    }
+    result = await bulk_move_by_talent_ids(project_id, payload.talent_ids, target_stage)
+    return {"success": True, **result}
 
 
 @router.post("/{project_id}/pipeline/bulk-label")

@@ -36,7 +36,21 @@ def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefiniti
     for intent in agent.intents:
         for trig in intent.triggers:
             t = trig.lower().strip()
-            if first == t or first.startswith(t + " ") or first.startswith(t + ":"):
+            matches = (
+                first == t
+                or first.startswith(t + " ")
+                or first.startswith(t + ":")
+                # "P5" / "T12"-style shorthand: the trigger literal glued
+                # directly to a number, no separator. Generic (benefits any
+                # agent's short trigger, not just one domain), and safe —
+                # it only fires when the message IS the trigger word
+                # immediately followed by digits, not a substring of
+                # unrelated text (e.g. "add7" would need to literally start
+                # with "add" then a digit; "addressbook" doesn't match
+                # since 'r' isn't a digit).
+                or (first.startswith(t) and len(first) > len(t) and first[len(t)].isdigit())
+            )
+            if matches:
                 if best is None or len(t) > best[0]:
                     best = (len(t), intent)
     return best[1] if best else None

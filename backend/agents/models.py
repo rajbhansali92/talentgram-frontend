@@ -84,6 +84,17 @@ class IntentDefinition:
     # or future intent is unaffected unless it opts in.
     extract_fields: Optional[Callable[[str], Dict[str, str]]] = None
     parse_edits: Optional[Callable[[str, List[FieldSpec]], Dict[str, str]]] = None
+    # When True, an intent with no missing required fields executes
+    # immediately (no confirm/edit/cancel gate) — for read-only query
+    # intents where there is nothing to approve. Default False preserves
+    # every existing intent's behaviour unchanged.
+    auto_confirm: bool = False
+    # Overrides confirmation.build_confirmation_message for intents whose
+    # confirmation text needs data the generic (sync, DB-free) validate/
+    # extract_fields hooks can't reach — e.g. resolving a raw talent
+    # selector against the current session's DB-backed listing. None means
+    # "use the generic renderer" (every existing intent's behaviour).
+    build_confirmation: Optional[Callable[[Dict[str, str], "ExecContext"], Awaitable[str]]] = None
 
 
 @dataclass

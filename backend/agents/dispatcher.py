@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Optional
 
-from agents import audit, conversation, registry, session_context
+from agents import audit, conversation, registry, request_scope, session_context
 from agents.confirmation import (
     CANCELLED_MESSAGE,
     EDIT_PROMPT,
@@ -153,6 +153,12 @@ async def _collect_or_advance(
             await conversation.clear_conversation(agent.agent_id, phone)
         return DispatchResult(handled=True, reply=exec_result.message)
 
+    if intent.try_auto_execute:
+        auto_result = await intent.try_auto_execute(collected, ctx)
+        if auto_result is not None:
+            await conversation.clear_conversation(agent.agent_id, phone)
+            return DispatchResult(handled=True, reply=auto_result.message)
+
     await conversation.update_conversation(
         agent.agent_id, phone, collected=collected, step="confirming"
     )
@@ -192,23 +198,27 @@ async def handle_inbound_message(
 
     # Coarse, always-on timing for the backend-side portion of a turn —
     # real production latency (railway logs on the worker) showed backend
-    # request time as roughly half the total, but with no breakdown of
-    # WHERE inside the backend it went. This gives that breakdown for free
-    # going forward without needing another guess-and-check profiling pass.
+    # request time as roughly half the total. request_scope gives a real
+    # per-stage breakdown (auth/mongo/fuzzy/db_write — see
+    # casting_pipeline.py) logged alongside this total in the `finally`
+    # block below, instead of another guess-and-check profiling pass.
     t0 = time.monotonic()
     dispatched_agent_id: Optional[str] = None
+    request_scope.reset()
 
     try:
-        resolved = await registry.resolve_agent_for_group(group_name)
-        if not resolved:
-            # Messages from groups no agent owns are silently ignored.
-            return DispatchResult(handled=False)
-        agent, config = resolved
-        dispatched_agent_id = agent.agent_id
+        with request_scope.stage("auth"):
+            resolved = await registry.resolve_agent_for_group(group_name)
+            if not resolved:
+                # Messages from groups no agent owns are silently ignored.
+                return DispatchResult(handled=False)
+            agent, config = resolved
+            dispatched_agent_id = agent.agent_id
 
-        if not registry.is_sender_allowed(
-            config, phone, is_group_member=sender_is_group_member
-        ):
+            sender_allowed = registry.is_sender_allowed(
+                config, phone, is_group_member=sender_is_group_member
+            )
+        if not sender_allowed:
             await audit.log_turn(
                 agent_id=agent.agent_id,
                 group_name=group_name,
@@ -400,6 +410,25 @@ async def handle_inbound_message(
                 )
                 return DispatchResult(handled=True, reply=exec_result.message)
 
+            if intent.try_auto_execute:
+                auto_result = await intent.try_auto_execute(collected, ctx)
+                if auto_result is not None:
+                    await conversation.clear_conversation(agent.agent_id, phone)
+                    await audit.log_turn(
+                        agent_id=agent.agent_id,
+                        group_name=group_name,
+                        sender_phone=phone,
+                        raw_message=raw_message,
+                        conversation_id=str(conv.get("_id") or ""),
+                        parsed_intent=intent.intent_id,
+                        parsed_fields=collected,
+                        validation_errors=initial_errors or None,
+                        confirmation_action="and_confirm",
+                        execution_result=auto_result.message,
+                        error=auto_result.error,
+                    )
+                    return DispatchResult(handled=True, reply=auto_result.message)
+
             await conversation.update_conversation(
                 agent.agent_id, phone, collected=collected, step="confirming"
             )
@@ -520,6 +549,6 @@ async def handle_inbound_message(
     finally:
         dispatch_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
-            "dispatch_timing agent=%s group=%r dispatch_ms=%d",
-            dispatched_agent_id, group_name, dispatch_ms,
+            "dispatch_timing agent=%s group=%r dispatch_ms=%d stages=%s",
+            dispatched_agent_id, group_name, dispatch_ms, request_scope.get_timings(),
         )

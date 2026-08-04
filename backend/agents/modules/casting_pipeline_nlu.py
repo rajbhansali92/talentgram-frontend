@@ -22,9 +22,10 @@ in this file.
 from __future__ import annotations
 
 import difflib
+import functools
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -65,18 +66,30 @@ _STAGE_FUZZY_CUTOFF = 0.72
 _STAGE_AUTOCORRECT_CUTOFF = 0.85
 
 
-def build_stage_registry(stage_order: List[str]) -> Dict[str, str]:
-    """phrase -> canonical stage key, built fresh from whatever is live
-    right now. Includes each stage's own key, its auto-derived label, and
-    any shorthand that still points at a live stage."""
+@functools.lru_cache(maxsize=8)
+def _build_stage_registry_cached(stage_order_tuple: Tuple[str, ...]) -> Dict[str, str]:
     registry: Dict[str, str] = {}
-    for stage in stage_order:
+    for stage in stage_order_tuple:
         registry[stage] = stage
         registry[stage_label(stage).lower()] = stage
     for alias, target in _STAGE_SHORTHAND.items():
-        if target in stage_order:
+        if target in stage_order_tuple:
             registry.setdefault(alias, target)
     return registry
+
+
+def build_stage_registry(stage_order: List[str]) -> Dict[str, str]:
+    """phrase -> canonical stage key, built from whatever is live right
+    now. Includes each stage's own key, its auto-derived label, and any
+    shorthand that still points at a live stage. Memoized on the stage
+    order's contents (PIPELINE_STAGE_ORDER never changes at runtime, so
+    this is a pure win, not a staleness risk) — called from several
+    places per message (match_stage_phrase, extract_stage_phrase), so the
+    same ~11-entry dict was being rebuilt repeatedly. Still takes
+    `stage_order` as a parameter rather than importing PIPELINE_STAGE_ORDER
+    directly — this module stays dynamic-stage-vocabulary-driven, never
+    hardcoded, exactly as before."""
+    return _build_stage_registry_cached(tuple(stage_order))
 
 
 def format_numbered_options(header: str, options: List[List[str]]) -> str:
@@ -721,6 +734,146 @@ def _match_label_tiers(query: str, labels: List[str]) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# Multi-action / compact-format preprocessing — shared by extract_move_fields
+# and extract_add_fields, applied BEFORE either does its own single-action
+# parsing. Turns slash-delimited and "and confirm"-suffixed input into the
+# same normalized shape a single clean natural-language command already
+# produces, and splits a multi-action message into one raw-text chunk per
+# independent/chained action. A single-action message is unaffected: it
+# comes back out as a 1-item chunk list with nothing stripped except the
+# (rare) "and confirm"/trailing "Confirm" marker.
+# ---------------------------------------------------------------------------
+_AND_CONFIRM_RE = re.compile(r"\s+and\s+confirm\.?\s*$", re.IGNORECASE)
+_CONFIRM_LINE_RE = re.compile(r"^\s*confirm\.?\s*$", re.IGNORECASE)
+
+
+def normalize_compact_text(text: str) -> str:
+    """Slash-delimited compact commands ("add / ahana / toyota") are
+    treated exactly like the newline-delimited compact form — normalize
+    once, up front, so every downstream parser (single-action extraction,
+    multi-action splitting, "and confirm" recognition) is slash-aware for
+    free. "/" is never a plausible fragment of a talent/project name in
+    this system's existing conventions (same assumption already made for
+    "and"/"talent" as noise words)."""
+    return (text or "").replace("/", "\n")
+
+
+def strip_and_confirm(text: str) -> "Tuple[str, bool]":
+    """Recognizes the "and confirm" shortcut (agents/models.py's
+    IntentDefinition.try_auto_execute — see casting_pipeline.py) — either
+    trailing inline ("... and confirm") or as its own trailing line in
+    the compact/line-based format ("...\\nConfirm"), one recognition
+    point for both. Returns (text_with_the_modifier_removed, auto_confirm)."""
+    working = text or ""
+    m = _AND_CONFIRM_RE.search(working)
+    if m:
+        return working[:m.start()], True
+    lines = working.split("\n")
+    if lines and _CONFIRM_LINE_RE.match(lines[-1]):
+        return "\n".join(lines[:-1]), True
+    return working, False
+
+
+def _starts_with_any_trigger(line: str, triggers: List[str]) -> bool:
+    low = line.strip().lower()
+    return any(
+        low == t or low.startswith(t + " ") or low.startswith(t + ":")
+        for t in triggers
+    )
+
+
+def classify_chunk_intent(chunk_text: str) -> Optional[str]:
+    """Which intent a split_actions chunk belongs to, based on which
+    trigger vocabulary its leading verb matches — "casting.move" or
+    "casting.add", or None if it starts with neither (defensive; not
+    reachable via split_actions's own chunking, which only ever starts a
+    new chunk at a recognized trigger)."""
+    first_line = (chunk_text or "").strip().split("\n", 1)[0]
+    if _starts_with_any_trigger(first_line, [t.lower() for t in ADD_TRIGGERS]):
+        return "casting.add"
+    if _starts_with_any_trigger(first_line, [t.lower() for t in MOVE_TRIGGERS]):
+        return "casting.move"
+    return None
+
+
+def split_actions(text: str) -> List[str]:
+    """Splits a (possibly multi-action) message into one raw-text chunk
+    per independent/chained action — a single-action message returns
+    [text] unchanged, so this is strictly additive on top of the existing
+    single-action extraction path, never a replacement for it. Two rules:
+
+      1. Newline-separated segments where a LATER line independently
+         starts with a recognized MOVE/ADD trigger word ("Move 2,4,6 to
+         Approved in Toyota Glanza\\n\\nMove 10,11 to Hold in Nykaa") ->
+         independent chunks. A blank line always forces a new chunk too.
+         The compact one-name-per-line form ("Add\\nName\\nProject") never
+         repeats a trigger word on a later line, so it always stays one
+         chunk under this rule.
+      2. If rule 1 found only one chunk, " and <verb>" chaining within
+         that single chunk ("Add X to Y and move to Approved") -> a
+         chained chunk. The new chunk's own talent selector is left
+         implicit (whatever's left after its own verb) — the existing
+         PRONOUN_LAST_MARKER/session.last_talent_id fallback already
+         resolves "whoever we just discussed" for exactly this shape, so
+         no new resolution logic is needed for the implicit continuation.
+    """
+    all_triggers = sorted({t.lower() for t in (MOVE_TRIGGERS + ADD_TRIGGERS)}, key=len, reverse=True)
+    lines = (text or "").split("\n")
+
+    chunks: List[List[str]] = [[]]
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if chunks[-1]:
+                chunks.append([])
+            continue
+        if chunks[-1] and _starts_with_any_trigger(line, all_triggers):
+            chunks.append([line])
+        else:
+            chunks[-1].append(line)
+    chunks = [c for c in chunks if c]
+
+    if len(chunks) > 1:
+        return ["\n".join(c) for c in chunks]
+
+    whole = chunks[0][0] if chunks and len(chunks[0]) == 1 else (text or "").strip()
+    and_chained = _split_and_chained(whole, all_triggers)
+    return and_chained if and_chained else [text or ""]
+
+
+def _split_and_chained(text: str, all_triggers: List[str]) -> List[str]:
+    pattern = re.compile(
+        r"\s+and\s+(?=(?:" + "|".join(re.escape(t) for t in all_triggers) + r")\b)",
+        re.IGNORECASE,
+    )
+    parts = [p.strip() for p in pattern.split(text) if p.strip()]
+    return parts
+
+
+def preprocess_command(text: str) -> "Tuple[List[str], bool]":
+    """The one entry point extract_move_fields/extract_add_fields both
+    call first (via casting_pipeline.py's shared wrapper): normalizes
+    slashes to newlines, recognizes+strips the "and confirm" shortcut,
+    then splits into one or more action chunks. Returns
+    (chunks, auto_confirm)."""
+    normalized = normalize_compact_text(text)
+    stripped, auto_confirm = strip_and_confirm(normalized)
+    chunks = split_actions(stripped)
+    return chunks, auto_confirm
+
+
+def split_multi_names(text: str) -> List[str]:
+    """Splits an "X, Y and Z" list into ["X", "Y", "Z"] — the same comma/
+    "and"-separated grammar parse_talent_selector's name_queries branch
+    uses for talent names, applied here to PROJECT references too ("to
+    Toyota Glanza and Nykaa") so a chunk naming multiple talents AND
+    multiple projects can be cross-product-expanded in casting_pipeline.py.
+    A single name returns a 1-item list unchanged."""
+    cleaned = _AND_SEP_RE.sub(",", text or "")
+    return [p.strip() for p in cleaned.split(",") if p.strip()]
+
+
+# ---------------------------------------------------------------------------
 # Move command extraction — trigger verb + selector text + stage text
 # ---------------------------------------------------------------------------
 MOVE_TRIGGERS = [
@@ -786,7 +939,32 @@ def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:
     name" ends up taking effective priority over everything else: it's
     never partially consumed by the (separately, unambiguously anchored)
     project/stage extraction.
+
+    A NO-CONNECTOR positional compact form is also recognized — "Move\\n
+    NAME\\nSTAGE\\nPROJECT" — tried first, only when the whole message has
+    no "to"/"into"/"in"/"for" connector word anywhere and enough lines to
+    be positionally unambiguous. A real natural-language command almost
+    always has a connector; this exists purely for the compact operator
+    shorthand where LINES are the grammar.
     """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    has_connector = bool(re.search(r"\b(?:to|into|in|for)\b", " ".join(lines), re.IGNORECASE))
+    if len(lines) >= 3 and not has_connector:
+        verb0, first_remainder = _strip_leading_trigger(lines[0], MOVE_TRIGGERS)
+        if verb0 is not None:
+            positional = ([first_remainder] if first_remainder else []) + lines[1:]
+            for i in range(1, len(positional)):
+                stage_match = match_stage_phrase(positional[i], stage_order)
+                if stage_match.key:
+                    talent_part = ", ".join(positional[:i]).strip(" ,") or PRONOUN_LAST_MARKER
+                    project_part = ", ".join(positional[i + 1:]).strip(" ,")
+                    positional_out: Dict[str, str] = {
+                        "talent_selector": talent_part, "target_stage": stage_match.key,
+                    }
+                    if project_part:
+                        positional_out["project_query"] = project_part
+                    return positional_out
+
     verb, remainder = _strip_leading_trigger(text, MOVE_TRIGGERS)
     out: Dict[str, str] = {}
 
@@ -875,6 +1053,15 @@ def extract_add_fields(text: str) -> Dict[str, str]:
         if project_candidate:
             out["project_query"] = project_candidate
             remainder = remainder[:proj_m.start()]
+    elif len(lines) >= 2:
+        # No-connector positional compact form: "Add\nNAME\nPROJECT" — the
+        # LAST line is the project, everything before it is the name(s).
+        # Only tried when there's no "to"/"in"/"for" connector at all
+        # (checked above) and more than one data line, so a genuine
+        # single-name-no-project message ("Add Prajal Tushir") is
+        # untouched — still correctly asks "which project?".
+        out["project_query"] = lines[-1]
+        remainder = ", ".join(lines[:-1])
 
     out["talent_selector"] = remainder.strip(" .!?,")
     return out

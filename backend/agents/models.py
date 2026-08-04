@@ -114,6 +114,25 @@ class IntentDefinition:
     parse_edits_async: Optional[
         Callable[[str, Dict[str, str], List[FieldSpec], "ExecContext"], Awaitable[Dict[str, str]]]
     ] = None
+    # Checked right before the engine would otherwise commit to the
+    # "confirming" step (both at the fresh-trigger completion point and
+    # _collect_or_advance's tail) — lets a message opt OUT of the approval
+    # gate for THIS turn (e.g. a trailing "and confirm"), without making
+    # auto_confirm a static per-intent flag. Returns None to proceed with
+    # the normal confirmation card (the default, and what every existing
+    # intent gets since this is None), or an ExecResult to short-circuit
+    # straight to it — exactly as if the user had just replied "1". A
+    # domain module that returns None here because resolution is still
+    # ambiguous can rely on its own pending_disambiguation/"editing"-step
+    # continuation firing as normal; since whatever field encoded "the
+    # user asked to skip confirmation" persists in `collected` across that
+    # continuation the same way any other field does, this hook naturally
+    # gets re-checked (and can then succeed) once the ambiguity resolves —
+    # no extra state needed for "continue automatically after resolving
+    # the ambiguity, without asking for a second approval".
+    try_auto_execute: Optional[
+        Callable[[Dict[str, str], "ExecContext"], Awaitable[Optional["ExecResult"]]]
+    ] = None
 
 
 @dataclass

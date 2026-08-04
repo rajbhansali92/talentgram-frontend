@@ -23,6 +23,8 @@ of truth), so a stage added there later works in this agent immediately.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field as dataclass_field
@@ -50,27 +52,87 @@ from agents.models import (
     ValidationResult,
 )
 from agents.registry import register_agent
-from agents import conversation, session_context, undo_store
+from agents import conversation, request_scope, session_context, undo_store
 from agents.parser import parse_confirmation_reply, parse_edit_instructions
 from agents.modules import casting_pipeline_nlu as nlu
 
 AGENT_ID = "casting-agent"
 UNDO_WINDOW_MINUTES = 5
 
+logger = logging.getLogger(__name__)
+
+# Placeholder value for a normally-required field (talent_selector,
+# target_stage, project_query) when this turn is actually a multi-action
+# plan (see collected["_plan"]) — exists purely so the generic engine's
+# next_missing_field check sees "something provided" and doesn't ask a
+# question the plan path will never read the answer to.
+_PLAN_PLACEHOLDER = "__plan__"
+
+
+def _validate_hidden(raw: str) -> ValidationResult:
+    """Trivial always-ok validator for the internal, never-user-facing
+    fields below (_auto_confirm, _plan) — they carry raw signal/data
+    between extract_fields and build_confirmation/executor/
+    try_auto_execute, never a value a user typed or edits directly."""
+    return ValidationResult(ok=True, value=raw)
+
+
+AUTO_CONFIRM_FIELD = FieldSpec(
+    key="_auto_confirm", label="AutoConfirm", question="",
+    validate=_validate_hidden, required=False,
+)
+
+PLAN_FIELD = FieldSpec(
+    key="_plan", label="Plan", question="",
+    validate=_validate_hidden, required=False,
+)
+
 
 # ---------------------------------------------------------------------------
 # DB helpers — the only place in this module that touches Mongo directly.
 # ---------------------------------------------------------------------------
+async def _timed_mongo(awaitable):
+    """Wraps a single Mongo read (or an asyncio.gather of several) in the
+    request_scope "mongo" timing bucket — one call-site-level wrap instead
+    of editing every helper function's body, so latency instrumentation
+    stays low-risk to add and easy to audit."""
+    with request_scope.stage("mongo"):
+        return await awaitable
+
+
+async def _timed_write(awaitable):
+    with request_scope.stage("db_write"):
+        return await awaitable
+
+
+async def _timed_aggregation(awaitable):
+    with request_scope.stage("aggregation"):
+        return await awaitable
+
+
+_PROJECTS_CACHE_KEY = ("ongoing_projects",)
+
+
 async def _fetch_ongoing_projects() -> List[Dict[str, str]]:
+    # Per-turn only (request_scope resets every dispatch) — safe: never
+    # serves data from a previous message, only avoids a genuinely
+    # redundant re-fetch when more than one resolution branch needs the
+    # live project list in the SAME turn (e.g. the "search everywhere?"
+    # retry path after an initial project-scoped lookup).
+    found, cached = request_scope.cache_get(_PROJECTS_CACHE_KEY)
+    if found:
+        return cached
     cursor = db.projects.find(
         {"status": "ongoing"}, {"_id": 0, "id": 1, "brand_name": 1}
     ).sort("brand_name", 1)
-    docs = await cursor.to_list(2000)
-    return [{"id": d["id"], "label": d.get("brand_name") or "(untitled project)"} for d in docs]
+    docs = await _timed_mongo(cursor.to_list(2000))
+    projects = [{"id": d["id"], "label": d.get("brand_name") or "(untitled project)"} for d in docs]
+    request_scope.cache_set(_PROJECTS_CACHE_KEY, projects)
+    return projects
 
 
 async def _project_exists(project_id: str) -> bool:
-    return bool(await db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1}))
+    return bool(await _timed_mongo(db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1})))
 
 
 async def _fetch_last_updated(project_id: str) -> Optional[Any]:
@@ -81,9 +143,11 @@ async def _fetch_last_updated(project_id: str) -> Optional[Any]:
     still sorts lexicographically == chronologically, so the Mongo sort
     below is correct regardless; _format_last_updated is what handles the
     str-vs-datetime distinction on the way out."""
-    rows = await db.casting_pipeline.find(
-        {"project_id": project_id}, {"_id": 0, "updated_at": 1}
-    ).sort("updated_at", -1).limit(1).to_list(1)
+    rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": project_id}, {"_id": 0, "updated_at": 1}
+        ).sort("updated_at", -1).limit(1).to_list(1)
+    )
     return rows[0]["updated_at"] if rows else None
 
 
@@ -119,15 +183,18 @@ def _stage_query_values(stage: str) -> List[str]:
 async def _hydrate_names(talent_ids: List[str]) -> Dict[str, str]:
     if not talent_ids:
         return {}
-    cursor = db.talents.find({"id": {"$in": talent_ids}}, {"_id": 0, "id": 1, "name": 1})
-    return {t["id"]: (t.get("name") or "Unknown") async for t in cursor}
+    with request_scope.stage("mongo"):
+        cursor = db.talents.find({"id": {"$in": talent_ids}}, {"_id": 0, "id": 1, "name": 1})
+        return {t["id"]: (t.get("name") or "Unknown") async for t in cursor}
 
 
 async def _fetch_stage_candidates(project_id: str, stage: str) -> List[nlu.Candidate]:
-    rows = await db.casting_pipeline.find(
-        {"project_id": project_id, "stage": {"$in": _stage_query_values(stage)}},
-        {"_id": 0, "talent_id": 1},
-    ).sort("created_at", 1).to_list(5000)
+    rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": project_id, "stage": {"$in": _stage_query_values(stage)}},
+            {"_id": 0, "talent_id": 1},
+        ).sort("created_at", 1).to_list(5000)
+    )
     talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
     names = await _hydrate_names(talent_ids)
     return [nlu.Candidate(id=tid, label=names.get(tid, "Unknown"), stage=stage) for tid in talent_ids]
@@ -139,9 +206,11 @@ async def _fetch_project_candidates(project_id: str, project_label: str = "") ->
     project_label is passed in (the caller already has it) purely for
     display in a disambiguation list — no extra DB round trip to fetch it
     again."""
-    rows = await db.casting_pipeline.find(
-        {"project_id": project_id}, {"_id": 0, "talent_id": 1, "stage": 1}
-    ).sort("created_at", 1).to_list(5000)
+    rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": project_id}, {"_id": 0, "talent_id": 1, "stage": 1}
+        ).sort("created_at", 1).to_list(5000)
+    )
     talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
     names = await _hydrate_names(talent_ids)
     out: List[nlu.Candidate] = []
@@ -170,10 +239,12 @@ async def _fetch_global_candidates() -> List[nlu.Candidate]:
         return []
     project_ids = [p["id"] for p in projects]
     project_label_by_id = {p["id"]: p["label"] for p in projects}
-    rows = await db.casting_pipeline.find(
-        {"project_id": {"$in": project_ids}},
-        {"_id": 0, "talent_id": 1, "stage": 1, "project_id": 1},
-    ).sort("created_at", 1).to_list(20000)
+    rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": {"$in": project_ids}},
+            {"_id": 0, "talent_id": 1, "stage": 1, "project_id": 1},
+        ).sort("created_at", 1).to_list(20000)
+    )
     talent_ids = list({r["talent_id"] for r in rows if r.get("talent_id")})
     names = await _hydrate_names(talent_ids)
     out: List[nlu.Candidate] = []
@@ -238,7 +309,8 @@ async def _resolve_project_ref(
     """
     if name_query:
         projects = await _fetch_ongoing_projects()
-        match = nlu.resolve_project_by_name(name_query, projects)
+        with request_scope.stage("fuzzy"):
+            match = nlu.resolve_project_by_name(name_query, projects)
         if match.project:
             return match.project, None, None
         if match.ambiguous:
@@ -323,7 +395,7 @@ async def _handle_project_detail(
     # project turns out not to exist) is safe.
     project_exists, counts, last_updated = await asyncio.gather(
         _project_exists(project["id"]),
-        get_stage_counts(project["id"]),
+        _timed_aggregation(get_stage_counts(project["id"])),
         _fetch_last_updated(project["id"]),
     )
     if not project_exists:
@@ -576,6 +648,13 @@ def _validate_selector(raw: str) -> ValidationResult:
 
 def _validate_target_stage(raw: str) -> ValidationResult:
     raw = raw or ""
+    if raw == _PLAN_PLACEHOLDER:
+        # A multi-action plan carries its own per-step stage inside
+        # collected["_plan"] — this placeholder only exists to satisfy
+        # next_missing_field's required-field check; _build_move_confirmation
+        # / _move_executor / _move_try_auto_execute all check `_plan`
+        # FIRST and never read target_stage's resolved value when it's set.
+        return ValidationResult(ok=True, value=raw)
     if raw.startswith("__ambiguous__:"):
         options = [o for o in raw[len("__ambiguous__:"):].split("|") if o]
         msg = nlu.format_numbered_options("I found multiple pipelines.", [[o] for o in options])
@@ -630,7 +709,36 @@ PROJECT_QUERY_FIELD = FieldSpec(
 
 
 def _extract_move_fields(text: str) -> Dict[str, str]:
-    return nlu.extract_move_fields(text, list(PIPELINE_STAGE_ORDER))
+    chunks, auto_confirm = nlu.preprocess_command(text)
+    out: Dict[str, str] = {}
+
+    if len(chunks) == 1:
+        fields = nlu.extract_move_fields(chunks[0], list(PIPELINE_STAGE_ORDER))
+        project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
+        if len(project_names) <= 1:
+            # The overwhelmingly common case — a normal single-action
+            # command (a multi-name TALENT selector into one project is
+            # already handled by the existing bulk-move machinery below,
+            # untouched). Nothing about this path changed this sprint.
+            out.update(fields)
+            if auto_confirm:
+                out[AUTO_CONFIRM_FIELD.key] = "1"
+            return out
+        # "... in Toyota Glanza and ABC Project" — a multi-project
+        # reference has no existing single-operation concept (a move only
+        # ever targets one project_id), so it always becomes a 1-step
+        # plan; _resolve_one_plan_step cross-product-expands it against
+        # however many talent names were also given.
+        chunks = [chunks[0]]
+
+    steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c} for c in chunks]
+    out[PLAN_FIELD.key] = json.dumps(steps)
+    out["talent_selector"] = _PLAN_PLACEHOLDER
+    out["target_stage"] = _PLAN_PLACEHOLDER
+    out["project_query"] = _PLAN_PLACEHOLDER
+    if auto_confirm:
+        out[AUTO_CONFIRM_FIELD.key] = "1"
+    return out
 
 
 @dataclass
@@ -717,7 +825,8 @@ async def _resolve_move_selection(
         project_id, project_label = None, ""
     elif project_query:
         projects = await _fetch_ongoing_projects()
-        match = nlu.resolve_project_by_name(project_query, projects)
+        with request_scope.stage("fuzzy"):
+            match = nlu.resolve_project_by_name(project_query, projects)
         if match.project:
             project_id = match.project["id"]
             project_label = match.project["label"]
@@ -781,7 +890,8 @@ async def _resolve_move_selection(
         if not candidates:
             return None, "No active projects have any talents in their pipeline yet.", None
 
-    resolved = nlu.resolve_against_candidates(selector, candidates)
+    with request_scope.stage("fuzzy"):
+        resolved = nlu.resolve_against_candidates(selector, candidates)
 
     if not resolved.ok:
         if resolved.ambiguous_candidates:
@@ -797,9 +907,10 @@ async def _resolve_move_selection(
         # than a flat dead end.
         if project_id and selector.name_query and resolved.error == "No matching talent.":
             global_candidates = await _fetch_global_candidates()
-            global_hit = nlu.resolve_against_candidates(
-                nlu.SelectorResult(ok=True, name_query=selector.name_query), global_candidates
-            )
+            with request_scope.stage("fuzzy"):
+                global_hit = nlu.resolve_against_candidates(
+                    nlu.SelectorResult(ok=True, name_query=selector.name_query), global_candidates
+                )
             if global_hit.ok:
                 found_name = global_hit.talent_labels[0]
                 return None, (
@@ -855,10 +966,12 @@ async def _split_by_current_stage(resolved: ResolvedMove) -> SplitMove:
     excluded from the write — matches "Talent already in Approved." — and
     "from_stages" (for the success message's per-stage before/after
     counts) reflects only the talents actually being moved."""
-    rows = await db.casting_pipeline.find(
-        {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
-        {"_id": 0, "talent_id": 1, "stage": 1},
-    ).to_list(len(resolved.talent_ids))
+    rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
+            {"_id": 0, "talent_id": 1, "stage": 1},
+        ).to_list(len(resolved.talent_ids))
+    )
     current_stage_by_id = {
         r["talent_id"]: (_normalise_stage(r.get("stage")) or r.get("stage")) for r in rows
     }
@@ -895,7 +1008,199 @@ async def _remember_last_talent(ctx: ExecContext, resolved: "ResolvedMove") -> N
         )
 
 
+# ---------------------------------------------------------------------------
+# Multi-action plan engine — shared by casting.move AND casting.add, since
+# a plan can chain both ("Add X to Y and move to Approved"). A plan is a
+# JSON list of {"intent_id", "raw_text"} steps (collected["_plan"], set by
+# _extract_move_fields/_extract_add_fields via nlu.split_actions). Every
+# step is resolved through the EXACT SAME per-domain resolver a single
+# action already uses (_resolve_move_selection / _resolve_add_selection),
+# so fuzzy matching, disambiguation payloads, and the pronoun/last-talent
+# continuation between chained steps all come for free — nothing here
+# re-implements any of that.
+# ---------------------------------------------------------------------------
+def _deserialize_plan(raw: Optional[str]) -> List[Dict[str, str]]:
+    try:
+        steps = json.loads(raw or "[]")
+        return steps if isinstance(steps, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List[Dict[str, Any]]:
+    """Resolves ONE plan step (one raw-text chunk) into one or more
+    resolved sub-steps — more than one only when the chunk cross-product-
+    expands (multiple talent names AND/OR multiple project names on the
+    SAME chunk, e.g. "Add Ahana and Prajal to Toyota and Nykaa" -> 4
+    sub-steps, or "Move 4 to Approved in Toyota and ABC" -> 2). Each
+    result dict: {"intent_id", "raw_text", "label" (a project label once
+    resolved, else the raw chunk text), "resolved" (ResolvedMove/
+    ResolvedAdd or None), "error" (str or None)}."""
+    intent_id = step.get("intent_id") or "casting.move"
+    raw_text = step.get("raw_text") or ""
+    if intent_id == "casting.add":
+        fields = nlu.extract_add_fields(raw_text)
+    else:
+        fields = nlu.extract_move_fields(raw_text, list(PIPELINE_STAGE_ORDER))
+        # extract_move_fields returns the RAW stage phrase ("Approved") —
+        # the single-action path normalizes it into the internal stage key
+        # ("approved") via the generic engine's FieldSpec.validate at
+        # initial-collection time; a plan step bypasses that machinery
+        # entirely (it resolves straight from raw_text), so it must
+        # normalize here itself or _resolve_move_selection's `target_stage
+        # not in PIPELINE_STAGES` check always fails.
+        stage_result = _validate_target_stage(fields.get("target_stage") or "")
+        if stage_result.ok:
+            fields["target_stage"] = stage_result.value
+
+    talent_raw = fields.get("talent_selector") or ""
+    talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
+    project_raw = fields.get("project_query")
+    project_names = nlu.split_multi_names(project_raw) if project_raw else [None]
+
+    if len(project_names) > 1:
+        # Cross-product-expand ONLY on multi-project — a multi-name talent
+        # selector against a SINGLE project is the pre-existing, already-
+        # correct "bulk move/add several people at once" behaviour (one
+        # write, one aggregate count), handled natively by
+        # _resolve_move_selection/_resolve_add_selection's own multi-name
+        # support; splitting it into one sub-step per name here would
+        # silently turn "2 talents moved" into two separate "1 talent
+        # moved" lines for every bulk step inside a plan.
+        pairs = [(t, p) for t in talent_names for p in project_names]
+    else:
+        pairs = [(talent_raw, project_raw)]
+
+    out: List[Dict[str, Any]] = []
+    for talent_text, project_text in pairs:
+        sub_fields = dict(fields)
+        sub_fields["talent_selector"] = talent_text
+        if project_text is not None:
+            sub_fields["project_query"] = project_text
+        session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+        if intent_id == "casting.add":
+            resolved, err, _dis = await _resolve_add_selection(sub_fields, session)
+        else:
+            resolved, err, _dis = await _resolve_move_selection(sub_fields, session)
+        if resolved is not None:
+            # Updates session.last_talent_id — a LATER step in the SAME
+            # plan referring implicitly to "whoever we just discussed"
+            # (e.g. a chained "move to Approved" with no name of its own)
+            # picks this up via the existing PRONOUN_LAST_MARKER path.
+            await _remember_last_talent(ctx, resolved)
+        out.append({
+            "intent_id": intent_id, "raw_text": raw_text,
+            "label": (resolved.project_label if resolved else (project_text or raw_text)),
+            "resolved": resolved, "error": err,
+        })
+    return out
+
+
+async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
+    steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
+    resolved_steps: List[Dict[str, Any]] = []
+    for step in steps:
+        resolved_steps.extend(await _resolve_one_plan_step(step, ctx))
+
+    lines = ["You are about to run this plan:", ""]
+    for i, rs in enumerate(resolved_steps, start=1):
+        r = rs["resolved"]
+        if r is not None:
+            names = ", ".join(r.talent_labels)
+            if rs["intent_id"] == "casting.add":
+                lines.append(f"{i}. Add {names} to {r.project_label} (Ask To Test)")
+            else:
+                lines.append(f"{i}. Move {names} to {nlu.stage_label(r.target_stage)} in {r.project_label}")
+        else:
+            lines.append(f"{i}. {rs['raw_text']} — {rs['error']}")
+    lines.append("")
+    lines.append("Reply:")
+    lines.append("1 → Approve")
+    lines.append("2 → Edit")
+    lines.append("3 → Cancel")
+    return "\n".join(lines)
+
+
+async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
+    """Runs every step SEQUENTIALLY — each wrapped in its own try/except
+    so one failing/ambiguous step never aborts the rest — and returns one
+    combined summary in the exact ✓/✗ format specified."""
+    steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
+    summary_lines = ["Completed", ""]
+    any_success = False
+
+    for step in steps:
+        try:
+            sub_steps = await _resolve_one_plan_step(step, ctx)
+        except Exception:
+            logger.exception("plan step resolution failed raw_text=%r", step.get("raw_text"))
+            summary_lines += [f"✗ {step.get('raw_text', 'step')}", "", "Something went wrong resolving this step.", ""]
+            continue
+
+        for rs in sub_steps:
+            label = rs["label"] or rs["raw_text"]
+            if rs["resolved"] is None:
+                summary_lines += [f"✗ {label}", "", rs["error"] or "Could not resolve this step.", ""]
+                continue
+            r = rs["resolved"]
+            try:
+                if rs["intent_id"] == "casting.add":
+                    split = await _split_by_existing_membership(r)
+                    if not split.actionable_ids:
+                        summary_lines += [f"✗ {label}", "", "Already in this pipeline.", ""]
+                        continue
+                    result = await _timed_write(
+                        add_talents_to_pipeline(r.project_id, split.actionable_ids, "ask_to_test")
+                    )
+                    added = result["added"]
+                    summary_lines += [
+                        f"✓ {label}", "", f"{added} talent{'' if added == 1 else 's'} added", "",
+                    ]
+                    any_success = True
+                else:
+                    split = await _split_by_current_stage(r)
+                    if not split.actionable_ids:
+                        summary_lines += [f"✗ {label}", "", "Already in that stage.", ""]
+                        continue
+                    write_result = await _timed_write(
+                        bulk_move_by_talent_ids(r.project_id, split.actionable_ids, r.target_stage)
+                    )
+                    moved = write_result["moved"]
+                    summary_lines += [
+                        f"✓ {label}", "", f"{moved} talent{'' if moved == 1 else 's'} moved", "",
+                    ]
+                    any_success = True
+            except Exception:
+                logger.exception("plan step execution failed label=%r", label)
+                summary_lines += [f"✗ {label}", "", "Something went wrong executing this step.", ""]
+
+    return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
+
+
+async def _move_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    if collected.get(PLAN_FIELD.key):
+        if not collected.get(AUTO_CONFIRM_FIELD.key):
+            return None
+        return await _execute_plan(collected, ctx)
+    if not collected.get(AUTO_CONFIRM_FIELD.key):
+        return None
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    _resolved, err, _dis = await _resolve_move_selection(collected, session)
+    if err:
+        # Still ambiguous/erroring — fall through to the normal
+        # confirmation flow, which sets up pending_disambiguation +
+        # "editing"-step continuation as usual. Since _auto_confirm stays
+        # in the persisted `collected` across that continuation, THIS
+        # check re-fires on the next turn once the ambiguity resolves,
+        # and auto-executes then — no extra state needed.
+        return None
+    return await _move_executor(collected, ctx)
+
+
 async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get(PLAN_FIELD.key):
+        return await _build_plan_confirmation(collected, ctx)
+
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     resolved, err, disambiguation = await _resolve_move_selection(collected, session)
 
@@ -958,6 +1263,9 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
 
 
 async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if collected.get(PLAN_FIELD.key):
+        return await _execute_plan(collected, ctx)
+
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     resolved, err, _disambiguation = await _resolve_move_selection(collected, session)
     if err:
@@ -997,9 +1305,11 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
             )
         return ExecResult(ok=False, error="nothing_to_move", message="Nothing to move.")
 
-    before_counts = await get_stage_counts(resolved.project_id)
-    write_result = await bulk_move_by_talent_ids(resolved.project_id, split.actionable_ids, resolved.target_stage)
-    after_counts = await get_stage_counts(resolved.project_id)
+    before_counts = await _timed_aggregation(get_stage_counts(resolved.project_id))
+    write_result = await _timed_write(
+        bulk_move_by_talent_ids(resolved.project_id, split.actionable_ids, resolved.target_stage)
+    )
+    after_counts = await _timed_aggregation(get_stage_counts(resolved.project_id))
 
     operation_id = str(uuid.uuid4())
     await undo_store.store_undo(
@@ -1121,11 +1431,12 @@ async def _move_parse_edits_async(
 MOVE_INTENT = IntentDefinition(
     intent_id="casting.move",
     triggers=nlu.MOVE_TRIGGERS,
-    fields=[TALENT_SELECTOR_FIELD, TARGET_STAGE_FIELD, PROJECT_QUERY_FIELD],
+    fields=[TALENT_SELECTOR_FIELD, TARGET_STAGE_FIELD, PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD],
     executor=_move_executor,
     extract_fields=_extract_move_fields,
     build_confirmation=_build_move_confirmation,
     parse_edits_async=_move_parse_edits_async,
+    try_auto_execute=_move_try_auto_execute,
     summary_title="You are about to move:",
 )
 
@@ -1160,6 +1471,29 @@ ADD_PROJECT_QUERY_FIELD = FieldSpec(
 )
 
 
+def _extract_add_fields(text: str) -> Dict[str, str]:
+    chunks, auto_confirm = nlu.preprocess_command(text)
+    out: Dict[str, str] = {}
+
+    if len(chunks) == 1:
+        fields = nlu.extract_add_fields(chunks[0])
+        project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
+        if len(project_names) <= 1:
+            out.update(fields)
+            if auto_confirm:
+                out[AUTO_CONFIRM_FIELD.key] = "1"
+            return out
+        chunks = [chunks[0]]
+
+    steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c} for c in chunks]
+    out[PLAN_FIELD.key] = json.dumps(steps)
+    out["talent_selector"] = _PLAN_PLACEHOLDER
+    out["project_query"] = _PLAN_PLACEHOLDER
+    if auto_confirm:
+        out[AUTO_CONFIRM_FIELD.key] = "1"
+    return out
+
+
 async def _fetch_all_talent_candidates() -> List[nlu.Candidate]:
     """Every talent in the database (id+name only) — the search space for
     Add, since a talent being added fresh may have no pipeline row in ANY
@@ -1167,7 +1501,7 @@ async def _fetch_all_talent_candidates() -> List[nlu.Candidate]:
     existing pipeline. Capped at 20000, same cap _fetch_global_candidates
     already uses for its own whole-database-ish scan."""
     cursor = db.talents.find({}, {"_id": 0, "id": 1, "name": 1}).limit(20000)
-    docs = await cursor.to_list(20000)
+    docs = await _timed_mongo(cursor.to_list(20000))
     return [nlu.Candidate(id=d["id"], label=d.get("name") or "Unknown") for d in docs]
 
 
@@ -1202,7 +1536,8 @@ async def _resolve_add_selection(
         return None, 'Which project? e.g. "Add Prajal Tushir to Toyota Glanza".', None
 
     projects = await _fetch_ongoing_projects()
-    match = nlu.resolve_project_by_name(project_query, projects)
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(project_query, projects)
     if match.project:
         project_id = match.project["id"]
         project_label = match.project["label"]
@@ -1227,7 +1562,8 @@ async def _resolve_add_selection(
     if not project_ok:
         return None, "Project doesn't exist.", None
 
-    resolved = nlu.resolve_against_candidates(selector, candidates)
+    with request_scope.stage("fuzzy"):
+        resolved = nlu.resolve_against_candidates(selector, candidates)
     if not resolved.ok:
         if resolved.ambiguous_candidates:
             options = [
@@ -1258,10 +1594,12 @@ async def _split_by_existing_membership(resolved: ResolvedAdd) -> SplitAdd:
     """Live check: which of the resolved talents already have a pipeline
     row (in ANY stage) for this project right now? Those are reported,
     never silently duplicated — mirrors MOVE's _split_by_current_stage."""
-    rows = await db.casting_pipeline.find(
-        {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
-        {"_id": 0, "talent_id": 1},
-    ).to_list(len(resolved.talent_ids))
+    rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
+            {"_id": 0, "talent_id": 1},
+        ).to_list(len(resolved.talent_ids))
+    )
     existing_ids = {r["talent_id"] for r in rows}
     actionable_ids: List[str] = []
     actionable_labels: List[str] = []
@@ -1276,6 +1614,9 @@ async def _split_by_existing_membership(resolved: ResolvedAdd) -> SplitAdd:
 
 
 async def _build_add_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get(PLAN_FIELD.key):
+        return await _build_plan_confirmation(collected, ctx)
+
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     resolved, err, disambiguation = await _resolve_add_selection(collected, session)
 
@@ -1318,6 +1659,9 @@ async def _build_add_confirmation(collected: dict, ctx: ExecContext) -> str:
 
 
 async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if collected.get(PLAN_FIELD.key):
+        return await _execute_plan(collected, ctx)
+
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     resolved, err, _disambiguation = await _resolve_add_selection(collected, session)
     if err:
@@ -1342,7 +1686,9 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
             )
         return ExecResult(ok=False, error="nothing_to_add", message="Everyone named is already in this pipeline.\n\nNo changes were made.")
 
-    result = await add_talents_to_pipeline(resolved.project_id, split.actionable_ids, "ask_to_test")
+    result = await _timed_write(
+        add_talents_to_pipeline(resolved.project_id, split.actionable_ids, "ask_to_test")
+    )
     added = result["added"]
 
     lines = [
@@ -1369,13 +1715,32 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     )
 
 
+async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    if collected.get(PLAN_FIELD.key):
+        if not collected.get(AUTO_CONFIRM_FIELD.key):
+            return None
+        return await _execute_plan(collected, ctx)
+    if not collected.get(AUTO_CONFIRM_FIELD.key):
+        return None
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    _resolved, err, _dis = await _resolve_add_selection(collected, session)
+    if err:
+        # Still ambiguous/erroring — fall through to the normal
+        # confirmation flow; _auto_confirm persists in `collected` across
+        # the "editing"-step continuation, so this check re-fires and
+        # auto-executes once the ambiguity resolves.
+        return None
+    return await _add_executor(collected, ctx)
+
+
 ADD_INTENT = IntentDefinition(
     intent_id="casting.add",
     triggers=nlu.ADD_TRIGGERS,
-    fields=[ADD_TALENT_SELECTOR_FIELD, ADD_PROJECT_QUERY_FIELD],
+    fields=[ADD_TALENT_SELECTOR_FIELD, ADD_PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD],
     executor=_add_executor,
-    extract_fields=nlu.extract_add_fields,
+    extract_fields=_extract_add_fields,
     build_confirmation=_build_add_confirmation,
+    try_auto_execute=_add_try_auto_execute,
     # Reused verbatim from MOVE — it only ever reads session's
     # pending_disambiguation (agent+phone scoped, not intent-specific) and
     # resolves a numbered/ordinal/label reply or a free-text retry against
@@ -1420,10 +1785,12 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     # the web UI), undo must not silently clobber that later, legitimate
     # change. Uses the shared bulk-move helper for the actual write, same
     # as every other mutation in this module.
-    live_rows = await db.casting_pipeline.find(
-        {"project_id": project_id, "talent_id": {"$in": list(previous_stage_by_id.keys())}},
-        {"_id": 0, "talent_id": 1, "stage": 1},
-    ).to_list(len(previous_stage_by_id) or 1)
+    live_rows = await _timed_mongo(
+        db.casting_pipeline.find(
+            {"project_id": project_id, "talent_id": {"$in": list(previous_stage_by_id.keys())}},
+            {"_id": 0, "talent_id": 1, "stage": 1},
+        ).to_list(len(previous_stage_by_id) or 1)
+    )
     live_stage_by_id = {
         r["talent_id"]: (_normalise_stage(r.get("stage")) or r.get("stage")) for r in live_rows
     }
@@ -1439,14 +1806,14 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if not restorable:
         return ExecResult(ok=False, error="nothing_to_undo", message="Nothing to move.")
 
-    before_counts = await get_stage_counts(project_id)
+    before_counts = await _timed_aggregation(get_stage_counts(project_id))
     total_restored = 0
     restored_ids: List[str] = []
     for prev_stage, ids in restorable.items():
-        res = await bulk_move_by_talent_ids(project_id, ids, prev_stage)
+        res = await _timed_write(bulk_move_by_talent_ids(project_id, ids, prev_stage))
         total_restored += res["moved"]
         restored_ids.extend(ids)
-    after_counts = await get_stage_counts(project_id)
+    after_counts = await _timed_aggregation(get_stage_counts(project_id))
 
     # Names are looked up fresh here purely for display — nothing about the
     # undo record's stored shape or the restore logic above depends on

@@ -785,11 +785,17 @@ async def poll_once(
                 # fixed the mapping or restored the group. Auto-recover.
                 await _clear_invalid_configuration(group_name)
 
+            t_scan_start = time.monotonic()
             try:
                 new_messages = await _scan_group_for_new_messages(page, group_name, participants_cache)
             except Exception:
                 logger.exception("inbound: scan failed for group=%r", group_name)
                 continue
+            # DOM scan/parse cost for this cycle — same for every message
+            # found in it (one scan can surface 0+ new messages), included
+            # in each one's own TIMING line below so the backend/DOM split
+            # of end-to-end latency is visible without guessing.
+            scan_sec = time.monotonic() - t_scan_start
 
             for msg in new_messages:
                 phone = msg["sender_phone"]
@@ -864,9 +870,9 @@ async def poll_once(
                     reply_elapsed = await _send_reply(page, group_name, reply)
                 t_total = time.monotonic() - t_detected
                 logger.info(
-                    "inbound: TIMING message_id=%r backend_sec=%.2f reply_send_sec=%.2f "
-                    "ack_sent_at_sec=%s total_sec=%.2f",
-                    msg["message_id"], t_backend_done - t_detected, reply_elapsed,
+                    "inbound: TIMING message_id=%r scan_sec=%.2f backend_sec=%.2f "
+                    "reply_send_sec=%.2f ack_sent_at_sec=%s total_sec=%.2f",
+                    msg["message_id"], scan_sec, t_backend_done - t_detected, reply_elapsed,
                     ack_sent_sec, t_total,
                 )
                 _record_latency(t_total)

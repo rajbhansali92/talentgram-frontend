@@ -15,7 +15,7 @@ import pytest
 
 from core import db, _now
 from agents import modules as agent_modules
-from agents import registry, session_context, undo_store
+from agents import registry, request_scope, session_context, undo_store
 from agents.dispatcher import handle_inbound_message
 from routers import casting_pipeline as pipeline_router
 
@@ -2761,3 +2761,470 @@ async def test_add_does_not_affect_move_workflow():
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# "and confirm" — skips the approval card when resolution is unambiguous;
+# still asks when ambiguous, then auto-continues (no second approval) once
+# the ambiguity is resolved.
+# ---------------------------------------------------------------------------
+async def test_and_confirm_skips_confirmation_for_move():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AndConfirmMove Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"AndConfirmTalent {tag}")
+    try:
+        await _seed_pipeline_row(project_id, t, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move AndConfirmTalent {tag} to Approved in {label} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        # Executed immediately — no "Reply: 1 -> Approve" confirmation card.
+        assert "Reply:" not in r.reply
+        assert "Done." in r.reply
+        assert "Moved 1 talent." in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc["stage"] == "approved"
+
+        # No pending conversation left behind either.
+        conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
+        assert conv is None
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_and_confirm_skips_confirmation_for_add():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AndConfirmAdd Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"AndConfirmAddTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add AndConfirmAddTalent {tag} to {label} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Reply:" not in r.reply
+        assert "Done." in r.reply
+        assert "Added 1 talent to Ask To Test." in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc is not None and doc["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_and_confirm_ambiguous_still_asks_then_auto_continues():
+    """An "and confirm" whose talent is ambiguous must still stop and ask
+    — but once the user picks one, it executes immediately with no second
+    approval step (the whole point of "and confirm" surviving the
+    disambiguation continuation)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AndConfirmAmbig Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a = await _seed_talent(f"Prajal Alpha {tag}")
+    b = await _seed_talent(f"Prajal Beta {tag}")
+    talent_ids = [a, b]
+    try:
+        await _seed_pipeline_row(project_id, a, "ask_to_test")
+        await _seed_pipeline_row(project_id, b, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move Prajal {tag} to Approved in {label} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple matching talents." in r.reply
+        assert f"Prajal Alpha {tag}" in r.reply and f"Prajal Beta {tag}" in r.reply
+        # Nobody touched yet.
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": a}))["stage"] == "ask_to_test"
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": b}))["stage"] == "ask_to_test"
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        # Resolves straight to execution — no second confirmation card.
+        assert "Reply:" not in r.reply
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": b}))["stage"] == "approved"
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": a}))["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Multi-action commands — chained ("and move to"), multi-project cross-
+# product, independent newline-separated operations, partial-failure
+# summary.
+# ---------------------------------------------------------------------------
+async def test_multi_action_chained_add_then_move():
+    """"Add X to Y and move to Approved" — one combined confirmation card,
+    then a single approval executes BOTH steps; the second step's implicit
+    talent resolves via the pronoun/last-talent continuation."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ChainedAddMove Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"ChainedTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add ChainedTalent {tag} to {label} and move to Approved",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply
+        assert f"ChainedTalent {tag}" in r.reply
+        assert "Approved" in r.reply
+        # Not executed yet.
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})) is None
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r.reply
+        assert r.reply.count("✓") == 2
+        assert "✗" not in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc is not None and doc["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_multi_project_single_move_command():
+    """"Move X to Approved in A and B" — same talent moved in BOTH
+    projects from one command, via the 1-step-plan cross-product path."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_a = await _seed_project(brand_name=f"MultiProjA Brand {tag}")
+    project_b = await _seed_project(brand_name=f"MultiProjB Brand {tag}")
+    label_a = (await db.projects.find_one({"id": project_a}))["brand_name"]
+    label_b = (await db.projects.find_one({"id": project_b}))["brand_name"]
+    t = await _seed_talent(f"MultiProjTalent {tag}")
+    try:
+        await _seed_pipeline_row(project_a, t, "ask_to_test")
+        await _seed_pipeline_row(project_b, t, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move MultiProjTalent {tag} to Approved in {label_a} and {label_b}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r.reply
+        assert r.reply.count("✓") == 2
+        assert (await db.casting_pipeline.find_one({"project_id": project_a, "talent_id": t}))["stage"] == "approved"
+        assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": t}))["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_cross_product_multi_talent_multi_project_add():
+    """"Add T1 and T2 to A and B" — cross-product-expands to all 4
+    (talent x project) additions from one command."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_a = await _seed_project(brand_name=f"CrossProjA Brand {tag}")
+    project_b = await _seed_project(brand_name=f"CrossProjB Brand {tag}")
+    label_a = (await db.projects.find_one({"id": project_a}))["brand_name"]
+    label_b = (await db.projects.find_one({"id": project_b}))["brand_name"]
+    t1 = await _seed_talent(f"CrossTalentOne {tag}")
+    t2 = await _seed_talent(f"CrossTalentTwo {tag}")
+    talent_ids = [t1, t2]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add CrossTalentOne {tag} and CrossTalentTwo {tag} to {label_a} and {label_b}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r.reply
+        assert r.reply.count("✓") == 4
+        for pid in (project_a, project_b):
+            for tid in talent_ids:
+                doc = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": tid})
+                assert doc is not None and doc["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_independent_multi_move_partial_failure_summary():
+    """Two independent, newline-separated move commands in one message —
+    one against a real project, one against a project that doesn't exist —
+    both run; the failing one is reported, not allowed to abort the rest."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"IndepMove Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t1 = await _seed_talent(f"IndepOne {tag}")
+    t2 = await _seed_talent(f"IndepTwo {tag}")
+    talent_ids = [t1, t2]
+    missing_project = f"NoSuchProject {tag}"
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        await _seed_pipeline_row(project_id, t2, "ask_to_test")
+
+        text = (
+            f"Move IndepOne {tag}, IndepTwo {tag} to Approved in {label}\n\n"
+            f"Move Somebody Else to Hold in {missing_project}"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.reply.startswith("Completed")
+        assert "✓" in r.reply and "✗" in r.reply
+        assert "2 talents moved" in r.reply
+        assert missing_project in r.reply
+        for tid in talent_ids:
+            assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid}))["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Compact line/slash-delimited formats.
+# ---------------------------------------------------------------------------
+async def test_slash_delimited_single_add_command():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"SlashAdd Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"SlashAddTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add / SlashAddTalent {tag} / {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply
+        assert f"SlashAddTalent {tag}" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc is not None and doc["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_line_based_positional_move_command():
+    """"Move\\nNAME\\nSTAGE\\nPROJECT" — no connector words, pure line
+    position determines talent / stage / project."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PositionalMove Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"PositionalTalent {tag}")
+    try:
+        await _seed_pipeline_row(project_id, t, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move\nPositionalTalent {tag}\nApproved\n{label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"PositionalTalent {tag}" in r.reply
+        assert "Approve" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_mega_example_line_based_add_move_confirm():
+    """The combined mega-example: compact line-based Add + chained Move +
+    a trailing "Confirm" line — one message, no taps, talent ends up
+    directly in Approved (never just sitting in Ask To Test)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"MegaLine Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"MegaLineTalent {tag}")
+    try:
+        text = f"Add\nMegaLineTalent {tag}\n{label}\nMove\nApproved\nConfirm"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Reply:" not in r.reply
+        assert "You are about to run this plan:" not in r.reply
+        assert "Completed" in r.reply
+        assert r.reply.count("✓") == 2
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc is not None and doc["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_mega_example_slash_delimited_add_move_confirm():
+    """Same mega-example, slash-delimited instead of newline-delimited —
+    normalize_compact_text must make the two forms behave identically."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"MegaSlash Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"MegaSlashTalent {tag}")
+    try:
+        text = f"add / MegaSlashTalent {tag} / {label} / move / approved / confirm"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Reply:" not in r.reply
+        assert "Completed" in r.reply
+        assert r.reply.count("✓") == 2
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+        assert doc is not None and doc["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Performance profiling / timing output + per-turn cache.
+# ---------------------------------------------------------------------------
+async def test_dispatch_timing_stage_breakdown_logged(caplog):
+    """dispatch_timing's log line carries a per-stage breakdown (mongo/
+    fuzzy/auth/...), not just one coarse total — the whole point of the
+    latency-instrumentation work."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name=f"TimingBrand {uuid.uuid4().hex[:6]}")
+    try:
+        await _seed_number_map_for_project(phone, project_id, "TimingBrand")
+        import logging
+        with caplog.at_level(logging.INFO, logger="agents.dispatcher"):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="Show Ask To Test",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        assert r.handled
+        timing_records = [rec for rec in caplog.records if "dispatch_timing" in rec.getMessage()]
+        assert timing_records
+        msg = timing_records[-1].getMessage()
+        assert "dispatch_ms=" in msg
+        assert "stages=" in msg
+        assert "mongo" in msg
+    finally:
+        await _cleanup(phone, project_ids=[project_id])
+        await _restore_config(original)
+
+
+async def test_request_scope_session_cache_avoids_duplicate_reads():
+    """Two get_session calls within the SAME turn (request_scope.reset()
+    called once) must hit Mongo only once — the per-turn memo cache."""
+    phone = _phone()
+
+    class _CountingCollection:
+        def __init__(self, real):
+            self._real = real
+            self.find_one_calls = 0
+
+        async def find_one(self, *a, **kw):
+            self.find_one_calls += 1
+            return await self._real.find_one(*a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    class _FakeDB:
+        def __init__(self, real, name, fake):
+            self._real = real
+            self._name = name
+            self._fake = fake
+
+        def __getitem__(self, name):
+            if name == self._name:
+                return self._fake
+            return self._real[name]
+
+    real_collection = db[session_context.COLLECTION]
+    counting = _CountingCollection(real_collection)
+    fake_db = _FakeDB(db, session_context.COLLECTION, counting)
+
+    import agents.session_context as sc_module
+    old_db = sc_module.db
+    sc_module.db = fake_db
+    try:
+        request_scope.reset()
+        s1 = await session_context.get_session(AGENT_ID, phone)
+        s2 = await session_context.get_session(AGENT_ID, phone)
+        assert s1 == s2
+        assert counting.find_one_calls == 1
+
+        # A fresh turn (reset() again) is a genuinely new scope — it must
+        # be allowed to hit Mongo again, proving the cache is per-turn
+        # only, never stale across turns.
+        request_scope.reset()
+        await session_context.get_session(AGENT_ID, phone)
+        assert counting.find_one_calls == 2
+    finally:
+        sc_module.db = old_db

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from core import db
+from agents import request_scope
 
 COLLECTION = "whatsapp_agent_sessions"
 
@@ -30,11 +31,25 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _cache_key(agent_id: str, phone: str):
+    return ("session", agent_id, phone)
+
+
 async def get_session(agent_id: str, phone: str) -> Optional[dict]:
+    # Real, measured redundancy: within a single turn, more than one hook
+    # can independently ask for the same session (e.g. parse_edits_async
+    # fetches it, then build_confirmation fetches it again moments later
+    # in the same turn) — request_scope's cache is reset at the top of
+    # every dispatch turn, so this can never serve stale data ACROSS
+    # turns, only avoid a genuinely redundant round trip WITHIN one.
+    found, cached = request_scope.cache_get(_cache_key(agent_id, phone))
+    if found:
+        return cached
     session = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
     if session and is_expired(session):
         await clear_session(agent_id, phone)
         return None
+    request_scope.cache_set(_cache_key(agent_id, phone), session)
     return session
 
 
@@ -69,8 +84,14 @@ async def update_session(
         },
         upsert=True,
     )
-    return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
+    result = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
+    # Keep the per-turn cache in sync with the write, so a get_session
+    # call later in this SAME turn sees the freshly patched doc, not a
+    # stale pre-write snapshot.
+    request_scope.cache_set(_cache_key(agent_id, phone), result)
+    return result
 
 
 async def clear_session(agent_id: str, phone: str) -> None:
     await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})
+    request_scope.cache_set(_cache_key(agent_id, phone), None)

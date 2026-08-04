@@ -375,7 +375,15 @@ def test_app_video_complete_success(mock_decode):
             
             assert response.status_code == 200
             assert response.json()["ok"] is True
-            assert mock_db.applications.update_one.call_count == 1
+            # Single-slot replacement: the old intro_video is pulled and the
+            # new one pushed only now that the upload is confirmed complete
+            # (never at video-signature time — see app_video_signature) —
+            # that's 2 calls, matching the R2 branch and
+            # routers/submissions.py's attach_video_media.
+            assert mock_db.applications.update_one.call_count == 2
+            pull_call, push_call = mock_db.applications.update_one.call_args_list
+            assert pull_call.args[1] == {"$pull": {"media": {"category": "intro_video"}}}
+            assert "$push" in push_call.args[1]
             assert mock_db.asset_metadata.update_one.call_count == 1
 
 

@@ -372,10 +372,14 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
     const fetchSignature = async (publicId) => {
         let res;
         try {
+            // Never dedupe: a fresh call must always mint its own upload
+            // slot, even a resign with the same body as a still-in-flight
+            // prior call (see the identical fix and rationale in
+            // UploadManagerContext.jsx's /sign call).
             res = await api.post(
                 signatureEndpoint,
                 { category, label: label || null, content_type: file.type || null, public_id: publicId || null },
-                { headers: authHeader }
+                { headers: authHeader, key: `video-signature-${category}-${publicId || "fresh"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }
             );
         } catch (err) {
             const wrapped = new Error("Couldn't start the upload — please check your connection and try again.");

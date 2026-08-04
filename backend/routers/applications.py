@@ -997,10 +997,12 @@ async def app_video_signature(
                 raise HTTPException(400, "Invalid public_id for this application")
             public_id = payload.public_id
     else:
-        # Pre-pull existing intro video to keep it clean
-        await db.applications.update_one(
-            {"id": aid}, {"$pull": {"media": {"category": "intro_video"}}}
-        )
+        # NOTE: the previous intro_video is intentionally NOT removed here.
+        # Removing it at signature time (before any byte of the replacement
+        # is confirmed uploaded) meant an interrupted/failed re-record left
+        # the applicant with zero video — see app_video_complete, which
+        # removes the old entry only once the new one is confirmed, mirroring
+        # routers/submissions.py's attach_video_media single-slot pattern.
         public_id = "intro_video"
 
     from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
@@ -1217,6 +1219,11 @@ async def app_video_complete(
         "poster_url": video_poster_url(public_id),
     }
 
+    # Single-slot replacement for intro_video — pull the old entry only now
+    # that the new asset is confirmed uploaded (matches the R2 branch above
+    # and routers/submissions.py's attach_video_media; see the note in
+    # app_video_signature for why this can't happen any earlier).
+    await db.applications.update_one({"id": aid}, {"$pull": {"media": {"category": "intro_video"}}})
     await db.applications.update_one({"id": aid}, {"$push": {"media": media}})
     try:
         await db.asset_metadata.update_one(

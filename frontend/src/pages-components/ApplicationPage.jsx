@@ -889,7 +889,20 @@ export default function ApplicationPage() {
         }
 
         for (const file of files) {
-            const label = (category === "image" || category === "indian" || category === "western") ? file.name : null;
+            // The label only exists to give UploadManagerContext a unique
+            // in-flight slotKey (`${category}:${label}`) for this image —
+            // it's never sent to or stored by the backend for image
+            // categories. Using the bare filename meant two different files
+            // sharing a name (extremely common — camera photos,
+            // screenshots) uploaded in quick succession collided on that
+            // key: the sync in-flight guard in UploadManagerContext.jsx
+            // silently dropped the second one with only a console.warn, no
+            // toast, no failed-state entry. A per-call unique suffix fixes
+            // it without touching that shared guard or anything persisted
+            // server-side.
+            const label = (category === "image" || category === "indian" || category === "western")
+                ? `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+                : null;
             await uploadFile(file, category, label, {
                 endpoint: `/public/apply/${aid}/upload`,
                 token: token,

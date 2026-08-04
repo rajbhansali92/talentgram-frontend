@@ -1587,25 +1587,41 @@ function SubmissionPage() {
             toast.error(`"${over.name}" is too large (max 20 MB per image).`);
             return;
         }
+        // HEIC is a genuinely supported format (see UploadManagerContext.jsx
+        // and the identical checks in ApplicationPage.jsx / TalentEdit.jsx,
+        // and it's converted to a displayable image by Cloudinary same as
+        // the other flows) — this check used to also reject it, meaning the
+        // single most common iPhone camera-roll format was blocked here
+        // while working on the other two upload flows. Only BMP/TIFF
+        // (genuinely unsupported) are rejected now.
         const badFormat = accepted.find((f) => {
             const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
-            return ['.bmp', '.tiff', '.heic', '.heif'].includes(ext) || ['image/bmp', 'image/tiff', 'image/heic', 'image/heif'].includes(f.type);
+            return ['.bmp', '.tiff'].includes(ext) || ['image/bmp', 'image/tiff'].includes(f.type);
         });
         if (badFormat) {
-            toast.error(`HEIC, BMP, and TIFF formats are not supported. Please upload JPEG or PNG.`);
+            toast.error(`BMP and TIFF formats are not supported. Please upload JPEG, PNG, WEBP, or HEIC.`);
             return;
         }
         const unsupportedImage = accepted.find((f) => {
             const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
-            return !f.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+            return !f.type.startsWith('image/') && !['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif'].includes(ext);
         });
         if (unsupportedImage) {
-            toast.error(`"${unsupportedImage.name}" is not a supported image format. Please upload JPG, PNG, or WEBP.`);
+            toast.error(`"${unsupportedImage.name}" is not a supported image format. Please upload JPG, PNG, WEBP, or HEIC.`);
             return;
         }
 
+        // These run concurrently (Promise.all) and the label is only used
+        // as UploadManagerContext's in-flight slotKey
+        // (`${category}:${label}`) — never sent to or stored by the backend
+        // for image categories. Two files sharing a name (camera photos,
+        // screenshots) selected in the same multi-select would collide on
+        // that key: the sync in-flight guard silently drops the second with
+        // only a console.warn, no toast, no failed-state entry. A per-call
+        // unique suffix fixes it without touching that shared guard or
+        // anything persisted server-side.
         await Promise.all(
-            accepted.map((f) => triggerUpload(f, imageCategory, f.name))
+            accepted.map((f) => triggerUpload(f, imageCategory, `${f.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`))
         );
     };
 
@@ -1721,7 +1737,12 @@ function SubmissionPage() {
 
     const replaceMediaFile = async (oldMedia, file) => {
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(oldMedia.category);
-        const label = oldMedia.category === "take" ? oldMedia.label : (!isVideoSlot ? file.name : null);
+        // Same unique-slotKey fix as uploadImages() above — only "take"
+        // needs its real label preserved (persisted server-side); images
+        // just need a collision-proof in-flight key.
+        const label = oldMedia.category === "take"
+            ? oldMedia.label
+            : (!isVideoSlot ? `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` : null);
         await triggerUpload(file, oldMedia.category, label);
         await removeMedia(oldMedia.id);
     };

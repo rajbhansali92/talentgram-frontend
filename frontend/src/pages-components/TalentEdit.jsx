@@ -171,6 +171,13 @@ export default function TalentEdit() {
     const [linksDraft, setLinksDraft] = useState("");
     const [saving, setSaving] = useState(false);
     const [uploading, setUploading] = useState(null);
+    // This endpoint is a single server-mediated multipart POST (browser ->
+    // Railway -> Cloudinary), unlike the chunked direct-to-cloud transport
+    // the Talent Invite/Submission flows use — but it still has real bytes
+    // in flight for up to 200MB, and previously gave zero feedback beyond a
+    // spinner for the whole request. Tracks aggregate percent across the
+    // current upload batch (see uploadFiles below).
+    const [uploadProgress, setUploadProgress] = useState(0);
     const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
     const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
     const [mediaToRemove, setMediaToRemove] = useState(null);
@@ -431,18 +438,37 @@ export default function TalentEdit() {
         }
         
         setUploading(category);
+        setUploadProgress(0);
         try {
-            const uploadPromises = validFiles.map(async (file) => {
+            // Aggregate percent across the whole batch — each file's own
+            // last-known loaded/total is tracked separately since axios
+            // reports per-request progress, not batch progress.
+            const totalBytes = validFiles.reduce((sum, f) => sum + f.size, 0);
+            const loadedByIndex = new Array(validFiles.length).fill(0);
+            const reportProgress = () => {
+                if (!totalBytes) return;
+                const loaded = loadedByIndex.reduce((sum, n) => sum + n, 0);
+                setUploadProgress(Math.min(99, Math.round((loaded / totalBytes) * 100)));
+            };
+
+            const uploadPromises = validFiles.map(async (file, idx) => {
                 const fd = new FormData();
                 fd.append("file", file);
                 fd.append("category", category);
                 const { data } = await adminApi.post(`/talents/${id}/media`, fd, {
                     headers: { "Content-Type": "multipart/form-data" },
+                    onUploadProgress: (evt) => {
+                        loadedByIndex[idx] = evt.loaded;
+                        reportProgress();
+                    },
                 });
+                loadedByIndex[idx] = file.size;
+                reportProgress();
                 return data;
             });
-            
+
             const results = await Promise.all(uploadPromises);
+            setUploadProgress(100);
             const latestTalent = results[results.length - 1];
 
             if (latestTalent) {
@@ -459,6 +485,7 @@ export default function TalentEdit() {
             toast.error(formatErrorDetail(e, "Upload failed"));
         } finally {
             setUploading(null);
+            setUploadProgress(0);
         }
     };
 
@@ -1382,7 +1409,7 @@ export default function TalentEdit() {
                                         ) : (
                                             <Upload className="w-3 h-3" />
                                         )}
-                                        Upload
+                                        {uploading === cat.key ? `Uploading… ${uploadProgress}%` : "Upload"}
                                     </button>
                                 )}
                                 <input
@@ -1414,7 +1441,9 @@ export default function TalentEdit() {
                                                     {uploading === "video" ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
                                                 </div>
                                                 <div>
-                                                    <p className="text-xs font-semibold text-black/70">Upload Audition / Intro Video</p>
+                                                    <p className="text-xs font-semibold text-black/70">
+                                                        {uploading === "video" ? `Uploading… ${uploadProgress}%` : "Upload Audition / Intro Video"}
+                                                    </p>
                                                     <p className="text-[10px] text-black/40 mt-1">Supports MP4, MOV up to 200MB</p>
                                                 </div>
                                             </div>

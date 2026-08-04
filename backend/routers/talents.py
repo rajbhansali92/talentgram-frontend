@@ -1007,6 +1007,19 @@ async def add_media(
         "poster_url": video_poster_url(result["public_id"]) if is_video else None,
     }
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
+    # Singleton video slot: only one active Introduction Video may exist
+    # per talent, matching the Apply/Submission intro_video invariant. The
+    # UI's "Replace" button just re-POSTs here as a plain add (no dedicated
+    # replace endpoint), so without this the old video/Cloudinary asset was
+    # silently orphaned instead of replaced — new upload has already
+    # succeeded by this point, so it's safe to clean up the stale ones now.
+    if category == "video":
+        stale = [
+            m for m in (talent.get("media") or [])
+            if m.get("category") == "video" and m.get("id") != media_id
+        ]
+        for old in stale:
+            await delete_talent_media_item(tid, old["id"])
     # Auto-assign cover on first image upload
     if not talent.get("cover_media_id") and category in {"indian", "western", "portfolio"}:
         await db.talents.update_one(

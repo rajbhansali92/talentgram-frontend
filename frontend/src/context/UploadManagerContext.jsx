@@ -263,10 +263,15 @@ export function UploadManagerProvider({ children }) {
                     : `/public/submissions/${targetId}/video-signature`;
                 try {
                     const headers = dynamicToken ? { Authorization: `Bearer ${dynamicToken}` } : {};
+                    // Same never-dedupe requirement as the image /sign call
+                    // above — a fresh upload slot must be minted every call,
+                    // even when two attempts share an identical body (e.g.
+                    // two "intro_video" re-record attempts in a row, both
+                    // with public_id: null).
                     const res = await api.post(
                         signatureEndpoint,
                         { category, label: label || null, content_type: file.type || null, public_id: null },
-                        { headers }
+                        { headers, key: `video-signature-${category}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }
                     );
                     if (res.data && res.data.use_r2) {
                         preFetchedSig = {
@@ -588,10 +593,23 @@ export function UploadManagerProvider({ children }) {
                 if (dynamicToken) {
                     headers["Authorization"] = `Bearer ${dynamicToken}`;
                 }
+                // This call mints a fresh, unique media_id + Cloudinary
+                // signature every time it is called; it must never be
+                // deduplicated. The shared Request Manager
+                // (lib/requestManager) dedupes POST calls by default when
+                // method+path+body match exactly — and two DIFFERENT files
+                // uploaded to the same category with the same filename
+                // (extremely common: camera photos, repeated "Add" clicks)
+                // produce an identical body. Without an explicit unique key,
+                // the second call joins the first in-flight request and gets
+                // back the SAME media_id, so both files end up pushed into
+                // the media array under one shared id (deleting either one
+                // then deletes both, since Mongo's $pull matches every array
+                // entry with that id).
                 const signRes = await api.post(`${dynamicEndpoint}/sign`, {
                     category,
                     filename: fileToUpload.name
-                }, { headers });
+                }, { headers, key: `upload-sign-${category}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` });
                 const signData = signRes.data;
 
                 // 2. Build signed upload FormData for Cloudinary

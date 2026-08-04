@@ -24,6 +24,7 @@ from agents.confirmation import (
 )
 from agents.models import DispatchResult, ExecContext
 from agents.parser import (
+    clean_voice_transcript,
     detect_trigger,
     extract_initial_fields,
     next_missing_field,
@@ -84,8 +85,18 @@ async def _collect_or_advance(
     phone = conv["phone"]
 
     if conv["step"] == "editing":
-        edit_parser = intent.parse_edits or parse_edit_instructions
-        edits = edit_parser(text, intent.fields)
+        if intent.parse_edits_async:
+            edit_ctx = ExecContext(
+                agent_id=agent.agent_id,
+                group_name=conv.get("group_name") or "",
+                sender_phone=phone,
+                sender_name=sender_name,
+                conversation_id=str(conv.get("_id") or ""),
+            )
+            edits = await intent.parse_edits_async(text, collected, intent.fields, edit_ctx)
+        else:
+            edit_parser = intent.parse_edits or parse_edit_instructions
+            edits = edit_parser(text, intent.fields)
         if not edits:
             return DispatchResult(handled=True, reply=UNRECOGNIZED_EDIT_REPLY)
         for key, raw_value in edits.items():
@@ -149,6 +160,13 @@ async def handle_inbound_message(
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
+    # Used for trigger detection, field extraction, and confirmation/edit
+    # parsing — a speech-to-text transcript's filler words ("hey", "um",
+    # "please") and stutters ("move move X") are stripped here so every
+    # matcher downstream sees text that behaves like clean typed input.
+    # raw_message itself is left untouched and is what's stored in the
+    # audit log — the audit trail always shows exactly what was received.
+    working_message = clean_voice_transcript(raw_message)
 
     try:
         resolved = await registry.resolve_agent_for_group(group_name)
@@ -175,7 +193,7 @@ async def handle_inbound_message(
             conv = None
 
         # A fresh trigger always restarts, even mid-conversation.
-        fresh_intent = detect_trigger(agent, raw_message)
+        fresh_intent = detect_trigger(agent, working_message)
 
         if conv is None or fresh_intent is not None:
             intent = fresh_intent or (
@@ -187,7 +205,7 @@ async def handle_inbound_message(
                 return DispatchResult(handled=False)
 
             extractor = intent.extract_fields or (lambda t: extract_initial_fields(intent, t))
-            initial_raw = extractor(raw_message)
+            initial_raw = extractor(working_message)
             collected: dict = {}
             initial_errors: list = []
             for field in intent.fields:
@@ -283,7 +301,7 @@ async def handle_inbound_message(
             return DispatchResult(handled=False)
 
         if conv["step"] == "confirming":
-            action = parse_confirmation_reply(raw_message)
+            action = parse_confirmation_reply(working_message)
             if action == "approve":
                 ctx = ExecContext(
                     agent_id=agent.agent_id,
@@ -349,7 +367,7 @@ async def handle_inbound_message(
 
         # step in ("collecting", "editing")
         result = await _collect_or_advance(
-            agent, intent, conv, raw_message, sender_name=sender_name
+            agent, intent, conv, working_message, sender_name=sender_name
         )
         await audit.log_turn(
             agent_id=agent.agent_id,

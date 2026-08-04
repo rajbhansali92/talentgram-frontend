@@ -23,6 +23,36 @@ def _clean_lines(text: str) -> List[str]:
     return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
 
 
+# Voice-transcript hygiene: common leading filler ("hey", "please", "can
+# you", "um") — possibly several chained together — and trailing filler
+# ("...please", "...thanks"), plus an immediately-repeated word ("move
+# move Sarah" -> "move Sarah", a common speech-to-text stutter artifact).
+# Generic (no domain vocabulary), so it lives here rather than in any one
+# agent's module — every agent's trigger detection and field extraction
+# benefits identically, the same as detect_trigger's glued-digit rule.
+_LEADING_FILLER_RE = re.compile(
+    r"^\s*(?:(?:hey|hi|ok(?:ay)?|please|um+|uh+|so|can you|could you|would you)[\s,]+)+",
+    re.IGNORECASE,
+)
+_TRAILING_FILLER_RE = re.compile(r"[\s,]+(?:please|thanks|thank you)\.?\s*$", re.IGNORECASE)
+_REPEATED_WORD_RE = re.compile(r"\b(\w+)(\s+\1\b)+", re.IGNORECASE)
+
+
+def clean_voice_transcript(text: str) -> str:
+    """Best-effort speech-to-text cleanup, applied once at the top of
+    handle_inbound_message to the text used for trigger detection and
+    field extraction — NOT to what's stored as the audit log's raw_message
+    (that stays verbatim, so the audit trail always shows exactly what was
+    received). Missing punctuation and inconsistent capitalization need no
+    special handling here: every trigger/field/confirmation matcher in
+    this platform is already case- and punctuation-tolerant on its own."""
+    working = text or ""
+    working = _LEADING_FILLER_RE.sub("", working)
+    working = _TRAILING_FILLER_RE.sub("", working)
+    working = _REPEATED_WORD_RE.sub(r"\1", working)
+    return working.strip()
+
+
 def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefinition]:
     """Does this message open a new intent? Matches if the first line
     starts with (case-insensitively) one of the intent's trigger phrases,
@@ -95,14 +125,20 @@ def extract_initial_fields(intent: IntentDefinition, text: str) -> Dict[str, str
     return result
 
 
-_CONFIRM_APPROVE = {"1", "approve", "yes", "y", "confirm", "ok", "okay"}
+_CONFIRM_APPROVE = {
+    "1", "approve", "yes", "y", "confirm", "ok", "okay",
+    "go ahead", "proceed", "do it",
+}
 _CONFIRM_EDIT = {"2", "edit", "change"}
 _CONFIRM_CANCEL = {"3", "cancel", "no", "n", "stop"}
 
 
 def parse_confirmation_reply(text: str) -> Optional[str]:
-    """Returns "approve" / "edit" / "cancel", or None if unrecognized."""
-    norm = (text or "").strip().lower()
+    """Returns "approve" / "edit" / "cancel", or None if unrecognized.
+    Tolerant of trailing punctuation a voice transcript might (or might
+    not) include — "Go ahead." / "Yes!" match the same as "Go ahead" /
+    "Yes" — purely additive: nothing that matched before stops matching."""
+    norm = (text or "").strip().rstrip(".!?").strip().lower()
     if norm in _CONFIRM_APPROVE:
         return "approve"
     if norm in _CONFIRM_EDIT:

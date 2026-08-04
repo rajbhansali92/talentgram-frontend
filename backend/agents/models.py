@@ -95,6 +95,16 @@ class IntentDefinition:
     # selector against the current session's DB-backed listing. None means
     # "use the generic renderer" (every existing intent's behaviour).
     build_confirmation: Optional[Callable[[Dict[str, str], "ExecContext"], Awaitable[str]]] = None
+    # Async counterpart to `parse_edits` — for an "editing"-step reply that
+    # needs DB/session access to interpret (e.g. "2" picking option 2 from
+    # a disambiguation list the domain module stored in session, rather
+    # than "Key = value" syntax). Signature: (raw_text, collected_so_far,
+    # fields, ctx) -> {field_key: raw_value}. Takes priority over the sync
+    # `parse_edits` when set; None (the default) means "use parse_edits or
+    # the generic Key=value parser" — every existing intent is unaffected.
+    parse_edits_async: Optional[
+        Callable[[str, Dict[str, str], List[FieldSpec], "ExecContext"], Awaitable[Dict[str, str]]]
+    ] = None
 
 
 @dataclass

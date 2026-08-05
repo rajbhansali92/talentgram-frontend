@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from core import db
+from agents import request_scope
 
 COLLECTION = "whatsapp_agent_undo"
 
@@ -45,11 +46,13 @@ async def store_undo(
         "created_at": now,
         "expires_at": now + timedelta(minutes=ttl_minutes),
     }
-    await db[COLLECTION].replace_one({"agent_id": agent_id, "phone": phone}, doc, upsert=True)
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].replace_one({"agent_id": agent_id, "phone": phone}, doc, upsert=True)
 
 
 async def get_undo(agent_id: str, phone: str) -> Optional[dict]:
-    return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
 
 
 def is_expired(doc: dict) -> bool:
@@ -62,4 +65,5 @@ def is_expired(doc: dict) -> bool:
 
 
 async def clear_undo(agent_id: str, phone: str) -> None:
-    await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})

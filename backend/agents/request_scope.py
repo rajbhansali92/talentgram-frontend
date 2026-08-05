@@ -80,3 +80,66 @@ def get_timings() -> Dict[str, float]:
     for name, ms in (_timings.get() or []):
         totals[name] = totals.get(name, 0.0) + ms
     return {name: round(ms, 1) for name, ms in totals.items()}
+
+
+# Display order + labels for the human-readable summary table — deliberately
+# NOT every stage name that might ever appear (e.g. a future domain module's
+# custom stage still shows up via the dict, just without a friendly label/
+# fixed position), just the ones this investigation cares about seeing in a
+# stable, readable order every time.
+_STAGE_DISPLAY = [
+    ("auth", "Authentication"),
+    ("conversation_state", "Conversation State"),
+    ("nlu", "NLU"),
+    ("project_lookup", "Project Lookup"),
+    ("talent_lookup", "Talent Lookup"),
+    ("mongo_query", "Mongo Query"),
+    ("aggregation", "Aggregation"),
+    ("fuzzy", "Fuzzy Matching"),
+    ("business_logic", "Business Logic"),
+    ("db_write", "Database Write"),
+    ("response_formatting", "Response Formatting"),
+]
+
+
+def format_stage_table(stages: Dict[str, float], total_ms: float) -> str:
+    """Renders the per-turn breakdown as an aligned ASCII table:
+
+        Authentication ............... 3 ms
+        Mongo Query ................... 8 ms
+        ...
+        TOTAL ....................... 8553 ms
+
+    `business_logic` is NOT a real named stage anywhere (wrapping a
+    resolver's whole body in its own stage would nest inside — and double-
+    count against — the DB/fuzzy stages it calls internally). It is instead
+    computed here as the remainder: total dispatch time minus every stage
+    that WAS explicitly timed, so the table always sums to `total_ms`
+    without any span being counted twice. Any stage name not in
+    `_STAGE_DISPLAY` (e.g. a future domain module's own custom stage) is
+    still included, appended after the known rows, so nothing is silently
+    dropped from the table even if this list falls out of date.
+    """
+    known_ms = sum(ms for name, ms in stages.items() if name != "business_logic")
+    remainder = max(0.0, total_ms - known_ms)
+
+    rows: List[tuple] = []
+    seen = set()
+    for key, label in _STAGE_DISPLAY:
+        if key == "business_logic":
+            rows.append((label, remainder))
+        else:
+            rows.append((label, stages.get(key, 0.0)))
+        seen.add(key)
+    for key, ms in stages.items():
+        if key not in seen:
+            rows.append((key, ms))
+
+    label_width = max([len("TOTAL")] + [len(label) for label, _ in rows]) + 2
+    lines = []
+    for label, ms in rows:
+        dots = "." * max(1, label_width - len(label) + 3)
+        lines.append(f"{label} {dots} {ms:.0f} ms")
+    dots = "." * max(1, label_width - len("TOTAL") + 3)
+    lines.append(f"TOTAL {dots} {total_ms:.0f} ms")
+    return "\n".join(lines)

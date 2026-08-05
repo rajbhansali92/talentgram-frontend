@@ -40,7 +40,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import httpx
 
@@ -427,11 +427,22 @@ async def _match_group_member(participants: Optional[list], sender_name: Optiona
 
 async def _scan_group_for_new_messages(
     page, group_name: str, participants_cache: "GroupParticipantsCache"
-) -> list[dict]:
+) -> Tuple[list[dict], float, float]:
     """Scan the ALREADY-OPEN, ALREADY-VERIFIED conversation for the most
     recent messages, returning ones that are new + incoming + not yet
     processed. Reuses sender._resolve_scope / sender._is_outgoing_msg
-    directly rather than re-deriving selector logic."""
+    directly rather than re-deriving selector logic.
+
+    Returns (new_messages, dom_detection_sec, message_extraction_sec) — the
+    latency-investigation split of the old single `scan_sec`: dom_detection
+    is "how long until we know how many messages exist" (scope resolution +
+    count), message_extraction is the per-message direction/text/sender
+    extraction work in the loop below. Both are 0.0 when nothing new is
+    found (the loop still runs over already-processed tail messages, so
+    message_extraction is not literally zero unless start==n, but stays
+    accurately attributed either way since it wraps the whole loop body,
+    not just the messages that end up in `new_messages`)."""
+    t_dom_start = time.monotonic()
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
     try:
@@ -439,7 +450,8 @@ async def _scan_group_for_new_messages(
         n = await loc.count()
     except Exception:
         logger.exception("inbound: message count failed for group=%r", group_name)
-        return []
+        return [], time.monotonic() - t_dom_start, 0.0
+    dom_detection_sec = time.monotonic() - t_dom_start
     logger.info("inbound: DIAG scan group=%r scope=%r n=%d", group_name, scope, n)
 
     # Only the tail — new messages always arrive at the bottom, and this
@@ -451,6 +463,7 @@ async def _scan_group_for_new_messages(
     # consumer, and most scan cycles find nothing new to check.
     participants: Optional[list] = None
     participants_fetched = False
+    t_extraction_start = time.monotonic()
 
     for i in range(start, n):
         try:
@@ -553,7 +566,8 @@ async def _scan_group_for_new_messages(
             "media_type": media_type,
         })
 
-    return new_messages
+    message_extraction_sec = time.monotonic() - t_extraction_start
+    return new_messages, dom_detection_sec, message_extraction_sec
 
 
 async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phone: str,
@@ -594,10 +608,12 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
         return None
 
 
-async def _send_reply(page, group_name: str, reply_text: str) -> float:
-    """Returns elapsed seconds spent sending (0.0 if there was nothing to send)."""
+async def _send_reply(page, group_name: str, reply_text: str) -> Tuple[float, Dict[str, float]]:
+    """Returns (elapsed seconds spent sending, per-stage SEND_TIMING
+    breakdown from sender.send_whatsapp_message) — (0.0, {}) if there was
+    nothing to send."""
     if not reply_text:
-        return 0.0
+        return 0.0, {}
     t0 = time.monotonic()
     try:
         result = await sender.send_whatsapp_message(
@@ -607,10 +623,10 @@ async def _send_reply(page, group_name: str, reply_text: str) -> float:
         elapsed = time.monotonic() - t0
         logger.info("inbound: reply send result group=%r state=%s elapsed_sec=%.2f",
                      group_name, result.get("state"), elapsed)
-        return elapsed
+        return elapsed, (result.get("timing") or {})
     except Exception:
         logger.exception("inbound: failed to send reply into group=%r", group_name)
-        return time.monotonic() - t0
+        return time.monotonic() - t0, {}
 
 
 # If the backend hasn't responded within this long, send an immediate
@@ -785,9 +801,10 @@ async def poll_once(
                 # fixed the mapping or restored the group. Auto-recover.
                 await _clear_invalid_configuration(group_name)
 
-            t_scan_start = time.monotonic()
             try:
-                new_messages = await _scan_group_for_new_messages(page, group_name, participants_cache)
+                new_messages, dom_detection_sec, message_extraction_sec = await _scan_group_for_new_messages(
+                    page, group_name, participants_cache
+                )
             except Exception:
                 logger.exception("inbound: scan failed for group=%r", group_name)
                 continue
@@ -795,7 +812,6 @@ async def poll_once(
             # found in it (one scan can surface 0+ new messages), included
             # in each one's own TIMING line below so the backend/DOM split
             # of end-to-end latency is visible without guessing.
-            scan_sec = time.monotonic() - t_scan_start
 
             for msg in new_messages:
                 phone = msg["sender_phone"]
@@ -847,7 +863,7 @@ async def poll_once(
                 done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
                 ack_sent_sec = None
                 if backend_task not in done:
-                    ack_elapsed = await _send_reply(page, group_name, ACK_TEXT)
+                    ack_elapsed, _ack_timing = await _send_reply(page, group_name, ACK_TEXT)
                     ack_sent_sec = round(time.monotonic() - t_detected, 2)
                     logger.info(
                         "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
@@ -866,14 +882,21 @@ async def poll_once(
 
                 reply = result.get("reply")
                 reply_elapsed = 0.0
+                send_timing: Dict[str, float] = {}
                 if reply:
-                    reply_elapsed = await _send_reply(page, group_name, reply)
+                    reply_elapsed, send_timing = await _send_reply(page, group_name, reply)
                 t_total = time.monotonic() - t_detected
                 logger.info(
-                    "inbound: TIMING message_id=%r scan_sec=%.2f backend_sec=%.2f "
-                    "reply_send_sec=%.2f ack_sent_at_sec=%s total_sec=%.2f",
-                    msg["message_id"], scan_sec, t_backend_done - t_detected, reply_elapsed,
-                    ack_sent_sec, t_total,
+                    "inbound: TIMING message_id=%r dom_detection_sec=%.2f "
+                    "message_extraction_sec=%.2f backend_sec=%.2f reply_send_sec=%.2f "
+                    "reply_open_or_verify_chat=%.2f reply_composer_wait=%.2f reply_typing=%.2f "
+                    "reply_send_click=%.2f reply_delivery_verify=%.2f ack_sent_at_sec=%s "
+                    "total_sec=%.2f",
+                    msg["message_id"], dom_detection_sec, message_extraction_sec,
+                    t_backend_done - t_detected, reply_elapsed,
+                    send_timing.get("open_or_verify_chat", 0.0), send_timing.get("composer_wait", 0.0),
+                    send_timing.get("typing", 0.0), send_timing.get("send_click", 0.0),
+                    send_timing.get("delivery_verify", 0.0), ack_sent_sec, t_total,
                 )
                 _record_latency(t_total)
 

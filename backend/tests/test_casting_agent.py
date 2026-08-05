@@ -3172,7 +3172,7 @@ async def test_dispatch_timing_stage_breakdown_logged(caplog):
         msg = timing_records[-1].getMessage()
         assert "dispatch_ms=" in msg
         assert "stages=" in msg
-        assert "mongo" in msg
+        assert "project_lookup" in msg or "talent_lookup" in msg
     finally:
         await _cleanup(phone, project_ids=[project_id])
         await _restore_config(original)

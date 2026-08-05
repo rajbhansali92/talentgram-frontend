@@ -548,7 +548,18 @@ async def handle_inbound_message(
         )
     finally:
         dispatch_ms = int((time.monotonic() - t0) * 1000)
+        stages = request_scope.get_timings()
         logger.info(
             "dispatch_timing agent=%s group=%r dispatch_ms=%d stages=%s",
-            dispatched_agent_id, group_name, dispatch_ms, request_scope.get_timings(),
+            dispatched_agent_id, group_name, dispatch_ms, stages,
+        )
+        # Human-readable companion to the line above (Phase 1 of the
+        # latency investigation) — same data, aligned ASCII table instead
+        # of a Python dict, for skimming Railway logs by eye. The
+        # machine-parseable `stages={...}` line above stays unchanged for
+        # grep/diffing.
+        logger.info(
+            "dispatch_breakdown agent=%s group=%r\n%s",
+            dispatched_agent_id, group_name,
+            request_scope.format_stage_table(stages, float(dispatch_ms)),
         )

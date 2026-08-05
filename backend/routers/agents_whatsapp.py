@@ -13,7 +13,9 @@ Two kinds of routes:
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -22,6 +24,8 @@ from pydantic import BaseModel, Field
 from core import current_admin, db
 from agents import registry
 from agents.dispatcher import handle_inbound_message
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents/whatsapp", tags=["WhatsApp Agents"])
 
@@ -76,8 +80,20 @@ async def inbound_message(
     payload: InboundMessageIn,
     x_internal_secret: Optional[str] = Header(default=None),
 ):
+    # http_request/http_response — the FastAPI/Starlette-level overhead
+    # AROUND handle_inbound_message's own work (which logs its own
+    # dispatch_timing/dispatch_breakdown lines). Pydantic body parsing and
+    # the ASGI request itself happen before this function is even called,
+    # so this measures everything this function is responsible for: the
+    # shared-secret check, the dispatcher call, and response construction
+    # — subtracting the dispatcher's own dispatch_ms from this total
+    # isolates pure HTTP-layer overhead (Phase 1 of the latency
+    # investigation, matching the requested "Backend HTTP Request" /
+    # "HTTP Response" categories).
+    t_http_start = time.monotonic()
     if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    t_auth_done = time.monotonic()
     result = await handle_inbound_message(
         group_name=payload.group_name,
         sender_phone=payload.sender_phone,
@@ -87,7 +103,15 @@ async def inbound_message(
         transcript_confidence=payload.transcript_confidence,
         media_type=payload.media_type,
     )
-    return {"handled": result.handled, "reply": result.reply}
+    t_dispatch_done = time.monotonic()
+    response = {"handled": result.handled, "reply": result.reply}
+    http_request_ms = (t_auth_done - t_http_start) * 1000
+    http_response_ms = (time.monotonic() - t_dispatch_done) * 1000
+    logger.info(
+        "inbound_http_timing group=%r http_request_ms=%.1f dispatch_ms=%.1f http_response_ms=%.1f",
+        payload.group_name, http_request_ms, (t_dispatch_done - t_auth_done) * 1000, http_response_ms,
+    )
+    return response
 
 
 class AgentConfigUpdate(BaseModel):

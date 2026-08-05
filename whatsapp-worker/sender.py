@@ -15,7 +15,7 @@ import unicodedata
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import config
 from db import get_db
@@ -1403,6 +1403,21 @@ async def send_whatsapp_message(
         "verification_method": None,
         "verification_selector": None,
     }
+    # Stage breakdown for the latency investigation (Phase 1) — each span
+    # is a plain time.monotonic() delta, not a shared context-manager
+    # system like the backend's request_scope (this is a single, linear
+    # sequence of awaits with no concurrency to worry about, so a simple
+    # dict is enough). Logged as "sender: SEND_TIMING" below and folded
+    # back into inbound.py's per-message TIMING line by the caller.
+    timing: Dict[str, float] = {}
+    t_stage = time.monotonic()
+
+    def _mark(name: str) -> None:
+        nonlocal t_stage
+        now = time.monotonic()
+        timing[name] = timing.get(name, 0.0) + (now - t_stage)
+        t_stage = now
+
     logger.info("sender: preparing to send to %s (%s)", destination, destination_type)
 
     # PHASE26B STEP 1/2: raw destination, detected type, normalized value,
@@ -1426,7 +1441,7 @@ async def send_whatsapp_message(
     # announcements). Unknown/undismissable dialogs -> retryable, nothing sent.
     if not await dismiss_blocking_dialogs(page, "pre-open"):
         logger.warning("sender: blocking dialog could not be handled -> CHAT_NOT_OPENED")
-        return {"state": CHAT_NOT_OPENED, "evidence": evidence}
+        return {"state": CHAT_NOT_OPENED, "evidence": evidence, "timing": timing}
 
     if destination_type == "number":
         # Format clean phone number (digits only, e.g. 919876543210)
@@ -1481,7 +1496,7 @@ async def send_whatsapp_message(
             await _store_dom_snapshot(page, "group_search_failed", {"group": destination})
             logger.warning("sender: group open SEARCH_FAILED for %r -> CHAT_NOT_OPENED (retryable)",
                            destination)
-            return {"state": CHAT_NOT_OPENED, "evidence": evidence}
+            return {"state": CHAT_NOT_OPENED, "evidence": evidence, "timing": timing}
         if result == "NOT_FOUND":
             # PHASE26B: full evidence capture BEFORE raising (terminal, not retried).
             await _p26b_dump(page, "group_not_found_before_raise", extra={"group": destination})
@@ -1491,6 +1506,7 @@ async def send_whatsapp_message(
         evidence["chat_opened"] = True
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")
+    _mark("open_or_verify_chat")
 
     # STEP 7 / STEP 11: wait for the composer to be interactive.
     logger.info("sender: STEP 7 waiting for chat ready (composer interactive)...")
@@ -1505,7 +1521,7 @@ async def send_whatsapp_message(
         await _p26b_dump(page, "composer_wait_failed", extra={"destination": destination, "error": str(exc)})
         await _capture_open_failure(page, "chat_not_ready",
                                     {"destination": destination, "error": str(exc)})
-        return {"state": CHAT_NOT_OPENED, "evidence": evidence}
+        return {"state": CHAT_NOT_OPENED, "evidence": evidence, "timing": timing}
 
     # STEP 8-10, 12-13: the compose box is NOT sufficient — confirm a real
     # conversation is open (panel + header + recipient) before typing. For groups
@@ -1534,7 +1550,7 @@ async def send_whatsapp_message(
                                     {"destination": destination, "expected": expected_name,
                                      "header_found": hdr_found, "recipient_found": rcp_found,
                                      "recipient_text": rcp_text, "body_present": body_present})
-        return {"state": CHAT_NOT_OPENED, "evidence": evidence}
+        return {"state": CHAT_NOT_OPENED, "evidence": evidence, "timing": timing}
     evidence["header_verified"] = True
     logger.info("sender: STEP 14 ready to send")
     await _p26b_dump(page, "conversation_verified")  # PHASE26B
@@ -1561,7 +1577,12 @@ async def send_whatsapp_message(
         )
         evidence["dom_verified"] = True
         evidence["verification_method"] = "already_delivered"
-        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence}
+        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence, "timing": timing}
+    # composer_wait covers STEP 7-14 above (composer-interactive wait +
+    # conversation-open verification) plus the baselines snapshot / dump /
+    # duplicate-check just done — all pre-typing "is this chat ready"
+    # overhead, folded into one bucket rather than five near-zero ones.
+    _mark("composer_wait")
 
     # Handle media attachment if present
     if media_url:
@@ -1620,7 +1641,7 @@ async def send_whatsapp_message(
             if not await dismiss_blocking_dialogs(page, "send"):
                 logger.warning("sender: blocking dialog before media send — not pressing "
                                "anything -> MESSAGE_NOT_SENT")
-                return {"state": MESSAGE_NOT_SENT, "evidence": evidence}
+                return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
             await _safe_screenshot(page, "/tmp/pre_send.png")
             sent_via = await _find_and_click_send(page)
             evidence["send_clicked"] = True
@@ -1657,19 +1678,21 @@ async def send_whatsapp_message(
         
         logger.info("sender: message text inserted? True (%d line(s))", len(lines))
         await asyncio.sleep(0.2 if fast else 0.5)
+        _mark("typing")
         # Click send button via resilient fallback chain. If a dialog is
         # blocking, do NOT press anything (Enter could activate a dialog
         # button) — composer still holds the text, so this is retryable.
         if not await dismiss_blocking_dialogs(page, "send"):
             logger.warning("sender: blocking dialog before send — not pressing anything "
                            "-> MESSAGE_NOT_SENT")
-            return {"state": MESSAGE_NOT_SENT, "evidence": evidence}
+            return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
         await _safe_screenshot(page, "/tmp/pre_send.png")
         sent_via = await _find_and_click_send(page)
         evidence["send_clicked"] = True
         logger.info("sender: text send click executed via %s", sent_via)
         await asyncio.sleep(0.4 if fast else 1.0)
         await _safe_screenshot(page, "/tmp/post_send.png")
+        _mark("send_click")
 
     # TASK 2 instrumentation: dump the live outgoing-message DOM so the real
     # selector is captured in the logs.
@@ -1679,13 +1702,22 @@ async def send_whatsapp_message(
     await asyncio.sleep(0.7 if fast else 1.5)
     logger.info("sender: verification started (baselines=%s)", "provided" if baselines else "none")
     verified, composer_cleared, matched_sel = await _verify_delivery(page, message_body, baselines=baselines)
+    _mark("delivery_verify")
+    logger.info(
+        "sender: SEND_TIMING destination=%r open_or_verify_chat=%.2f composer_wait=%.2f "
+        "typing=%.2f send_click=%.2f delivery_verify=%.2f total=%.2f",
+        destination,
+        timing.get("open_or_verify_chat", 0.0), timing.get("composer_wait", 0.0),
+        timing.get("typing", 0.0), timing.get("send_click", 0.0),
+        timing.get("delivery_verify", 0.0), sum(timing.values()),
+    )
 
     if verified:
         evidence["dom_verified"] = True
         evidence["verification_method"] = "outgoing_bubble_match"
         evidence["verification_selector"] = matched_sel
         logger.info("sender: MESSAGE_SENT_AND_VERIFIED — outgoing bubble confirmed")
-        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence}
+        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence, "timing": timing}
 
     await _safe_screenshot(page, "/tmp/verify_failed.png")
     # No outgoing bubble. The composer state distinguishes "never sent" (safe to
@@ -1696,10 +1728,10 @@ async def send_whatsapp_message(
             "sender: MESSAGE_SENT_BUT_NOT_VERIFIED — composer cleared but no outgoing bubble "
             "matched. Marking as sent+unverified (no retry — message likely delivered)."
         )
-        return {"state": MESSAGE_SENT_BUT_NOT_VERIFIED, "evidence": evidence}
+        return {"state": MESSAGE_SENT_BUT_NOT_VERIFIED, "evidence": evidence, "timing": timing}
 
     logger.warning(
         "sender: MESSAGE_NOT_SENT — composer still holds text and no outgoing bubble. "
         "Safe to retry."
     )
-    return {"state": MESSAGE_NOT_SENT, "evidence": evidence}
+    return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}

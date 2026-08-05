@@ -45,7 +45,8 @@ async def get_session(agent_id: str, phone: str) -> Optional[dict]:
     found, cached = request_scope.cache_get(_cache_key(agent_id, phone))
     if found:
         return cached
-    session = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        session = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
     if session and is_expired(session):
         await clear_session(agent_id, phone)
         return None
@@ -76,15 +77,16 @@ async def update_session(
     to_set = dict(patch)
     to_set["updated_at"] = now
     to_set["expires_at"] = now + timedelta(minutes=ttl_minutes)
-    await db[COLLECTION].update_one(
-        {"agent_id": agent_id, "phone": phone},
-        {
-            "$set": to_set,
-            "$setOnInsert": {"agent_id": agent_id, "phone": phone, "created_at": now},
-        },
-        upsert=True,
-    )
-    result = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].update_one(
+            {"agent_id": agent_id, "phone": phone},
+            {
+                "$set": to_set,
+                "$setOnInsert": {"agent_id": agent_id, "phone": phone, "created_at": now},
+            },
+            upsert=True,
+        )
+        result = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
     # Keep the per-turn cache in sync with the write, so a get_session
     # call later in this SAME turn sees the freshly patched doc, not a
     # stale pre-write snapshot.
@@ -93,5 +95,6 @@ async def update_session(
 
 
 async def clear_session(agent_id: str, phone: str) -> None:
-    await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})
     request_scope.cache_set(_cache_key(agent_id, phone), None)

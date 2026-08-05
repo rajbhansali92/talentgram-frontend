@@ -91,12 +91,24 @@ PLAN_FIELD = FieldSpec(
 # ---------------------------------------------------------------------------
 # DB helpers — the only place in this module that touches Mongo directly.
 # ---------------------------------------------------------------------------
-async def _timed_mongo(awaitable):
+async def _timed_project_lookup(awaitable):
     """Wraps a single Mongo read (or an asyncio.gather of several) in the
-    request_scope "mongo" timing bucket — one call-site-level wrap instead
-    of editing every helper function's body, so latency instrumentation
-    stays low-risk to add and easy to audit."""
-    with request_scope.stage("mongo"):
+    request_scope "project_lookup" timing bucket — one call-site-level wrap
+    instead of editing every helper function's body, so latency
+    instrumentation stays low-risk to add and easy to audit. Reserved for
+    reads that resolve project IDENTITY (which project(s) exist/match),
+    as distinct from `_timed_talent_lookup`'s pipeline-membership reads —
+    the split the latency investigation asked for instead of one catch-all
+    "mongo" bucket."""
+    with request_scope.stage("project_lookup"):
+        return await awaitable
+
+
+async def _timed_talent_lookup(awaitable):
+    """Same as `_timed_project_lookup`, for reads that resolve TALENT
+    identity/candidates or pipeline-membership rows (casting_pipeline
+    rows, talent name hydration)."""
+    with request_scope.stage("talent_lookup"):
         return await awaitable
 
 
@@ -125,14 +137,14 @@ async def _fetch_ongoing_projects() -> List[Dict[str, str]]:
     cursor = db.projects.find(
         {"status": "ongoing"}, {"_id": 0, "id": 1, "brand_name": 1}
     ).sort("brand_name", 1)
-    docs = await _timed_mongo(cursor.to_list(2000))
+    docs = await _timed_project_lookup(cursor.to_list(2000))
     projects = [{"id": d["id"], "label": d.get("brand_name") or "(untitled project)"} for d in docs]
     request_scope.cache_set(_PROJECTS_CACHE_KEY, projects)
     return projects
 
 
 async def _project_exists(project_id: str) -> bool:
-    return bool(await _timed_mongo(db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1})))
+    return bool(await _timed_project_lookup(db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1})))
 
 
 async def _fetch_last_updated(project_id: str) -> Optional[Any]:
@@ -143,7 +155,7 @@ async def _fetch_last_updated(project_id: str) -> Optional[Any]:
     still sorts lexicographically == chronologically, so the Mongo sort
     below is correct regardless; _format_last_updated is what handles the
     str-vs-datetime distinction on the way out."""
-    rows = await _timed_mongo(
+    rows = await _timed_project_lookup(
         db.casting_pipeline.find(
             {"project_id": project_id}, {"_id": 0, "updated_at": 1}
         ).sort("updated_at", -1).limit(1).to_list(1)
@@ -183,13 +195,13 @@ def _stage_query_values(stage: str) -> List[str]:
 async def _hydrate_names(talent_ids: List[str]) -> Dict[str, str]:
     if not talent_ids:
         return {}
-    with request_scope.stage("mongo"):
+    with request_scope.stage("talent_lookup"):
         cursor = db.talents.find({"id": {"$in": talent_ids}}, {"_id": 0, "id": 1, "name": 1})
         return {t["id"]: (t.get("name") or "Unknown") async for t in cursor}
 
 
 async def _fetch_stage_candidates(project_id: str, stage: str) -> List[nlu.Candidate]:
-    rows = await _timed_mongo(
+    rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": project_id, "stage": {"$in": _stage_query_values(stage)}},
             {"_id": 0, "talent_id": 1},
@@ -206,7 +218,7 @@ async def _fetch_project_candidates(project_id: str, project_label: str = "") ->
     project_label is passed in (the caller already has it) purely for
     display in a disambiguation list — no extra DB round trip to fetch it
     again."""
-    rows = await _timed_mongo(
+    rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": project_id}, {"_id": 0, "talent_id": 1, "stage": 1}
         ).sort("created_at", 1).to_list(5000)
@@ -239,7 +251,7 @@ async def _fetch_global_candidates() -> List[nlu.Candidate]:
         return []
     project_ids = [p["id"] for p in projects]
     project_label_by_id = {p["id"]: p["label"] for p in projects}
-    rows = await _timed_mongo(
+    rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": {"$in": project_ids}},
             {"_id": 0, "talent_id": 1, "stage": 1, "project_id": 1},
@@ -356,8 +368,10 @@ async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryInten
         current_project_id=None, current_project_label=None, current_stage=None,
         number_map={"type": "projects", "items": items},
     )
-    lines = [f'{it["ordinal"]}. {it["label"]}' for it in items]
-    return ExecResult(ok=True, message="\n".join(lines))
+    with request_scope.stage("response_formatting"):
+        lines = [f'{it["ordinal"]}. {it["label"]}' for it in items]
+        rendered = "\n".join(lines)
+    return ExecResult(ok=True, message=rendered)
 
 
 async def _ask_project_clarification(
@@ -402,12 +416,14 @@ async def _handle_project_detail(
         return ExecResult(ok=False, error="project_not_found", message="Project doesn't exist.")
     total_talents = sum(counts.values())
 
-    lines = ["Project", "", project["label"], "", f"Total Talents: {total_talents}", "", "Pipelines", ""]
-    for i, stage in enumerate(PIPELINE_STAGE_ORDER, start=1):
-        lines.append(f"{i}. {nlu.stage_label(stage)} ({counts.get(stage, 0)})")
-    lines.append("")
-    lines.append("Last Updated:")
-    lines.append(_format_last_updated(last_updated))
+    with request_scope.stage("response_formatting"):
+        lines = ["Project", "", project["label"], "", f"Total Talents: {total_talents}", "", "Pipelines", ""]
+        for i, stage in enumerate(PIPELINE_STAGE_ORDER, start=1):
+            lines.append(f"{i}. {nlu.stage_label(stage)} ({counts.get(stage, 0)})")
+        lines.append("")
+        lines.append("Last Updated:")
+        lines.append(_format_last_updated(last_updated))
+        rendered = "\n".join(lines)
 
     await session_context.update_session(
         AGENT_ID, ctx.sender_phone,
@@ -415,7 +431,7 @@ async def _handle_project_detail(
         current_stage=None,
         number_map={"type": None, "items": []},
     )
-    return ExecResult(ok=True, message="\n".join(lines))
+    return ExecResult(ok=True, message=rendered)
 
 
 def _render_talent_list(project_label: str, stage: str, items: List[Dict[str, Any]]) -> str:
@@ -508,15 +524,17 @@ async def _handle_pipeline_query(
     # sorted order is exactly what's persisted into number_map, so a later
     # "Move 15" indexes into the same order the user was actually shown —
     # never the original DB order.
-    sorted_candidates = sorted(candidates, key=lambda c: (c.label or "").strip().lower())
-    items = [{"ordinal": i + 1, "id": c.id, "label": c.label} for i, c in enumerate(sorted_candidates)]
+    with request_scope.stage("response_formatting"):
+        sorted_candidates = sorted(candidates, key=lambda c: (c.label or "").strip().lower())
+        items = [{"ordinal": i + 1, "id": c.id, "label": c.label} for i, c in enumerate(sorted_candidates)]
+        rendered = _render_talent_list(project["label"], stage, items)
     await session_context.update_session(
         AGENT_ID, ctx.sender_phone,
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=stage,
         number_map={"type": "talents", "items": items},
     )
-    return ExecResult(ok=True, message=_render_talent_list(project["label"], stage, items))
+    return ExecResult(ok=True, message=rendered)
 
 
 _IMPLICIT_COUNT_RE = re.compile(r"\b(how many|left|remaining)\b", re.IGNORECASE)
@@ -570,7 +588,8 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if raw_text == _QUERY_RESUME_MARKER:
         return await _resume_pending_query(session, ctx)
 
-    classification = nlu.classify_query(raw_text, list(PIPELINE_STAGE_ORDER))
+    with request_scope.stage("nlu"):
+        classification = nlu.classify_query(raw_text, list(PIPELINE_STAGE_ORDER))
 
     if (
         classification.kind == "unrecognized"
@@ -709,36 +728,37 @@ PROJECT_QUERY_FIELD = FieldSpec(
 
 
 def _extract_move_fields(text: str) -> Dict[str, str]:
-    chunks, auto_confirm = nlu.preprocess_command(text)
-    out: Dict[str, str] = {}
+    with request_scope.stage("nlu"):
+        chunks, auto_confirm = nlu.preprocess_command(text)
+        out: Dict[str, str] = {}
 
-    if len(chunks) == 1:
-        fields = nlu.extract_move_fields(chunks[0], list(PIPELINE_STAGE_ORDER))
-        project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
-        if len(project_names) <= 1:
-            # The overwhelmingly common case — a normal single-action
-            # command (a multi-name TALENT selector into one project is
-            # already handled by the existing bulk-move machinery below,
-            # untouched). Nothing about this path changed this sprint.
-            out.update(fields)
-            if auto_confirm:
-                out[AUTO_CONFIRM_FIELD.key] = "1"
-            return out
-        # "... in Toyota Glanza and ABC Project" — a multi-project
-        # reference has no existing single-operation concept (a move only
-        # ever targets one project_id), so it always becomes a 1-step
-        # plan; _resolve_one_plan_step cross-product-expands it against
-        # however many talent names were also given.
-        chunks = [chunks[0]]
+        if len(chunks) == 1:
+            fields = nlu.extract_move_fields(chunks[0], list(PIPELINE_STAGE_ORDER))
+            project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
+            if len(project_names) <= 1:
+                # The overwhelmingly common case — a normal single-action
+                # command (a multi-name TALENT selector into one project is
+                # already handled by the existing bulk-move machinery below,
+                # untouched). Nothing about this path changed this sprint.
+                out.update(fields)
+                if auto_confirm:
+                    out[AUTO_CONFIRM_FIELD.key] = "1"
+                return out
+            # "... in Toyota Glanza and ABC Project" — a multi-project
+            # reference has no existing single-operation concept (a move only
+            # ever targets one project_id), so it always becomes a 1-step
+            # plan; _resolve_one_plan_step cross-product-expands it against
+            # however many talent names were also given.
+            chunks = [chunks[0]]
 
-    steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c} for c in chunks]
-    out[PLAN_FIELD.key] = json.dumps(steps)
-    out["talent_selector"] = _PLAN_PLACEHOLDER
-    out["target_stage"] = _PLAN_PLACEHOLDER
-    out["project_query"] = _PLAN_PLACEHOLDER
-    if auto_confirm:
-        out[AUTO_CONFIRM_FIELD.key] = "1"
-    return out
+        steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c} for c in chunks]
+        out[PLAN_FIELD.key] = json.dumps(steps)
+        out["talent_selector"] = _PLAN_PLACEHOLDER
+        out["target_stage"] = _PLAN_PLACEHOLDER
+        out["project_query"] = _PLAN_PLACEHOLDER
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
+        return out
 
 
 @dataclass
@@ -966,7 +986,7 @@ async def _split_by_current_stage(resolved: ResolvedMove) -> SplitMove:
     excluded from the write — matches "Talent already in Approved." — and
     "from_stages" (for the success message's per-stage before/after
     counts) reflects only the talents actually being moved."""
-    rows = await _timed_mongo(
+    rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
             {"_id": 0, "talent_id": 1, "stage": 1},
@@ -1038,25 +1058,26 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
     ResolvedAdd or None), "error" (str or None)}."""
     intent_id = step.get("intent_id") or "casting.move"
     raw_text = step.get("raw_text") or ""
-    if intent_id == "casting.add":
-        fields = nlu.extract_add_fields(raw_text)
-    else:
-        fields = nlu.extract_move_fields(raw_text, list(PIPELINE_STAGE_ORDER))
-        # extract_move_fields returns the RAW stage phrase ("Approved") —
-        # the single-action path normalizes it into the internal stage key
-        # ("approved") via the generic engine's FieldSpec.validate at
-        # initial-collection time; a plan step bypasses that machinery
-        # entirely (it resolves straight from raw_text), so it must
-        # normalize here itself or _resolve_move_selection's `target_stage
-        # not in PIPELINE_STAGES` check always fails.
-        stage_result = _validate_target_stage(fields.get("target_stage") or "")
-        if stage_result.ok:
-            fields["target_stage"] = stage_result.value
+    with request_scope.stage("nlu"):
+        if intent_id == "casting.add":
+            fields = nlu.extract_add_fields(raw_text)
+        else:
+            fields = nlu.extract_move_fields(raw_text, list(PIPELINE_STAGE_ORDER))
+            # extract_move_fields returns the RAW stage phrase ("Approved") —
+            # the single-action path normalizes it into the internal stage key
+            # ("approved") via the generic engine's FieldSpec.validate at
+            # initial-collection time; a plan step bypasses that machinery
+            # entirely (it resolves straight from raw_text), so it must
+            # normalize here itself or _resolve_move_selection's `target_stage
+            # not in PIPELINE_STAGES` check always fails.
+            stage_result = _validate_target_stage(fields.get("target_stage") or "")
+            if stage_result.ok:
+                fields["target_stage"] = stage_result.value
 
-    talent_raw = fields.get("talent_selector") or ""
-    talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
-    project_raw = fields.get("project_query")
-    project_names = nlu.split_multi_names(project_raw) if project_raw else [None]
+        talent_raw = fields.get("talent_selector") or ""
+        talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
+        project_raw = fields.get("project_query")
+        project_names = nlu.split_multi_names(project_raw) if project_raw else [None]
 
     if len(project_names) > 1:
         # Cross-product-expand ONLY on multi-project — a multi-name talent
@@ -1235,31 +1256,32 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
             return f"{resolved.talent_labels[0]} is already in {nlu.stage_label(resolved.target_stage)}.\n\nNo changes were made."
         return "Nothing to move."
 
-    from_label = ", ".join(nlu.stage_label(s) for s in split.from_stages) or "—"
-    lines = [
-        "Project",
-        resolved.project_label,
-        "",
-        "Pipeline",
-        from_label,
-        "",
-        "You are about to move",
-        "",
-    ]
-    lines.extend(f"• {name}" for name in split.actionable_labels)
-    if split.already_labels:
+    with request_scope.stage("response_formatting"):
+        from_label = ", ".join(nlu.stage_label(s) for s in split.from_stages) or "—"
+        lines = [
+            "Project",
+            resolved.project_label,
+            "",
+            "Pipeline",
+            from_label,
+            "",
+            "You are about to move",
+            "",
+        ]
+        lines.extend(f"• {name}" for name in split.actionable_labels)
+        if split.already_labels:
+            lines.append("")
+            lines.append(f"(already in {nlu.stage_label(resolved.target_stage)}, skipped: {', '.join(split.already_labels)})")
         lines.append("")
-        lines.append(f"(already in {nlu.stage_label(resolved.target_stage)}, skipped: {', '.join(split.already_labels)})")
-    lines.append("")
-    lines.append("To")
-    lines.append("")
-    lines.append(nlu.stage_label(resolved.target_stage))
-    lines.append("")
-    lines.append("Reply:")
-    lines.append("1 → Approve")
-    lines.append("2 → Edit")
-    lines.append("3 → Cancel")
-    return "\n".join(lines)
+        lines.append("To")
+        lines.append("")
+        lines.append(nlu.stage_label(resolved.target_stage))
+        lines.append("")
+        lines.append("Reply:")
+        lines.append("1 → Approve")
+        lines.append("2 → Edit")
+        lines.append("3 → Cancel")
+        return "\n".join(lines)
 
 
 async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
@@ -1330,31 +1352,32 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         ttl_minutes=UNDO_WINDOW_MINUTES,
     )
 
-    moved = write_result["moved"]
-    lines = [
-        "Done.",
-        "",
-        "Project",
-        resolved.project_label,
-        "",
-        f"Moved {moved} talent{'' if moved == 1 else 's'}.",
-        "",
-    ]
-    lines.extend(f"• {name}" for name in split.actionable_labels)
-    if split.already_labels:
+    with request_scope.stage("response_formatting"):
+        moved = write_result["moved"]
+        lines = [
+            "Done.",
+            "",
+            "Project",
+            resolved.project_label,
+            "",
+            f"Moved {moved} talent{'' if moved == 1 else 's'}.",
+            "",
+        ]
+        lines.extend(f"• {name}" for name in split.actionable_labels)
+        if split.already_labels:
+            lines.append("")
+            lines.append(f"({len(split.already_labels)} already in {nlu.stage_label(resolved.target_stage)} — skipped)")
         lines.append("")
-        lines.append(f"({len(split.already_labels)} already in {nlu.stage_label(resolved.target_stage)} — skipped)")
-    lines.append("")
-    for stage in split.from_stages:
-        lines.append(nlu.stage_label(stage))
-        lines.append(f"{before_counts.get(stage, 0)} → {after_counts.get(stage, 0)}")
+        for stage in split.from_stages:
+            lines.append(nlu.stage_label(stage))
+            lines.append(f"{before_counts.get(stage, 0)} → {after_counts.get(stage, 0)}")
+            lines.append("")
+        lines.append(nlu.stage_label(resolved.target_stage))
+        lines.append(f"{before_counts.get(resolved.target_stage, 0)} → {after_counts.get(resolved.target_stage, 0)}")
         lines.append("")
-    lines.append(nlu.stage_label(resolved.target_stage))
-    lines.append(f"{before_counts.get(resolved.target_stage, 0)} → {after_counts.get(resolved.target_stage, 0)}")
-    lines.append("")
-    lines.append(f"Operation ID: {operation_id}")
-    lines.append("")
-    lines.append(f"Reply UNDO within {UNDO_WINDOW_MINUTES} minutes to restore the previous state.")
+        lines.append(f"Operation ID: {operation_id}")
+        lines.append("")
+        lines.append(f"Reply UNDO within {UNDO_WINDOW_MINUTES} minutes to restore the previous state.")
 
     # Audit-only enrichment: `collected` is the SAME dict object the
     # dispatcher logs as `parsed_fields` for this exact turn right after
@@ -1472,26 +1495,27 @@ ADD_PROJECT_QUERY_FIELD = FieldSpec(
 
 
 def _extract_add_fields(text: str) -> Dict[str, str]:
-    chunks, auto_confirm = nlu.preprocess_command(text)
-    out: Dict[str, str] = {}
+    with request_scope.stage("nlu"):
+        chunks, auto_confirm = nlu.preprocess_command(text)
+        out: Dict[str, str] = {}
 
-    if len(chunks) == 1:
-        fields = nlu.extract_add_fields(chunks[0])
-        project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
-        if len(project_names) <= 1:
-            out.update(fields)
-            if auto_confirm:
-                out[AUTO_CONFIRM_FIELD.key] = "1"
-            return out
-        chunks = [chunks[0]]
+        if len(chunks) == 1:
+            fields = nlu.extract_add_fields(chunks[0])
+            project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
+            if len(project_names) <= 1:
+                out.update(fields)
+                if auto_confirm:
+                    out[AUTO_CONFIRM_FIELD.key] = "1"
+                return out
+            chunks = [chunks[0]]
 
-    steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c} for c in chunks]
-    out[PLAN_FIELD.key] = json.dumps(steps)
-    out["talent_selector"] = _PLAN_PLACEHOLDER
-    out["project_query"] = _PLAN_PLACEHOLDER
-    if auto_confirm:
-        out[AUTO_CONFIRM_FIELD.key] = "1"
-    return out
+        steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c} for c in chunks]
+        out[PLAN_FIELD.key] = json.dumps(steps)
+        out["talent_selector"] = _PLAN_PLACEHOLDER
+        out["project_query"] = _PLAN_PLACEHOLDER
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
+        return out
 
 
 async def _fetch_all_talent_candidates() -> List[nlu.Candidate]:
@@ -1501,7 +1525,7 @@ async def _fetch_all_talent_candidates() -> List[nlu.Candidate]:
     existing pipeline. Capped at 20000, same cap _fetch_global_candidates
     already uses for its own whole-database-ish scan."""
     cursor = db.talents.find({}, {"_id": 0, "id": 1, "name": 1}).limit(20000)
-    docs = await _timed_mongo(cursor.to_list(20000))
+    docs = await _timed_talent_lookup(cursor.to_list(20000))
     return [nlu.Candidate(id=d["id"], label=d.get("name") or "Unknown") for d in docs]
 
 
@@ -1594,7 +1618,7 @@ async def _split_by_existing_membership(resolved: ResolvedAdd) -> SplitAdd:
     """Live check: which of the resolved talents already have a pipeline
     row (in ANY stage) for this project right now? Those are reported,
     never silently duplicated — mirrors MOVE's _split_by_current_stage."""
-    rows = await _timed_mongo(
+    rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
             {"_id": 0, "talent_id": 1},
@@ -1785,7 +1809,7 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     # the web UI), undo must not silently clobber that later, legitimate
     # change. Uses the shared bulk-move helper for the actual write, same
     # as every other mutation in this module.
-    live_rows = await _timed_mongo(
+    live_rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": project_id, "talent_id": {"$in": list(previous_stage_by_id.keys())}},
             {"_id": 0, "talent_id": 1, "stage": 1},

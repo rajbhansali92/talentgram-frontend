@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from core import db
+from agents import request_scope
 
 COLLECTION = "whatsapp_conversations"
 
@@ -29,7 +30,8 @@ def _now() -> datetime:
 
 
 async def get_conversation(agent_id: str, phone: str) -> Optional[dict]:
-    return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
 
 
 def is_expired(conv: dict) -> bool:
@@ -65,9 +67,10 @@ async def start_conversation(
         "updated_at": now,
         "expires_at": now + timedelta(minutes=ttl_minutes),
     }
-    await db[COLLECTION].replace_one(
-        {"agent_id": agent_id, "phone": phone}, doc, upsert=True
-    )
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].replace_one(
+            {"agent_id": agent_id, "phone": phone}, doc, upsert=True
+        )
     return doc
 
 
@@ -85,11 +88,13 @@ async def update_conversation(
     to_set = dict(patch)
     to_set["updated_at"] = now
     to_set["expires_at"] = now + timedelta(minutes=ttl_minutes)
-    await db[COLLECTION].update_one(
-        {"agent_id": agent_id, "phone": phone},
-        {"$set": to_set, "$inc": {"turn_count": 1}},
-    )
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].update_one(
+            {"agent_id": agent_id, "phone": phone},
+            {"$set": to_set, "$inc": {"turn_count": 1}},
+        )
 
 
 async def clear_conversation(agent_id: str, phone: str) -> None:
-    await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})
+    with request_scope.stage("conversation_state"):
+        await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})

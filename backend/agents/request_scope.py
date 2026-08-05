@@ -15,6 +15,7 @@ every turn — nothing here is ever valid across two different turns.
 from __future__ import annotations
 
 import time
+import uuid
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 import contextvars
@@ -25,6 +26,19 @@ _cache: "contextvars.ContextVar[Optional[Dict[Any, Any]]]" = contextvars.Context
 _timings: "contextvars.ContextVar[Optional[List[Tuple[str, float]]]]" = contextvars.ContextVar(
     "_agents_request_timings", default=None
 )
+# Fine-grained per-operation log (2026-08-05 latency sprint) — each entry:
+# {"name", "collection", "elapsed_ms", "cache"} where cache is "hit"/"miss"/
+# None (None = not a cacheable op at all, e.g. a pure write). Separate from
+# `_timings` (which only aggregates by coarse stage bucket) so the coarse
+# ASCII table keeps working unchanged while also giving a per-operation
+# Mongo Summary (count/total-ms/avg-RTT per collection) and a detailed
+# operation trace for deep-dive investigation.
+_ops: "contextvars.ContextVar[Optional[List[Dict[str, Any]]]]" = contextvars.ContextVar(
+    "_agents_request_ops", default=None
+)
+_request_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "_agents_request_id", default=None
+)
 
 
 def reset() -> None:
@@ -32,6 +46,17 @@ def reset() -> None:
     top of handle_inbound_message, before anything else runs."""
     _cache.set({})
     _timings.set([])
+    _ops.set([])
+    _request_id.set(uuid.uuid4().hex[:12])
+
+
+def get_request_id() -> str:
+    """Short id identifying this one dispatch turn — correlates the coarse
+    dispatch_timing/dispatch_breakdown log lines with the fine-grained op
+    trace and Mongo summary below. Falls back to "no-request-scope" if
+    called outside a reset() turn (e.g. a unit test), so callers never need
+    a None-check."""
+    return _request_id.get() or "no-request-scope"
 
 
 def cache_get(key: Any) -> Tuple[bool, Any]:
@@ -73,6 +98,28 @@ def stage(name: str):
             lst.append((name, elapsed_ms))
 
 
+def record(name: str, stage_bucket: Optional[str] = None, *, elapsed_ms: float = 0.0,
+           collection: Optional[str] = None, cache: Optional[str] = None) -> None:
+    """Non-context-manager sibling of `op()` — records an ALREADY-MEASURED
+    elapsed time (e.g. a sub-stage timing dict computed by a pure,
+    request_scope-free function like nlu.resolve_against_candidates and
+    handed back to its caller) instead of timing a live block. `stage_bucket`
+    is optional here since some fine-grained sub-stages (e.g. nlu.py's
+    "candidate_count") aren't real elapsed-time spans at all — passing
+    None records the op-log entry only, without touching the coarse
+    dict `stage()`/`op()` feed."""
+    if stage_bucket:
+        lst = _timings.get()
+        if lst is not None:
+            lst.append((stage_bucket, elapsed_ms))
+    ops = _ops.get()
+    if ops is not None:
+        ops.append({
+            "name": name, "collection": collection,
+            "elapsed_ms": round(elapsed_ms, 3), "cache": cache,
+        })
+
+
 def get_timings() -> Dict[str, float]:
     """Aggregated {stage_name: total_ms}, rounded to whole ms — the shape
     dispatcher.py logs alongside the overall dispatch_ms total."""
@@ -80,6 +127,91 @@ def get_timings() -> Dict[str, float]:
     for name, ms in (_timings.get() or []):
         totals[name] = totals.get(name, 0.0) + ms
     return {name: round(ms, 1) for name, ms in totals.items()}
+
+
+@contextmanager
+def op(name: str, stage_bucket: str, *, collection: Optional[str] = None, cache: Optional[str] = None):
+    """Fine-grained sibling of `stage()` — records the SAME elapsed time
+    into the coarse `stage_bucket` (so the existing ASCII table/dict keep
+    working exactly as before) AND appends one entry to the per-request op
+    log: {name, collection, elapsed_ms, cache}. `cache` is "hit" (served
+    from request_scope's cache, effectively free), "miss" (a real Mongo
+    round trip happened), or None (not a cacheable read at all, e.g. a
+    write). A "hit" still gets timed (the cache_get call itself is ~free,
+    but recording it proves it really was a hit, not silently skipped)."""
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        lst = _timings.get()
+        if lst is not None:
+            lst.append((stage_bucket, elapsed_ms))
+        ops = _ops.get()
+        if ops is not None:
+            ops.append({
+                "name": name, "collection": collection,
+                "elapsed_ms": round(elapsed_ms, 2), "cache": cache,
+            })
+
+
+def get_ops() -> List[Dict[str, Any]]:
+    """The raw fine-grained operation trace for this turn, in call order."""
+    return list(_ops.get() or [])
+
+
+def format_op_trace() -> str:
+    """One line per fine-grained operation, in call order — the literal
+    "for every step record: elapsed time / Mongo collection / cache
+    status / request id" breakdown."""
+    rid = get_request_id()
+    lines = []
+    for entry in get_ops():
+        cache_label = entry["cache"] or "n/a"
+        coll_label = entry["collection"] or "-"
+        lines.append(
+            f"[{rid}] {entry['name']:<28} collection={coll_label:<20} "
+            f"cache={cache_label:<4} elapsed={entry['elapsed_ms']:.1f}ms"
+        )
+    return "\n".join(lines)
+
+
+def get_mongo_summary() -> Dict[str, Any]:
+    """Aggregates the op trace into {collection: {"queries": N, "total_ms":
+    X}} for every op that was an actual Mongo round trip (cache != "hit"
+    AND collection is set — a cache hit did no Mongo work at all, so it's
+    correctly excluded from the query count), plus overall totals/average
+    RTT across every real round trip this turn."""
+    by_collection: Dict[str, Dict[str, float]] = {}
+    total_queries = 0
+    total_ms = 0.0
+    for entry in get_ops():
+        if not entry.get("collection") or entry.get("cache") == "hit":
+            continue
+        coll = entry["collection"]
+        bucket = by_collection.setdefault(coll, {"queries": 0, "total_ms": 0.0})
+        bucket["queries"] += 1
+        bucket["total_ms"] += entry["elapsed_ms"]
+        total_queries += 1
+        total_ms += entry["elapsed_ms"]
+    return {
+        "by_collection": by_collection,
+        "total_queries": total_queries,
+        "total_ms": round(total_ms, 1),
+        "avg_rtt_ms": round(total_ms / total_queries, 1) if total_queries else 0.0,
+    }
+
+
+def format_mongo_summary() -> str:
+    summary = get_mongo_summary()
+    lines = ["Mongo Summary", ""]
+    for coll, stats in summary["by_collection"].items():
+        lines.append(f"{coll} ........... {stats['queries']} queries ({stats['total_ms']:.0f} ms)")
+    lines.append("")
+    lines.append(f"TOTAL queries ........... {summary['total_queries']}")
+    lines.append(f"TOTAL Mongo time ........ {summary['total_ms']:.0f} ms")
+    lines.append(f"Average RTT .............. {summary['avg_rtt_ms']:.1f} ms")
+    return "\n".join(lines)
 
 
 # Display order + labels for the human-readable summary table — deliberately

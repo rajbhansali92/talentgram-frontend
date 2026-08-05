@@ -46,12 +46,12 @@ async def store_undo(
         "created_at": now,
         "expires_at": now + timedelta(minutes=ttl_minutes),
     }
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("save_undo", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].replace_one({"agent_id": agent_id, "phone": phone}, doc, upsert=True)
 
 
 async def get_undo(agent_id: str, phone: str) -> Optional[dict]:
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("get_undo", "conversation_state", collection=COLLECTION, cache="miss"):
         return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
 
 
@@ -65,5 +65,5 @@ def is_expired(doc: dict) -> bool:
 
 
 async def clear_undo(agent_id: str, phone: str) -> None:
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("clear_undo", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})

@@ -44,8 +44,10 @@ async def get_session(agent_id: str, phone: str) -> Optional[dict]:
     # turns, only avoid a genuinely redundant round trip WITHIN one.
     found, cached = request_scope.cache_get(_cache_key(agent_id, phone))
     if found:
+        with request_scope.op("get_session", "conversation_state", collection=COLLECTION, cache="hit"):
+            pass
         return cached
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("get_session", "conversation_state", collection=COLLECTION, cache="miss"):
         session = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
     if session and is_expired(session):
         await clear_session(agent_id, phone)
@@ -77,7 +79,7 @@ async def update_session(
     to_set = dict(patch)
     to_set["updated_at"] = now
     to_set["expires_at"] = now + timedelta(minutes=ttl_minutes)
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("update_session", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].update_one(
             {"agent_id": agent_id, "phone": phone},
             {
@@ -86,6 +88,10 @@ async def update_session(
             },
             upsert=True,
         )
+    # The read-back is its own real Mongo round trip — timed and counted
+    # separately in the Mongo Summary (this is exactly the 2-round-trips-
+    # per-update-session-call the latency investigation flagged).
+    with request_scope.op("update_session_readback", "conversation_state", collection=COLLECTION, cache=None):
         result = await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
     # Keep the per-turn cache in sync with the write, so a get_session
     # call later in this SAME turn sees the freshly patched doc, not a
@@ -95,6 +101,6 @@ async def update_session(
 
 
 async def clear_session(agent_id: str, phone: str) -> None:
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("clear_session", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})
     request_scope.cache_set(_cache_key(agent_id, phone), None)

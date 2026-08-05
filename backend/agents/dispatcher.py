@@ -563,3 +563,16 @@ async def handle_inbound_message(
             dispatched_agent_id, group_name,
             request_scope.format_stage_table(stages, float(dispatch_ms)),
         )
+        # Fine-grained op trace + Mongo Summary (2026-08-05 latency sprint,
+        # Phase 1) — request_id ties these two lines back to the
+        # dispatch_timing/dispatch_breakdown lines above for the same turn.
+        logger.info(
+            "op_trace agent=%s group=%r request_id=%s\n%s",
+            dispatched_agent_id, group_name, request_scope.get_request_id(),
+            request_scope.format_op_trace(),
+        )
+        logger.info(
+            "mongo_summary agent=%s group=%r request_id=%s\n%s",
+            dispatched_agent_id, group_name, request_scope.get_request_id(),
+            request_scope.format_mongo_summary(),
+        )

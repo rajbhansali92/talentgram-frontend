@@ -88,37 +88,61 @@ PLAN_FIELD = FieldSpec(
 )
 
 
+def _log_talent_resolve_timing(resolved: "nlu.ResolvedTalents") -> None:
+    """Folds nlu.resolve_against_candidates's local sub-stage timing dict
+    (normalize/exact_match/token_match/fuzzy_scoring/ranking) into the
+    fine-grained op log under the "talent_lookup" stage bucket, and logs
+    the candidate count directly — so the Talent Lookup investigation's
+    per-substage breakdown shows up in the real op trace, not just the
+    coarse total."""
+    timing = getattr(resolved, "timing", None) or {}
+    if not timing:
+        return
+    for key, value in timing.items():
+        if key == "candidate_count":
+            continue
+        request_scope.record(f"talent_match_{key}", "talent_lookup", elapsed_ms=value)
+    logger.info(
+        "talent_lookup_detail request_id=%s candidate_count=%d timing=%s",
+        request_scope.get_request_id(), int(timing.get("candidate_count", 0)), timing,
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB helpers — the only place in this module that touches Mongo directly.
 # ---------------------------------------------------------------------------
-async def _timed_project_lookup(awaitable):
+async def _timed_project_lookup(awaitable, collection: str = "projects", name: str = "project_lookup"):
     """Wraps a single Mongo read (or an asyncio.gather of several) in the
-    request_scope "project_lookup" timing bucket — one call-site-level wrap
-    instead of editing every helper function's body, so latency
-    instrumentation stays low-risk to add and easy to audit. Reserved for
-    reads that resolve project IDENTITY (which project(s) exist/match),
-    as distinct from `_timed_talent_lookup`'s pipeline-membership reads —
-    the split the latency investigation asked for instead of one catch-all
-    "mongo" bucket."""
-    with request_scope.stage("project_lookup"):
+    request_scope "project_lookup" timing bucket AND the fine-grained op
+    log (Mongo Summary) — one call-site-level wrap instead of editing
+    every helper function's body, so latency instrumentation stays
+    low-risk to add and easy to audit. Reserved for reads that resolve
+    project IDENTITY (which project(s) exist/match), as distinct from
+    `_timed_talent_lookup`'s pipeline-membership reads — the split the
+    latency investigation asked for instead of one catch-all "mongo"
+    bucket. `collection`/`name` are overridable per call site so the
+    Mongo Summary shows the REAL collection touched, not always
+    "projects" (e.g. `_fetch_last_updated` actually reads
+    casting_pipeline)."""
+    with request_scope.op(name, "project_lookup", collection=collection, cache="miss"):
         return await awaitable
 
 
-async def _timed_talent_lookup(awaitable):
+async def _timed_talent_lookup(awaitable, collection: str = "talents", name: str = "talent_lookup"):
     """Same as `_timed_project_lookup`, for reads that resolve TALENT
     identity/candidates or pipeline-membership rows (casting_pipeline
     rows, talent name hydration)."""
-    with request_scope.stage("talent_lookup"):
+    with request_scope.op(name, "talent_lookup", collection=collection, cache="miss"):
         return await awaitable
 
 
-async def _timed_write(awaitable):
-    with request_scope.stage("db_write"):
+async def _timed_write(awaitable, collection: str = "casting_pipeline", name: str = "db_write"):
+    with request_scope.op(name, "db_write", collection=collection, cache=None):
         return await awaitable
 
 
-async def _timed_aggregation(awaitable):
-    with request_scope.stage("aggregation"):
+async def _timed_aggregation(awaitable, collection: str = "casting_pipeline", name: str = "aggregation"):
+    with request_scope.op(name, "aggregation", collection=collection, cache="miss"):
         return await awaitable
 
 
@@ -133,18 +157,50 @@ async def _fetch_ongoing_projects() -> List[Dict[str, str]]:
     # retry path after an initial project-scoped lookup).
     found, cached = request_scope.cache_get(_PROJECTS_CACHE_KEY)
     if found:
+        with request_scope.op("fetch_ongoing_projects", "project_lookup", collection="projects", cache="hit"):
+            pass
         return cached
     cursor = db.projects.find(
         {"status": "ongoing"}, {"_id": 0, "id": 1, "brand_name": 1}
     ).sort("brand_name", 1)
-    docs = await _timed_project_lookup(cursor.to_list(2000))
+    docs = await _timed_project_lookup(cursor.to_list(2000), name="fetch_ongoing_projects")
     projects = [{"id": d["id"], "label": d.get("brand_name") or "(untitled project)"} for d in docs]
     request_scope.cache_set(_PROJECTS_CACHE_KEY, projects)
     return projects
 
 
 async def _project_exists(project_id: str) -> bool:
-    return bool(await _timed_project_lookup(db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1})))
+    cache_key = ("project_exists", project_id)
+    found, cached = request_scope.cache_get(cache_key)
+    if found:
+        with request_scope.op("project_exists", "project_lookup", collection="projects", cache="hit"):
+            pass
+        return cached
+    result = bool(await _timed_project_lookup(
+        db.projects.find_one({"id": project_id}, {"_id": 0, "id": 1}), name="project_exists"
+    ))
+    request_scope.cache_set(cache_key, result)
+    return result
+
+
+async def _project_exists_batch(project_ids: List[str]) -> None:
+    """Batch-checks existence for several project ids in ONE $in query and
+    seeds the per-turn cache for each — so individual `_project_exists`
+    calls that follow (one per cross-product pair, potentially against
+    several DIFFERENT projects) become cache hits instead of one query
+    each. Only called from the plan engine's multi-project pre-fetch
+    (_resolve_one_plan_step); the single-action path never needs it (it
+    only ever resolves one project)."""
+    unique_ids = list(dict.fromkeys(pid for pid in project_ids if pid))
+    if not unique_ids:
+        return
+    rows = await _timed_project_lookup(
+        db.projects.find({"id": {"$in": unique_ids}}, {"_id": 0, "id": 1}).to_list(len(unique_ids)),
+        name="project_exists_batch",
+    )
+    found_ids = {r["id"] for r in rows}
+    for pid in unique_ids:
+        request_scope.cache_set(("project_exists", pid), pid in found_ids)
 
 
 async def _fetch_last_updated(project_id: str) -> Optional[Any]:
@@ -158,7 +214,8 @@ async def _fetch_last_updated(project_id: str) -> Optional[Any]:
     rows = await _timed_project_lookup(
         db.casting_pipeline.find(
             {"project_id": project_id}, {"_id": 0, "updated_at": 1}
-        ).sort("updated_at", -1).limit(1).to_list(1)
+        ).sort("updated_at", -1).limit(1).to_list(1),
+        collection="casting_pipeline", name="fetch_last_updated",
     )
     return rows[0]["updated_at"] if rows else None
 
@@ -195,7 +252,7 @@ def _stage_query_values(stage: str) -> List[str]:
 async def _hydrate_names(talent_ids: List[str]) -> Dict[str, str]:
     if not talent_ids:
         return {}
-    with request_scope.stage("talent_lookup"):
+    with request_scope.op("hydrate_names", "talent_lookup", collection="talents", cache="miss"):
         cursor = db.talents.find({"id": {"$in": talent_ids}}, {"_id": 0, "id": 1, "name": 1})
         return {t["id"]: (t.get("name") or "Unknown") async for t in cursor}
 
@@ -205,7 +262,8 @@ async def _fetch_stage_candidates(project_id: str, stage: str) -> List[nlu.Candi
         db.casting_pipeline.find(
             {"project_id": project_id, "stage": {"$in": _stage_query_values(stage)}},
             {"_id": 0, "talent_id": 1},
-        ).sort("created_at", 1).to_list(5000)
+        ).sort("created_at", 1).to_list(5000),
+        collection="casting_pipeline", name="fetch_stage_candidates",
     )
     talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
     names = await _hydrate_names(talent_ids)
@@ -221,7 +279,8 @@ async def _fetch_project_candidates(project_id: str, project_label: str = "") ->
     rows = await _timed_talent_lookup(
         db.casting_pipeline.find(
             {"project_id": project_id}, {"_id": 0, "talent_id": 1, "stage": 1}
-        ).sort("created_at", 1).to_list(5000)
+        ).sort("created_at", 1).to_list(5000),
+        collection="casting_pipeline", name="fetch_project_candidates",
     )
     talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
     names = await _hydrate_names(talent_ids)
@@ -252,7 +311,8 @@ async def _fetch_global_candidates() -> List[nlu.Candidate]:
     project_ids = [p["id"] for p in projects]
     project_label_by_id = {p["id"]: p["label"] for p in projects}
     rows = await _timed_talent_lookup(
-        db.casting_pipeline.find(
+        collection="casting_pipeline", name="fetch_global_candidates",
+        awaitable=db.casting_pipeline.find(
             {"project_id": {"$in": project_ids}},
             {"_id": 0, "talent_id": 1, "stage": 1, "project_id": 1},
         ).sort("created_at", 1).to_list(20000)
@@ -326,10 +386,11 @@ async def _resolve_project_ref(
         if match.project:
             return match.project, None, None
         if match.ambiguous:
-            numbered = "\n".join(f"- {o}" for o in match.ambiguous)
-            return None, f"Which project did you mean?\n{numbered}", match.ambiguous
+            labels = [o["label"] for o in match.ambiguous]
+            numbered = "\n".join(f"- {label}" for label in labels)
+            return None, f"Which project did you mean?\n{numbered}", labels
         if match.suggestions:
-            bullets = "\n".join(f"• {s}" for s in match.suggestions)
+            bullets = "\n".join(f"• {o['label']}" for o in match.suggestions)
             return None, (
                 f"I couldn't find a project matching:\n\n{name_query}\n\nDid you mean:\n\n{bullets}"
             ), None
@@ -851,11 +912,11 @@ async def _resolve_move_selection(
             project_id = match.project["id"]
             project_label = match.project["label"]
         elif match.ambiguous:
-            options = [{"label": o, "value": o} for o in match.ambiguous]
-            msg = nlu.format_numbered_options("I found multiple projects.", [[o] for o in match.ambiguous])
+            options = [{"label": o["label"], "value": o["label"]} for o in match.ambiguous]
+            msg = nlu.format_numbered_options("I found multiple projects.", [[o["label"]] for o in match.ambiguous])
             return None, msg, {"kind": "project", "field_key": "project_query", "options": options}
         elif match.suggestions:
-            bullets = "\n".join(f"• {s}" for s in match.suggestions)
+            bullets = "\n".join(f"• {o['label']}" for o in match.suggestions)
             return None, (
                 f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
             ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
@@ -912,6 +973,7 @@ async def _resolve_move_selection(
 
     with request_scope.stage("fuzzy"):
         resolved = nlu.resolve_against_candidates(selector, candidates)
+    _log_talent_resolve_timing(resolved)
 
     if not resolved.ok:
         if resolved.ambiguous_candidates:
@@ -931,6 +993,7 @@ async def _resolve_move_selection(
                 global_hit = nlu.resolve_against_candidates(
                     nlu.SelectorResult(ok=True, name_query=selector.name_query), global_candidates
                 )
+            _log_talent_resolve_timing(global_hit)
             if global_hit.ok:
                 found_name = global_hit.talent_labels[0]
                 return None, (
@@ -990,7 +1053,8 @@ async def _split_by_current_stage(resolved: ResolvedMove) -> SplitMove:
         db.casting_pipeline.find(
             {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
             {"_id": 0, "talent_id": 1, "stage": 1},
-        ).to_list(len(resolved.talent_ids))
+        ).to_list(len(resolved.talent_ids)),
+        collection="casting_pipeline", name="split_by_current_stage",
     )
     current_stage_by_id = {
         r["talent_id"]: (_normalise_stage(r.get("stage")) or r.get("stage")) for r in rows
@@ -1089,10 +1153,33 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
         # silently turn "2 talents moved" into two separate "1 talent
         # moved" lines for every bulk step inside a plan.
         pairs = [(t, p) for t in talent_names for p in project_names]
+        # Opt 3 (2026-08-05 latency sprint): batch-check existence for
+        # every distinct project this step touches in ONE $in query,
+        # instead of one query per pair inside the loop below — pure
+        # in-memory name resolution (already cached via
+        # _fetch_ongoing_projects), so pre-resolving names to ids here
+        # costs no extra Mongo round trips.
+        projects_list = await _fetch_ongoing_projects()
+        pre_resolve_ids = []
+        for pname in set(project_names):
+            pmatch = nlu.resolve_project_by_name(pname, projects_list)
+            if pmatch.project:
+                pre_resolve_ids.append(pmatch.project["id"])
+        if pre_resolve_ids:
+            await _project_exists_batch(pre_resolve_ids)
     else:
         pairs = [(talent_raw, project_raw)]
 
     out: List[Dict[str, Any]] = []
+    # Opt 2 (2026-08-05 latency sprint): _remember_last_talent used to be
+    # called once PER PAIR — for a multi-project cross-product step that's
+    # N sequential write+read-back round trips to persist a value only the
+    # LAST one ends up keeping (last-write-wins). Nothing within this same
+    # step's pair loop ever reads session.last_talent_id back (only a
+    # LATER, separate plan step does — see the docstring note below), so
+    # it's safe to collect the last successful resolution and write it
+    # once, after the loop, instead of once per pair.
+    last_resolved_single = None
     for talent_text, project_text in pairs:
         sub_fields = dict(fields)
         sub_fields["talent_selector"] = talent_text
@@ -1103,17 +1190,22 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
             resolved, err, _dis = await _resolve_add_selection(sub_fields, session)
         else:
             resolved, err, _dis = await _resolve_move_selection(sub_fields, session)
-        if resolved is not None:
-            # Updates session.last_talent_id — a LATER step in the SAME
-            # plan referring implicitly to "whoever we just discussed"
-            # (e.g. a chained "move to Approved" with no name of its own)
-            # picks this up via the existing PRONOUN_LAST_MARKER path.
-            await _remember_last_talent(ctx, resolved)
+        if resolved is not None and len(resolved.talent_ids) == 1:
+            last_resolved_single = resolved
         out.append({
             "intent_id": intent_id, "raw_text": raw_text,
             "label": (resolved.project_label if resolved else (project_text or raw_text)),
             "resolved": resolved, "error": err,
         })
+    if last_resolved_single is not None:
+        # Updates session.last_talent_id — a LATER step in the SAME plan
+        # referring implicitly to "whoever we just discussed" (e.g. a
+        # chained "move to Approved" with no name of its own) picks this
+        # up via the existing PRONOUN_LAST_MARKER path. Written once, after
+        # every pair in THIS step has resolved — identical end result to
+        # the old per-pair writes (last-write-wins), just without the
+        # discarded intermediate round trips.
+        await _remember_last_talent(ctx, last_resolved_single)
     return out
 
 
@@ -1518,15 +1610,35 @@ def _extract_add_fields(text: str) -> Dict[str, str]:
         return out
 
 
+_ALL_TALENTS_CACHE_KEY = ("all_talent_candidates",)
+
+
 async def _fetch_all_talent_candidates() -> List[nlu.Candidate]:
     """Every talent in the database (id+name only) — the search space for
     Add, since a talent being added fresh may have no pipeline row in ANY
     project yet, unlike Move's candidates which are always scoped to an
     existing pipeline. Capped at 20000, same cap _fetch_global_candidates
-    already uses for its own whole-database-ish scan."""
+    already uses for its own whole-database-ish scan.
+
+    Request-scoped cache (2026-08-05 latency investigation finding): this
+    is an unfiltered, uncached full-collection fetch — before this cache,
+    a multi-project cross-product Add ("Add X to A and B") called this
+    once PER project pair, re-downloading the identical, non-project-
+    specific candidate list every time. Mirrors _fetch_ongoing_projects's
+    existing cache pattern exactly: one fetch per turn, discarded at the
+    next request_scope.reset(), never stale across turns."""
+    found, cached = request_scope.cache_get(_ALL_TALENTS_CACHE_KEY)
+    if found:
+        with request_scope.op("fetch_all_talent_candidates", "talent_lookup", collection="talents", cache="hit"):
+            pass
+        return cached
     cursor = db.talents.find({}, {"_id": 0, "id": 1, "name": 1}).limit(20000)
-    docs = await _timed_talent_lookup(cursor.to_list(20000))
-    return [nlu.Candidate(id=d["id"], label=d.get("name") or "Unknown") for d in docs]
+    docs = await _timed_talent_lookup(
+        cursor.to_list(20000), collection="talents", name="fetch_all_talent_candidates",
+    )
+    candidates = [nlu.Candidate(id=d["id"], label=d.get("name") or "Unknown") for d in docs]
+    request_scope.cache_set(_ALL_TALENTS_CACHE_KEY, candidates)
+    return candidates
 
 
 @dataclass
@@ -1566,11 +1678,11 @@ async def _resolve_add_selection(
         project_id = match.project["id"]
         project_label = match.project["label"]
     elif match.ambiguous:
-        options = [{"label": o, "value": o} for o in match.ambiguous]
-        msg = nlu.format_numbered_options("I found multiple projects.", [[o] for o in match.ambiguous])
+        options = [{"label": o["label"], "value": o["label"]} for o in match.ambiguous]
+        msg = nlu.format_numbered_options("I found multiple projects.", [[o["label"]] for o in match.ambiguous])
         return None, msg, {"kind": "project", "field_key": "project_query", "options": options}
     elif match.suggestions:
-        bullets = "\n".join(f"• {s}" for s in match.suggestions)
+        bullets = "\n".join(f"• {o['label']}" for o in match.suggestions)
         return None, (
             f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
         ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
@@ -1588,6 +1700,7 @@ async def _resolve_add_selection(
 
     with request_scope.stage("fuzzy"):
         resolved = nlu.resolve_against_candidates(selector, candidates)
+    _log_talent_resolve_timing(resolved)
     if not resolved.ok:
         if resolved.ambiguous_candidates:
             options = [
@@ -1622,7 +1735,8 @@ async def _split_by_existing_membership(resolved: ResolvedAdd) -> SplitAdd:
         db.casting_pipeline.find(
             {"project_id": resolved.project_id, "talent_id": {"$in": resolved.talent_ids}},
             {"_id": 0, "talent_id": 1},
-        ).to_list(len(resolved.talent_ids))
+        ).to_list(len(resolved.talent_ids)),
+        collection="casting_pipeline", name="split_by_existing_membership",
     )
     existing_ids = {r["talent_id"] for r in rows}
     actionable_ids: List[str] = []
@@ -1813,7 +1927,8 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         db.casting_pipeline.find(
             {"project_id": project_id, "talent_id": {"$in": list(previous_stage_by_id.keys())}},
             {"_id": 0, "talent_id": 1, "stage": 1},
-        ).to_list(len(previous_stage_by_id) or 1)
+        ).to_list(len(previous_stage_by_id) or 1),
+        collection="casting_pipeline", name="undo_live_rows",
     )
     live_stage_by_id = {
         r["talent_id"]: (_normalise_stage(r.get("stage")) or r.get("stage")) for r in live_rows

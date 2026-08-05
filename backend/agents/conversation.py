@@ -30,7 +30,11 @@ def _now() -> datetime:
 
 
 async def get_conversation(agent_id: str, phone: str) -> Optional[dict]:
-    with request_scope.stage("conversation_state"):
+    # No per-turn cache here (unlike session_context.get_session) — a
+    # conversation's `step` can legitimately change mid-turn (e.g. an edit
+    # applied then re-read), so every call is a real, uncached read; still
+    # logged as "load_pending_operation" for the fine-grained trace.
+    with request_scope.op("load_pending_operation", "conversation_state", collection=COLLECTION, cache="miss"):
         return await db[COLLECTION].find_one({"agent_id": agent_id, "phone": phone})
 
 
@@ -67,7 +71,7 @@ async def start_conversation(
         "updated_at": now,
         "expires_at": now + timedelta(minutes=ttl_minutes),
     }
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("save_pending_operation", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].replace_one(
             {"agent_id": agent_id, "phone": phone}, doc, upsert=True
         )
@@ -88,7 +92,7 @@ async def update_conversation(
     to_set = dict(patch)
     to_set["updated_at"] = now
     to_set["expires_at"] = now + timedelta(minutes=ttl_minutes)
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("save_pending_operation", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].update_one(
             {"agent_id": agent_id, "phone": phone},
             {"$set": to_set, "$inc": {"turn_count": 1}},
@@ -96,5 +100,5 @@ async def update_conversation(
 
 
 async def clear_conversation(agent_id: str, phone: str) -> None:
-    with request_scope.stage("conversation_state"):
+    with request_scope.op("clear_completed_operation", "conversation_state", collection=COLLECTION, cache=None):
         await db[COLLECTION].delete_one({"agent_id": agent_id, "phone": phone})

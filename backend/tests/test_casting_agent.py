@@ -1529,7 +1529,14 @@ async def test_talent_already_in_destination_stage_message():
 
 # 4. Project fuzzy suggestion — a typo'd project name is suggested, never
 # silently auto-corrected.
-async def test_project_fuzzy_suggestion_not_auto_resolved():
+async def test_project_fuzzy_typo_auto_resolves():
+    """2026-08-05 latency/matching sprint: project fuzzy matching now auto-
+    resolves an unambiguous close typo, mirroring talent matching's own
+    autocorrect-cutoff + ambiguity-margin logic exactly (previously project
+    matching NEVER auto-resolved on fuzzy, always asking "did you mean" —
+    that old behavior is intentionally gone). Confirmation is still
+    required before anything is actually moved — this only removes the
+    extra "did you mean" round trip, not the approval step."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group)
     phone = _phone()
@@ -1545,14 +1552,53 @@ async def test_project_fuzzy_suggestion_not_auto_resolved():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "I couldn't find a project matching:" in r.reply
-        assert "Toyota Glnza" in r.reply
-        assert "Did you mean:" in r.reply
-        assert "• Toyota Glanza" in r.reply
-        # Never silently moved — the typo was only ever suggested.
+        # Auto-resolved straight to the move confirmation card — no "did
+        # you mean" round trip for an unambiguous typo.
+        assert "Project" in r.reply and "Toyota Glanza" in r.reply
+        assert "You are about to move" in r.reply
+        assert "• Suggestion Talent" in r.reply
+        # Still not moved — confirmation is a separate, required step.
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "hold"
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+async def test_project_fuzzy_ambiguous_still_asks():
+    """Two projects close enough to each other that neither clears the
+    ambiguity margin over the other must still ask — auto-resolve only
+    fires for a single, clearly-best fuzzy match (same safety bar as
+    talent matching)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_a = await _seed_project(brand_name=f"Toyota Glanza {tag}")
+    project_b = await _seed_project(brand_name=f"Toyota Glanzo {tag}")
+    t1 = await _seed_talent(f"AmbigProjTalent {tag}")
+    talent_ids = [t1]
+    try:
+        await _seed_pipeline_row(project_a, t1, "hold")
+        await _seed_pipeline_row(project_b, t1, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move AmbigProjTalent {tag} to Approved in Toyota Glanz {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        # Neither project was silently picked.
+        assert (await db.casting_pipeline.find_one({"project_id": project_a, "talent_id": t1}))["stage"] == "hold"
+        assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": t1}))["stage"] == "hold"
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=talent_ids)
         await _restore_config(original)
 
 

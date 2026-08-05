@@ -24,6 +24,7 @@ from __future__ import annotations
 import difflib
 import functools
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -365,6 +366,17 @@ class ResolvedTalents:
     # showing text the user would have to re-type a fix for.
     ambiguous_candidates: Optional[List[Candidate]] = None
     error: Optional[str] = None
+    # Local, request_scope-free sub-stage timing (2026-08-05 latency
+    # sprint) — {"normalize", "exact_match", "token_match", "fuzzy_scoring",
+    # "ranking"} in ms, plus "candidate_count". Kept as plain time.monotonic()
+    # deltas (not agents.request_scope) so this module stays framework-
+    # agnostic/pure and independently unit-testable; the caller
+    # (casting_pipeline.py) folds these into the fine-grained op log.
+    # Only populated on the single-name_query tier-escalation path (the one
+    # this investigation is about) — the ordinal/everyone/resolved_id/
+    # name_queries branches are index lookups or thin recursion, not real
+    # comparison work.
+    timing: Dict[str, float] = field(default_factory=dict)
 
 
 _NAME_FUZZY_CUTOFF = 0.72          # worth suggesting at all
@@ -372,14 +384,26 @@ _NAME_AUTOCORRECT_CUTOFF = 0.85    # confident enough to auto-resolve without as
 _NAME_AMBIGUITY_MARGIN = 0.05      # top-2 candidates scoring this close => ask, never guess
 
 _NAME_PUNCT_RE = re.compile(r"[^a-z0-9\s]")
+# A trailing possessive ("Ahaan's") must become its own clean token
+# ("ahaan"), not merge into "ahaans" — deleting the apostrophe outright (the
+# old behaviour) glues the "s" onto the base word, which then can never
+# match a query token like "ahaan" under the token-subset tier below. Strip
+# the possessive as a unit, before generic punctuation stripping ever runs.
+_POSSESSIVE_RE = re.compile(r"'s\b")
 
 
 def _normalize_name(s: str) -> str:
     """Lowercase, punctuation-stripped, whitespace-collapsed — absorbs the
     kind of noise a voice transcript or a typo introduces (stray periods,
     apostrophes, double spaces) without touching the underlying matching
-    logic itself."""
+    logic itself. A possessive "'s" is stripped as a unit (see
+    _POSSESSIVE_RE) and a hyphen is treated as a word separator (space),
+    not simply deleted — both matter for project names like "Tira -
+    Ahaan's Film", which must tokenize as {tira, ahaan, film}, not
+    {tira, ahaans, film} or a hyphen-glued mess."""
     s = (s or "").strip().lower()
+    s = _POSSESSIVE_RE.sub("", s)
+    s = s.replace("-", " ")
     s = _NAME_PUNCT_RE.sub("", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -504,35 +528,48 @@ def resolve_against_candidates(selector: SelectorResult, candidates: List[Candid
         return ResolvedTalents(ok=True, talent_ids=ids, talent_labels=labels)
 
     if selector.name_query:
-        raw_q = selector.name_query.strip()
-        if not raw_q:
-            return ResolvedTalents(ok=False, error="I didn't catch who to move.")
+        # Local sub-stage timing (2026-08-05 latency sprint) — see
+        # ResolvedTalents.timing's docstring for why this stays a plain
+        # dict of time.monotonic() deltas instead of using request_scope.
+        timing: Dict[str, float] = {"candidate_count": float(len(candidates))}
 
-        # Tier 1: exact, case-SENSITIVE — the single highest-confidence
-        # signal, tried before anything normalises casing away.
+        def _finish(result: ResolvedTalents) -> ResolvedTalents:
+            result.timing = timing
+            return result
+
+        t0 = time.monotonic()
+        raw_q = selector.name_query.strip()
+        timing["normalize"] = round((time.monotonic() - t0) * 1000, 3)
+        if not raw_q:
+            return _finish(ResolvedTalents(ok=False, error="I didn't catch who to move."))
+
+        # Tier 1+2: exact, case-sensitive then case-insensitive — the
+        # single highest-confidence signal, tried before anything
+        # normalises casing away.
+        t0 = time.monotonic()
         result = _pick_unique_or_ambiguous(
             [c for c in candidates if c.label.strip() == raw_q], raw_q
         )
+        if result is None:
+            q_lower = raw_q.lower()
+            result = _pick_unique_or_ambiguous(
+                [c for c in candidates if c.label.strip().lower() == q_lower], raw_q
+            )
+        timing["exact_match"] = round((time.monotonic() - t0) * 1000, 3)
         if result is not None:
-            return result
-
-        # Tier 2: exact, case-insensitive.
-        q_lower = raw_q.lower()
-        result = _pick_unique_or_ambiguous(
-            [c for c in candidates if c.label.strip().lower() == q_lower], raw_q
-        )
-        if result is not None:
-            return result
+            return _finish(result)
 
         # Tier 3: normalized substring (handles a short first name like
         # "Sneh" or "Aahana" against a full "First Last" label, and
         # absorbs punctuation/whitespace noise from a voice transcript).
+        t0 = time.monotonic()
         q_norm = _normalize_name(raw_q)
         result = _pick_unique_or_ambiguous(
             [c for c in candidates if q_norm and q_norm in _normalize_name(c.label)], raw_q
         )
+        timing["token_match"] = round((time.monotonic() - t0) * 1000, 3)
         if result is not None:
-            return result
+            return _finish(result)
 
         # Tier 4: fuzzy — whole-string or best-token similarity (see
         # _name_similarity for why both are tried). Auto-resolves ONLY
@@ -540,13 +577,17 @@ def resolve_against_candidates(selector: SelectorResult, candidates: List[Candid
         # AND clearly ahead of the next-best one; two candidates scoring
         # within the ambiguity margin of each other are never silently
         # collapsed into a guess, regardless of how high either scores.
+        t0 = time.monotonic()
         scored = sorted(
             ((c, _name_similarity(raw_q, c.label)) for c in candidates),
             key=lambda pair: pair[1], reverse=True,
         )
+        timing["fuzzy_scoring"] = round((time.monotonic() - t0) * 1000, 3)
+        t0 = time.monotonic()
         scored = [(c, s) for c, s in scored if s >= _NAME_FUZZY_CUTOFF]
         if not scored:
-            return ResolvedTalents(ok=False, error="No matching talent.")
+            timing["ranking"] = round((time.monotonic() - t0) * 1000, 3)
+            return _finish(ResolvedTalents(ok=False, error="No matching talent."))
 
         top_c, top_s = scored[0]
         if len(scored) == 1:
@@ -559,22 +600,25 @@ def resolve_against_candidates(selector: SelectorResult, candidates: List[Candid
             # written, which is the real safety net — the alternative
             # (an "I found multiple matching talents" list with a single
             # option) is strictly worse UX for zero extra safety.
-            return ResolvedTalents(
+            timing["ranking"] = round((time.monotonic() - t0) * 1000, 3)
+            return _finish(ResolvedTalents(
                 ok=True, talent_ids=[top_c.id], talent_labels=[top_c.label],
                 resolved_project_id=top_c.project_id, resolved_project_label=top_c.project_label,
-            )
+            ))
         second_s = scored[1][1]
         if top_s >= _NAME_AUTOCORRECT_CUTOFF and (top_s - second_s) > _NAME_AMBIGUITY_MARGIN:
-            return ResolvedTalents(
+            timing["ranking"] = round((time.monotonic() - t0) * 1000, 3)
+            return _finish(ResolvedTalents(
                 ok=True, talent_ids=[top_c.id], talent_labels=[top_c.label],
                 resolved_project_id=top_c.project_id, resolved_project_label=top_c.project_label,
-            )
+            ))
         close_enough = [c for c, s in scored if (top_s - s) <= _NAME_AMBIGUITY_MARGIN][:8]
-        return ResolvedTalents(
+        timing["ranking"] = round((time.monotonic() - t0) * 1000, 3)
+        return _finish(ResolvedTalents(
             ok=False,
             error=_format_ambiguous_matches(close_enough, raw_q),
             ambiguous_candidates=close_enough,
-        )
+        ))
 
     return ResolvedTalents(ok=False, error="I didn't catch who to move.")
 
@@ -1163,8 +1207,15 @@ def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
 @dataclass
 class ProjectNameMatch:
     project: Optional[Dict[str, str]] = None  # {"id": ..., "label": ...}
-    ambiguous: Optional[List[str]] = None      # multiple real (exact/substring) matches tied
-    suggestions: Optional[List[str]] = None    # no real match, but fuzzy found close candidates
+    # Multiple real (exact/substring/token-subset) matches tied, OR (Tier 5)
+    # multiple fuzzy candidates too close to call — each {"id", "label"},
+    # not bare strings, so a caller can fetch per-candidate detail (status/
+    # talent count/last updated) for a richer disambiguation card without a
+    # second name-to-id lookup.
+    ambiguous: Optional[List[Dict[str, str]]] = None
+    # No real/tied match, but fuzzy found close candidates below the
+    # auto-resolve bar — same {"id", "label"} shape as `ambiguous`.
+    suggestions: Optional[List[Dict[str, str]]] = None
     error: Optional[str] = None
 
 
@@ -1179,12 +1230,15 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     labels = [(p.get("label") or "") for p in projects]
     q_lower = q_raw.lower()
 
+    def _as_dicts(idxs: List[int]) -> List[Dict[str, str]]:
+        return [{"id": projects[i]["id"], "label": labels[i]} for i in idxs]
+
     # Tier 1: exact, case-insensitive.
     exact = [i for i, l in enumerate(labels) if l.strip().lower() == q_lower]
     if len(exact) == 1:
         return ProjectNameMatch(project=projects[exact[0]])
     if len(exact) > 1:
-        return ProjectNameMatch(ambiguous=[labels[i] for i in exact[:8]])
+        return ProjectNameMatch(ambiguous=_as_dicts(exact[:8]))
 
     # Tier 2: normalized exact — case/punctuation/hyphen/whitespace-
     # insensitive ("Bajaj Pulsar Main Guy" == "Bajaj Pulsar - Main Guy").
@@ -1194,7 +1248,7 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(nexact) == 1:
         return ProjectNameMatch(project=projects[nexact[0]])
     if len(nexact) > 1:
-        return ProjectNameMatch(ambiguous=[labels[i] for i in nexact[:8]])
+        return ProjectNameMatch(ambiguous=_as_dicts(nexact[:8]))
 
     # Tier 3: normalized substring (either direction).
     contains = [
@@ -1203,7 +1257,7 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(contains) == 1:
         return ProjectNameMatch(project=projects[contains[0]])
     if len(contains) > 1:
-        return ProjectNameMatch(ambiguous=[labels[i] for i in contains[:8]])
+        return ProjectNameMatch(ambiguous=_as_dicts(contains[:8]))
 
     # Tier 4: order-independent token-subset — every normalized query token
     # present somewhere in the candidate's tokens, regardless of order or
@@ -1215,17 +1269,31 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(subset_idxs) == 1:
         return ProjectNameMatch(project=projects[subset_idxs[0]])
     if len(subset_idxs) > 1:
-        return ProjectNameMatch(ambiguous=[labels[i] for i in subset_idxs[:8]])
+        return ProjectNameMatch(ambiguous=_as_dicts(subset_idxs[:8]))
 
-    # Tier 5: character-level fuzzy / partial token overlap. Deliberately
-    # never auto-resolves here, however close — moving someone into the
-    # WRONG client's project is a higher-stakes mistake than a talent-name
-    # typo, so a close fuzzy hit is always offered as a suggestion to
-    # confirm, never silently applied.
-    labels_lower = [l.strip().lower() for l in labels]
-    close = difflib.get_close_matches(q_lower, labels_lower, n=3, cutoff=_PROJECT_NAME_FUZZY_CUTOFF)
-    if close:
-        matched = [labels[i] for i, l in enumerate(labels_lower) if l in close]
-        return ProjectNameMatch(suggestions=matched)
+    # Tier 5: character-level fuzzy / partial token overlap. Mirrors talent
+    # matching's own fuzzy tier exactly (_name_similarity + the same
+    # autocorrect-cutoff/ambiguity-margin check already proven safe in
+    # production) — a confident, unambiguous top match now auto-resolves
+    # instead of always asking; the move/add confirmation card is the
+    # actual safety net, same as it already is for talent matching.
+    scored = sorted(
+        ((i, _name_similarity(q_raw, labels[i])) for i in range(len(labels))),
+        key=lambda pair: pair[1], reverse=True,
+    )
+    scored = [(i, s) for i, s in scored if s >= _NAME_FUZZY_CUTOFF]
+    if not scored:
+        return ProjectNameMatch(error=f'I couldn\'t find a project matching "{name_query}".')
 
-    return ProjectNameMatch(error=f'I couldn\'t find a project matching "{name_query}".')
+    top_i, top_s = scored[0]
+    if len(scored) == 1:
+        # Nothing else cleared even the base "worth suggesting" cutoff —
+        # there's nothing for it to be ambiguous WITH (same reasoning as
+        # talent matching's single-candidate case).
+        return ProjectNameMatch(project=projects[top_i])
+    second_s = scored[1][1]
+    if top_s >= _NAME_AUTOCORRECT_CUTOFF and (top_s - second_s) > _NAME_AMBIGUITY_MARGIN:
+        return ProjectNameMatch(project=projects[top_i])
+
+    close_enough = [i for i, s in scored if (top_s - s) <= _NAME_AMBIGUITY_MARGIN][:8]
+    return ProjectNameMatch(suggestions=_as_dicts(close_enough))

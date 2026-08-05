@@ -58,6 +58,12 @@ class InboundMessageIn(BaseModel):
     # sends) means "not a reply" — dispatcher.py's task-routing branch is
     # then always skipped, so this is fully backward compatible.
     replied_to_message_id: Optional[str] = None
+    # Step 2B (2026-08-05) — the inner text of the reply's "quoted message"
+    # block, if the transport could read one (see whatsapp-worker/
+    # inbound.py's _extract_reply_context). None means either "not a
+    # reply" or "couldn't read the quote" — either way the task-routing
+    # tier that uses this is simply skipped, fully backward compatible.
+    replied_quoted_text: Optional[str] = None
 
 
 class TaskSentIn(BaseModel):
@@ -115,6 +121,7 @@ async def inbound_message(
         transcript_confidence=payload.transcript_confidence,
         media_type=payload.media_type,
         replied_to_message_id=payload.replied_to_message_id,
+        replied_quoted_text=payload.replied_quoted_text,
     )
     t_dispatch_done = time.monotonic()
     # operation_id is only ever set when `reply` is a task's confirmation/

@@ -372,49 +372,67 @@ async def _direction_diag(page, css_selector: str, index: int) -> dict:
         return {"error": str(exc)}
 
 
-async def _dump_reply_quote_diag(page, full_selector: str, index: int) -> dict:
-    """Discovery-only (Concurrent Task Engine, Step 2A) — nothing in this
-    codebase has ever read WhatsApp Web's "replying to X" quoted-message DOM
-    structure (confirmed by grep before writing this), so rather than guess a
-    selector for something this central, this logs whatever it finds for any
-    incoming message that DOES look like a reply, using the same broad,
-    evidence-gathering-not-guessing spirit as sender.py's PHASE26B dumps.
-    Purely observational: never raises into the scan loop, never affects
-    which messages get dispatched, and its output is not (yet) used for
-    anything — Step 2B reads these logs from production to pick a real
-    selector before replied_to_message_id extraction is implemented."""
+async def _extract_reply_context(page, full_selector: str, index: int) -> Optional[dict]:
+    """Concurrent Task Engine Step 2B — structured extraction of a WhatsApp
+    reply's "quoted message" context, replacing Step 2A's discovery-only
+    dump now that real production samples have confirmed the shape:
+
+        <div data-testid="quoted-message">
+          ...
+          <span ...>You</span>                          <- quoted sender
+          ...
+          <span data-testid="selectable-text" ...>
+            {the quoted card's full rendered text}
+          </span>
+        </div>
+
+    Two real production samples (2026-08-05, group "Talentgram Casting
+    Pipeline") both showed a `[data-testid="quoted-message"]` block whose
+    `[data-testid="selectable-text"]` innerText was an exact copy of the
+    confirmation card's rendered text, with NO `data-id`/message-id
+    attribute anywhere in the quoted block itself. Given that, this
+    function still does a best-effort walk up a few ancestors for a
+    `data-id` (the same pattern _extract_message_info already uses for
+    phone extraction) in case a different WhatsApp Web build/version
+    exposes one — but the caller (agents/tasks.find_task_by_quoted_text,
+    backend side) treats quotedMessageId as optional and falls back to
+    matching quotedText, which real evidence shows is reliably present.
+    Returns None for a plain, non-reply message — never raises."""
     try:
         return await page.evaluate(
             """([sel, idx]) => {
                 const els = document.querySelectorAll(sel);
-                if (idx >= els.length) return {found: false};
+                if (idx >= els.length) return null;
                 const el = els[idx];
-                // Broad net: any descendant whose testid/class/aria-label
-                // mentions "quoted" or "reply" — WhatsApp Web's own naming
-                // for this feature is unconfirmed, so match liberally and
-                // let a human read the captured markup.
-                const candidates = Array.from(el.querySelectorAll('*')).filter(node => {
-                    const testid = (node.getAttribute && node.getAttribute('data-testid')) || '';
-                    const cls = typeof node.className === 'string' ? node.className : '';
-                    const aria = (node.getAttribute && node.getAttribute('aria-label')) || '';
-                    const blob = (testid + ' ' + cls + ' ' + aria).toLowerCase();
-                    return blob.includes('quoted') || blob.includes('reply');
-                });
-                if (candidates.length === 0) return {found: false};
-                const node = candidates[0];
-                return {
-                    found: true,
-                    candidateCount: candidates.length,
-                    testid: node.getAttribute ? node.getAttribute('data-testid') : null,
-                    className: typeof node.className === 'string' ? node.className : null,
-                    dataId: node.getAttribute ? node.getAttribute('data-id') : null,
-                    outerHtml: node.outerHTML.slice(0, 2000),
-                };
+                const quoted = el.querySelector('[data-testid="quoted-message"]');
+                if (!quoted) return null;
+                const textEl = quoted.querySelector('[data-testid="selectable-text"]');
+                const quotedText = textEl ? textEl.innerText : null;
+                if (!quotedText) return null;
+                // First span with visible text inside the quoted block is
+                // the quoted message's own sender label ("You" for our own
+                // sent cards, or a contact name for someone else's).
+                let quotedSender = null;
+                const spans = quoted.querySelectorAll('span[dir="auto"]');
+                for (const s of spans) {
+                    const t = (s.innerText || '').trim();
+                    if (t) { quotedSender = t; break; }
+                }
+                // Best-effort id search — checked, not assumed present.
+                let quotedMessageId = null;
+                let node = quoted;
+                for (let i = 0; i < 4 && node; i++) {
+                    const did = node.getAttribute ? node.getAttribute('data-id') : null;
+                    if (did) { quotedMessageId = did; break; }
+                    node = node.parentElement;
+                }
+                return {quotedText, quotedSender, quotedMessageId};
             }""",
             [full_selector, index],
         )
-    except Exception as exc:
-        return {"found": False, "error": str(exc)}
+    except Exception:
+        logger.exception("inbound: _extract_reply_context failed at index %d", index)
+        return None
 
 
 _PHONE_LIKE_RE = re.compile(r"^\+?[\d\s\-]{7,20}$")
@@ -546,14 +564,16 @@ async def _scan_group_for_new_messages(
         except Exception:
             text = ""
 
-        # Step 2A discovery-only logging (see _dump_reply_quote_diag) — only
-        # logs when something reply-shaped is actually found, so a normal
-        # scan cycle stays quiet.
-        quote_diag = await _dump_reply_quote_diag(page, full_sel, i)
-        if quote_diag.get("found"):
+        # Step 2B — structured reply context (None for a plain message; a
+        # log line only fires when this message actually IS a reply, so a
+        # normal scan cycle stays quiet).
+        reply_context = await _extract_reply_context(page, full_sel, i)
+        if reply_context:
             logger.info(
-                "inbound: DIAG reply-quote structure detected group=%r index=%d testid=%r diag=%s",
-                group_name, i, testid, quote_diag,
+                "inbound: DIAG reply context extracted group=%r index=%d testid=%r "
+                "quoted_sender=%r quoted_message_id=%r quoted_text=%r",
+                group_name, i, testid, reply_context.get("quotedSender"),
+                reply_context.get("quotedMessageId"), (reply_context.get("quotedText") or "")[:200],
             )
 
         info = await _extract_message_info(page, full_sel, i)
@@ -619,6 +639,7 @@ async def _scan_group_for_new_messages(
             "sender_is_group_member": is_member,
             "raw_pre_plain_text": pre_plain,
             "media_type": media_type,
+            "reply_context": reply_context,
         })
 
     message_extraction_sec = time.monotonic() - t_extraction_start
@@ -628,7 +649,9 @@ async def _scan_group_for_new_messages(
 async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phone: str,
                          sender_name: Optional[str], text: str, message_id: str,
                          sender_is_group_member: Optional[bool] = None,
-                         media_type: Optional[str] = None) -> Optional[dict]:
+                         media_type: Optional[str] = None,
+                         replied_to_message_id: Optional[str] = None,
+                         replied_quoted_text: Optional[str] = None) -> Optional[dict]:
     t0 = time.monotonic()
     try:
         resp = await http.post(
@@ -642,6 +665,8 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                 "message_id": message_id,
                 "sender_is_group_member": sender_is_group_member,
                 "media_type": media_type,
+                "replied_to_message_id": replied_to_message_id,
+                "replied_quoted_text": replied_quoted_text,
             },
             timeout=20.0,
         )
@@ -936,6 +961,7 @@ async def poll_once(
                     msg["message_id"], msg["text"][:120],
                 )
 
+                reply_context = msg.get("reply_context") or {}
                 backend_task = asyncio.create_task(_post_inbound(
                     http,
                     group_name=group_name,
@@ -945,6 +971,8 @@ async def poll_once(
                     message_id=msg["message_id"],
                     sender_is_group_member=msg["sender_is_group_member"],
                     media_type=msg.get("media_type"),
+                    replied_to_message_id=reply_context.get("quotedMessageId"),
+                    replied_quoted_text=reply_context.get("quotedText"),
                 ))
                 done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
                 ack_sent_sec = None

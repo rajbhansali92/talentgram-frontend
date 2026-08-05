@@ -176,6 +176,14 @@ async def _collect_or_advance(
 # (often nothing, defaulting to "1"/approve) is parsed as the actual reply.
 _OPERATION_ID_RE = re.compile(r"^\s*(CP-\d{8}-[0-9A-Fa-f]{4})\b\s*(.*)$", re.IGNORECASE)
 
+# Unanchored variant for Step 2B's Tier 2b: scans anywhere inside a QUOTED
+# card's multi-line text for an embedded operation id (today's templates
+# never include one, so this is currently inert — future-proofing only,
+# see the routing block below). _OPERATION_ID_RE itself stays anchored to
+# ^...$ because it also has to strip a leading id off the user's own single
+# -line reply text, which this variant is not used for.
+_OPERATION_ID_SCAN_RE = re.compile(r"(CP-\d{8}-[0-9A-Fa-f]{4})", re.IGNORECASE)
+
 
 async def _advance_task(
     agent, task: dict, text: str, *, group_name: str, phone: str, sender_name: Optional[str],
@@ -210,7 +218,9 @@ async def _advance_task(
             await tasks.clear_task(agent.agent_id, op_id)
             return DispatchResult(handled=True, reply=exec_result.message)
         if action == "edit":
-            await tasks.update_task(agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING)
+            await tasks.update_task(
+                agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING, last_message_text=EDIT_PROMPT,
+            )
             return DispatchResult(handled=True, reply=EDIT_PROMPT, operation_id=op_id)
         if action == "cancel":
             await tasks.clear_task(agent.agent_id, op_id)
@@ -248,15 +258,20 @@ async def _advance_task(
 
     still_missing = next_missing_field(intent, collected)
     if still_missing:
-        await tasks.update_task(agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CREATED)
-        return DispatchResult(
-            handled=True, reply=_render_question(still_missing.question, collected), operation_id=op_id,
+        reply = _render_question(still_missing.question, collected)
+        await tasks.update_task(
+            agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CREATED,
+            last_message_text=reply,
         )
+        return DispatchResult(handled=True, reply=reply, operation_id=op_id)
 
     if intent.auto_confirm:
         exec_result = await intent.executor(collected, ctx)
         if exec_result.needs_clarification:
-            await tasks.update_task(agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING, collected=collected)
+            await tasks.update_task(
+                agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING, collected=collected,
+                last_message_text=exec_result.message,
+            )
             return DispatchResult(handled=True, reply=exec_result.message, operation_id=op_id)
         await tasks.clear_task(agent.agent_id, op_id)
         return DispatchResult(handled=True, reply=exec_result.message)
@@ -267,10 +282,12 @@ async def _advance_task(
             await tasks.clear_task(agent.agent_id, op_id)
             return DispatchResult(handled=True, reply=auto_result.message)
 
-    await tasks.update_task(agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CONFIRMING)
-    return DispatchResult(
-        handled=True, reply=await _render_confirmation(intent, collected, ctx), operation_id=op_id,
+    reply = await _render_confirmation(intent, collected, ctx)
+    await tasks.update_task(
+        agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CONFIRMING,
+        last_message_text=reply,
     )
+    return DispatchResult(handled=True, reply=reply, operation_id=op_id)
 
 
 async def handle_inbound_message(
@@ -300,6 +317,15 @@ async def handle_inbound_message(
     # whatsapp-worker/inbound.py) — until then this stays None in
     # production too, same as a test that doesn't pass it.
     replied_to_message_id: Optional[str] = None,
+    # Step 2B (2026-08-05) — the INNER TEXT of the reply's "quoted message"
+    # block, if this is a WhatsApp reply. Real production DOM samples (see
+    # whatsapp-worker/inbound.py's _extract_reply_context) show this text is
+    # reliably present on a reply even though a directly-readable message id
+    # for the quoted original is NOT — so this is the signal that actually
+    # resolves a reply in practice; replied_to_message_id is still tried
+    # first whenever it IS available (a stronger, non-text identifier), per
+    # "avoid brittle string matching whenever a stronger identifier exists".
+    replied_quoted_text: Optional[str] = None,
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
@@ -408,15 +434,29 @@ async def handle_inbound_message(
                 reply=f'I heard:\n\n"{raw_message}"\n\nIs that correct?\n\n1. Yes\n2. No',
             )
 
-        # --- Concurrent Task Engine routing (2026-08-05) — priority order
-        # per spec: (1) reply-to-message context, (2) explicit operation id
-        # typed in the message, (3)/(4) the EXISTING conversation.py /
-        # session_context.py fallback below, completely unchanged. Only
-        # ever reached for agents that opt in (agent.supports_concurrent_
-        # tasks) — CRM never creates tasks, so this is always a no-op miss
-        # for it. A match here resolves and advances ONLY that one task —
-        # no other pending task (this agent's or anyone else's) is ever
-        # read or touched. ---
+        # --- Concurrent Task Engine routing (2026-08-05, Step 2B) — priority
+        # order per spec, strongest identifier first:
+        #   1. WhatsApp confirmation_message_id (if the reply's quoted block
+        #      exposed one — best-effort, see _extract_reply_context; real
+        #      samples so far never carry one, but this is tried first
+        #      whenever it IS present since it's an exact, non-text match).
+        #   2a. Explicit operation id typed directly in the reply text.
+        #   2b. Explicit operation id embedded in the QUOTED card's text
+        #       (future-proofs richer templates that show "Operation\nCP-
+        #       ..."; today's templates don't, so this is currently inert
+        #       but costs nothing to check).
+        #   3. Quoted confirmation/clarification TEXT match, scoped to this
+        #      sender's own pending tasks — the signal that actually
+        #      resolves a reply in practice today (see tasks.
+        #      find_task_by_quoted_text's docstring for why this, not a
+        #      message id, is the reliable fallback here).
+        #   4. Falls through to the EXISTING conversation.py / session_
+        #      context.py path below, completely unchanged.
+        # Only ever reached for agents that opt in (agent.supports_
+        # concurrent_tasks) — CRM never creates tasks, so this is always a
+        # no-op miss for it. A match here resolves and advances ONLY that
+        # one task — no other pending task (this agent's or anyone else's)
+        # is ever read or touched. ---
         replied_task: Optional[dict] = None
         if agent.supports_concurrent_tasks:
             if replied_to_message_id:
@@ -436,6 +476,20 @@ async def handle_inbound_message(
                         # ("1", "2 = Approved", "") is the actual reply,
                         # same grammar as replying to a card directly.
                         working_message = op_match.group(2).strip() or "1"
+            if replied_task is None and replied_quoted_text:
+                quoted_op_match = _OPERATION_ID_SCAN_RE.search(replied_quoted_text)
+                if quoted_op_match:
+                    candidate = await tasks.get_task(agent.agent_id, quoted_op_match.group(1).upper())
+                    if candidate and not tasks.is_expired(candidate):
+                        replied_task = candidate
+                        # The id came from the QUOTED card, not the user's
+                        # own reply text — working_message is the user's
+                        # actual reply ("1", "cancel", ...) and must NOT be
+                        # stripped here.
+            if replied_task is None and replied_quoted_text:
+                replied_task = await tasks.find_task_by_quoted_text(
+                    agent.agent_id, phone, replied_quoted_text
+                )
         if replied_task is not None:
             task_result = await _advance_task(
                 agent, replied_task, working_message,
@@ -539,6 +593,8 @@ async def handle_inbound_message(
             if missing:
                 question = _render_question(missing.question, collected)
                 reply = ("\n\n".join(initial_errors) + "\n\n" + question) if initial_errors else question
+                if new_task:
+                    await tasks.update_task(agent.agent_id, task_op_id, last_message_text=reply)
                 await audit.log_turn(
                     agent_id=agent.agent_id,
                     group_name=group_name,
@@ -571,6 +627,7 @@ async def handle_inbound_message(
                     if new_task:
                         await tasks.update_task(
                             agent.agent_id, task_op_id, status=tasks.STATUS_CLARIFYING,
+                            last_message_text=exec_result.message,
                         )
                 else:
                     await conversation.clear_conversation(agent.agent_id, phone)
@@ -616,9 +673,11 @@ async def handle_inbound_message(
             await conversation.update_conversation(
                 agent.agent_id, phone, collected=collected, step="confirming"
             )
-            if new_task:
-                await tasks.update_task(agent.agent_id, task_op_id, status=tasks.STATUS_CONFIRMING)
             reply = await _render_confirmation(intent, collected, ctx)
+            if new_task:
+                await tasks.update_task(
+                    agent.agent_id, task_op_id, status=tasks.STATUS_CONFIRMING, last_message_text=reply,
+                )
             await audit.log_turn(
                 agent_id=agent.agent_id,
                 group_name=group_name,

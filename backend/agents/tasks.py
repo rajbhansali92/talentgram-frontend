@@ -103,6 +103,17 @@ async def create_task(
         "status": STATUS_CREATED,
         "confirmation_message_id": None,
         "reply_message_id": reply_message_id,
+        # Step 2B — the exact text of the most recent confirmation/
+        # clarification/question card this task sent, kept in sync by every
+        # dispatcher.py branch that sends one via update_task(...,
+        # last_message_text=...). This is the Tier-3 reply-correlation
+        # signal (see find_task_by_quoted_text below): WhatsApp Web's
+        # "quoted message" DOM block for a reply carries the ORIGINAL
+        # message's rendered text but, per real production samples, no
+        # directly-readable message id — so matching a reply's quoted text
+        # back to whichever task actually sent that exact text is the
+        # reliable fallback the spec calls "stored confirmation metadata".
+        "last_message_text": None,
         "created_at": now,
         "updated_at": now,
         "expires_at": now + timedelta(minutes=ttl_minutes),
@@ -139,6 +150,42 @@ async def get_task_by_confirmation_message_id(agent_id: str, message_id: str) ->
         return await db[COLLECTION].find_one(
             {"agent_id": agent_id, "confirmation_message_id": message_id}
         )
+
+
+def _normalize_for_match(text: str) -> str:
+    """Collapses all whitespace (including WhatsApp Web's own line-break
+    rendering of our multi-blank-line templates) to single spaces, so a
+    quoted reply's innerText compares equal to our stored card text even if
+    WhatsApp's DOM renders blank lines slightly differently than the raw
+    string we sent. Still a full-content compare, not a substring/fuzzy
+    one — two different confirmation cards are still practically
+    guaranteed to normalize to different strings."""
+    return " ".join((text or "").split())
+
+
+async def find_task_by_quoted_text(agent_id: str, phone: str, quoted_text: str) -> Optional[dict]:
+    """Tier-3 reply correlation (see create_task's last_message_text
+    comment) — used only when neither a WhatsApp message id nor an
+    explicit operation id could be resolved from the reply. Scoped to this
+    ONE sender's own pending tasks (the "sender" signal from the spec) and
+    excludes expired tasks (the "timestamp" signal) — never inspects
+    another phone's tasks. An ambiguous match (zero or more than one
+    candidate) fails closed and returns None rather than guessing, so a
+    coincidental collision falls through to the existing legacy
+    conversation.py path instead of resuming the wrong operation."""
+    normalized_quote = _normalize_for_match(quoted_text)
+    if not normalized_quote:
+        return None
+    with request_scope.op("load_reply_mapping", "conversation_state", collection=COLLECTION, cache="miss"):
+        candidates = await db[COLLECTION].find({"agent_id": agent_id, "phone": phone}).to_list(50)
+    matches = [
+        t for t in candidates
+        if t.get("last_message_text") and not is_expired(t)
+        and _normalize_for_match(t["last_message_text"]) == normalized_quote
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 async def list_pending_tasks(agent_id: str, phone: str) -> List[dict]:

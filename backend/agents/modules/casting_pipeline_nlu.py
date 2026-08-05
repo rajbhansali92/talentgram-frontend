@@ -1028,13 +1028,28 @@ def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:
         s = s.strip(" .!?,")
         return s if s else PRONOUN_LAST_MARKER
 
+    # Hotfix (2026-08-05, project-matching-only): tier 1 below used to take
+    # WHATEVER follows "to"/"into" as target_stage unconditionally — so
+    # "Move Ahana Pocha to Ahaan Film" (an implied-stage command naming
+    # only the PROJECT) misfired into target_stage="Ahaan Film", which
+    # then failed stage validation and asked "which pipeline is 'Ahaan
+    # Film'?" instead of ever treating it as a project reference. Now the
+    # tier-1 capture is validated against the real stage vocabulary before
+    # being committed; on a miss it's held aside (not discarded) so tiers
+    # 2/3 still get their normal chance to find a real stage elsewhere in
+    # the remainder, and only if THEY also find nothing does the held
+    # phrase get reinterpreted as project_query.
+    unvalidated_stage_candidate: Optional["tuple[str, str]"] = None
     m = _TO_STAGE_RE.match(remainder)
     if m:
         selector_text = m.group(1).strip(" ,")
         stage_text = m.group(2).strip(" .!?,")
-        out["talent_selector"] = _selector_or_pronoun(selector_text)
-        out["target_stage"] = stage_text
-        return out
+        stage_match = match_stage_phrase(stage_text, stage_order)
+        if stage_match.key:
+            out["talent_selector"] = _selector_or_pronoun(selector_text)
+            out["target_stage"] = stage_match.key
+            return out
+        unvalidated_stage_candidate = (selector_text, stage_text)
 
     implied = IMPLIED_STAGE_BY_VERB.get(verb or "")
     if implied and implied in stage_order:
@@ -1046,6 +1061,25 @@ def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:
     if stage_key:
         out["talent_selector"] = _selector_or_pronoun(rest)
         out["target_stage"] = stage_key
+        return out
+
+    if unvalidated_stage_candidate:
+        selector_text, stage_text = unvalidated_stage_candidate
+        if "project_query" not in out:
+            # No project was named anywhere else in the sentence — X is far
+            # more likely the intended PROJECT (implied-stage phrasing)
+            # than a mistyped stage name, so reinterpret it as such.
+            out["talent_selector"] = _selector_or_pronoun(selector_text)
+            out["project_query"] = stage_text
+            return out
+        # A project WAS already named explicitly (via "... in <project>"),
+        # so X is unambiguously meant to be the stage — preserve the
+        # original behaviour of passing it through as-is, so an invalid
+        # value still surfaces the specific "I couldn't find a pipeline
+        # named X" validation error downstream, not a vague generic
+        # question that discards what the user actually typed.
+        out["talent_selector"] = _selector_or_pronoun(selector_text)
+        out["target_stage"] = stage_text
         return out
 
     out["talent_selector"] = remainder.strip(" .!?")
@@ -1198,6 +1232,84 @@ def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
 
 
 # ---------------------------------------------------------------------------
+# Hotfix (2026-08-05): project-matching-only forgiveness layer. Talent
+# matching (_normalize_name, _name_similarity, _NAME_AUTOCORRECT_CUTOFF,
+# _NAME_AMBIGUITY_MARGIN, _token_subset_matches) is untouched — every
+# helper below is a SEPARATE, project-only function, used only inside
+# resolve_project_by_name.
+# ---------------------------------------------------------------------------
+# Deliberately short and casting-context-specific, not a general stopword
+# list: common words a project name may or may not include, which
+# shouldn't cost a match either way once removed symmetrically from both
+# the query and every candidate label before comparing.
+_PROJECT_FILLER_WORDS = {"the", "a", "an", "project", "film", "movie", "show", "series", "shoot", "shoots"}
+
+# Looser than talent matching's shared cutoff/margin (0.85 / 0.05) — a
+# project reference is usually the ONLY thing being named in that part of
+# a sentence (unlike a talent name, which sits among other words), so a
+# solid fuzzy ratio is already a confident signal on its own, and the
+# real production evidence motivating this hotfix showed unwanted "did you
+# mean" prompts even at high top scores. Still conservative: 0.78 is well
+# above the 0.6 "worth suggesting at all" floor, and a 0.03 margin still
+# catches a genuine near-tie between two real candidates.
+_PROJECT_AUTOCORRECT_CUTOFF = 0.78
+_PROJECT_AMBIGUITY_MARGIN = 0.03
+
+
+def _project_match_tokens(s: str) -> set:
+    """Tokenizes a project name/query for forgiving comparison: same
+    normalization _normalize_project_label already uses, plus filler-word
+    removal and simple plural/singular folding (a trailing 's' on a token
+    longer than 3 characters is dropped, e.g. "Films"/"Film" and the
+    common typo pattern "Ahaans"/"Ahaan" both fold to the same token).
+    Project-matching only — talent matching's own tokenization in
+    _name_similarity is untouched."""
+    out = set()
+    for t in _normalize_project_label(s).split():
+        if t in _PROJECT_FILLER_WORDS:
+            continue
+        if len(t) > 3 and t.endswith("s"):
+            t = t[:-1]
+        if t:
+            out.add(t)
+    return out
+
+
+def _project_token_subset_matches(query: str, labels: List[str]) -> List[int]:
+    """Project-only counterpart of _token_subset_matches, using
+    _project_match_tokens' filler-word/plural forgiveness — e.g. "Ahaan
+    Movie" now matches a label containing "Ahaan Film" (both "movie" and
+    "film" are filler words here), and "Tira Films" matches a label
+    containing singular "Film". A separate function (not a modification of
+    _token_subset_matches) so _match_label_tiers's shared disambiguation-
+    reply resolution — used by both talent and project continuation — is
+    completely unaffected."""
+    q_tokens = _project_match_tokens(query)
+    if not q_tokens:
+        return []
+    return [i for i, l in enumerate(labels) if q_tokens <= _project_match_tokens(l)]
+
+
+def _project_name_similarity(query: str, label: str) -> float:
+    """Project-only fuzzy similarity, computed over filler-word/plural-
+    normalized tokens (order-independent — token-subset above already
+    handles reordering, so this tier's job is purely typo tolerance).
+    Combined with (never replacing) the shared _name_similarity via max()
+    at the call site, so this can only ever IMPROVE a project match
+    relative to today's behaviour, never regress one."""
+    q_tokens = sorted(_project_match_tokens(query))
+    lab_tokens = sorted(_project_match_tokens(label))
+    if not q_tokens or not lab_tokens:
+        return 0.0
+    whole = difflib.SequenceMatcher(None, " ".join(q_tokens), " ".join(lab_tokens)).ratio()
+    best_token = max(
+        (difflib.SequenceMatcher(None, qt, lt).ratio() for qt in q_tokens for lt in lab_tokens),
+        default=0.0,
+    )
+    return max(whole, best_token)
+
+
+# ---------------------------------------------------------------------------
 # Project name resolution — mirrors resolve_against_candidates' name-lookup
 # escalation (exact -> unique substring -> fuzzy) but for project brand
 # names rather than talent names; a separate function because the shapes
@@ -1264,21 +1376,33 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     # what's interposed between them ("Pulsar Guy" / "Bajaj Main Guy" both
     # match "Bajaj Pulsar - Main Guy"). Precise (not edit-distance), so
     # it's safe to auto-resolve on when unique — same safety bar as the
-    # substring tier above, just reorder-tolerant.
-    subset_idxs = _token_subset_matches(q_raw, labels)
+    # substring tier above, just reorder-tolerant. Hotfix (2026-08-05):
+    # uses the project-only forgiving tokenizer (filler words + plural
+    # folding, e.g. "Tira Films" / "Ahaan Movie" both still match) instead
+    # of the strict shared _token_subset_matches — this can only find MORE
+    # unique matches than the strict version, never fewer.
+    subset_idxs = _project_token_subset_matches(q_raw, labels)
     if len(subset_idxs) == 1:
         return ProjectNameMatch(project=projects[subset_idxs[0]])
     if len(subset_idxs) > 1:
         return ProjectNameMatch(ambiguous=_as_dicts(subset_idxs[:8]))
 
-    # Tier 5: character-level fuzzy / partial token overlap. Mirrors talent
-    # matching's own fuzzy tier exactly (_name_similarity + the same
-    # autocorrect-cutoff/ambiguity-margin check already proven safe in
-    # production) — a confident, unambiguous top match now auto-resolves
-    # instead of always asking; the move/add confirmation card is the
-    # actual safety net, same as it already is for talent matching.
+    # Tier 5: character-level fuzzy / partial token overlap. Started as a
+    # mirror of talent matching's own fuzzy tier; hotfix (2026-08-05) adds
+    # a project-only scoring layer (_project_name_similarity, filler-word/
+    # plural-normalized) taken via max() alongside the original shared
+    # _name_similarity — so a project's score is never LOWER than it was
+    # before, only ever equal or higher — plus project-specific (not
+    # talent-shared) auto-resolve thresholds: a project reference is
+    # usually the only thing named in that part of a sentence, so a solid
+    # fuzzy ratio is already a confident signal on its own, and real
+    # production evidence showed the shared, stricter talent thresholds
+    # triggering unwanted "did you mean" prompts even at high top scores.
     scored = sorted(
-        ((i, _name_similarity(q_raw, labels[i])) for i in range(len(labels))),
+        (
+            (i, max(_name_similarity(q_raw, labels[i]), _project_name_similarity(q_raw, labels[i])))
+            for i in range(len(labels))
+        ),
         key=lambda pair: pair[1], reverse=True,
     )
     scored = [(i, s) for i, s in scored if s >= _NAME_FUZZY_CUTOFF]
@@ -1292,8 +1416,8 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
         # talent matching's single-candidate case).
         return ProjectNameMatch(project=projects[top_i])
     second_s = scored[1][1]
-    if top_s >= _NAME_AUTOCORRECT_CUTOFF and (top_s - second_s) > _NAME_AMBIGUITY_MARGIN:
+    if top_s >= _PROJECT_AUTOCORRECT_CUTOFF and (top_s - second_s) > _PROJECT_AMBIGUITY_MARGIN:
         return ProjectNameMatch(project=projects[top_i])
 
-    close_enough = [i for i, s in scored if (top_s - s) <= _NAME_AMBIGUITY_MARGIN][:8]
+    close_enough = [i for i, s in scored if (top_s - s) <= _PROJECT_AMBIGUITY_MARGIN][:8]
     return ProjectNameMatch(suggestions=_as_dicts(close_enough))

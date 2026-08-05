@@ -425,6 +425,11 @@ CAMPAIGN_INTENT = IntentDefinition(
     summary_title="You are about to launch:",
 )
 
+UNAUTHORIZED_SENDER_MESSAGE = (
+    "You're not authorized to use the WhatsApp Campaign Agent.\n\n"
+    "Please contact an admin to be added."
+)
+
 CAMPAIGN_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="WhatsApp Campaign Agent",
@@ -434,6 +439,14 @@ CAMPAIGN_AGENT = AgentDefinition(
     # conversation flow is sufficient for v1; this is an additive,
     # per-agent flag (see agents/tasks.py) that can be turned on later
     # with zero risk to any other agent's code.
+    #
+    # unauthorized_sender_message (2026-08-06): a launched campaign is a
+    # real, mass-messaging action, so the allowlist itself stays fail-
+    # closed exactly as before — this only replaces the silent
+    # handled=False an unauthorized sender used to get with a clear
+    # message, so a legitimate team member who hasn't been added yet
+    # knows to ask, instead of the bot looking broken/unresponsive.
+    unauthorized_sender_message=UNAUTHORIZED_SENDER_MESSAGE,
 )
 
 

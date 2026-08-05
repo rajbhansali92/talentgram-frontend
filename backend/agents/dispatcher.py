@@ -367,6 +367,14 @@ async def handle_inbound_message(
                 raw_message=raw_message,
                 error="sender_not_allowlisted",
             )
+            # Opt-in only (2026-08-06) — None (every existing agent's
+            # default) preserves the exact prior behaviour: silent
+            # handled=False, nothing sent back. An agent that wants a
+            # friendly rejection message instead sets this one string on
+            # its AgentDefinition; nothing else about the fail-closed
+            # allowlist check above changes for anyone.
+            if agent.unauthorized_sender_message:
+                return DispatchResult(handled=True, reply=agent.unauthorized_sender_message)
             return DispatchResult(handled=False)
 
         # --- Voice transport interface (see this function's docstring-ish

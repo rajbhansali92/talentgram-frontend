@@ -21,6 +21,7 @@ from core import db, _now, ADMIN_EMAIL
 from agents import modules as agent_modules
 from agents import registry
 from agents.dispatcher import handle_inbound_message
+from agents.modules import whatsapp_campaign_agent as wca
 
 agent_modules.register_all()
 
@@ -377,7 +378,11 @@ async def test_different_group_does_not_activate_campaign_agent():
         await _restore_config(original)
 
 
-async def test_unauthorized_phone_in_campaign_group_is_rejected():
+async def test_unauthorized_phone_in_campaign_group_gets_friendly_reply():
+    """(2026-08-06) The allowlist itself stays fail-closed — an
+    unauthorized sender's message never reaches the campaign engine, never
+    creates a dry-run batch, never resolves a project/template. Only the
+    OUTCOME changed: a clear message instead of dead silence."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     authorized_phone = _phone()
     unauthorized_phone = _phone()
@@ -388,6 +393,44 @@ async def test_unauthorized_phone_in_campaign_group_is_rejected():
             text="Send campaign to Whatever using Whatever template",
             sender_name="Stranger", sender_is_group_member=True,
         )
-        assert not r.handled
+        assert r.handled
+        assert r.reply == wca.UNAUTHORIZED_SENDER_MESSAGE
+        assert "not authorized" in r.reply.lower()
+
+        # No dry-run batch was created for the rejected sender — the
+        # allowlist check happens BEFORE the campaign engine is ever
+        # touched, same as before this change.
+        stray = await db.whatsapp_batches.count_documents({"source_label": {"$regex": "Whatever"}})
+        assert stray == 0
     finally:
+        await _restore_config(original)
+
+
+async def test_authorized_phone_still_works_normally():
+    """The fix is additive to the REJECTION path only — an authorized
+    sender's flow is completely unaffected."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    label = f"Still Works Brand {uuid.uuid4().hex[:6]}"
+    project_id = await _seed_project(label)
+    template_name = f"Promo {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent("Still Works Talent", "917000000011")
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send campaign to {label} using {template_name} template",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert r.reply != wca.UNAUTHORIZED_SENDER_MESSAGE
+        assert "Recipients: 1" in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)

@@ -168,6 +168,13 @@ class AgentDefinition:
     # reply-addressable operations. See agents/tasks.py's module docstring
     # for the full design.
     supports_concurrent_tasks: bool = False
+    # (2026-08-06) — when set, an unauthorized sender (fails registry.
+    # is_sender_allowed) gets THIS text back instead of dispatcher.py's
+    # default silent handled=False. None (every existing agent, including
+    # crm-agent/casting-agent) means "no reply" — byte-for-byte identical
+    # to before this field existed. Does not weaken the allowlist itself
+    # in any way — it only changes what an already-rejected sender sees.
+    unauthorized_sender_message: Optional[str] = None
 
 
 @dataclass

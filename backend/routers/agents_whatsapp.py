@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from core import current_admin, db
-from agents import registry
+from agents import registry, tasks
 from agents.dispatcher import handle_inbound_message
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,18 @@ class InboundMessageIn(BaseModel):
     # reply instead of the message being silently dropped.
     transcript_confidence: Optional[float] = None
     media_type: Optional[str] = None
+    # Concurrent Task Engine (2026-08-05) — the WhatsApp message id this
+    # inbound message is a reply TO, if the transport could determine one.
+    # None (the default, and what every existing transport call already
+    # sends) means "not a reply" — dispatcher.py's task-routing branch is
+    # then always skipped, so this is fully backward compatible.
+    replied_to_message_id: Optional[str] = None
+
+
+class TaskSentIn(BaseModel):
+    agent_id: str = Field(..., min_length=1)
+    operation_id: str = Field(..., min_length=1)
+    message_id: str = Field(..., min_length=1)
 
 
 @router.get("/known-groups")
@@ -102,9 +114,14 @@ async def inbound_message(
         sender_is_group_member=payload.sender_is_group_member,
         transcript_confidence=payload.transcript_confidence,
         media_type=payload.media_type,
+        replied_to_message_id=payload.replied_to_message_id,
     )
     t_dispatch_done = time.monotonic()
-    response = {"handled": result.handled, "reply": result.reply}
+    # operation_id is only ever set when `reply` is a task's confirmation/
+    # clarification card (Concurrent Task Engine) — None for every CRM
+    # turn and every casting-agent turn that isn't task-related, so
+    # existing callers that ignore this new field see no behavior change.
+    response = {"handled": result.handled, "reply": result.reply, "operation_id": result.operation_id}
     http_request_ms = (t_auth_done - t_http_start) * 1000
     http_response_ms = (time.monotonic() - t_dispatch_done) * 1000
     logger.info(
@@ -112,6 +129,26 @@ async def inbound_message(
         payload.group_name, http_request_ms, (t_dispatch_done - t_auth_done) * 1000, http_response_ms,
     )
     return response
+
+
+@router.post("/task-sent")
+async def task_sent(
+    payload: TaskSentIn,
+    x_internal_secret: Optional[str] = Header(default=None),
+):
+    """Concurrent Task Engine (2026-08-05) — the worker calls this right
+    after it actually sends a task's confirmation/clarification card and
+    learns the WhatsApp message id that card got. Patches
+    agents.tasks.confirmation_message_id, which is what makes the task
+    reply-addressable from this point on (see agents/tasks.py's module
+    docstring). Same shared-secret gate as /inbound; a no-op (204, not an
+    error) if the operation is unknown/already cleared — the worker fires
+    this best-effort and should never fail loudly over a race with the
+    task's own natural completion."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    await tasks.set_confirmation_message_id(payload.agent_id, payload.operation_id, payload.message_id)
+    return {"ok": True}
 
 
 class AgentConfigUpdate(BaseModel):

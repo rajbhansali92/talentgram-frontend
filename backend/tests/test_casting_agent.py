@@ -108,6 +108,14 @@ async def _cleanup(phone: str, project_ids=(), talent_ids=()) -> None:
     await db.whatsapp_agent_sessions.delete_many({"agent_id": AGENT_ID, "phone": phone})
     await db.whatsapp_agent_undo.delete_many({"agent_id": AGENT_ID, "phone": phone})
     await db.whatsapp_agent_audit_log.delete_many({"agent_id": AGENT_ID, "sender_phone": phone})
+    # Concurrent Task Engine (2026-08-05) — casting-agent creates a task doc
+    # alongside every fresh-trigger conversation (supports_concurrent_tasks),
+    # so every test in this file leaves one behind unless it's cleaned up
+    # here too. Left unfixed, this accumulates in the shared dev DB across
+    # runs — CP-YYYYMMDD-XXXX only has a 4-hex-char/day suffix (65536 slots),
+    # and a few hundred leaked docs from repeated regression runs is enough
+    # to make operation_id collisions non-negligible.
+    await db.whatsapp_agent_tasks.delete_many({"agent_id": AGENT_ID, "phone": phone})
 
 
 _DUPLICATE_ORDINAL_RE = re.compile(r"^\d+\.\s*\d+\.\s")

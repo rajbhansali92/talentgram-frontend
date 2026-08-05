@@ -2041,6 +2041,11 @@ CASTING_AGENT = AgentDefinition(
     module="casting_pipeline",
     intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UNDO_INTENT],
     resolve_bare_reply=_resolve_bare_reply,
+    # Concurrent Task Engine (2026-08-05) — casting-agent is the first (and
+    # so far only) agent to opt into independently-addressable, concurrent
+    # WhatsApp-reply-routable operations. CRM does not set this, so it is
+    # completely unaffected.
+    supports_concurrent_tasks=True,
 )
 
 

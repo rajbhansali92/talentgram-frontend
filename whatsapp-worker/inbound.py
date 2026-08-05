@@ -372,6 +372,51 @@ async def _direction_diag(page, css_selector: str, index: int) -> dict:
         return {"error": str(exc)}
 
 
+async def _dump_reply_quote_diag(page, full_selector: str, index: int) -> dict:
+    """Discovery-only (Concurrent Task Engine, Step 2A) — nothing in this
+    codebase has ever read WhatsApp Web's "replying to X" quoted-message DOM
+    structure (confirmed by grep before writing this), so rather than guess a
+    selector for something this central, this logs whatever it finds for any
+    incoming message that DOES look like a reply, using the same broad,
+    evidence-gathering-not-guessing spirit as sender.py's PHASE26B dumps.
+    Purely observational: never raises into the scan loop, never affects
+    which messages get dispatched, and its output is not (yet) used for
+    anything — Step 2B reads these logs from production to pick a real
+    selector before replied_to_message_id extraction is implemented."""
+    try:
+        return await page.evaluate(
+            """([sel, idx]) => {
+                const els = document.querySelectorAll(sel);
+                if (idx >= els.length) return {found: false};
+                const el = els[idx];
+                // Broad net: any descendant whose testid/class/aria-label
+                // mentions "quoted" or "reply" — WhatsApp Web's own naming
+                // for this feature is unconfirmed, so match liberally and
+                // let a human read the captured markup.
+                const candidates = Array.from(el.querySelectorAll('*')).filter(node => {
+                    const testid = (node.getAttribute && node.getAttribute('data-testid')) || '';
+                    const cls = typeof node.className === 'string' ? node.className : '';
+                    const aria = (node.getAttribute && node.getAttribute('aria-label')) || '';
+                    const blob = (testid + ' ' + cls + ' ' + aria).toLowerCase();
+                    return blob.includes('quoted') || blob.includes('reply');
+                });
+                if (candidates.length === 0) return {found: false};
+                const node = candidates[0];
+                return {
+                    found: true,
+                    candidateCount: candidates.length,
+                    testid: node.getAttribute ? node.getAttribute('data-testid') : null,
+                    className: typeof node.className === 'string' ? node.className : null,
+                    dataId: node.getAttribute ? node.getAttribute('data-id') : null,
+                    outerHtml: node.outerHTML.slice(0, 2000),
+                };
+            }""",
+            [full_selector, index],
+        )
+    except Exception as exc:
+        return {"found": False, "error": str(exc)}
+
+
 _PHONE_LIKE_RE = re.compile(r"^\+?[\d\s\-]{7,20}$")
 
 
@@ -501,6 +546,16 @@ async def _scan_group_for_new_messages(
         except Exception:
             text = ""
 
+        # Step 2A discovery-only logging (see _dump_reply_quote_diag) — only
+        # logs when something reply-shaped is actually found, so a normal
+        # scan cycle stays quiet.
+        quote_diag = await _dump_reply_quote_diag(page, full_sel, i)
+        if quote_diag.get("found"):
+            logger.info(
+                "inbound: DIAG reply-quote structure detected group=%r index=%d testid=%r diag=%s",
+                group_name, i, testid, quote_diag,
+            )
+
         info = await _extract_message_info(page, full_sel, i)
         pre_plain = info.get("prePlainText")
         phone = info.get("phone")
@@ -608,12 +663,16 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
         return None
 
 
-async def _send_reply(page, group_name: str, reply_text: str) -> Tuple[float, Dict[str, float]]:
+async def _send_reply(
+    page, group_name: str, reply_text: str
+) -> Tuple[float, Dict[str, float], Optional[str]]:
     """Returns (elapsed seconds spent sending, per-stage SEND_TIMING
-    breakdown from sender.send_whatsapp_message) — (0.0, {}) if there was
-    nothing to send."""
+    breakdown from sender.send_whatsapp_message, the sent message's own
+    WhatsApp message id if captured) — (0.0, {}, None) if there was nothing
+    to send. The message id is what makes a task's confirmation card
+    reply-addressable (Concurrent Task Engine) — see _post_task_sent."""
     if not reply_text:
-        return 0.0, {}
+        return 0.0, {}, None
     t0 = time.monotonic()
     try:
         result = await sender.send_whatsapp_message(
@@ -623,10 +682,37 @@ async def _send_reply(page, group_name: str, reply_text: str) -> Tuple[float, Di
         elapsed = time.monotonic() - t0
         logger.info("inbound: reply send result group=%r state=%s elapsed_sec=%.2f",
                      group_name, result.get("state"), elapsed)
-        return elapsed, (result.get("timing") or {})
+        return elapsed, (result.get("timing") or {}), result.get("sent_message_id")
     except Exception:
         logger.exception("inbound: failed to send reply into group=%r", group_name)
-        return time.monotonic() - t0, {}
+        return time.monotonic() - t0, {}, None
+
+
+async def _post_task_sent(http: httpx.AsyncClient, *, agent_id: str, operation_id: str,
+                           message_id: str) -> None:
+    """Concurrent Task Engine (2026-08-05) — reports the WhatsApp message id a
+    task's confirmation/clarification card actually got once sent, so a later
+    reply to that message can be routed back to this operation_id (see
+    backend/agents/tasks.py, POST /api/agents/whatsapp/task-sent). Best-effort:
+    a failure here just means that one task stays reply-unaddressable (still
+    resolvable via explicit operation-id or the existing session fallback), so
+    it must never raise into the caller's send/report flow."""
+    try:
+        resp = await http.post(
+            f"{config.AGENTS_BACKEND_URL}/api/agents/whatsapp/task-sent",
+            headers={**_auth_headers(), "Content-Type": "application/json"},
+            json={"agent_id": agent_id, "operation_id": operation_id, "message_id": message_id},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        logger.info("inbound: task-sent reported operation_id=%r message_id=%r",
+                     operation_id, message_id)
+    except Exception:
+        logger.exception(
+            "inbound: failed to report task-sent operation_id=%r message_id=%r "
+            "(task stays reply-unaddressable; other resolution paths still work)",
+            operation_id, message_id,
+        )
 
 
 # If the backend hasn't responded within this long, send an immediate
@@ -863,7 +949,7 @@ async def poll_once(
                 done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
                 ack_sent_sec = None
                 if backend_task not in done:
-                    ack_elapsed, _ack_timing = await _send_reply(page, group_name, ACK_TEXT)
+                    ack_elapsed, _ack_timing, _ack_message_id = await _send_reply(page, group_name, ACK_TEXT)
                     ack_sent_sec = round(time.monotonic() - t_detected, 2)
                     logger.info(
                         "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
@@ -881,10 +967,20 @@ async def poll_once(
                 await _mark_processed(msg["message_id"])
 
                 reply = result.get("reply")
+                operation_id = result.get("operation_id")
                 reply_elapsed = 0.0
                 send_timing: Dict[str, float] = {}
                 if reply:
-                    reply_elapsed, send_timing = await _send_reply(page, group_name, reply)
+                    reply_elapsed, send_timing, sent_message_id = await _send_reply(page, group_name, reply)
+                    # Concurrent Task Engine (2026-08-05) — operation_id is only
+                    # set when `reply` is a task's confirmation/clarification
+                    # card; report the WhatsApp message id it actually got so a
+                    # later reply-to-this-message can be routed back to it.
+                    if operation_id and sent_message_id:
+                        asyncio.create_task(_post_task_sent(
+                            http, agent_id="casting-agent",
+                            operation_id=operation_id, message_id=sent_message_id,
+                        ))
                 t_total = time.monotonic() - t_detected
                 logger.info(
                     "inbound: TIMING message_id=%r dom_detection_sec=%.2f "

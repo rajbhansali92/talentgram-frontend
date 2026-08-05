@@ -61,6 +61,22 @@ async def ensure_agents_ready() -> None:
         await db["whatsapp_agent_audit_log"].create_index([("timestamp", -1)])
         await db["whatsapp_agent_audit_log"].create_index([("agent_id", 1), ("timestamp", -1)])
         await db[registry.CONFIG_COLLECTION].create_index("agent_id", unique=True)
+        # Concurrent Task Engine (2026-08-05) — MANY docs per (agent_id,
+        # phone), unlike whatsapp_conversations' single-slot unique index
+        # above, so this index is deliberately non-unique.
+        await db["whatsapp_agent_tasks"].create_index([("agent_id", 1), ("phone", 1)])
+        await db["whatsapp_agent_tasks"].create_index(
+            [("agent_id", 1), ("operation_id", 1)], unique=True, name="agent_operation_unique"
+        )
+        # The reply-to-message resolver's lookup path — sparse since most
+        # tasks won't have a confirmation_message_id yet at creation time.
+        await db["whatsapp_agent_tasks"].create_index(
+            [("agent_id", 1), ("confirmation_message_id", 1)],
+            sparse=True, name="agent_confirmation_message_id",
+        )
+        await db["whatsapp_agent_tasks"].create_index(
+            "expires_at", expireAfterSeconds=0, name="tasks_ttl"
+        )
     except Exception:
         logger.exception("whatsapp agent platform index creation failed (non-fatal)")
 

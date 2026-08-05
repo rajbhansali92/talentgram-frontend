@@ -12,10 +12,11 @@ every stage below it (agents/modules/*) knows nothing about WhatsApp.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Optional
 
-from agents import audit, conversation, registry, request_scope, session_context
+from agents import audit, conversation, registry, request_scope, session_context, tasks
 from agents.confirmation import (
     CANCELLED_MESSAGE,
     EDIT_PROMPT,
@@ -167,6 +168,111 @@ async def _collect_or_advance(
     )
 
 
+# Explicit-operation-id reply tier (priority 2, "future-ready" per the
+# Concurrent Task Engine spec) — "CP-20260805-0A1B 1" approves that exact
+# operation regardless of which message (if any) it's a WhatsApp reply to.
+# Matched BEFORE the existing conversation.py path, same as a reply-to-
+# message match; the operation id prefix is stripped and whatever's left
+# (often nothing, defaulting to "1"/approve) is parsed as the actual reply.
+_OPERATION_ID_RE = re.compile(r"^\s*(CP-\d{8}-[0-9A-Fa-f]{4})\b\s*(.*)$", re.IGNORECASE)
+
+
+async def _advance_task(
+    agent, task: dict, text: str, *, group_name: str, phone: str, sender_name: Optional[str],
+) -> DispatchResult:
+    """Task-engine counterpart of `_collect_or_advance` (+ the "confirming"
+    step block inside handle_inbound_message below) — a deliberately
+    PARALLEL implementation, not a shared one, so the existing, already-
+    working conversation.py single-slot path is never touched by this
+    feature (see agents/tasks.py's module docstring). Handles one turn
+    already resolved to belong to THIS task (via reply-to-message or an
+    explicit operation id) — never reads or writes any OTHER pending
+    task, matching "resolve only that operation, never inspect unrelated
+    pending tasks"."""
+    op_id = task["operation_id"]
+    intent = registry.get_intent(agent, task["intent_id"])
+    if intent is None:
+        await tasks.clear_task(agent.agent_id, op_id)
+        return DispatchResult(handled=False)
+
+    collected = dict(task.get("collected") or {})
+    status = task.get("status")
+    ctx = ExecContext(
+        agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+        sender_name=sender_name, conversation_id=op_id,
+    )
+
+    if status == tasks.STATUS_CONFIRMING:
+        action = parse_confirmation_reply(text)
+        if action == "approve":
+            await tasks.update_task(agent.agent_id, op_id, status=tasks.STATUS_EXECUTING)
+            exec_result = await intent.executor(collected, ctx)
+            await tasks.clear_task(agent.agent_id, op_id)
+            return DispatchResult(handled=True, reply=exec_result.message)
+        if action == "edit":
+            await tasks.update_task(agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING)
+            return DispatchResult(handled=True, reply=EDIT_PROMPT, operation_id=op_id)
+        if action == "cancel":
+            await tasks.clear_task(agent.agent_id, op_id)
+            return DispatchResult(handled=True, reply=CANCELLED_MESSAGE)
+        return DispatchResult(handled=True, reply=UNRECOGNIZED_CONFIRMATION_REPLY, operation_id=op_id)
+
+    if status == tasks.STATUS_CLARIFYING:
+        if intent.parse_edits_async:
+            edits = await intent.parse_edits_async(text, collected, intent.fields, ctx)
+        else:
+            edit_parser = intent.parse_edits or parse_edit_instructions
+            edits = edit_parser(text, intent.fields)
+        if not edits:
+            return DispatchResult(handled=True, reply=UNRECOGNIZED_EDIT_REPLY, operation_id=op_id)
+        for key, raw_value in edits.items():
+            field = next((f for f in intent.fields if f.key == key), None)
+            if not field:
+                continue
+            result = field.validate(raw_value)
+            if not result.ok:
+                return DispatchResult(handled=True, reply=result.error, operation_id=op_id)
+            collected[key] = result.value
+        await tasks.update_task(agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CREATED)
+    else:
+        # status == STATUS_CREATED: this message answers the question for
+        # the next missing field (mirrors _collect_or_advance's
+        # "collecting" branch).
+        missing = next_missing_field(intent, collected)
+        if missing:
+            result = missing.validate(text.strip())
+            if not result.ok:
+                return DispatchResult(handled=True, reply=result.error, operation_id=op_id)
+            collected[missing.key] = result.value
+            await tasks.update_task(agent.agent_id, op_id, collected=collected)
+
+    still_missing = next_missing_field(intent, collected)
+    if still_missing:
+        await tasks.update_task(agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CREATED)
+        return DispatchResult(
+            handled=True, reply=_render_question(still_missing.question, collected), operation_id=op_id,
+        )
+
+    if intent.auto_confirm:
+        exec_result = await intent.executor(collected, ctx)
+        if exec_result.needs_clarification:
+            await tasks.update_task(agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING, collected=collected)
+            return DispatchResult(handled=True, reply=exec_result.message, operation_id=op_id)
+        await tasks.clear_task(agent.agent_id, op_id)
+        return DispatchResult(handled=True, reply=exec_result.message)
+
+    if intent.try_auto_execute:
+        auto_result = await intent.try_auto_execute(collected, ctx)
+        if auto_result is not None:
+            await tasks.clear_task(agent.agent_id, op_id)
+            return DispatchResult(handled=True, reply=auto_result.message)
+
+    await tasks.update_task(agent.agent_id, op_id, collected=collected, status=tasks.STATUS_CONFIRMING)
+    return DispatchResult(
+        handled=True, reply=await _render_confirmation(intent, collected, ctx), operation_id=op_id,
+    )
+
+
 async def handle_inbound_message(
     *,
     group_name: str,
@@ -185,6 +291,15 @@ async def handle_inbound_message(
     # dropped.
     transcript_confidence: Optional[float] = None,
     media_type: Optional[str] = None,
+    # Concurrent Task Engine (2026-08-05) — the WhatsApp message id this
+    # inbound message is a reply TO, if any. None (the default, and what
+    # every existing/CRM caller passes) means "not a reply" — the entire
+    # routing branch below that reads this is skipped and behaviour is
+    # byte-for-byte identical to before this feature existed. Populated by
+    # the worker only once it can actually read this from the DOM (see
+    # whatsapp-worker/inbound.py) — until then this stays None in
+    # production too, same as a test that doesn't pass it.
+    replied_to_message_id: Optional[str] = None,
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
@@ -293,6 +408,50 @@ async def handle_inbound_message(
                 reply=f'I heard:\n\n"{raw_message}"\n\nIs that correct?\n\n1. Yes\n2. No',
             )
 
+        # --- Concurrent Task Engine routing (2026-08-05) — priority order
+        # per spec: (1) reply-to-message context, (2) explicit operation id
+        # typed in the message, (3)/(4) the EXISTING conversation.py /
+        # session_context.py fallback below, completely unchanged. Only
+        # ever reached for agents that opt in (agent.supports_concurrent_
+        # tasks) — CRM never creates tasks, so this is always a no-op miss
+        # for it. A match here resolves and advances ONLY that one task —
+        # no other pending task (this agent's or anyone else's) is ever
+        # read or touched. ---
+        replied_task: Optional[dict] = None
+        if agent.supports_concurrent_tasks:
+            if replied_to_message_id:
+                replied_task = await tasks.get_task_by_confirmation_message_id(
+                    agent.agent_id, replied_to_message_id
+                )
+                if replied_task and tasks.is_expired(replied_task):
+                    await tasks.clear_task(agent.agent_id, replied_task["operation_id"])
+                    replied_task = None
+            if replied_task is None:
+                op_match = _OPERATION_ID_RE.match(working_message)
+                if op_match:
+                    candidate = await tasks.get_task(agent.agent_id, op_match.group(1).upper())
+                    if candidate and not tasks.is_expired(candidate):
+                        replied_task = candidate
+                        # Strip the operation-id prefix — whatever remains
+                        # ("1", "2 = Approved", "") is the actual reply,
+                        # same grammar as replying to a card directly.
+                        working_message = op_match.group(2).strip() or "1"
+        if replied_task is not None:
+            task_result = await _advance_task(
+                agent, replied_task, working_message,
+                group_name=group_name, phone=phone, sender_name=sender_name,
+            )
+            await audit.log_turn(
+                agent_id=agent.agent_id,
+                group_name=group_name,
+                sender_phone=phone,
+                raw_message=raw_message,
+                conversation_id=replied_task["operation_id"],
+                parsed_intent=replied_task.get("intent_id"),
+                confirmation_action="task_reply",
+            )
+            return task_result
+
         conv = await conversation.get_conversation(agent.agent_id, phone)
         if conv and conversation.is_expired(conv):
             await conversation.clear_conversation(agent.agent_id, phone)
@@ -355,6 +514,22 @@ async def handle_inbound_message(
                 intent_id=intent.intent_id,
                 collected=collected,
             )
+            # Concurrent Task Engine: ALSO create an independent, reply-
+            # addressable task record — alongside, not instead of, the
+            # conversation.py record just above (which keeps the existing
+            # bare-digit-no-reply fallback working exactly as before).
+            # None for every agent that hasn't opted in (CRM) — zero
+            # effect on it.
+            new_task: Optional[dict] = None
+            if agent.supports_concurrent_tasks:
+                new_task = await tasks.create_task(
+                    agent_id=agent.agent_id, phone=phone, group_name=group_name,
+                    sender_name=sender_name, intent_id=intent.intent_id,
+                    collected=collected, original_text=raw_message,
+                    reply_message_id=replied_to_message_id,
+                )
+            task_op_id = new_task["operation_id"] if new_task else None
+
             # Fields already extracted from `raw_message` above — just
             # check what (if anything) is still missing and reply
             # accordingly, rather than routing through _collect_or_advance
@@ -374,7 +549,7 @@ async def handle_inbound_message(
                     parsed_fields=collected,
                     validation_errors=initial_errors or None,
                 )
-                return DispatchResult(handled=True, reply=reply)
+                return DispatchResult(handled=True, reply=reply, operation_id=task_op_id)
 
             ctx = ExecContext(
                 agent_id=agent.agent_id,
@@ -393,8 +568,15 @@ async def handle_inbound_message(
                 exec_result = await intent.executor(collected, ctx)
                 if exec_result.needs_clarification:
                     await conversation.update_conversation(agent.agent_id, phone, step="editing")
+                    if new_task:
+                        await tasks.update_task(
+                            agent.agent_id, task_op_id, status=tasks.STATUS_CLARIFYING,
+                        )
                 else:
                     await conversation.clear_conversation(agent.agent_id, phone)
+                    if new_task:
+                        await tasks.clear_task(agent.agent_id, task_op_id)
+                        task_op_id = None
                 await audit.log_turn(
                     agent_id=agent.agent_id,
                     group_name=group_name,
@@ -408,12 +590,14 @@ async def handle_inbound_message(
                     execution_result=exec_result.message,
                     error=exec_result.error,
                 )
-                return DispatchResult(handled=True, reply=exec_result.message)
+                return DispatchResult(handled=True, reply=exec_result.message, operation_id=task_op_id)
 
             if intent.try_auto_execute:
                 auto_result = await intent.try_auto_execute(collected, ctx)
                 if auto_result is not None:
                     await conversation.clear_conversation(agent.agent_id, phone)
+                    if new_task:
+                        await tasks.clear_task(agent.agent_id, task_op_id)
                     await audit.log_turn(
                         agent_id=agent.agent_id,
                         group_name=group_name,
@@ -432,6 +616,8 @@ async def handle_inbound_message(
             await conversation.update_conversation(
                 agent.agent_id, phone, collected=collected, step="confirming"
             )
+            if new_task:
+                await tasks.update_task(agent.agent_id, task_op_id, status=tasks.STATUS_CONFIRMING)
             reply = await _render_confirmation(intent, collected, ctx)
             await audit.log_turn(
                 agent_id=agent.agent_id,
@@ -443,7 +629,7 @@ async def handle_inbound_message(
                 parsed_fields=collected,
                 validation_errors=initial_errors or None,
             )
-            return DispatchResult(handled=True, reply=reply)
+            return DispatchResult(handled=True, reply=reply, operation_id=task_op_id)
 
         # Existing, non-expired conversation, no fresh trigger in this message.
         intent = registry.get_intent(agent, conv["intent_id"])

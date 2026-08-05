@@ -601,10 +601,19 @@ async def _snapshot_msg_baselines(page: Page) -> dict:
     return baselines
 
 
-async def _find_outgoing_with_text(page: Page, needle: str, baselines: Optional[dict] = None) -> Tuple[Optional[str], str]:
+async def _find_outgoing_with_text(
+    page: Page, needle: str, baselines: Optional[dict] = None,
+) -> Tuple[Optional[str], str, Optional[str]]:
     """Find a message element in the ACTIVE conversation whose text contains the
     exact first-30-char needle. When baselines is provided, only checks elements
-    that appeared AFTER the baseline snapshot (new messages only)."""
+    that appeared AFTER the baseline snapshot (new messages only). Returns
+    (matched_selector, matched_text, message_id) — message_id is the matched
+    element's own `data-testid` (e.g. "conv-msg-ABC123"), the same identifier
+    incoming messages already carry (see inbound.py's _scan_group_for_new_
+    messages) — this is what makes a just-sent confirmation card reply-
+    addressable (Concurrent Task Engine, 2026-08-05): None if the element has
+    no such attribute (older WhatsApp Web DOM shapes, or a non-conv-msg-*
+    fallback layer matched instead)."""
     scope = await _resolve_scope(page)
     chain = (SELECTOR_REGISTRY["message_element"]["primary"]
              + SELECTOR_REGISTRY["message_element"]["fallback"])
@@ -645,9 +654,13 @@ async def _find_outgoing_with_text(page: Page, needle: str, baselines: Optional[
                                    "UNKNOWN — accepting (DOM may have changed)", i)
                 logger.info("sender: verify — ✅ MATCHED layer=%r element#%d text[:60]=%r "
                             "outgoing=%s", full, i, t[:60], direction)
-                return full, t
+                try:
+                    message_id = await loc.nth(i).get_attribute("data-testid")
+                except Exception:
+                    message_id = None
+                return full, t, message_id
 
-    return None, ""
+    return None, "", None
 
 
 async def _dump_conv_msgs(page: Page) -> None:
@@ -728,11 +741,15 @@ async def _store_dom_snapshot(page: Page, reason: str, extra: Optional[dict] = N
         logger.info("sender: snapshot store error=%s (screenshot still at %s)", exc, shot)
 
 
-async def _verify_delivery(page: Page, message_body: str, baselines: Optional[dict] = None) -> Tuple[bool, bool, Optional[str]]:
+async def _verify_delivery(
+    page: Page, message_body: str, baselines: Optional[dict] = None,
+) -> Tuple[bool, bool, Optional[str], Optional[str]]:
     """VERIFIED iff a NEW message element (appeared after baselines snapshot)
     contains the exact first 30 characters of the sent payload. A cleared compose
     box is NOT proof (logged for diagnosis only). On failure, a DOM snapshot is
-    stored. Returns (verified, composer_cleared, matched_selector)."""
+    stored. Returns (verified, composer_cleared, matched_selector, message_id) —
+    message_id is the verified element's own data-testid, see
+    _find_outgoing_with_text's docstring."""
     composer_cleared = False
     try:
         txt = (await page.locator(SEL["msg_box"]).first.inner_text()).strip()
@@ -746,32 +763,35 @@ async def _verify_delivery(page: Page, message_body: str, baselines: Optional[di
     await _dump_conv_msgs(page)
 
     needle = _needle(message_body)
-    matched_sel, matched_text = await _find_outgoing_with_text(page, needle, baselines=baselines)
+    matched_sel, matched_text, message_id = await _find_outgoing_with_text(page, needle, baselines=baselines)
     verified = matched_sel is not None
 
     if verified:
         ts = await _msg_timestamp(page, matched_sel)
-        logger.info("sender: verify — VERIFIED via chain=%r | text[:80]=%r | timestamp=%r",
-                    matched_sel, matched_text[:80], ts)
+        logger.info("sender: verify — VERIFIED via chain=%r | text[:80]=%r | timestamp=%r | message_id=%r",
+                    matched_sel, matched_text[:80], ts, message_id)
     else:
         logger.warning("sender: verify — NOT VERIFIED: no message element contains the first-30-char "
                        "needle=%r — storing DOM snapshot", needle)
         await _store_dom_snapshot(page, "verify_failed", {"needle": needle})
 
-    return verified, composer_cleared, matched_sel
+    return verified, composer_cleared, matched_sel, message_id
 
 
-async def _already_delivered(page: Page, message_body: str, is_retry: bool = False) -> bool:
+async def _already_delivered(page: Page, message_body: str, is_retry: bool = False) -> Tuple[bool, Optional[str]]:
     """Duplicate guard: ONLY active on retries (attempt_count > 0). On first
     attempt, never skip — old messages from prior campaigns must not prevent
-    delivery. On retry, checks last 8 messages for the prior attempt's bubble."""
+    delivery. On retry, checks last 8 messages for the prior attempt's bubble.
+    Returns (delivered, message_id) — message_id is the prior bubble's own
+    data-testid when found, so the retry-short-circuit path can still report
+    a sent_message_id like every other MESSAGE_SENT_AND_VERIFIED return."""
     if not is_retry:
-        return False
+        return False, None
     needle = _needle(message_body)
     if not needle:
-        return False
-    matched_sel, _ = await _find_outgoing_with_text(page, needle)
-    return matched_sel is not None
+        return False, None
+    matched_sel, _, message_id = await _find_outgoing_with_text(page, needle)
+    return matched_sel is not None, message_id
 
 
 # ==========================================================================
@@ -1570,14 +1590,20 @@ async def send_whatsapp_message(
 
     # Duplicate prevention: ONLY on retries (attempt_count > 0). On first attempt
     # old messages from prior campaigns must never suppress a new send.
-    if await _already_delivered(page, message_body, is_retry=is_retry):
+    already_delivered, already_delivered_message_id = await _already_delivered(
+        page, message_body, is_retry=is_retry
+    )
+    if already_delivered:
         logger.warning(
             "sender: RETRY — message already present as a recent outgoing bubble — "
             "NOT resending (treating as already delivered / verified)"
         )
         evidence["dom_verified"] = True
         evidence["verification_method"] = "already_delivered"
-        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence, "timing": timing}
+        return {
+            "state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence, "timing": timing,
+            "sent_message_id": already_delivered_message_id,
+        }
     # composer_wait covers STEP 7-14 above (composer-interactive wait +
     # conversation-open verification) plus the baselines snapshot / dump /
     # duplicate-check just done — all pre-typing "is this chat ready"
@@ -1701,7 +1727,9 @@ async def send_whatsapp_message(
     # PROBLEM #2 / TASK 4: classify the outcome — never collapse to one FAILED.
     await asyncio.sleep(0.7 if fast else 1.5)
     logger.info("sender: verification started (baselines=%s)", "provided" if baselines else "none")
-    verified, composer_cleared, matched_sel = await _verify_delivery(page, message_body, baselines=baselines)
+    verified, composer_cleared, matched_sel, sent_message_id = await _verify_delivery(
+        page, message_body, baselines=baselines
+    )
     _mark("delivery_verify")
     logger.info(
         "sender: SEND_TIMING destination=%r open_or_verify_chat=%.2f composer_wait=%.2f "
@@ -1716,8 +1744,12 @@ async def send_whatsapp_message(
         evidence["dom_verified"] = True
         evidence["verification_method"] = "outgoing_bubble_match"
         evidence["verification_selector"] = matched_sel
-        logger.info("sender: MESSAGE_SENT_AND_VERIFIED — outgoing bubble confirmed")
-        return {"state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence, "timing": timing}
+        logger.info("sender: MESSAGE_SENT_AND_VERIFIED — outgoing bubble confirmed message_id=%r",
+                     sent_message_id)
+        return {
+            "state": MESSAGE_SENT_AND_VERIFIED, "evidence": evidence, "timing": timing,
+            "sent_message_id": sent_message_id,
+        }
 
     await _safe_screenshot(page, "/tmp/verify_failed.png")
     # No outgoing bubble. The composer state distinguishes "never sent" (safe to
@@ -1728,10 +1760,13 @@ async def send_whatsapp_message(
             "sender: MESSAGE_SENT_BUT_NOT_VERIFIED — composer cleared but no outgoing bubble "
             "matched. Marking as sent+unverified (no retry — message likely delivered)."
         )
-        return {"state": MESSAGE_SENT_BUT_NOT_VERIFIED, "evidence": evidence, "timing": timing}
+        return {
+            "state": MESSAGE_SENT_BUT_NOT_VERIFIED, "evidence": evidence, "timing": timing,
+            "sent_message_id": None,
+        }
 
     logger.warning(
         "sender: MESSAGE_NOT_SENT — composer still holds text and no outgoing bubble. "
         "Safe to retry."
     )
-    return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
+    return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing, "sent_message_id": None}

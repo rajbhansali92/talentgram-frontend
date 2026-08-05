@@ -158,6 +158,16 @@ class AgentDefinition:
     resolve_bare_reply: Optional[
         Callable[[str, "ExecContext"], Awaitable[Optional["Tuple[IntentDefinition, Dict[str, str]]"]]]
     ] = None
+    # Concurrent Task Engine (2026-08-05) — when True, dispatcher.py ALSO
+    # creates an independent, reply-addressable `agents.tasks` record for
+    # every fresh trigger this agent handles, alongside the existing
+    # single-slot `conversation.py` record it already creates (unchanged).
+    # False (the default) means "no such record" — every existing agent,
+    # including crm-agent, is completely unaffected; only an agent that
+    # opts in (currently just casting-agent) gets concurrent, WhatsApp-
+    # reply-addressable operations. See agents/tasks.py's module docstring
+    # for the full design.
+    supports_concurrent_tasks: bool = False
 
 
 @dataclass
@@ -165,3 +175,13 @@ class DispatchResult:
     """Outcome of processing one inbound message."""
     handled: bool  # False => the transport should send nothing back
     reply: Optional[str] = None
+    # Concurrent Task Engine — set whenever `reply` is a confirmation/
+    # clarification card belonging to a NEW or CONTINUED task, so the
+    # transport (whatsapp-worker) can report back which WhatsApp message
+    # id that card ends up getting once actually sent (see
+    # routers/agents_whatsapp.py's /task-sent endpoint) — that's what
+    # makes the task reply-addressable. None for every turn that isn't
+    # task-related (the entire CRM flow, and casting-agent's own approve/
+    # cancel/completed turns) — existing transport behaviour for those is
+    # completely unchanged, since it simply never sees this field set.
+    operation_id: Optional[str] = None

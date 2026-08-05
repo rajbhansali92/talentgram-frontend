@@ -38,6 +38,17 @@ async def ensure_agents_ready() -> None:
         # explicit choice for this agent, not the allowlist default.
         security_mode="group_members",
     )
+    await registry.seed_agent_config(
+        "whatsapp-campaign-agent",
+        group_names=["Talentgram WhatsApp Agent"],
+        allowed_senders=[],
+        # allowlist, not group_members — a launched campaign sends real
+        # messages to real recipients, so this stays fail-closed until an
+        # admin explicitly authorizes specific phone numbers (same generic
+        # PUT /api/agents/whatsapp/config/{agent_id} endpoint every agent
+        # already uses; no new endpoint needed).
+        security_mode="allowlist",
+    )
 
     try:
         await db["whatsapp_conversations"].create_index(

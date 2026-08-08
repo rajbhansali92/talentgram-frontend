@@ -305,6 +305,14 @@ class TemplateIn(BaseModel):
 class ManualContact(BaseModel):
     name: str = ""
     phone: str
+    # Optional (2026-08-08) — when a MANUAL contact is actually a known
+    # talent resolved by name (e.g. the WhatsApp agent's SEND_REQUIREMENT
+    # intent), passing her real whatsapp_group_name lets the SAME routing
+    # brain (_resolve_destination) send to her dedicated group instead of
+    # falling back to a raw phone number. "" (the default, and every
+    # existing MANUAL caller via the web app UI) preserves phone-only
+    # routing byte-for-byte.
+    whatsapp_group_name: str = ""
 
 
 class SourceParams(BaseModel):
@@ -913,10 +921,17 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
     elif source_type == "MANUAL":
         for mc in params.contacts:
             phone = _normalize_phone(mc.phone)
-            rid = "manual:" + (phone or (mc.phone or "").strip().lower())
+            group_name = (mc.whatsapp_group_name or "").strip()
+            rid = "manual:" + (phone or (mc.phone or "").strip().lower() or group_name.lower())
             if rid in seen:
                 continue
-            if not phone:
+            # A group-routed contact (e.g. a talent resolved by name, with
+            # her real whatsapp_group_name attached) doesn't need a valid
+            # phone at all — same "group-or-phone, either is enough"
+            # tolerance the PROJECT branch already gets for free via
+            # _resolve_destination. Only truly unresolvable (neither) when
+            # group_name is also empty.
+            if not phone and not group_name:
                 seen.add(rid)
                 unresolvable.append({
                     "name": mc.name or "", "phone": mc.phone or "",
@@ -925,7 +940,7 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
                 })
                 continue
             _add(*_make_recipient(
-                name=mc.name or "", phone=phone, group_name="",
+                name=mc.name or "", phone=phone, group_name=group_name,
                 source="MANUAL", source_id=None, kind="MANUAL", recipient_id=rid))
     elif source_type == "SAVED_LISTS":
         if not params.contact_list_ids and not params.group_list_ids:

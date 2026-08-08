@@ -4,44 +4,58 @@ agent. Translates a natural-language WhatsApp command into the SAME
 compile-preview / launch function (`routers.whatsapp.create_batch`)
 directly, in-process — zero duplicate recipient resolution, template
 rendering, job queueing, or delivery tracking. `create_batch` already IS
-both the preview and the launch call, distinguished only by
-`is_dry_run` — there is no separate preview endpoint to reuse, so this
-module calls the one function twice (dry-run for the confirmation card,
-live on approval), exactly mirroring what the web app's own "Preview" then
-"Send" buttons do.
+both the preview and the launch call, distinguished only by `is_dry_run`.
 
 Scoped to its own WhatsApp group ("Talentgram WhatsApp Agent"), completely
 independent of casting-agent/crm-agent — see agents/__init__.py's
 seed_agent_config call for the group binding.
 
-v1 scope (per the approved plan): PROJECT recipient source only (via
-casting_pipeline stage + project) — CRM/MANUAL/SAVED_LISTS sources are not
-supported by this agent. Attribution: every campaign launched via WhatsApp
-is created_by the single seeded ADMIN_EMAIL account (there is no phone-to-
-user mapping in this codebase) — the real WhatsApp sender is still fully
-traceable via agents.audit.log_turn, which dispatcher.py already writes
-for every turn (sender_phone/sender_name/raw_message), cross-referenceable
-to the resulting batch by the Batch ID included in both the confirmation
-card and the launch success message.
+2026-08-08 architecture change: this agent no longer gates on a literal
+trigger phrase like "send campaign"/"broadcast". It now works like
+casting-agent's own NLU — a broad set of action-verb synonyms opens the
+ONE intent (SEND_REQUIREMENT), and free-text entity extraction pulls out
+WHO to send to and WHAT to send, independent of exact phrasing. The old
+"send campaign to <project> using <template>" grammar still works
+byte-for-byte (kept as an explicit extraction tier) — it's simply now one
+of several phrasings that map to the same intent, not the only one.
 
-Ambiguity handling is intentionally v1-simple: an unresolvable/ambiguous
-project or template ends that attempt with a clear message and clears the
-pending conversation, rather than opening a full disambiguation sub-
-conversation (casting-agent's own pending_disambiguation continuation
-system took many dedicated sprints to harden — replicating it here would
-be exactly the kind of scope this agent is NOT meant to take on). The user
-simply retries with a more specific command.
+Message Source (v1 scope, decided explicitly — see AskUserQuestion during
+this sprint): resolves ONLY via `whatsapp_templates`, either an explicit
+template name/slug or a bare project-ish word that happens to fuzzy-match a
+template name (production evidence: real templates are routinely named
+after the project they're for, e.g. a template literally named "toyota
+glanza"). There is no free-text/custom-message send path in this codebase
+(`BatchIn.template_id` is required) and no "last generated requirement" /
+message-history / quoted-reply resolution — building those would mean
+inventing new send infrastructure, which this sprint deliberately does not
+do. A source phrase that resolves to nothing falls through to the existing
+generic "which template?" missing-field question, the same graceful
+degradation every intent on this platform already has.
 
-One intent:
-  whatsapp_campaign.launch — "Send campaign to <project> [<stage>] using
-  <template>". Always confirms first via build_confirmation (which itself
-  is where the dry-run preview happens); only launches on explicit
-  approval (1/2/3), via the standard confirm/edit/cancel gate the generic
-  engine already provides.
+Recipient resolution reuses the REAL existing engine end to end
+(`routers.whatsapp.resolve_recipients_engine` via `create_batch`) for
+PROJECT / MANUAL / SAVED_LISTS sources — the only new code is the free-text
+routing logic that decides WHICH existing source_type+params a recipient
+phrase means: a phone number, one or more named talents (reusing
+casting-agent's own hardened talent-selector/fuzzy-match machinery), an
+entire project's pipeline (reusing resolve_project_by_name, same as
+before), or a saved contact/group list (new tiny matchers in
+agents/modules/name_match.py, the SAME shared 4-tier shape templates
+already used, not a new algorithm).
+
+Attribution: every campaign launched via WhatsApp is created_by the single
+seeded ADMIN_EMAIL account (there is no phone-to-user mapping in this
+codebase) — the real WhatsApp sender is still fully traceable via
+agents.audit.log_turn, which dispatcher.py already writes for every turn.
+
+Ambiguity handling stays v1-simple: an unresolvable/ambiguous source or
+recipient ends that attempt with a clear message and clears the pending
+conversation, rather than opening a full disambiguation sub-conversation
+(casting-agent's own pending_disambiguation continuation system took many
+dedicated sprints to harden — replicating it here is still out of scope).
 """
 from __future__ import annotations
 
-import difflib
 import logging
 import re
 from dataclasses import dataclass
@@ -51,7 +65,7 @@ from fastapi import HTTPException
 
 from core import db, ADMIN_EMAIL
 
-from routers.whatsapp import BatchIn, SourceParams, create_batch
+from routers.whatsapp import BatchIn, SourceParams, ManualContact, create_batch, _normalize_phone
 from routers.casting_pipeline import PIPELINE_STAGE_ORDER
 
 from agents.models import (
@@ -65,26 +79,35 @@ from agents.models import (
 from agents.registry import register_agent
 from agents import conversation
 from agents.modules import casting_pipeline_nlu as nlu
-from agents.modules.casting_pipeline import _fetch_ongoing_projects
+from agents.modules import name_match
+from agents.modules.casting_pipeline import _fetch_ongoing_projects, _fetch_all_talent_candidates
 
 AGENT_ID = "whatsapp-campaign-agent"
 
 logger = logging.getLogger(__name__)
 
-CAMPAIGN_TRIGGERS = [
-    "send campaign", "launch campaign", "start campaign",
-    "run campaign", "broadcast", "send broadcast",
+# Action-verb synonyms — ANY of these opens the intent (broadened trigger
+# gate, not a single literal phrase). The old compound phrases are kept as
+# explicit aliases so "Send campaign to X using Y" still opens the same
+# intent it always did — they're longer, so parser.detect_trigger's
+# longest-match tie-break naturally still prefers them when present, though
+# it no longer matters which one wins since both route here now.
+SEND_VERBS = [
+    "send", "share", "forward", "deliver", "message",
+    "broadcast", "push", "dispatch",
 ]
+LEGACY_CAMPAIGN_PHRASES = [
+    "send campaign", "launch campaign", "start campaign",
+    "run campaign", "send broadcast",
+]
+SEND_TRIGGERS = LEGACY_CAMPAIGN_PHRASES + SEND_VERBS
 
 
 # ---------------------------------------------------------------------------
-# Template matching — no existing name->id resolver for templates exists in
-# this codebase (only exact template_id lookups), so this small, local
-# matcher IS the orchestration layer's own job: translating free text into
-# an existing template_id, not a duplicate of the templates API or
-# create_batch itself. Mirrors resolve_project_by_name's tier shape
-# (exact -> normalized-exact -> substring -> fuzzy) but is fully
-# independent — different collection, different fields, no shared state.
+# Template matching — thin wrapper around the shared tiered matcher
+# (agents/modules/name_match.py). This IS the orchestration layer's own
+# job: translating free text into an existing template_id, not a duplicate
+# of the templates API or create_batch itself.
 # ---------------------------------------------------------------------------
 @dataclass
 class TemplateMatch:
@@ -96,74 +119,42 @@ class TemplateMatch:
 _TEMPLATE_FUZZY_CUTOFF = 0.6
 _TEMPLATE_AUTOCORRECT_CUTOFF = 0.8
 _TEMPLATE_AMBIGUITY_MARGIN = 0.05
-_TEMPLATE_PUNCT_RE = re.compile(r"[^a-z0-9\s]")
-
-
-def _normalize_template_query(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = _TEMPLATE_PUNCT_RE.sub("", s)
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def resolve_template_by_name(name_query: str, templates: List[Dict[str, str]]) -> TemplateMatch:
-    q_raw = (name_query or "").strip()
-    if not q_raw or not templates:
-        return TemplateMatch(error=f'I couldn\'t find a template matching "{name_query}".')
-
     def _label(t: Dict[str, str]) -> str:
         return t.get("name") or t.get("slug") or ""
 
-    labels = [_label(t) for t in templates]
-    q_lower = q_raw.lower()
-
-    def _as_dicts(idxs: List[int]) -> List[Dict[str, str]]:
-        return [{"id": templates[i]["id"], "label": labels[i]} for i in idxs]
-
-    # Tier 1: exact, case-insensitive.
-    exact = [i for i, l in enumerate(labels) if l.strip().lower() == q_lower]
-    if len(exact) == 1:
-        return TemplateMatch(template=templates[exact[0]])
-    if len(exact) > 1:
-        return TemplateMatch(ambiguous=_as_dicts(exact[:8]))
-
-    # Tier 2: normalized exact (case/punctuation/whitespace-insensitive).
-    q_norm = _normalize_template_query(q_raw)
-    norm_labels = [_normalize_template_query(l) for l in labels]
-    nexact = [i for i, l in enumerate(norm_labels) if q_norm and l == q_norm]
-    if len(nexact) == 1:
-        return TemplateMatch(template=templates[nexact[0]])
-    if len(nexact) > 1:
-        return TemplateMatch(ambiguous=_as_dicts(nexact[:8]))
-
-    # Tier 3: normalized substring (either direction).
-    contains = [i for i, l in enumerate(norm_labels) if q_norm and (q_norm in l or l in q_norm)]
-    if len(contains) == 1:
-        return TemplateMatch(template=templates[contains[0]])
-    if len(contains) > 1:
-        return TemplateMatch(ambiguous=_as_dicts(contains[:8]))
-
-    # Tier 4: character-level fuzzy, confident-and-unambiguous auto-resolve.
-    scored = sorted(
-        ((i, difflib.SequenceMatcher(None, q_norm, norm_labels[i]).ratio()) for i in range(len(labels))),
-        key=lambda pair: pair[1], reverse=True,
+    m = name_match.tiered_name_match(
+        name_query, templates, _label,
+        id_fn=lambda t: t["id"], what="template",
+        fuzzy_cutoff=_TEMPLATE_FUZZY_CUTOFF,
+        autocorrect_cutoff=_TEMPLATE_AUTOCORRECT_CUTOFF,
+        ambiguity_margin=_TEMPLATE_AMBIGUITY_MARGIN,
     )
-    scored = [(i, s) for i, s in scored if s >= _TEMPLATE_FUZZY_CUTOFF]
-    if not scored:
-        return TemplateMatch(error=f'I couldn\'t find a template matching "{name_query}".')
-    top_i, top_s = scored[0]
-    if len(scored) == 1:
-        return TemplateMatch(template=templates[top_i])
-    second_s = scored[1][1]
-    if top_s >= _TEMPLATE_AUTOCORRECT_CUTOFF and (top_s - second_s) > _TEMPLATE_AMBIGUITY_MARGIN:
-        return TemplateMatch(template=templates[top_i])
-    close_enough = [i for i, s in scored if (top_s - s) <= _TEMPLATE_AMBIGUITY_MARGIN][:8]
-    return TemplateMatch(ambiguous=_as_dicts(close_enough))
+    if m.item is not None:
+        return TemplateMatch(template=m.item)
+    if m.ambiguous:
+        return TemplateMatch(ambiguous=m.ambiguous)
+    return TemplateMatch(error=m.error)
 
 
 async def _fetch_templates() -> List[Dict[str, str]]:
     return await db.whatsapp_templates.find(
         {}, {"_id": 0, "id": 1, "name": 1, "slug": 1}
     ).sort("created_at", 1).to_list(200)
+
+
+async def _fetch_contact_lists() -> List[Dict[str, str]]:
+    return await db.whatsapp_contact_lists.find(
+        {"deleted": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1}
+    ).sort("created_at", -1).to_list(500)
+
+
+async def _fetch_group_lists() -> List[Dict[str, str]]:
+    return await db.whatsapp_group_lists.find(
+        {"deleted": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1}
+    ).sort("created_at", -1).to_list(500)
 
 
 async def _service_admin() -> dict:
@@ -180,58 +171,79 @@ async def _service_admin() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Field extraction — "Send campaign to <project> [<stage>] using <template>
-# [template]". v1-simple, fixed connector roles to stay unambiguous: stage
-# is a bare vocabulary match (no connector word, removed first via the
-# already-hardened extract_stage_phrase); template follows "using"/"with";
-# project follows "to". A command that doesn't fit this shape just leaves
-# that field unextracted — it falls through to the existing missing-field
-# question flow (dispatcher.py), the same graceful degradation every other
-# intent on this platform already has, not a hard failure.
+# Entity extraction — intent detection + entity extraction, not trigger-
+# phrase matching. Three tiers, tried in order:
+#
+#   1. Explicit "using <template>" clause (the original, still fully
+#      supported campaign grammar) — template extracted+removed first, then
+#      whatever follows "to"/"with" in what's left is the recipient, then a
+#      stage word (if any) left over before that is scanned last. Anchored
+#      on "using" specifically (not "with") so it can never collide with
+#      "Share X with Y" (tier 3), which also uses "with" but to mean the
+#      RECIPIENT connector, not a template connector.
+#   2. "<verb> <recipient> the <source>" inverted shape ("Message Ahana the
+#      Toyota requirement") — only tried when no to/with connector exists
+#      at all, so it can't misfire on phrasing tier 3 already handles.
+#   3. Generic "<source> to|with <recipient>" shape — covers every other
+#      natural-language example (Send/Share/Forward/Deliver/Push/Dispatch
+#      X to/with Y).
+#
+# A command that doesn't fit any of these just leaves fields unextracted —
+# it falls through to the existing missing-field question flow
+# (dispatcher.py), the same graceful degradation every other intent here
+# already has, not a hard failure.
 # ---------------------------------------------------------------------------
-_TEMPLATE_RE = re.compile(
-    r"\b(?:using|with)\s+(?:the\s+)?(.+?)(?:\s+template\b)?\s*[.!?]*$",
+_LEGACY_TEMPLATE_RE = re.compile(
+    r"\busing\s+(?:the\s+)?(.+?)(?:\s+template\b)?\s*[.!?]*$",
     re.IGNORECASE | re.DOTALL,
 )
-_PROJECT_RE = re.compile(r"\bto\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_TO_OR_WITH_RE = re.compile(r"\b(?:to|with)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
 
-def extract_campaign_fields(text: str) -> Dict[str, str]:
-    _, remainder = nlu._strip_leading_trigger(text or "", CAMPAIGN_TRIGGERS)
+def extract_send_requirement_fields(text: str) -> Dict[str, str]:
+    _, remainder = nlu._strip_leading_trigger(text or "", SEND_TRIGGERS)
     out: Dict[str, str] = {}
 
-    # Template and project are extracted (and their matched spans removed)
-    # FIRST, in that order — both anchored to the current end of the
-    # remainder, mirroring casting_pipeline_nlu's own trailing-clause
-    # technique (_PROJECT_IN_MOVE_RE). Stage is scanned LAST, only in
-    # whatever text is left over — deliberately never over the project
-    # name itself: extract_stage_phrase's shorthand table includes common
-    # single words (e.g. "test" -> ask_to_test), so scanning the raw
-    # project name risks a false positive whenever a real project's name
-    # happens to contain one of those words (confirmed live: a project
-    # named "...Test..." was misread as a stage-only command before this
-    # ordering fix). A user who wants to name a stage explicitly puts it
-    # BEFORE "to <project>", e.g. "Send campaign Approved to Toyota Glanza
-    # using Diwali Promo" — that word ends up in the leftover text this
-    # scans, never inside the captured project name.
-    t_m = _TEMPLATE_RE.search(remainder)
+    # Tier 1: legacy explicit-template grammar.
+    t_m = _LEGACY_TEMPLATE_RE.search(remainder)
     if t_m:
-        template_query = t_m.group(1).strip(" .!?")
-        if template_query:
-            out["template_query"] = template_query
-            remainder = remainder[:t_m.start()].strip()
+        source_query = t_m.group(1).strip(" .!?")
+        if source_query:
+            out["source_query"] = source_query
+            head = remainder[:t_m.start()].strip()
+            r_m = _TO_OR_WITH_RE.search(head)
+            if r_m:
+                recipient_query = r_m.group(1).strip(" .!?")
+                if recipient_query:
+                    out["recipient_query"] = recipient_query
+                    head = head[:r_m.start()].strip()
+            if head:
+                stage_key, _ambig, _rest = nlu.extract_stage_phrase(head, PIPELINE_STAGE_ORDER)
+                if stage_key:
+                    out["stage_query"] = stage_key
+            return out
 
-    p_m = _PROJECT_RE.search(remainder)
-    if p_m:
-        project_candidate = p_m.group(1).strip(" .!?")
-        if project_candidate:
-            out["project_query"] = project_candidate
-            remainder = remainder[:p_m.start()].strip()
+    # Tier 2: "<verb> <recipient> the <source>" inverted shape — only when
+    # there's no to/with connector anywhere (tier 3 owns that shape).
+    if not _TO_OR_WITH_RE.search(remainder):
+        idx = remainder.lower().rfind(" the ")
+        if idx > 0:
+            recipient_part = remainder[:idx].strip(" .!?")
+            source_part = remainder[idx + len(" the "):].strip(" .!?")
+            if recipient_part and source_part:
+                out["recipient_query"] = recipient_part
+                out["source_query"] = source_part
+                return out
 
-    if remainder:
-        stage_key, _ambig, _rest = nlu.extract_stage_phrase(remainder, PIPELINE_STAGE_ORDER)
-        if stage_key:
-            out["stage_query"] = stage_key
+    # Tier 3: generic "<source> to|with <recipient>" shape.
+    m = _TO_OR_WITH_RE.search(remainder)
+    if m:
+        recipient_part = m.group(1).strip(" .!?")
+        source_part = remainder[:m.start()].strip(" .!?")
+        if recipient_part:
+            out["recipient_query"] = recipient_part
+        if source_part:
+            out["source_query"] = source_part
 
     return out
 
@@ -243,21 +255,20 @@ def _validate_query_text(raw: str) -> ValidationResult:
     return ValidationResult(ok=True, value=v)
 
 
-PROJECT_QUERY_FIELD = FieldSpec(
-    key="project_query", label="Project",
-    question="Which project should I send this campaign to?",
-    validate=_validate_query_text, aliases=["project"],
+SOURCE_QUERY_FIELD = FieldSpec(
+    key="source_query", label="Message Source",
+    question="What should I send? (a project name or a template name)",
+    validate=_validate_query_text, aliases=["source", "template", "message"],
 )
-TEMPLATE_QUERY_FIELD = FieldSpec(
-    key="template_query", label="Template",
-    question="Which template should I use?",
-    validate=_validate_query_text, aliases=["template"],
+RECIPIENT_QUERY_FIELD = FieldSpec(
+    key="recipient_query", label="Recipients",
+    question="Who should this go to?",
+    validate=_validate_query_text, aliases=["recipient", "recipients", "to"],
 )
-# Optional — never blocks confirmation (next_missing_field skips
-# required=False fields entirely). Absent means "every stage" (see
-# _resolve_campaign_target). Kept as a real field anyway so the generic
-# "Key = value" edit parser (parser.parse_edit_instructions) can match a
-# "Pipeline = Approved" edit line against its label/aliases for free.
+# Optional — never blocks confirmation. Only meaningful when the recipient
+# resolves to a whole PROJECT (absent means "every stage"). Kept as a real
+# field so the generic "Key = value" edit parser can still match a
+# "Pipeline = Approved" edit line against its label/aliases.
 STAGE_QUERY_FIELD = FieldSpec(
     key="stage_query", label="Pipeline",
     question="Which pipeline stage?",
@@ -267,65 +278,196 @@ STAGE_QUERY_FIELD = FieldSpec(
 
 
 # ---------------------------------------------------------------------------
-# Shared resolution — called from both the confirmation-card builder and
-# the executor (re-resolved fresh at approval time, same pattern casting-
-# agent's MOVE/ADD intents already use, rather than trusting whatever the
-# card build resolved could still be valid moments later).
+# Message source resolution — try the raw phrase first (so an explicit
+# template name that happens to contain a "filler" word like "Custom
+# Message" still matches exactly), then a filler-stripped version (so
+# "Toyota requirement" resolves via the bare project-ish word "Toyota"
+# against a template literally named after that project — confirmed real
+# production pattern, not a hypothetical).
+# ---------------------------------------------------------------------------
+_SOURCE_FILLER_WORDS = {
+    "requirement", "requirements", "brief", "briefs", "message", "template",
+    "the", "this", "that", "content", "info", "information",
+}
+
+
+def _strip_source_filler(q: str) -> str:
+    tokens = [t for t in q.split() if t.lower() not in _SOURCE_FILLER_WORDS]
+    return " ".join(tokens).strip()
+
+
+async def _resolve_source(source_query: str) -> TemplateMatch:
+    q = (source_query or "").strip()
+    if not q:
+        return TemplateMatch(error="What should I send? (a project name or a template name)")
+    templates = await _fetch_templates()
+    match = resolve_template_by_name(q, templates)
+    if match.template or match.ambiguous:
+        return match
+    stripped = _strip_source_filler(q)
+    if stripped and stripped.lower() != q.lower():
+        match2 = resolve_template_by_name(stripped, templates)
+        if match2.template or match2.ambiguous:
+            return match2
+    return match
+
+
+# ---------------------------------------------------------------------------
+# Recipient resolution — decides WHICH existing source_type+SourceParams a
+# free-text recipient phrase means. Every branch below ends in the SAME
+# real recipient engine (resolve_recipients_engine, called from inside
+# create_batch) — this function only picks the routing, never resolves a
+# recipient's phone/group itself.
 # ---------------------------------------------------------------------------
 @dataclass
-class _CampaignTarget:
+class _RecipientTarget:
     ok: bool
-    project: Optional[Dict[str, str]] = None
-    stage_list: Optional[List[str]] = None
-    stage_label: Optional[str] = None
+    source_type: Optional[str] = None
+    source_params: Optional[SourceParams] = None
+    display_label: str = ""
+    error: Optional[str] = None
+
+
+_PHONE_RE = re.compile(r"^[\d\s\+\-\(\)]{7,}$")
+
+
+async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
+    q = (recipient_query or "").strip()
+    if not q:
+        return _RecipientTarget(ok=False, error="Who should this go to?")
+
+    # Tier 1: phone number.
+    if _PHONE_RE.match(q):
+        phone = _normalize_phone(q)
+        if phone:
+            return _RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=[ManualContact(name="", phone=phone)]),
+                display_label=phone,
+            )
+        return _RecipientTarget(ok=False, error=f'"{q}" doesn\'t look like a valid phone number.')
+
+    # Tier 2: an entire project (send to its pipeline) — tried before named
+    # talents so the original campaign grammar ("... to Toyota Glanza")
+    # keeps resolving to the whole project, unchanged.
+    projects = await _fetch_ongoing_projects()
+    proj_match = nlu.resolve_project_by_name(q, projects)
+    if proj_match.project:
+        stage_list = [stage_query] if stage_query else list(PIPELINE_STAGE_ORDER)
+        stage_label = nlu.stage_label(stage_query) if stage_query else "All stages"
+        return _RecipientTarget(
+            ok=True, source_type="PROJECT",
+            source_params=SourceParams(project_id=proj_match.project["id"], pipeline_stages=stage_list),
+            display_label=f'{proj_match.project["label"]} — {stage_label}',
+        )
+
+    # Tier 3: one or more named talents — global pool (same candidate set
+    # ADD_INTENT already searches; a talent being messaged directly needn't
+    # be in any particular project's pipeline).
+    selector = nlu.parse_talent_selector(q)
+    if selector.ok and not selector.everyone and not selector.ordinals:
+        candidates = await _fetch_all_talent_candidates()
+        resolved = nlu.resolve_against_candidates(selector, candidates)
+        if resolved.ok and resolved.talent_ids:
+            docs = await db.talents.find(
+                {"id": {"$in": resolved.talent_ids}},
+                {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
+            ).to_list(len(resolved.talent_ids))
+            tmap = {d["id"]: d for d in docs}
+            contacts: List[ManualContact] = []
+            for tid in resolved.talent_ids:
+                d = tmap.get(tid)
+                if not d:
+                    continue
+                group_name = (d.get("whatsapp_group_name") or "").strip()
+                phone = (d.get("phone") or "").strip()
+                if not group_name and not phone:
+                    continue
+                contacts.append(ManualContact(name=d.get("name") or "", phone=phone, whatsapp_group_name=group_name))
+            if contacts:
+                return _RecipientTarget(
+                    ok=True, source_type="MANUAL",
+                    source_params=SourceParams(contacts=contacts),
+                    display_label=", ".join(resolved.talent_labels),
+                )
+            return _RecipientTarget(
+                ok=False,
+                error=f'{" and ".join(resolved.talent_labels)} — no phone number or WhatsApp group on file.',
+            )
+        if resolved.ambiguous_candidates:
+            options = "\n".join(f"- {c.label}" for c in resolved.ambiguous_candidates)
+            return _RecipientTarget(
+                ok=False,
+                error=f'Multiple talents match "{q}":\n\n{options}\n\nPlease try again with the full name.',
+            )
+
+    # Tier 4: a saved contact list.
+    lists = await _fetch_contact_lists()
+    cl_match = name_match.tiered_name_match(
+        q, lists, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what="saved list",
+    )
+    if cl_match.item:
+        return _RecipientTarget(
+            ok=True, source_type="SAVED_LISTS",
+            source_params=SourceParams(contact_list_ids=[cl_match.item["id"]]),
+            display_label=cl_match.item["name"],
+        )
+
+    # Tier 5: a saved WhatsApp group list.
+    glists = await _fetch_group_lists()
+    gl_match = name_match.tiered_name_match(
+        q, glists, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what="saved group",
+    )
+    if gl_match.item:
+        return _RecipientTarget(
+            ok=True, source_type="SAVED_LISTS",
+            source_params=SourceParams(group_list_ids=[gl_match.item["id"]]),
+            display_label=gl_match.item["name"],
+        )
+
+    return _RecipientTarget(
+        ok=False,
+        error=f'I couldn\'t figure out who "{q}" refers to — a talent, project, phone number, or saved list.',
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared resolution — called from both the confirmation-card builder and
+# the executor (re-resolved fresh at approval time, same pattern
+# casting-agent's MOVE/ADD intents already use).
+# ---------------------------------------------------------------------------
+@dataclass
+class _SendTarget:
+    ok: bool
+    source_type: Optional[str] = None
+    source_params: Optional[SourceParams] = None
+    recipient_label: str = ""
     template: Optional[Dict[str, str]] = None
     error: Optional[str] = None
 
 
-async def _resolve_campaign_target(collected: Dict[str, str]) -> _CampaignTarget:
-    project_query = (collected.get("project_query") or "").strip()
-    template_query = (collected.get("template_query") or "").strip()
+async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
+    source_query = (collected.get("source_query") or "").strip()
+    recipient_query = (collected.get("recipient_query") or "").strip()
     stage_query = (collected.get("stage_query") or "").strip()
 
-    projects = await _fetch_ongoing_projects()
-    proj_match = nlu.resolve_project_by_name(project_query, projects)
-    if proj_match.error:
-        return _CampaignTarget(ok=False, error=proj_match.error)
-    if proj_match.ambiguous:
-        options = "\n".join(f"- {c['label']}" for c in proj_match.ambiguous)
-        return _CampaignTarget(
-            ok=False,
-            error=f'Multiple projects match "{project_query}":\n\n{options}\n\nPlease try again with the exact project name.',
-        )
-    if proj_match.suggestions:
-        options = "\n".join(f"- {c['label']}" for c in proj_match.suggestions)
-        return _CampaignTarget(
-            ok=False,
-            error=f'I couldn\'t confidently match "{project_query}" to one project. Did you mean:\n\n{options}\n\nPlease try again with the exact project name.',
-        )
-    project = proj_match.project
-
-    if stage_query:
-        stage_list = [stage_query]
-        stage_label = nlu.stage_label(stage_query)
-    else:
-        stage_list = list(PIPELINE_STAGE_ORDER)
-        stage_label = "All stages"
-
-    templates = await _fetch_templates()
-    tmpl_match = resolve_template_by_name(template_query, templates)
+    tmpl_match = await _resolve_source(source_query)
     if tmpl_match.error:
-        return _CampaignTarget(ok=False, error=tmpl_match.error)
+        return _SendTarget(ok=False, error=tmpl_match.error)
     if tmpl_match.ambiguous:
         options = "\n".join(f"- {c['label']}" for c in tmpl_match.ambiguous)
-        return _CampaignTarget(
+        return _SendTarget(
             ok=False,
-            error=f'Multiple templates match "{template_query}":\n\n{options}\n\nPlease try again with the exact template name.',
+            error=f'Multiple templates match "{source_query}":\n\n{options}\n\nPlease try again with the exact template name.',
         )
-    template = tmpl_match.template
 
-    return _CampaignTarget(
-        ok=True, project=project, stage_list=stage_list, stage_label=stage_label, template=template,
+    recipient = await _resolve_recipient(recipient_query, stage_query)
+    if not recipient.ok:
+        return _SendTarget(ok=False, error=recipient.error)
+
+    return _SendTarget(
+        ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
+        recipient_label=recipient.display_label, template=tmpl_match.template,
     )
 
 
@@ -334,8 +476,34 @@ def _truncate(s: str, limit: int = 300) -> str:
     return s if len(s) <= limit else s[:limit].rstrip() + "…"
 
 
-async def _build_campaign_confirmation(collected: dict, ctx: ExecContext) -> str:
-    target = await _resolve_campaign_target(collected)
+def _format_recipients_and_delivery(jobs: List[dict], skipped: List[dict]) -> "tuple[str, str]":
+    """Builds the RECIPIENTS list ("✓ Name → destination") and DELIVERY
+    summary line from create_batch's own dry-run job list — no separate
+    recipient-formatting logic, this just renders what the real engine
+    already resolved."""
+    lines = []
+    shown = jobs[:10]
+    for j in shown:
+        lines.append(f"✓ {j['talent_name']} → {j['destination']}")
+    if len(jobs) > len(shown):
+        lines.append(f"…and {len(jobs) - len(shown)} more")
+    if skipped:
+        lines.append(f"⚠ {len(skipped)} skipped (no phone/group on file)")
+    recipients_block = "\n".join(lines) if lines else "(no recipients resolved)"
+
+    groups = sum(1 for j in jobs if j.get("destination_type") == "group")
+    numbers = sum(1 for j in jobs if j.get("destination_type") == "number")
+    delivery_parts = []
+    if groups:
+        delivery_parts.append(f"{groups} WhatsApp Group{'s' if groups != 1 else ''}")
+    if numbers:
+        delivery_parts.append(f"{numbers} Phone Number{'s' if numbers != 1 else ''}")
+    delivery = ", ".join(delivery_parts) if delivery_parts else "(none)"
+    return recipients_block, delivery
+
+
+async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext) -> str:
+    target = await _resolve_send_target(collected)
     if not target.ok:
         # v1 scope (see module docstring): end this attempt cleanly rather
         # than opening a disambiguation sub-conversation.
@@ -345,8 +513,8 @@ async def _build_campaign_confirmation(collected: dict, ctx: ExecContext) -> str
     try:
         preview = await create_batch(
             BatchIn(
-                source_type="PROJECT",
-                source_params=SourceParams(project_id=target.project["id"], pipeline_stages=target.stage_list),
+                source_type=target.source_type,
+                source_params=target.source_params,
                 template_id=target.template["id"],
                 is_dry_run=True,
             ),
@@ -354,42 +522,42 @@ async def _build_campaign_confirmation(collected: dict, ctx: ExecContext) -> str
         )
     except HTTPException as exc:
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
-        return f"Couldn't prepare that campaign: {exc.detail}"
+        return f"Couldn't prepare that: {exc.detail}"
 
     jobs = preview["jobs"]
     skipped = preview["skipped"]
     template_label = target.template.get("name") or target.template.get("slug") or ""
+    recipients_block, delivery = _format_recipients_and_delivery(jobs, skipped)
 
     lines = [
-        "Campaign",
+        "ACTION",
+        "Send Requirement",
+        "",
+        "MESSAGE SOURCE",
         template_label,
         "",
-        "Project",
-        target.project["label"],
+        "RECIPIENTS",
+        recipients_block,
         "",
-        "Pipeline",
-        target.stage_label,
-        "",
-        f"Recipients: {len(jobs)}",
+        "DELIVERY",
+        delivery,
     ]
-    if skipped:
-        lines.append(f"Skipped (unresolvable): {len(skipped)}")
     if jobs:
         lines += ["", "Sample message", "", _truncate(jobs[0]["message_body"])]
-    lines += ["", "Reply:", "1 → Send", "2 → Edit", "3 → Cancel"]
+    lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
     return "\n".join(lines)
 
 
-async def _campaign_executor(collected: dict, ctx: ExecContext) -> ExecResult:
-    target = await _resolve_campaign_target(collected)
+async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    target = await _resolve_send_target(collected)
     if not target.ok:
-        return ExecResult(ok=False, error="campaign_resolution_failed", message=target.error)
+        return ExecResult(ok=False, error="send_requirement_resolution_failed", message=target.error)
 
     try:
         result = await create_batch(
             BatchIn(
-                source_type="PROJECT",
-                source_params=SourceParams(project_id=target.project["id"], pipeline_stages=target.stage_list),
+                source_type=target.source_type,
+                source_params=target.source_params,
                 template_id=target.template["id"],
                 is_dry_run=False,
             ),
@@ -397,32 +565,31 @@ async def _campaign_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         )
     except HTTPException as exc:
         return ExecResult(
-            ok=False, error="campaign_launch_failed",
-            message=f"Couldn't launch that campaign: {exc.detail}",
+            ok=False, error="send_requirement_launch_failed",
+            message=f"Couldn't send that: {exc.detail}",
         )
 
     batch = result["batch"]
     queued = len(result["jobs"])
     template_label = target.template.get("name") or target.template.get("slug") or ""
     message = (
-        "Campaign launched.\n\n"
-        f"Project\n{target.project['label']}\n\n"
-        f"Pipeline\n{target.stage_label}\n\n"
-        f"Template\n{template_label}\n\n"
+        "Sent.\n\n"
+        f"Message Source\n{template_label}\n\n"
+        f"Recipients\n{target.recipient_label}\n\n"
         f"Queued {queued} message(s) — delivery happens over the next few minutes.\n\n"
         f"Batch ID: {batch['id']}"
     )
     return ExecResult(ok=True, message=message, data={"batch_id": batch["id"], "queued": queued})
 
 
-CAMPAIGN_INTENT = IntentDefinition(
-    intent_id="whatsapp_campaign.launch",
-    triggers=CAMPAIGN_TRIGGERS,
-    fields=[PROJECT_QUERY_FIELD, TEMPLATE_QUERY_FIELD, STAGE_QUERY_FIELD],
-    executor=_campaign_executor,
-    extract_fields=extract_campaign_fields,
-    build_confirmation=_build_campaign_confirmation,
-    summary_title="You are about to launch:",
+SEND_REQUIREMENT_INTENT = IntentDefinition(
+    intent_id="whatsapp_campaign.send_requirement",
+    triggers=SEND_TRIGGERS,
+    fields=[SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD],
+    executor=_send_requirement_executor,
+    extract_fields=extract_send_requirement_fields,
+    build_confirmation=_build_send_requirement_confirmation,
+    summary_title="You are about to send:",
 )
 
 UNAUTHORIZED_SENDER_MESSAGE = (
@@ -434,18 +601,11 @@ CAMPAIGN_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="WhatsApp Campaign Agent",
     module="whatsapp_campaign_agent",
-    intents=[CAMPAIGN_INTENT],
+    intents=[SEND_REQUIREMENT_INTENT],
     # Deliberately NOT opting into supports_concurrent_tasks — single-
     # conversation flow is sufficient for v1; this is an additive,
-    # per-agent flag (see agents/tasks.py) that can be turned on later
-    # with zero risk to any other agent's code.
-    #
-    # unauthorized_sender_message (2026-08-06): a launched campaign is a
-    # real, mass-messaging action, so the allowlist itself stays fail-
-    # closed exactly as before — this only replaces the silent
-    # handled=False an unauthorized sender used to get with a clear
-    # message, so a legitimate team member who hasn't been added yet
-    # knows to ask, instead of the bot looking broken/unresponsive.
+    # per-agent flag that can be turned on later with zero risk to any
+    # other agent's code.
     unauthorized_sender_message=UNAUTHORIZED_SENDER_MESSAGE,
 )
 

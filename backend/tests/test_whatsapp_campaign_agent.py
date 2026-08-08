@@ -1,10 +1,20 @@
-"""WhatsApp Campaign Orchestration Agent (2026-08-05) — tests for the third
-registered agent, whatsapp-campaign-agent. Everything DB-facing it touches
-(whatsapp_batches, whatsapp_jobs, whatsapp_templates, projects,
-casting_pipeline, talents) is the SAME existing WhatsApp Engine the web app
-uses — these tests exist to prove the orchestration layer wires into it
-correctly (compile preview -> confirmation -> launch), not to re-test the
-engine itself (routers/whatsapp.py has its own test coverage).
+"""WhatsApp Campaign Orchestration Agent — tests for whatsapp-campaign-agent.
+
+2026-08-08: the agent moved from literal trigger-phrase matching
+("send campaign") to intent detection + entity extraction (any of several
+action-verb synonyms opens the SAME intent, and free-text parsing pulls out
+who to send to and what to send). These tests cover: the extraction layer
+directly (no DB), the full natural-language flow end to end, backward
+compatibility with the old "send campaign to X using Y" grammar, every
+recipient tier (project, named talent(s), phone number, saved contact
+list, saved group list), and the pre-existing group/allowlist regression
+guards.
+
+Everything DB-facing this touches (whatsapp_batches, whatsapp_jobs,
+whatsapp_templates, projects, casting_pipeline, talents, whatsapp_contact_
+lists, whatsapp_group_lists) is the SAME existing WhatsApp Engine the web
+app uses — these tests exist to prove the orchestration layer wires into
+it correctly, not to re-test the engine itself.
 """
 import os
 os.environ["JWT_SECRET"] = "dummy"
@@ -22,6 +32,7 @@ from agents import modules as agent_modules
 from agents import registry
 from agents.dispatcher import handle_inbound_message
 from agents.modules import whatsapp_campaign_agent as wca
+import agents.parser as parser
 
 agent_modules.register_all()
 
@@ -66,9 +77,12 @@ async def _seed_project(brand_name: str) -> str:
     return pid
 
 
-async def _seed_talent(name: str, phone: str) -> str:
+async def _seed_talent(name: str, phone: str = "", group_name: str = "") -> str:
     tid = f"test-wca-tal-{uuid.uuid4().hex[:8]}"
-    await db.talents.insert_one({"id": tid, "name": name, "phone": phone, "tags": [], "notes": ""})
+    await db.talents.insert_one({
+        "id": tid, "name": name, "phone": phone or None,
+        "whatsapp_group_name": group_name, "tags": [], "notes": "",
+    })
     return tid
 
 
@@ -82,7 +96,7 @@ async def _seed_pipeline_row(project_id: str, talent_id: str, stage: str) -> Non
 async def _seed_template(name: str) -> str:
     tpl_id = f"test-wca-tpl-{uuid.uuid4().hex[:8]}"
     await db.whatsapp_templates.insert_one({
-        "id": tpl_id, "name": name, "slug": name.lower().replace(" ", "_"),
+        "id": tpl_id, "name": name, "slug": name.lower().replace(" ", "_") + uuid.uuid4().hex[:4],
         "body_text": "Hi {{talent_name}}, about {{project_name}} — reply to confirm.",
         "variables": [], "media_type": "none", "media_url": None,
         "media_cloudinary_id": None, "is_custom": False,
@@ -91,16 +105,43 @@ async def _seed_template(name: str) -> str:
     return tpl_id
 
 
-async def _cleanup(phone: str, project_ids=(), talent_ids=(), template_ids=()) -> None:
+async def _seed_contact_list(name: str, contacts) -> str:
+    list_id = f"test-wca-cl-{uuid.uuid4().hex[:8]}"
+    await db.whatsapp_contact_lists.insert_one({
+        "id": list_id, "name": name, "description": "", "contacts": contacts,
+        "deleted": False, "created_at": _now(), "updated_at": _now(),
+    })
+    return list_id
+
+
+async def _seed_group_list(name: str, groups) -> str:
+    list_id = f"test-wca-gl-{uuid.uuid4().hex[:8]}"
+    await db.whatsapp_group_lists.insert_one({
+        "id": list_id, "name": name, "description": "", "groups": groups,
+        "deleted": False, "created_at": _now(), "updated_at": _now(),
+    })
+    return list_id
+
+
+async def _cleanup(phone: str, project_ids=(), talent_ids=(), template_ids=(),
+                    contact_list_ids=(), group_list_ids=()) -> None:
     await db.projects.delete_many({"id": {"$in": list(project_ids)}})
     await db.talents.delete_many({"id": {"$in": list(talent_ids)}})
     await db.casting_pipeline.delete_many({"project_id": {"$in": list(project_ids)}})
     await db.whatsapp_templates.delete_many({"id": {"$in": list(template_ids)}})
+    await db.whatsapp_contact_lists.delete_many({"id": {"$in": list(contact_list_ids)}})
+    await db.whatsapp_group_lists.delete_many({"id": {"$in": list(group_list_ids)}})
     await db.whatsapp_conversations.delete_many({"agent_id": AGENT_ID, "phone": phone})
     await db.whatsapp_agent_sessions.delete_many({"agent_id": AGENT_ID, "phone": phone})
     await db.whatsapp_agent_audit_log.delete_many({"agent_id": AGENT_ID, "sender_phone": phone})
     batches = await db.whatsapp_batches.find({"project_id": {"$in": list(project_ids)}}).to_list(100)
     for b in batches:
+        await db.whatsapp_batches.delete_one({"id": b["id"]})
+        await db.whatsapp_jobs.delete_many({"batch_id": b["id"]})
+    # MANUAL/SAVED_LISTS-sourced batches have no project_id — clean up by
+    # template_id instead, so those don't leak between test runs either.
+    tpl_batches = await db.whatsapp_batches.find({"template_id": {"$in": list(template_ids)}}).to_list(100)
+    for b in tpl_batches:
         await db.whatsapp_batches.delete_one({"id": b["id"]})
         await db.whatsapp_jobs.delete_many({"batch_id": b["id"]})
 
@@ -112,7 +153,59 @@ async def _seed_admin_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-async def test_one_line_command_auto_resolves_and_confirmation_card_correct():
+# Pure extraction tests — no DB, mirrors every phrasing example from the
+# architecture spec plus the legacy campaign grammar it must keep working.
+# ---------------------------------------------------------------------------
+def test_extract_fields_all_natural_language_variants():
+    cases = [
+        ("Send Toyota requirement to Ahana", "Ahana", "Toyota requirement"),
+        ("Send Toyota requirement to Ahana Pocha", "Ahana Pocha", "Toyota requirement"),
+        ("Share Toyota requirement with Ahana", "Ahana", "Toyota requirement"),
+        ("Forward Toyota brief to Ahana", "Ahana", "Toyota brief"),
+        ("Message Ahana the Toyota requirement", "Ahana", "Toyota requirement"),
+        ("Deliver Toyota requirement to Ahana", "Ahana", "Toyota requirement"),
+        ("Send the requirement to Ahana", "Ahana", "the requirement"),
+        ("Send this requirement to Ahana", "Ahana", "this requirement"),
+        ("Forward this to Ahana", "Ahana", "this"),
+    ]
+    for text, expected_recipient, expected_source in cases:
+        cleaned = parser.clean_voice_transcript(text)
+        fields = wca.extract_send_requirement_fields(cleaned)
+        assert fields.get("recipient_query") == expected_recipient, text
+        assert fields.get("source_query") == expected_source, text
+
+    # Leading-filler variants ("Please"/"Kindly") — stripped upstream by
+    # parser.clean_voice_transcript before extraction ever sees them.
+    for filler in ("Please", "Kindly"):
+        cleaned = parser.clean_voice_transcript(f"{filler} send Toyota to Ahana")
+        fields = wca.extract_send_requirement_fields(cleaned)
+        assert fields.get("recipient_query") == "Ahana"
+        assert fields.get("source_query") == "Toyota"
+
+
+def test_extract_fields_legacy_campaign_grammar_unchanged():
+    for verb_phrase in ("Send campaign", "Launch campaign", "Start campaign", "Run campaign"):
+        text = f"{verb_phrase} to Toyota Glanza using Diwali Template"
+        fields = wca.extract_send_requirement_fields(text)
+        assert fields.get("recipient_query") == "Toyota Glanza", text
+        assert fields.get("source_query") == "Diwali", text
+
+    fields = wca.extract_send_requirement_fields("Broadcast to Toyota Glanza using Diwali Template")
+    assert fields.get("recipient_query") == "Toyota Glanza"
+    assert fields.get("source_query") == "Diwali"
+
+    # Explicit stage before "to" in the legacy grammar still extracts.
+    fields = wca.extract_send_requirement_fields(
+        "Send campaign Approved to Toyota Glanza using Diwali Template"
+    )
+    assert fields.get("stage_query") == "approved"
+    assert fields.get("recipient_query") == "Toyota Glanza"
+
+
+# ---------------------------------------------------------------------------
+# Full end-to-end flow — legacy grammar (backward compatibility).
+# ---------------------------------------------------------------------------
+async def test_legacy_campaign_phrasing_still_works_end_to_end():
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -120,8 +213,8 @@ async def test_one_line_command_auto_resolves_and_confirmation_card_correct():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Talent One", "917000000001")
-    t2 = await _seed_talent("Talent Two", "917000000002")
+    t1 = await _seed_talent("Talent One", phone="917000000001")
+    t2 = await _seed_talent("Talent Two", phone="917000000002")
     talent_ids = [t1, t2]
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
@@ -134,14 +227,12 @@ async def test_one_line_command_auto_resolves_and_confirmation_card_correct():
         )
         assert r.handled
         assert "did you mean" not in r.reply.lower()
-        assert f"Campaign\n{template_name}" in r.reply
-        assert f"Project\n{label}" in r.reply
-        assert "Pipeline\nAll stages" in r.reply
-        assert "Recipients: 2" in r.reply
-        assert "1 → Send" in r.reply
+        assert f"MESSAGE SOURCE\n{template_name}" in r.reply
+        assert "RECIPIENTS" in r.reply
+        assert "DELIVERY" in r.reply
+        assert "2 Phone Numbers" in r.reply
+        assert "1 Approve" in r.reply
 
-        # A dry-run batch was written (the actual compile preview), never
-        # picked up by the worker.
         dry = await db.whatsapp_batches.find_one({
             "project_id": project_id, "template_id": template_id, "is_dry_run": True,
         })
@@ -164,7 +255,7 @@ async def test_one_line_command_auto_resolves_and_confirmation_card_correct():
         await _restore_config(original)
 
 
-async def test_missing_template_asks_then_completes():
+async def test_missing_source_asks_then_completes():
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -172,7 +263,7 @@ async def test_missing_template_asks_then_completes():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Only Talent", "917000000003")
+    t1 = await _seed_talent("Only Talent", phone="917000000003")
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
 
@@ -181,14 +272,14 @@ async def test_missing_template_asks_then_completes():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert r.reply == "Which template should I use?"
+        assert r.reply == "What should I send? (a project name or a template name)"
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text=template_name,
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert f"Campaign\n{template_name}" in r2.reply
-        assert "Recipients: 1" in r2.reply
+        assert f"MESSAGE SOURCE\n{template_name}" in r2.reply
+        assert "1 Phone Number" in r2.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -207,8 +298,8 @@ async def test_explicit_stage_filters_recipients():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Ask Talent", "917000000004")
-    t2 = await _seed_talent("Approved Talent", "917000000005")
+    t1 = await _seed_talent("Ask Talent", phone="917000000004")
+    t2 = await _seed_talent("Approved Talent", phone="917000000005")
     talent_ids = [t1, t2]
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
@@ -220,8 +311,7 @@ async def test_explicit_stage_filters_recipients():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Pipeline\nApproved" in r.reply
-        assert "Recipients: 1" in r.reply
+        assert "1 Phone Number" in r.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -240,9 +330,9 @@ async def test_no_stage_defaults_to_whole_project():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Ask Talent", "917000000006")
-    t2 = await _seed_talent("Approved Talent", "917000000007")
-    t3 = await _seed_talent("Hold Talent", "917000000008")
+    t1 = await _seed_talent("Ask Talent", phone="917000000006")
+    t2 = await _seed_talent("Approved Talent", phone="917000000007")
+    t3 = await _seed_talent("Hold Talent", phone="917000000008")
     talent_ids = [t1, t2, t3]
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
@@ -254,8 +344,7 @@ async def test_no_stage_defaults_to_whole_project():
             text=f"Send campaign to {label} using {template_name} template",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Pipeline\nAll stages" in r.reply
-        assert "Recipients: 3" in r.reply
+        assert "3 Phone Numbers" in r.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -266,6 +355,221 @@ async def test_no_stage_defaults_to_whole_project():
         await _restore_config(original)
 
 
+# ---------------------------------------------------------------------------
+# New natural-language recipient tiers.
+# ---------------------------------------------------------------------------
+async def test_named_talent_recipient_routes_via_whatsapp_group():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    talent_name = f"Zoya Unique{uuid.uuid4().hex[:6]}"
+    group_display = f"{talent_name} x Talentgram"
+    t1 = await _seed_talent(talent_name, phone="917000000012", group_name=group_display)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {talent_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"✓ {talent_name} → {group_display}" in r.reply
+        assert "1 WhatsApp Group" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        assert jobs[0]["destination_type"] == "group"
+        assert jobs[0]["destination"] == group_display
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_named_talent_recipient_routes_via_phone_when_no_group():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    talent_name = f"Priya Unique{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(talent_name, phone="917000000013")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {talent_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"✓ {talent_name} → 917000000013" in r.reply
+        assert "1 Phone Number" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multiple_named_talents_recipient():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    n1 = f"Kavya Unique{uuid.uuid4().hex[:6]}"
+    n2 = f"Meera Unique{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(n1, phone="917000000014")
+    t2 = await _seed_talent(n2, phone="917000000015")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {n1} and {n2}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "2 Phone Numbers" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_phone_number_recipient():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to +917000099999",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "1 Phone Number" in r.reply
+        assert "917000099999" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_saved_contact_list_recipient():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    list_name = f"VIP Clients {uuid.uuid4().hex[:6]}"
+    contacts = [{"name": "Contact A", "phone": "917000000020"}, {"name": "Contact B", "phone": "917000000021"}]
+    list_id = await _seed_contact_list(list_name, contacts)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {list_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "2 Phone Numbers" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, template_ids=[template_id], contact_list_ids=[list_id])
+        await _restore_config(original)
+
+
+async def test_saved_group_list_recipient():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    list_name = f"Client Groups {uuid.uuid4().hex[:6]}"
+    groups = [{"group_name": "Toyota Client Group"}, {"group_name": "Nykaa Client Group"}]
+    list_id = await _seed_group_list(list_name, groups)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {list_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "2 WhatsApp Groups" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, template_ids=[template_id], group_list_ids=[list_id])
+        await _restore_config(original)
+
+
+async def test_unresolvable_source_gives_clear_error():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    talent_name = f"Nora Unique{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(talent_name, phone="917000000016")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send zzz_nonexistent_source_zzz to {talent_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "couldn't find a template" in r.reply.lower()
+
+        stray = await db.whatsapp_batches.count_documents({"source_label": {"$regex": "zzz_nonexistent"}})
+        assert stray == 0
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_unresolvable_recipient_gives_clear_error():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Zzz Nonexistent Person Zzz",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "couldn't figure out who" in r.reply.lower()
+    finally:
+        await _cleanup(phone, template_ids=[template_id])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Approve / cancel / group / allowlist regression guards.
+# ---------------------------------------------------------------------------
 async def test_approve_creates_live_batch_and_jobs():
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
@@ -274,7 +578,7 @@ async def test_approve_creates_live_batch_and_jobs():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Send Talent", "917000000009")
+    t1 = await _seed_talent("Send Talent", phone="917000000009")
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
 
@@ -283,15 +587,15 @@ async def test_approve_creates_live_batch_and_jobs():
             text=f"Send campaign to {label} using {template_name} template",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Recipients: 1" in r.reply
+        assert "1 Phone Number" in r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r2.handled
-        assert "Campaign launched." in r2.reply
-        assert f"Project\n{label}" in r2.reply
+        assert "Sent." in r2.reply
+        assert f"Recipients\n{label}" in r2.reply
         assert "Queued 1 message(s)" in r2.reply
         assert "Batch ID:" in r2.reply
         batch_id = r2.reply.split("Batch ID:")[1].strip()
@@ -310,10 +614,6 @@ async def test_approve_creates_live_batch_and_jobs():
         assert jobs[0]["status"] == "pending"
         assert jobs[0]["is_dry_run"] is False
 
-        # The dispatcher's own generic audit trail (agent-turn level, not
-        # the campaign engine's own whatsapp_audit_log) still traces the
-        # real WhatsApp sender back to this batch — the "attribution
-        # without new infra" mechanism this agent relies on.
         audit_row = await db.whatsapp_agent_audit_log.find_one(
             {"agent_id": AGENT_ID, "sender_phone": phone, "confirmation_action": "approve"},
         )
@@ -332,7 +632,7 @@ async def test_cancel_creates_no_live_batch():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Cancel Talent", "917000000010")
+    t1 = await _seed_talent("Cancel Talent", phone="917000000010")
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
 
@@ -350,8 +650,6 @@ async def test_cancel_creates_no_live_batch():
 
         live_count = await db.whatsapp_batches.count_documents({"project_id": project_id, "is_dry_run": False})
         assert live_count == 0
-        # The dry-run preview batch is expected/harmless — same as clicking
-        # "Preview" in the web app.
         dry_count = await db.whatsapp_batches.count_documents({"project_id": project_id, "is_dry_run": True})
         assert dry_count >= 1
     finally:
@@ -364,13 +662,9 @@ async def test_different_group_does_not_activate_campaign_agent():
     phone = _phone()
     original = await _use_test_config(group, phone)
     try:
-        # This phone is authorized for the campaign group above, but the
-        # message is sent to a DIFFERENT group entirely — resolve_agent_
-        # for_group must not route it to this agent (or any agent that
-        # doesn't own that group).
         r = await handle_inbound_message(
             group_name="Talentgram Casting Pipeline", sender_phone=phone,
-            text="Send campaign to Whatever using Whatever template",
+            text="Send Whatever to Whoever",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert not r.handled
@@ -379,10 +673,6 @@ async def test_different_group_does_not_activate_campaign_agent():
 
 
 async def test_unauthorized_phone_in_campaign_group_gets_friendly_reply():
-    """(2026-08-06) The allowlist itself stays fail-closed — an
-    unauthorized sender's message never reaches the campaign engine, never
-    creates a dry-run batch, never resolves a project/template. Only the
-    OUTCOME changed: a clear message instead of dead silence."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     authorized_phone = _phone()
     unauthorized_phone = _phone()
@@ -390,16 +680,13 @@ async def test_unauthorized_phone_in_campaign_group_gets_friendly_reply():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=unauthorized_phone,
-            text="Send campaign to Whatever using Whatever template",
+            text="Send Whatever to Whoever",
             sender_name="Stranger", sender_is_group_member=True,
         )
         assert r.handled
         assert r.reply == wca.UNAUTHORIZED_SENDER_MESSAGE
         assert "not authorized" in r.reply.lower()
 
-        # No dry-run batch was created for the rejected sender — the
-        # allowlist check happens BEFORE the campaign engine is ever
-        # touched, same as before this change.
         stray = await db.whatsapp_batches.count_documents({"source_label": {"$regex": "Whatever"}})
         assert stray == 0
     finally:
@@ -407,8 +694,6 @@ async def test_unauthorized_phone_in_campaign_group_gets_friendly_reply():
 
 
 async def test_authorized_phone_still_works_normally():
-    """The fix is additive to the REJECTION path only — an authorized
-    sender's flow is completely unaffected."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -416,7 +701,7 @@ async def test_authorized_phone_still_works_normally():
     project_id = await _seed_project(label)
     template_name = f"Promo {uuid.uuid4().hex[:6]}"
     template_id = await _seed_template(template_name)
-    t1 = await _seed_talent("Still Works Talent", "917000000011")
+    t1 = await _seed_talent("Still Works Talent", phone="917000000011")
     try:
         await _seed_pipeline_row(project_id, t1, "ask_to_test")
         r = await handle_inbound_message(
@@ -426,7 +711,7 @@ async def test_authorized_phone_still_works_normally():
         )
         assert r.handled
         assert r.reply != wca.UNAUTHORIZED_SENDER_MESSAGE
-        assert "Recipients: 1" in r.reply
+        assert "1 Phone Number" in r.reply
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
             sender_name="Raj", sender_is_group_member=True,

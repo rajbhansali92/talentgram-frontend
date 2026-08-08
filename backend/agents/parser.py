@@ -31,7 +31,7 @@ def _clean_lines(text: str) -> List[str]:
 # agent's module — every agent's trigger detection and field extraction
 # benefits identically, the same as detect_trigger's glued-digit rule.
 _LEADING_FILLER_RE = re.compile(
-    r"^\s*(?:(?:hey|hi|ok(?:ay)?|please|um+|uh+|so|can you|could you|would you)[\s,]+)+",
+    r"^\s*(?:(?:hey|hi|ok(?:ay)?|please|kindly|um+|uh+|so|can you|could you|would you)[\s,]+)+",
     re.IGNORECASE,
 )
 _TRAILING_FILLER_RE = re.compile(r"[\s,]+(?:please|thanks|thank you)\.?\s*$", re.IGNORECASE)

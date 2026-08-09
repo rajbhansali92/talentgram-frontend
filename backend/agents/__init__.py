@@ -88,6 +88,16 @@ async def ensure_agents_ready() -> None:
         await db["whatsapp_agent_tasks"].create_index(
             "expires_at", expireAfterSeconds=0, name="tasks_ttl"
         )
+        # Shared Interactive Disambiguation Engine (Sprint 1, 2026-08-09) —
+        # single-slot per (agent_id, phone), same shape as whatsapp_
+        # conversations, since a phone can only have one pending choice at
+        # a time.
+        await db["whatsapp_agent_disambiguation"].create_index(
+            [("agent_id", 1), ("phone", 1)], unique=True, name="agent_phone_unique"
+        )
+        await db["whatsapp_agent_disambiguation"].create_index(
+            "expires_at", expireAfterSeconds=0, name="disambiguation_ttl"
+        )
     except Exception:
         logger.exception("whatsapp agent platform index creation failed (non-fatal)")
 

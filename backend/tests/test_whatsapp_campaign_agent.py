@@ -30,6 +30,7 @@ import pytest
 from core import db, _now, ADMIN_EMAIL
 from agents import modules as agent_modules
 from agents import registry
+from agents import disambiguation
 from agents.dispatcher import handle_inbound_message
 from agents.modules import whatsapp_campaign_agent as wca
 import agents.parser as parser
@@ -199,11 +200,15 @@ def test_talent_match_safety_gate_rejects_shared_surname_only():
     """(2026-08-09 live production incident, deterministic unit form) A
     fuzzy match sharing only a surname must be rejected; a genuine surname-
     only search, or an exact/superset name match, must still pass."""
-    assert wca._talent_match_is_safe("Ami Trivedi", "Kripa Trivedi") is False
-    assert wca._talent_match_is_safe("Trivedi", "Kripa Trivedi") is True
-    assert wca._talent_match_is_safe("Ahana Pocha", "Ahana Pocha") is True
-    assert wca._talent_match_is_safe("Ahana", "Ahana Pocha") is True
-    assert wca._talent_match_is_safe("", "Kripa Trivedi") is False
+    assert wca._fuzzy_match_is_safe("Ami Trivedi", "Kripa Trivedi") is False
+    assert wca._fuzzy_match_is_safe("Trivedi", "Kripa Trivedi") is True
+    assert wca._fuzzy_match_is_safe("Ahana Pocha", "Ahana Pocha") is True
+    assert wca._fuzzy_match_is_safe("Ahana", "Ahana Pocha") is True
+    assert wca._fuzzy_match_is_safe("", "Kripa Trivedi") is False
+    # (2026-08-09, caught in testing) the SAME shape of bug, reproduced
+    # against the project matcher — a single shared word ("Alpha") must
+    # not be enough on its own.
+    assert wca._fuzzy_match_is_safe("ZList123 Alpha", "QATEST Project Alpha") is False
 
 
 def test_extract_fields_legacy_campaign_grammar_unchanged():
@@ -876,4 +881,325 @@ async def test_authorized_phone_still_works_normally():
         )
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1 (2026-08-09) — Shared Interactive Disambiguation Engine.
+# ---------------------------------------------------------------------------
+async def test_disambiguation_project_ambiguity_resolved_via_digit():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    labels = sorted([f"ZAmbig{tag} Glanza", f"ZAmbig{tag} Hyryder", f"ZAmbig{tag} Fortuner"])
+    project_ids = [await _seed_project(label) for label in labels]
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000040")
+    await _seed_pipeline_row(project_ids[0], t1, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZAmbig{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple projects." in r.reply
+        for i, label in enumerate(labels):
+            marker = disambiguation._CIRCLED_DIGITS[i]
+            assert f"{marker} {label}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "RECIPIENTS" in r2.reply
+        assert labels[0] in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        pending = await disambiguation.get_pending(AGENT_ID, phone)
+        assert pending is None
+    finally:
+        await _cleanup(phone, project_ids=project_ids, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_disambiguation_template_ambiguity_resolved_via_circled_digit():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"Requirement {tag}"
+    tpl_ids = [await _seed_template(f"{label} Alpha"), await _seed_template(f"{label} Beta")]
+    talent_name = f"Nina Unique{tag}"
+    t1 = await _seed_talent(talent_name, phone="917000000041")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {label} to {talent_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple templates." in r.reply
+        assert f"① {label} Alpha" in r.reply
+        assert f"② {label} Beta" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="②",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert f"MESSAGE SOURCE\n{label} Beta" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=tpl_ids)
+        await _restore_config(original)
+
+
+async def test_disambiguation_talent_ambiguity_resolved_via_exact_name():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    name_sharma = f"Priya Sharma{tag}"
+    name_verma = f"Priya Verma{tag}"
+    t1 = await _seed_talent(name_sharma, phone="917000000042")
+    t2 = await _seed_talent(name_verma, phone="917000000043")
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Priya{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple talents." in r.reply
+        assert name_sharma in r.reply and name_verma in r.reply
+
+        # Reply with one candidate's full, distinguishing name.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=name_sharma,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "RECIPIENTS" in r2.reply
+        assert f"✓ {name_sharma}" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_disambiguation_crm_ambiguity_resolved_via_ordinal_word():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    types = sorted([f"ZCrm{tag} Alpha", f"ZCrm{tag} Beta"])
+    c1 = await _seed_crm_client("Client A", "917000000044", types[0])
+    c2 = await _seed_crm_client("Client B", "917000000045", types[1])
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZCrm{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple CRM contacts." in r.reply
+        assert types[0] in r.reply and types[1] in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="the second one",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "RECIPIENTS" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r3.reply
+        batch_id = r3.reply.split("Batch ID:")[1].strip()
+        live = await db.whatsapp_batches.find_one({"id": batch_id})
+        assert live["source_type"] == "CRM"
+        assert live["source_label"] == types[1]
+    finally:
+        await _cleanup(phone, template_ids=[template_id], client_ids=[c1, c2])
+        await _restore_config(original)
+
+
+async def test_disambiguation_saved_list_resolved_via_option_n():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    name_a = f"ZList{tag} Alpha"
+    name_b = f"ZList{tag} Beta"
+    list_a = await _seed_contact_list(name_a, [{"name": "X", "phone": "917000000050"}])
+    list_b = await _seed_contact_list(name_b, [{"name": "Y", "phone": "917000000051"}])
+    # _fetch_contact_lists sorts created_at DESC — the most recently
+    # inserted (list_b) is candidate ①.
+    order = [name_b, name_a]
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZList{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple saved lists." in r.reply
+        assert f"① {order[0]}" in r.reply
+        assert f"② {order[1]}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="option 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "1 Phone Number" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, template_ids=[template_id], contact_list_ids=[list_a, list_b])
+        await _restore_config(original)
+
+
+async def test_disambiguation_invalid_selection_reprompts_same_candidates():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    labels = sorted([f"ZInvalid{tag} Glanza", f"ZInvalid{tag} Hyryder"])
+    project_ids = [await _seed_project(label) for label in labels]
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000047")
+    await _seed_pipeline_row(project_ids[0], t1, "ask_to_test")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZInvalid{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        # Out of range — must re-prompt with the SAME two candidates, not
+        # crash, not silently pick one, not show the generic "unrecognized
+        # edit" text.
+        r_bad = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="9",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r_bad.handled
+        assert "didn't catch that" in r_bad.reply.lower()
+        assert labels[0] in r_bad.reply and labels[1] in r_bad.reply
+
+        garbage = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="zzz_nonexistent_zzz",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert garbage.handled
+        assert "didn't catch that" in garbage.reply.lower()
+
+        # Still pending — a valid pick now still works.
+        r_ok = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert labels[0] in r_ok.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=project_ids, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_disambiguation_cancel():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    labels = sorted([f"ZCancel{tag} Glanza", f"ZCancel{tag} Hyryder"])
+    project_ids = [await _seed_project(label) for label in labels]
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZCancel{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        pending = await disambiguation.get_pending(AGENT_ID, phone)
+        assert pending is not None
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="cancel",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Cancelled" in r.reply
+
+        pending_after = await disambiguation.get_pending(AGENT_ID, phone)
+        assert pending_after is None
+        conv_after = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
+        assert conv_after is None
+    finally:
+        await _cleanup(phone, project_ids=project_ids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_disambiguation_expiry():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    labels = sorted([f"ZExpire{tag} Glanza", f"ZExpire{tag} Hyryder"])
+    project_ids = [await _seed_project(label) for label in labels]
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZExpire{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        import datetime as _dt
+        past = _dt.datetime(2000, 1, 1, tzinfo=_dt.timezone.utc)
+        await db[disambiguation.COLLECTION].update_one(
+            {"agent_id": AGENT_ID, "phone": phone}, {"$set": {"expires_at": past}},
+        )
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "expired" in r.reply.lower()
+        pending_after = await disambiguation.get_pending(AGENT_ID, phone)
+        assert pending_after is None
+    finally:
+        await _cleanup(phone, project_ids=project_ids, template_ids=[template_id])
         await _restore_config(original)

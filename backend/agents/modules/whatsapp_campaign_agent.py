@@ -43,8 +43,8 @@ group routing still applies), an entire project's pipeline (reusing
 resolve_project_by_name, same as before), a CRM contact_type category
 (reusing the same distinct-values query the web app's own CRM filter
 dropdown runs), or a saved contact/group list (small matchers in
-agents/modules/name_match.py, the SAME shared 4-tier shape templates
-already used, not a new algorithm). None of these branches write to
+agents/name_match.py, the SAME shared 4-tier shape templates already
+used, not a new algorithm). None of these branches write to
 whatsapp_batches/whatsapp_jobs directly or render a message body
 themselves — every one of them ends by handing source_type+SourceParams to
 the same create_batch() call the web app's own Preview/Send buttons use.
@@ -54,11 +54,15 @@ seeded ADMIN_EMAIL account (there is no phone-to-user mapping in this
 codebase) — the real WhatsApp sender is still fully traceable via
 agents.audit.log_turn, which dispatcher.py already writes for every turn.
 
-Ambiguity handling stays v1-simple: an unresolvable/ambiguous source or
-recipient ends that attempt with a clear message and clears the pending
-conversation, rather than opening a full disambiguation sub-conversation
-(casting-agent's own pending_disambiguation continuation system took many
-dedicated sprints to harden — replicating it here is still out of scope).
+Ambiguity handling (2026-08-09, Sprint 1): a genuinely UNRESOLVABLE source
+or recipient still ends the attempt with a clear message. A source or
+recipient that matched MULTIPLE legitimate candidates instead opens an
+interactive clarification via the shared, agent-agnostic
+agents/disambiguation.py engine — a numbered list, the user replies with a
+digit/circled digit/ordinal word/name, and the original command resumes
+automatically with no retyping. See _resolve_source/_resolve_recipient's
+AmbiguousEntity returns and _build_send_requirement_confirmation's use of
+disambiguation.start.
 """
 from __future__ import annotations
 
@@ -83,9 +87,8 @@ from agents.models import (
     ValidationResult,
 )
 from agents.registry import register_agent
-from agents import conversation
+from agents import conversation, disambiguation, name_match
 from agents.modules import casting_pipeline_nlu as nlu
-from agents.modules import name_match
 from agents.modules.casting_pipeline import _fetch_ongoing_projects, _fetch_all_talent_candidates
 
 AGENT_ID = "whatsapp-campaign-agent"
@@ -120,6 +123,20 @@ class TemplateMatch:
     template: Optional[Dict[str, str]] = None
     ambiguous: Optional[List[Dict[str, str]]] = None
     error: Optional[str] = None
+
+
+@dataclass
+class AmbiguousEntity:
+    """Carries a multi-candidate resolution outcome up to
+    _build_send_requirement_confirmation, which hands it to the shared
+    disambiguation engine (agents/disambiguation.py) instead of formatting
+    a dead-end text error. `entity_type` is one of the engine's known
+    opaque labels ("project"/"template"/"talent"/"crm_source"/
+    "saved_list"); `field_key` is which `collected` field to overwrite
+    with the resolved label once the user picks."""
+    entity_type: str
+    field_key: str
+    candidates: List["disambiguation.Candidate"]
 
 
 _TEMPLATE_FUZZY_CUTOFF = 0.6
@@ -381,29 +398,38 @@ class _RecipientTarget:
     source_params: Optional[SourceParams] = None
     display_label: str = ""
     error: Optional[str] = None
+    ambiguous: Optional[AmbiguousEntity] = None
 
 
 _PHONE_RE = re.compile(r"^[\d\s\+\-\(\)]{7,}$")
 _NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _talent_match_is_safe(query_fragment: str, matched_label: str) -> bool:
-    """(2026-08-09, live production incident) "Ami Trivedi" fuzzy-matched
-    "Kripa Trivedi" — the ONLY talent in the database sharing the surname
-    "Trivedi" — and the shared matcher's normal "lone survivor above the
-    cutoff auto-accepts" rule (the same rule casting-agent's MOVE/ADD rely
-    on for internal pipeline edits, where a wrong pick is a data mistake
-    with an UNDO) silently sent a real WhatsApp message to the wrong real
-    person. That's a much higher bar than an internal edit: not reversible,
-    and no UI ever showed a human the wrong name before it went out.
+def _fuzzy_match_is_safe(query_fragment: str, matched_label: str) -> bool:
+    """(2026-08-09, live production incident + one caught in testing)
+    "Ami Trivedi" fuzzy-matched "Kripa Trivedi" — the ONLY talent sharing
+    the surname "Trivedi" — and a real WhatsApp message went to the wrong
+    real person. The SAME shape of bug was then reproduced against
+    resolve_project_by_name too: a disambiguation reply "ZList... Alpha"
+    (naming a saved contact list) matched a real, unrelated project
+    "QATEST Project Alpha" purely because both share the single word
+    "Alpha" — resolve_project_by_name's per-token fuzzy tier
+    (_project_name_similarity's "best_token" component, added 2026-08-05
+    for a different, legitimate purpose) scores a single exactly-matching
+    token as 1.0 even when every other token is unrelated. Both matchers'
+    "lone survivor above the cutoff auto-accepts" rule is correct and
+    heavily relied on for casting-agent's MOVE/ADD (internal pipeline
+    edits with an UNDO) — not reversible when the result becomes an
+    external send target instead.
 
-    Deliberately NOT touching nlu.resolve_against_candidates itself — it's
-    heavily tested, casting-agent's MOVE/ADD depend on its exact tolerance,
-    and this risk is specific to THIS call site (an external send target),
-    not to talent matching in general. Instead: an extra, local gate on
-    the result before trusting it as a send target — every significant
-    word the user actually typed must appear in the matched person's name
-    (a surname-only query like "Trivedi" alone still legitimately matches
+    Deliberately NOT touching nlu.resolve_against_candidates or
+    resolve_project_by_name themselves — both are heavily tested and
+    casting-agent depends on their exact tolerance; this risk is specific
+    to call sites that turn a match straight into a WhatsApp send target.
+    Instead: an extra, local gate on the result before trusting it —
+    every significant word the user actually typed must appear in the
+    matched name/label (a surname-only query like "Trivedi" alone still
+    legitimately matches
     a single same-surnamed talent; a two-word query where only the surname
     overlaps does not)."""
     q_tokens = set(_NAME_TOKEN_RE.findall((query_fragment or "").lower()))
@@ -434,13 +460,32 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
     # keeps resolving to the whole project, unchanged.
     projects = await _fetch_ongoing_projects()
     proj_match = nlu.resolve_project_by_name(q, projects)
-    if proj_match.project:
+    # Safety gate (see _fuzzy_match_is_safe docstring — this is the exact
+    # "ZList... Alpha" false-matched "QATEST Project Alpha" bug caught in
+    # testing) — an unsafe single-token-coincidence match is NOT hard-
+    # rejected here like the talent tier does; it just falls through to
+    # try the remaining tiers, since a project match this weak is just as
+    # likely to actually be a talent/CRM/saved-list name instead.
+    if proj_match.project and _fuzzy_match_is_safe(q, proj_match.project["label"]):
         stage_list = [stage_query] if stage_query else list(PIPELINE_STAGE_ORDER)
         stage_label = nlu.stage_label(stage_query) if stage_query else "All stages"
         return _RecipientTarget(
             ok=True, source_type="PROJECT",
             source_params=SourceParams(project_id=proj_match.project["id"], pipeline_stages=stage_list),
             display_label=f'{proj_match.project["label"]} — {stage_label}',
+        )
+    if proj_match.ambiguous:
+        # A genuine tie (multiple REAL matches) is disambiguation-worthy.
+        # `.suggestions` (a weak fuzzy "did you mean" below the confident
+        # bar) is deliberately NOT gated here — same as before this sprint,
+        # it falls through to the talent tier next, since a suggestion
+        # this weak is just as likely to actually be a talent name.
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="project", field_key="recipient_query",
+                candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in proj_match.ambiguous],
+            ),
         )
 
     # Tier 3: one or more named talents — global pool (same candidate set
@@ -451,13 +496,13 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
         candidates = await _fetch_all_talent_candidates()
         resolved = nlu.resolve_against_candidates(selector, candidates)
         if resolved.ok and resolved.talent_ids:
-            # Safety gate (see _talent_match_is_safe docstring) — every
+            # Safety gate (see _fuzzy_match_is_safe docstring) — every
             # resolved label must genuinely contain what the user typed,
             # not just share one word (e.g. a surname) with it.
             fragments = nlu.split_multi_names(q)
             unsafe = [
                 label for label in resolved.talent_labels
-                if not any(_talent_match_is_safe(frag, label) for frag in fragments)
+                if not any(_fuzzy_match_is_safe(frag, label) for frag in fragments)
             ]
             if unsafe:
                 return _RecipientTarget(
@@ -494,10 +539,15 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
                 error=f'{" and ".join(resolved.talent_labels)} — no phone number or WhatsApp group on file.',
             )
         if resolved.ambiguous_candidates:
-            options = "\n".join(f"- {c.label}" for c in resolved.ambiguous_candidates)
             return _RecipientTarget(
                 ok=False,
-                error=f'Multiple talents match "{q}":\n\n{options}\n\nPlease try again with the full name.',
+                ambiguous=AmbiguousEntity(
+                    entity_type="talent", field_key="recipient_query",
+                    candidates=[
+                        disambiguation.Candidate(id=c.id, label=c.label)
+                        for c in resolved.ambiguous_candidates
+                    ],
+                ),
             )
 
     # Tier 4: a CRM contact-type category ("send ... to Brand Managers") —
@@ -507,12 +557,24 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
     # silently resolve to the wrong (or an empty) audience.
     contact_types = await _fetch_crm_contact_types()
     if contact_types:
-        ct_match = name_match.tiered_name_match(q, contact_types, lambda t: t, what="CRM contact type")
+        ct_match = name_match.tiered_name_match(
+            q, contact_types, lambda t: t, id_fn=lambda t: t, what="CRM contact type",
+        )
         if ct_match.item:
             return _RecipientTarget(
                 ok=True, source_type="CRM",
                 source_params=SourceParams(contact_type=ct_match.item),
                 display_label=f"CRM — {ct_match.item}",
+            )
+        if ct_match.ambiguous:
+            # (2026-08-09) Previously fell through silently to the saved-
+            # list tiers below, never surfacing the ambiguity at all.
+            return _RecipientTarget(
+                ok=False,
+                ambiguous=AmbiguousEntity(
+                    entity_type="crm_source", field_key="recipient_query",
+                    candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in ct_match.ambiguous],
+                ),
             )
 
     # Tier 5: a saved contact list.
@@ -526,6 +588,14 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
             source_params=SourceParams(contact_list_ids=[cl_match.item["id"]]),
             display_label=cl_match.item["name"],
         )
+    if cl_match.ambiguous:
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="saved_list", field_key="recipient_query",
+                candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in cl_match.ambiguous],
+            ),
+        )
 
     # Tier 6: a saved WhatsApp group list.
     glists = await _fetch_group_lists()
@@ -537,6 +607,14 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
             ok=True, source_type="SAVED_LISTS",
             source_params=SourceParams(group_list_ids=[gl_match.item["id"]]),
             display_label=gl_match.item["name"],
+        )
+    if gl_match.ambiguous:
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="saved_list", field_key="recipient_query",
+                candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in gl_match.ambiguous],
+            ),
         )
 
     return _RecipientTarget(
@@ -558,6 +636,7 @@ class _SendTarget:
     recipient_label: str = ""
     template: Optional[Dict[str, str]] = None
     error: Optional[str] = None
+    ambiguous: Optional[AmbiguousEntity] = None
 
 
 async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
@@ -569,14 +648,24 @@ async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
     if tmpl_match.error:
         return _SendTarget(ok=False, error=tmpl_match.error)
     if tmpl_match.ambiguous:
-        options = "\n".join(f"- {c['label']}" for c in tmpl_match.ambiguous)
         return _SendTarget(
             ok=False,
-            error=f'Multiple templates match "{source_query}":\n\n{options}\n\nPlease try again with the exact template name.',
+            ambiguous=AmbiguousEntity(
+                entity_type="template", field_key="source_query",
+                candidates=[
+                    disambiguation.Candidate(id=c.get("id", c["label"]), label=c["label"])
+                    for c in tmpl_match.ambiguous
+                ],
+            ),
         )
 
+    # Source resolved cleanly — only now check the recipient, so at most
+    # ONE disambiguation is ever open at a time (source first, then
+    # recipient), matching the engine's single-pending-choice state model.
     recipient = await _resolve_recipient(recipient_query, stage_query)
     if not recipient.ok:
+        if recipient.ambiguous:
+            return _SendTarget(ok=False, ambiguous=recipient.ambiguous)
         return _SendTarget(ok=False, error=recipient.error)
 
     return _SendTarget(
@@ -619,8 +708,22 @@ def _format_recipients_and_delivery(jobs: List[dict], skipped: List[dict]) -> "t
 async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext) -> str:
     target = await _resolve_send_target(collected)
     if not target.ok:
-        # v1 scope (see module docstring): end this attempt cleanly rather
-        # than opening a disambiguation sub-conversation.
+        if target.ambiguous:
+            await disambiguation.start(
+                agent_id=ctx.agent_id, phone=ctx.sender_phone,
+                entity_type=target.ambiguous.entity_type,
+                candidates=target.ambiguous.candidates,
+                intent_id=SEND_REQUIREMENT_INTENT.intent_id,
+                field_key=target.ambiguous.field_key,
+                collected=collected,
+            )
+            # Overrides the "confirming" step dispatcher.py just set right
+            # before calling this hook — same override-after-the-fact
+            # pattern ExecResult.needs_clarification already uses for
+            # "editing" step, just for the new "disambiguating" step.
+            await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="disambiguating")
+            return disambiguation.format_prompt(target.ambiguous.entity_type, target.ambiguous.candidates)
+        # Genuinely unresolvable — end this attempt cleanly.
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return target.error
 

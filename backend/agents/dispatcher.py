@@ -16,7 +16,7 @@ import re
 import time
 from typing import Optional
 
-from agents import audit, conversation, registry, request_scope, session_context, tasks
+from agents import audit, conversation, disambiguation, registry, request_scope, session_context, tasks
 from agents.confirmation import (
     CANCELLED_MESSAGE,
     EDIT_PROMPT,
@@ -288,6 +288,90 @@ async def _advance_task(
         last_message_text=reply,
     )
     return DispatchResult(handled=True, reply=reply, operation_id=op_id)
+
+
+async def _advance_disambiguation(
+    agent, conv: dict, text: str, *, group_name: str, phone: str, sender_name: Optional[str],
+) -> DispatchResult:
+    """Sprint 1 (2026-08-09) — Shared Interactive Disambiguation Engine.
+    Handles one turn while the conversation is in the "disambiguating"
+    step (set by a domain module's build_confirmation hook via
+    disambiguation.start, see agents/disambiguation.py's module docstring).
+    Fully generic — knows nothing about projects/templates/talents/CRM/
+    saved lists, only the opaque entity_type/field_key/candidates the
+    caller stored. Self-contained (own audit logging), same shape as
+    _collect_or_advance/_advance_task."""
+    pending = await disambiguation.get_pending(agent.agent_id, phone)
+    if pending is None or disambiguation.is_expired(pending):
+        if pending:
+            await disambiguation.clear(agent.agent_id, phone)
+        await conversation.clear_conversation(agent.agent_id, phone)
+        await audit.log_turn(
+            agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+            raw_message=text, confirmation_action="disambiguation_expired",
+        )
+        return DispatchResult(
+            handled=True,
+            reply="That selection has expired — please send your command again.",
+        )
+
+    action = parse_confirmation_reply(text)
+    if action == "cancel":
+        await disambiguation.clear(agent.agent_id, phone)
+        await conversation.clear_conversation(agent.agent_id, phone)
+        await audit.log_turn(
+            agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+            raw_message=text, confirmation_action="disambiguation_cancel",
+        )
+        return DispatchResult(handled=True, reply=CANCELLED_MESSAGE)
+
+    candidates = [disambiguation.Candidate(**c) for c in pending["candidates"]]
+    picked = disambiguation.resolve_reply(text, candidates)
+    if picked is None:
+        await audit.log_turn(
+            agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+            raw_message=text, validation_errors=["unrecognized_disambiguation_reply"],
+        )
+        prompt = disambiguation.format_prompt(pending["entity_type"], candidates)
+        return DispatchResult(handled=True, reply=f"Sorry, I didn't catch that.\n\n{prompt}")
+
+    intent = registry.get_intent(agent, pending["intent_id"])
+    if intent is None:
+        await disambiguation.clear(agent.agent_id, phone)
+        await conversation.clear_conversation(agent.agent_id, phone)
+        return DispatchResult(handled=False)
+
+    collected = dict(pending.get("collected") or {})
+    collected[pending["field_key"]] = picked.label
+    await disambiguation.clear(agent.agent_id, phone)
+
+    still_missing = next_missing_field(intent, collected)
+    if still_missing:
+        await conversation.update_conversation(
+            agent.agent_id, phone, collected=collected, step="collecting"
+        )
+        reply = _render_question(still_missing.question, collected)
+        await audit.log_turn(
+            agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+            raw_message=text, parsed_intent=intent.intent_id, parsed_fields=collected,
+            confirmation_action="disambiguation_resolved",
+        )
+        return DispatchResult(handled=True, reply=reply)
+
+    ctx = ExecContext(
+        agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+        sender_name=sender_name, conversation_id=str(conv.get("_id") or ""),
+    )
+    await conversation.update_conversation(
+        agent.agent_id, phone, collected=collected, step="confirming"
+    )
+    reply = await _render_confirmation(intent, collected, ctx)
+    await audit.log_turn(
+        agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+        raw_message=text, parsed_intent=intent.intent_id, parsed_fields=collected,
+        confirmation_action="disambiguation_resolved",
+    )
+    return DispatchResult(handled=True, reply=reply)
 
 
 async def handle_inbound_message(
@@ -768,6 +852,12 @@ async def handle_inbound_message(
                 validation_errors=["unrecognized_confirmation_reply"],
             )
             return DispatchResult(handled=True, reply=UNRECOGNIZED_CONFIRMATION_REPLY)
+
+        if conv["step"] == "disambiguating":
+            return await _advance_disambiguation(
+                agent, conv, working_message, group_name=group_name, phone=phone,
+                sender_name=sender_name,
+            )
 
         # step in ("collecting", "editing")
         result = await _collect_or_advance(

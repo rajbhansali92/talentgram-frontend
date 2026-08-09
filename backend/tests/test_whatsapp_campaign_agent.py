@@ -1203,3 +1203,71 @@ async def test_disambiguation_expiry():
     finally:
         await _cleanup(phone, project_ids=project_ids, template_ids=[template_id])
         await _restore_config(original)
+
+
+async def test_disambiguation_fresh_trigger_clears_stale_pending_choice():
+    """(2026-08-09, production-readiness audit) A fresh trigger message
+    sent WHILE a disambiguation is pending must not leave the old
+    whatsapp_agent_disambiguation doc orphaned — it should be explicitly
+    cleared, not just rely on the (harmless but untidy) TTL."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    labels = sorted([f"ZFresh{tag} Glanza", f"ZFresh{tag} Hyryder"])
+    project_ids = [await _seed_project(label) for label in labels]
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000048")
+    await _seed_pipeline_row(project_ids[0], t1, "ask_to_test")
+    try:
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to ZFresh{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r1.reply
+        pending = await disambiguation.get_pending(AGENT_ID, phone)
+        assert pending is not None
+
+        # A brand-new command, NOT a disambiguation reply, interrupts it.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {labels[0]}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "RECIPIENTS" in r2.reply
+
+        pending_after = await disambiguation.get_pending(AGENT_ID, phone)
+        assert pending_after is None
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=project_ids, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_executor_ambiguous_recheck_never_returns_none_message():
+    """(2026-08-09, production-readiness audit) If the underlying data
+    changes between the confirmation card being shown and approval so a
+    previously-unique recipient/source becomes ambiguous again, the
+    executor must fail with a clear message — never DispatchResult(reply=
+    None), which would reach the WhatsApp worker as a blank/crashing send."""
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent(f"Priya Sharma{tag}", phone="917000000049")
+    t2 = await _seed_talent(f"Priya Verma{tag}", phone="917000000059")
+    template_name = f"Requirement {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        collected = {"source_query": template_name, "recipient_query": f"Priya{tag}"}
+        exec_result = await wca._send_requirement_executor(collected, None)
+        assert exec_result.ok is False
+        assert exec_result.message is not None
+        assert "no longer unique" in exec_result.message.lower()
+    finally:
+        await db.talents.delete_many({"id": {"$in": [t1, t2]}})
+        await db.whatsapp_templates.delete_many({"id": {"$in": [template_id]}})

@@ -607,6 +607,15 @@ async def handle_inbound_message(
         fresh_intent = detect_trigger(agent, working_message)
 
         if conv is None or fresh_intent is not None:
+            # (2026-08-09, production-readiness audit) A fresh trigger
+            # restarts the conversation even if it interrupts a pending
+            # disambiguation — clear that stale choice explicitly rather
+            # than leaving it to TTL. Harmless no-op when nothing is
+            # pending; never a correctness issue either way (the
+            # "disambiguating" branch below is only ever reached when
+            # conv["step"] is still "disambiguating", which a fresh
+            # trigger always overwrites), just resource hygiene.
+            await disambiguation.clear(agent.agent_id, phone)
             intent = fresh_intent or (
                 registry.get_intent(agent, conv["intent_id"]) if conv else None
             )

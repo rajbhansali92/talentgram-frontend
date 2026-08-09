@@ -768,6 +768,20 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
 async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     target = await _resolve_send_target(collected)
     if not target.ok:
+        if target.ambiguous:
+            # (2026-08-09, production-readiness audit) Re-resolving fresh
+            # at approval time (see module comment above) means a match
+            # that was clean when the confirmation card was built COULD in
+            # principle become ambiguous again if the underlying data
+            # changed in between (e.g. a same-named record was added).
+            # Re-opening a disambiguation round from inside an approval
+            # turn is out of scope — just fail clearly instead of leaving
+            # `message` as None, which would reach the WhatsApp worker as
+            # a blank/crashing send.
+            return ExecResult(
+                ok=False, error="send_requirement_became_ambiguous",
+                message="That selection is no longer unique — please resend your command.",
+            )
         return ExecResult(ok=False, error="send_requirement_resolution_failed", message=target.error)
 
     try:

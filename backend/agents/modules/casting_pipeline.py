@@ -8,8 +8,12 @@ independently testable.
 
 Two intents:
   casting.query  — every read-only ask (project list, project detail,
-                    pipeline listing/counts). auto_confirm=True: nothing
-                    to approve, replies immediately.
+                    pipeline listing/counts, plus Conversational Talent
+                    Search — roster search by gender/category/city/age/
+                    height, reusing routers.talents._build_talent_query,
+                    the same filter engine Global Talent's page uses).
+                    auto_confirm=True: nothing to approve, replies
+                    immediately.
   casting.move   — every pipeline mutation (move/mark/approve/reject/...).
                     Always confirms first via a custom `build_confirmation`
                     hook (the generic confirmation.py can't resolve a raw
@@ -31,7 +35,7 @@ from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from core import db
+from core import db, parse_height_to_inches
 
 from routers.casting_pipeline import (
     LEGACY_STAGE_ALIASES,
@@ -42,6 +46,8 @@ from routers.casting_pipeline import (
     bulk_move_by_talent_ids,
     get_stage_counts,
 )
+
+from routers.talents import _build_talent_query, _LIST_PROJECTION, _enrich_list
 
 from agents.models import (
     AgentDefinition,
@@ -444,6 +450,7 @@ async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryInten
         AGENT_ID, ctx.sender_phone,
         current_project_id=None, current_project_label=None, current_stage=None,
         number_map={"type": "projects", "items": items},
+        talent_search=None,
     )
     with request_scope.stage("response_formatting"):
         lines = [f'{it["ordinal"]}. {it["label"]}' for it in items]
@@ -507,6 +514,7 @@ async def _handle_project_detail(
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=None,
         number_map={"type": None, "items": []},
+        talent_search=None,
     )
     return ExecResult(ok=True, message=rendered)
 
@@ -589,6 +597,7 @@ async def _handle_pipeline_query(
             AGENT_ID, ctx.sender_phone,
             current_project_id=project["id"], current_project_label=project["label"],
             current_stage=stage,
+            talent_search=None,
         )
         return ExecResult(
             ok=True,
@@ -610,6 +619,7 @@ async def _handle_pipeline_query(
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=stage,
         number_map={"type": "talents", "items": items},
+        talent_search=None,
     )
     return ExecResult(ok=True, message=rendered)
 
@@ -899,12 +909,321 @@ async def _resume_pending_query(session: Optional[dict], ctx: ExecContext) -> Ex
     )
 
 
+# ---------------------------------------------------------------------------
+# Conversational Talent Search (Phase 1, 2026-08-10) — roster search by
+# gender/category/city/age/height, scoped to "Talentgram Casting Pipeline"
+# only (enforced generically by registry.resolve_agent_for_group). Reuses
+# routers.talents._build_talent_query/_LIST_PROJECTION/_enrich_list — the
+# EXACT filter engine Global Talent's own page uses — no parallel filtering
+# system. Out of scope: recommendations, ranking, bulk actions, shortlisting,
+# opening a talent's profile, WhatsApp/PDF export — this only ever renders a
+# read-only text listing.
+# ---------------------------------------------------------------------------
+_TALENT_SEARCH_PAGE_SIZE = 20
+_TALENT_SEARCH_ALL_CAP = 500
+
+# Bare-reply markers, same idiom as _QUERY_RESUME_MARKER above.
+_TALENT_SEARCH_PAGE_MARKER = "__talent_search_page__:"
+_TALENT_SEARCH_REFINE_MARKER = "__talent_search_refine__:"
+# Set by _query_parse_edits_async once a vague-term or unsupported-criteria
+# clarification reply has been resolved — tells _query_executor to run the
+# search directly off session.talent_search_pending_filters rather than
+# re-parsing free text.
+_TALENT_SEARCH_RESUME_MARKER = "__talent_search_resume__"
+_TALENT_SEARCH_CANCELLED_MARKER = "__talent_search_cancelled__"
+
+
+def _gender_display(gender: str) -> str:
+    return (gender or "").replace("_", " ").title()
+
+
+def _inches_to_height_str(inches: float) -> str:
+    total = int(round(inches))
+    feet, remainder = divmod(total, 12)
+    return f'{feet}\'{remainder}"'
+
+
+def _format_active_filters(filters: Dict[str, Any]) -> Optional[str]:
+    """Labeled, human-readable summary of the currently active filters —
+    shown above every result set (and in the zero-results message) so the
+    conversation's search context is always visible, never implicit."""
+    parts = []
+    if filters.get("gender"):
+        parts.append(f'Gender: {_gender_display(filters["gender"])}')
+    if filters.get("interested_in"):
+        parts.append(f'Category: {"/".join(filters["interested_in"])}')
+    if filters.get("location"):
+        parts.append(f'City: {"/".join(filters["location"])}')
+
+    age_min, age_max = filters.get("age_min"), filters.get("age_max")
+    if age_min is not None and age_max is not None:
+        parts.append(f"Age: {age_min}–{age_max}")
+    elif age_min is not None:
+        parts.append(f"Age: {age_min}+")
+    elif age_max is not None:
+        parts.append(f"Age: up to {age_max}")
+
+    height_min, height_max = filters.get("height_min"), filters.get("height_max")
+    if height_min is not None and height_max is not None:
+        parts.append(f"Height: {_inches_to_height_str(height_min)}–{_inches_to_height_str(height_max)}")
+    elif height_min is not None:
+        parts.append(f"Height: {_inches_to_height_str(height_min)}+")
+    elif height_max is not None:
+        parts.append(f"Height: up to {_inches_to_height_str(height_max)}")
+
+    return ", ".join(parts) if parts else None
+
+
+def _active_filter_labels(filters: Dict[str, Any]) -> List[str]:
+    """Just the field NAMES currently active (e.g. ["Gender", "City"]) —
+    used by the zero-results message to suggest which filter to relax,
+    without re-parsing _format_active_filters' display string."""
+    labels = []
+    if filters.get("gender"):
+        labels.append("Gender")
+    if filters.get("interested_in"):
+        labels.append("Category")
+    if filters.get("location"):
+        labels.append("City")
+    if filters.get("age_min") is not None or filters.get("age_max") is not None:
+        labels.append("Age")
+    if filters.get("height_min") is not None or filters.get("height_max") is not None:
+        labels.append("Height")
+    return labels
+
+
+def _format_talent_card(ordinal: int, t: Dict[str, Any]) -> str:
+    lines = [f'{ordinal}. {t.get("name") or "Unnamed"}']
+
+    # location entries are normally {"city","country"} dicts, but this is a
+    # shared dev DB with some legacy/malformed docs (plain strings) — skip
+    # those defensively rather than crash the whole card render over one
+    # bad talent in an otherwise-valid result page.
+    locations = t.get("location") or []
+    city = "/".join([l["city"] for l in locations if isinstance(l, dict) and l.get("city")]) or None
+    top_bits = []
+    if t.get("age") is not None:
+        top_bits.append(f'Age: {t["age"]}')
+    if t.get("height"):
+        top_bits.append(f'Height: {t["height"]}')
+    if city:
+        top_bits.append(city)
+    if top_bits:
+        lines.append(" | ".join(top_bits))
+
+    bottom_bits = []
+    if t.get("gender"):
+        bottom_bits.append(f'Gender: {_gender_display(t["gender"])}')
+    categories = t.get("interested_in") or []
+    if categories:
+        bottom_bits.append(f'Category: {"/".join(categories)}')
+    if bottom_bits:
+        lines.append(" | ".join(bottom_bits))
+
+    handle = t.get("instagram_handle")
+    if handle:
+        lines.append(f'Instagram: {handle if handle.startswith("@") else "@" + handle}')
+
+    return "\n".join(lines)
+
+
+def _render_talent_search_results(
+    talents: List[Dict[str, Any]], total: int, skip: int, page_size: int,
+    filters: Dict[str, Any], *, is_all: bool = False,
+) -> str:
+    filters_line = _format_active_filters(filters)
+
+    if total == 0:
+        lines = ["Found 0 talents matching that."]
+        if filters_line:
+            lines += ["", f"Filters: {filters_line}"]
+        labels = _active_filter_labels(filters)
+        if labels:
+            lines += ["", f"Try removing one or more filters (e.g. {', '.join(labels)}) and search again."]
+        return "\n".join(lines)
+
+    lines = [f"Found {total} talents."]
+    if filters_line:
+        lines.append(f"Filters: {filters_line}")
+    lines += ["", "━━━━━━━━━━━━━━", ""]
+    for i, t in enumerate(talents):
+        lines.append(_format_talent_card(skip + i + 1, t))
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("")
+    shown = len(talents)
+
+    if is_all:
+        footer = f"Showing all {shown} of {total} results."
+        if shown < total:
+            footer = f"Showing all {shown} of {total} results (capped)."
+    else:
+        footer = f"Showing {shown} of {total} results."
+        hints = []
+        if skip + shown < total:
+            hints.append('Reply "Show next 20" for more.')
+        if skip > 0:
+            hints.append('Reply "Show previous 20" to go back.')
+        if hints:
+            footer += "\n" + " ".join(hints)
+    lines.append(footer)
+    return "\n".join(lines)
+
+
+async def _run_talent_search(
+    ctx: ExecContext, filters: Dict[str, Any], *, skip: int = 0,
+    limit: Optional[int] = None, is_all: bool = False,
+) -> ExecResult:
+    query = _build_talent_query(
+        q=None, status=None,
+        gender=filters.get("gender"), ethnicity=None,
+        location=filters.get("location") or [],
+        age_min=filters.get("age_min"), age_max=filters.get("age_max"),
+        height_min=filters.get("height_min"), height_max=filters.get("height_max"),
+        followers_min=None,
+        interested_in=filters.get("interested_in") or [], interested_in_mode="any",
+        skills=[], skills_mode="any", tags=[], tags_mode="any",
+    )
+    page_size = limit or _TALENT_SEARCH_PAGE_SIZE
+    with request_scope.stage("talent_search_query"):
+        total, docs = await asyncio.gather(
+            db.talents.count_documents(query),
+            db.talents.find(query, _LIST_PROJECTION)
+                .sort([("name", 1), ("id", 1)]).skip(skip).limit(page_size).to_list(page_size),
+        )
+        talents = [_enrich_list(t) for t in docs]
+
+    # Temporary result index (Phase 1 UX polish, 2026-08-10) — same
+    # ordinal->id number_map pattern _handle_pipeline_query already uses
+    # for talent-list replies, so a future "Select 3"/"Shortlist 1,2,5"
+    # (Phase 2) has a real id to resolve against, not just a displayed
+    # number. Ordinals are skip+i+1 (continue across pages, never reset),
+    # so the SAME talent keeps the SAME number across "next"/"previous".
+    items = [
+        {"ordinal": skip + i + 1, "id": t.get("id"), "label": t.get("name") or "Unnamed"}
+        for i, t in enumerate(talents)
+    ]
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone,
+        talent_search={"filters": filters, "skip": skip, "page_size": page_size, "total": total},
+        talent_search_pending_vague=None,
+        talent_search_pending_unsupported=None,
+        talent_search_pending_filters=None,
+        talent_search_pending_is_refinement=None,
+        number_map={"type": "talent_search", "items": items},
+    )
+    with request_scope.stage("response_formatting"):
+        message = _render_talent_search_results(talents, total, skip, page_size, filters, is_all=is_all)
+    return ExecResult(ok=True, message=message)
+
+
+async def _handle_talent_search(
+    ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent, *, is_refinement: bool
+) -> ExecResult:
+    if classification.search_unsupported:
+        kinds = " and ".join(classification.search_unsupported)
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            talent_search_pending_unsupported={
+                "filters": classification.search_filters or {},
+                "is_refinement": is_refinement,
+            },
+        )
+        return ExecResult(
+            ok=False, needs_clarification=True,
+            message=f"I can't filter by {kinds} yet — want results without that filter?",
+        )
+
+    if classification.search_vague_terms:
+        term = classification.search_vague_terms[0]
+        field_key = nlu.VAGUE_TERM_FIELD.get(term)
+        question = nlu.VAGUE_CLARIFY_QUESTIONS.get(field_key, "Could you be more specific?")
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            talent_search_pending_vague={"field": field_key},
+            talent_search_pending_filters=classification.search_filters or {},
+            talent_search_pending_is_refinement=is_refinement,
+        )
+        return ExecResult(ok=False, needs_clarification=True, message=question)
+
+    new_filters = classification.search_filters or {}
+    if is_refinement:
+        existing = (session or {}).get("talent_search") or {}
+        merged = {**(existing.get("filters") or {}), **new_filters}
+    else:
+        merged = new_filters
+    return await _run_talent_search(ctx, merged)
+
+
+async def _handle_talent_search_page(
+    ctx: ExecContext, session: Optional[dict], action: Optional[str]
+) -> ExecResult:
+    active = (session or {}).get("talent_search")
+    if not active:
+        return ExecResult(
+            ok=False, error="no_active_search",
+            message='No active talent search yet. Try "Show female models from Mumbai" first.',
+        )
+    filters = active.get("filters") or {}
+    skip = active.get("skip", 0)
+    page_size = active.get("page_size", _TALENT_SEARCH_PAGE_SIZE)
+    total = active.get("total", 0)
+
+    if action == "next":
+        new_skip = skip + page_size
+        if new_skip >= total:
+            return ExecResult(ok=True, message=f"That's all {total} results — nothing more to show.")
+        return await _run_talent_search(ctx, filters, skip=new_skip, limit=page_size)
+
+    if action == "previous":
+        if skip <= 0:
+            return ExecResult(ok=True, message="You're already at the first page.")
+        return await _run_talent_search(ctx, filters, skip=max(0, skip - page_size), limit=page_size)
+
+    if action == "all":
+        return await _run_talent_search(ctx, filters, skip=0, limit=_TALENT_SEARCH_ALL_CAP, is_all=True)
+
+    return ExecResult(ok=False, error="unrecognized_page_action", message="I didn't understand that.")
+
+
+def _parse_clarification_value(text: str, field_key: Optional[str]):
+    stripped = (text or "").strip()
+    if field_key in ("height_min", "height_max"):
+        return parse_height_to_inches(stripped)
+    if field_key in ("age_min", "age_max"):
+        m = re.match(r"^\s*(\d{1,3})\s*$", stripped)
+        return int(m.group(1)) if m else None
+    return None
+
+
+async def _handle_talent_search_pending_resume(ctx: ExecContext, session: Optional[dict]) -> ExecResult:
+    filters = (session or {}).get("talent_search_pending_filters") or {}
+    is_refinement = (session or {}).get("talent_search_pending_is_refinement", False)
+    if is_refinement:
+        existing = (session or {}).get("talent_search") or {}
+        filters = {**(existing.get("filters") or {}), **filters}
+    return await _run_talent_search(ctx, filters)
+
+
 async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     raw_text = collected.get("query_text", "")
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
 
     if raw_text == _QUERY_RESUME_MARKER:
         return await _resume_pending_query(session, ctx)
+
+    if raw_text == _TALENT_SEARCH_RESUME_MARKER:
+        return await _handle_talent_search_pending_resume(ctx, session)
+    if raw_text == _TALENT_SEARCH_CANCELLED_MARKER:
+        return ExecResult(ok=True, message="Okay, cancelled.")
+    if raw_text.startswith(_TALENT_SEARCH_PAGE_MARKER):
+        action = raw_text[len(_TALENT_SEARCH_PAGE_MARKER):]
+        return await _handle_talent_search_page(ctx, session, action)
+    if raw_text.startswith(_TALENT_SEARCH_REFINE_MARKER):
+        refine_text = raw_text[len(_TALENT_SEARCH_REFINE_MARKER):]
+        refinement = nlu.extract_talent_search_refinement(refine_text) or {}
+        classification = nlu.QueryIntent(kind="talent_search", search_filters=refinement)
+        return await _handle_talent_search(ctx, session, classification, is_refinement=True)
 
     with request_scope.stage("nlu"):
         classification = nlu.classify_query(raw_text, list(PIPELINE_STAGE_ORDER))
@@ -930,6 +1249,10 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return await _handle_talent_projects(ctx, classification.talent_query or "")
     if classification.kind == "talent_stage_query":
         return await _handle_talent_stage_query(ctx, session, classification, classification.talent_query or "")
+    if classification.kind == "talent_search":
+        return await _handle_talent_search(ctx, session, classification, is_refinement=False)
+    if classification.kind == "talent_search_page":
+        return await _handle_talent_search_page(ctx, session, classification.search_page_action)
     if classification.kind == "replay":
         return await _handle_replay(ctx, session)
     return ExecResult(
@@ -949,8 +1272,39 @@ async def _query_parse_edits_async(
     original query via _QUERY_RESUME_MARKER (see _resume_pending_query),
     without the user repeating the whole command."""
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
-    pending = (session or {}).get("pending_disambiguation")
     stripped = (text or "").strip()
+
+    pending_unsupported = (session or {}).get("talent_search_pending_unsupported")
+    if pending_unsupported:
+        decision = parse_confirmation_reply(stripped)
+        if decision == "approve":
+            await session_context.update_session(
+                AGENT_ID, ctx.sender_phone,
+                talent_search_pending_unsupported=None,
+                talent_search_pending_filters=pending_unsupported.get("filters") or {},
+                talent_search_pending_is_refinement=pending_unsupported.get("is_refinement", False),
+            )
+            return {"query_text": _TALENT_SEARCH_RESUME_MARKER}
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone, talent_search_pending_unsupported=None,
+        )
+        return {"query_text": _TALENT_SEARCH_CANCELLED_MARKER}
+
+    pending_vague = (session or {}).get("talent_search_pending_vague")
+    if pending_vague:
+        value = _parse_clarification_value(stripped, pending_vague.get("field"))
+        if value is None:
+            return {}
+        staged = (session or {}).get("talent_search_pending_filters") or {}
+        filters = {**staged, pending_vague["field"]: value}
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            talent_search_pending_vague=None,
+            talent_search_pending_filters=filters,
+        )
+        return {"query_text": _TALENT_SEARCH_RESUME_MARKER}
+
+    pending = (session or {}).get("pending_disambiguation")
     if not pending:
         return {}
 
@@ -2300,25 +2654,43 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     query. Only claims the message when a real project resolves (uniquely
     or ambiguously) — an unresolvable candidate is left alone, falling
     through to "unrelated chatter, ignore", exactly as before this
-    existed."""
-    stripped = (text or "").strip()
-    if stripped.isdigit():
-        session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
-        number_map = (session or {}).get("number_map") or {}
-        if number_map.get("type") != "projects":
-            return None
-        return QUERY_INTENT, {"query_text": f"Project {stripped}"}
+    existed.
 
-    candidate = nlu.extract_bare_pipeline_candidate(stripped, list(PIPELINE_STAGE_ORDER))
-    if candidate is None:
-        return None
-    _stage_key, _ambiguous, project_text = candidate
-    projects = await _fetch_ongoing_projects()
-    with request_scope.stage("fuzzy"):
-        match = nlu.resolve_project_by_name(project_text, projects)
-    if not (match.project or match.ambiguous):
-        return None
-    return QUERY_INTENT, {"query_text": stripped}
+    Also handles Conversational Talent Search refinements/pagination
+    (Phase 1, 2026-08-10) — "Only Mumbai", "Above 5'7\"", "Age under 22",
+    "Previous 20" arrive with no leading trigger word at all. Tried LAST,
+    after the digit/number_map and verb-less-pipeline checks above, so
+    existing precedence is unchanged. Primary safety net: only even
+    attempted when session.talent_search is already active (an unrelated
+    "Mumbai shoot confirmed" with no search in progress is never touched).
+    Secondary safety net: nlu.extract_talent_search_refinement/_pagination
+    require an explicit filter- or page-shaped clause — a bare "ok thanks"
+    returns None regardless of session state."""
+    stripped = (text or "").strip()
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+
+    if stripped.isdigit():
+        number_map = (session or {}).get("number_map") or {}
+        if number_map.get("type") == "projects":
+            return QUERY_INTENT, {"query_text": f"Project {stripped}"}
+    else:
+        candidate = nlu.extract_bare_pipeline_candidate(stripped, list(PIPELINE_STAGE_ORDER))
+        if candidate is not None:
+            _stage_key, _ambiguous, project_text = candidate
+            projects = await _fetch_ongoing_projects()
+            with request_scope.stage("fuzzy"):
+                match = nlu.resolve_project_by_name(project_text, projects)
+            if match.project or match.ambiguous:
+                return QUERY_INTENT, {"query_text": stripped}
+
+    if (session or {}).get("talent_search"):
+        page = nlu.extract_talent_search_pagination(stripped)
+        if page is not None:
+            return QUERY_INTENT, {"query_text": _TALENT_SEARCH_PAGE_MARKER + page["action"]}
+        if nlu.extract_talent_search_refinement(stripped):
+            return QUERY_INTENT, {"query_text": _TALENT_SEARCH_REFINE_MARKER + stripped}
+
+    return None
 
 
 CASTING_AGENT = AgentDefinition(

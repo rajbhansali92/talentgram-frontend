@@ -26,7 +26,9 @@ import functools
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from core import parse_height_to_inches
 
 
 # ---------------------------------------------------------------------------
@@ -1251,6 +1253,15 @@ QUERY_TRIGGERS = [
     # test_stage_first_commands. "testing"/"follow up" have no such
     # collision.
     "testing", "follow up", "followup",
+    # Conversational Talent Search (Phase 1, 2026-08-10) — "find"/"search"
+    # cover natural variants of the roster-search examples that don't
+    # start with "show" ("Find actors in Mumbai"). Checked against
+    # MOVE_TRIGGERS/ADD_TRIGGERS/undo's triggers: no collision. Deliberately
+    # NOT adding bare nouns ("girls", "models", "available") as triggers —
+    # detect_trigger only inspects the message's leading words, and those
+    # are too generic (risk of misrouting ordinary group chatter that
+    # happens to start with one of them).
+    "find", "search",
 ]
 
 # Matches "Project 5", "project #5", and the "P5" / "P 5" shorthand alike.
@@ -1279,7 +1290,7 @@ _REPLAY_RE = re.compile(
 
 @dataclass
 class QueryIntent:
-    kind: str  # "list_projects" | "project_detail" | "pipeline" | "talent_projects" | "talent_stage_query" | "replay" | "unrecognized"
+    kind: str  # "list_projects" | "project_detail" | "pipeline" | "talent_projects" | "talent_stage_query" | "talent_search" | "talent_search_page" | "replay" | "unrecognized"
     project_ordinal: Optional[int] = None
     project_name_query: Optional[str] = None
     stage_key: Optional[str] = None
@@ -1288,6 +1299,21 @@ class QueryIntent:
     # Only set for "talent_projects"/"talent_stage_query" — the raw talent
     # name span extracted from the message (see _extract_talent_stage_query).
     talent_query: Optional[str] = None
+    # Only set for "talent_search" — a partial filter dict using the SAME
+    # key names as routers.talents._build_talent_query's own params
+    # (gender, location, age_min/age_max, height_min/height_max,
+    # interested_in), so casting_pipeline.py's executor can pass it
+    # straight through with no parallel filter vocabulary.
+    search_filters: Optional[Dict[str, Any]] = None
+    # Relative terms with no resolvable number ("tall", "young") — must
+    # clarify, never guess a default threshold (see classify_query's talent
+    # search section below).
+    search_vague_terms: Optional[List[str]] = None
+    # Criteria with no backing Talent-schema field at all ("language",
+    # "availability") — must clarify, never silently drop or guess.
+    search_unsupported: Optional[List[str]] = None
+    # Only set for "talent_search_page" — "next" | "previous" | "all".
+    search_page_action: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1538,7 +1564,299 @@ def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
     if _PROJECTS_LIST_HINT_RE.search(text):
         return QueryIntent(kind="list_projects", count_only=bool(_COUNT_HINT_RE.search(text)))
 
+    page = extract_talent_search_pagination(stripped)
+    if page is not None:
+        return QueryIntent(kind="talent_search_page", search_page_action=page["action"])
+
+    if _SEARCH_TRIGGER_RE.search(stripped):
+        parsed = extract_talent_search_filters(stripped)
+        return QueryIntent(
+            kind="talent_search",
+            search_filters=parsed["filters"] or None,
+            search_vague_terms=parsed["vague_terms"] or None,
+            search_unsupported=parsed["unsupported"] or None,
+        )
+
     return QueryIntent(kind="unrecognized")
+
+
+# ---------------------------------------------------------------------------
+# Conversational Talent Search (Phase 1, 2026-08-10) — roster search by
+# gender/category/city/age/height. Entirely separate from the talent-centric
+# helpers above (those answer questions about ONE NAMED talent's project
+# history/stage; this searches the whole roster by criteria). Filter keys
+# mirror routers.talents._build_talent_query's own parameter names exactly,
+# so casting_pipeline.py's executor can pass the parsed dict straight into
+# that shared query builder — no parallel filter vocabulary, no new
+# filtering system, per the feature spec.
+# ---------------------------------------------------------------------------
+
+_GENDER_WORD_MAP: Dict[str, str] = {
+    "female": "female", "females": "female", "woman": "female", "women": "female",
+    "girl": "female", "girls": "female",
+    "male": "male", "males": "male", "man": "male", "men": "male",
+    "boy": "male", "boys": "male",
+}
+# non_binary/prefer_not_say deliberately have no NL synonyms here — no
+# plausible casual phrasing exists for them (same "hand-curate only what
+# people actually type" philosophy as _STAGE_SHORTHAND above).
+_GENDER_RE = re.compile(
+    r"\b(" + "|".join(sorted(_GENDER_WORD_MAP, key=len, reverse=True)) + r")\b", re.IGNORECASE
+)
+
+_CATEGORY_WORD_MAP: Dict[str, str] = {
+    "actor": "Acting", "actors": "Acting", "actress": "Acting", "actresses": "Acting",
+    "acting": "Acting",
+    "model": "Modeling", "models": "Modeling", "modeling": "Modeling", "modelling": "Modeling",
+    "influencer": "Influencer Campaigns", "influencers": "Influencer Campaigns",
+    "creator": "Influencer Campaigns", "creators": "Influencer Campaigns",
+}
+_CATEGORY_RE = re.compile(
+    r"\b(" + "|".join(sorted(_CATEGORY_WORD_MAP, key=len, reverse=True)) + r")\b", re.IGNORECASE
+)
+
+# A talent-search-shaped message must mention at least one of these roster
+# nouns — gates classify_query's talent_search fallthrough so an unrelated
+# unrecognized message never gets misclassified as a roster search just
+# because it fell through every other check.
+_SEARCH_TRIGGER_RE = re.compile(
+    r"\b(talent|talents|actor|actors|actress|actresses|model|models|modeling|modelling|"
+    r"influencer|influencers|female|females|male|males|woman|women|man|men|girl|girls|boy|boys)\b",
+    re.IGNORECASE,
+)
+
+# City/country span after from/in/at — no canonicalization against a known
+# location list, matching _build_talent_query's own plain-string $in match
+# (routers/talents.py). Capped at 2 words (covers "Mumbai", "New Delhi")
+# and stops before a short list of connector words a trailing clause might
+# start with, so "from Mumbai who speak Gujarati" doesn't swallow "who
+# speak" into the captured city.
+_LOCATION_STOPWORDS = ("who", "that", "and", "speak", "speaks", "speaking", "available", "with", "having")
+_LOCATION_RE = re.compile(
+    r"\b(?:from|in|at)\s+((?:(?!\b(?:" + "|".join(_LOCATION_STOPWORDS) + r")\b)[A-Za-z]+\s*){1,2})",
+    re.IGNORECASE,
+)
+
+# Height tokens — same free-text shapes core.parse_height_to_inches already
+# understands ("5'10\"", "5 ft 10", "172cm"); only the SPAN is matched here,
+# the actual inches conversion is always delegated to that one function.
+_HEIGHT_TOKEN_RE = r"\d+\s*(?:'|’|ft|feet)\s*\d*\"?|\d+\s*cm\b"
+_HEIGHT_BETWEEN_RE = re.compile(
+    r"\bbetween\s+(" + _HEIGHT_TOKEN_RE + r")\s+and\s+(" + _HEIGHT_TOKEN_RE + r")", re.IGNORECASE
+)
+_HEIGHT_ABOVE_RE = re.compile(
+    r"\b(?:above|over|taller than)\s+(" + _HEIGHT_TOKEN_RE + r")", re.IGNORECASE
+)
+_HEIGHT_BELOW_RE = re.compile(
+    r"\b(?:below|under|shorter than)\s+(" + _HEIGHT_TOKEN_RE + r")", re.IGNORECASE
+)
+
+_AGE_BETWEEN_RE = re.compile(r"\bbetween\s+(\d{1,3})\s+and\s+(\d{1,3})\b", re.IGNORECASE)
+_AGE_RANGE_DASH_RE = re.compile(r"\bage[sd]?\s+(\d{1,3})\s*(?:-|to)\s*(\d{1,3})\b", re.IGNORECASE)
+_AGE_ABOVE_RE = re.compile(r"\b(?:above|over|older than)\s+(\d{1,3})\b", re.IGNORECASE)
+_AGE_BELOW_RE = re.compile(r"\b(?:below|under|younger than)\s+(\d{1,3})\b", re.IGNORECASE)
+
+# Vague relative terms with NO resolvable number anywhere in the message —
+# "Show tall girls" must ask "What minimum height should I use?" (the
+# spec's own example), never guess a default threshold. Maps each word to
+# the search_filters key a clarification answer will fill in.
+VAGUE_TERM_FIELD: Dict[str, str] = {
+    "tall": "height_min", "taller": "height_min",
+    "short": "height_max", "shorter": "height_max",
+    "old": "age_min", "older": "age_min",
+    "young": "age_max", "younger": "age_max",
+}
+
+VAGUE_CLARIFY_QUESTIONS: Dict[str, str] = {
+    "height_min": "What minimum height should I use?",
+    "height_max": "What maximum height should I use?",
+    "age_min": "What minimum age should I use?",
+    "age_max": "What maximum age should I use?",
+}
+
+# Criteria with NO backing Talent-schema field at all (languages/
+# availability only exist on per-project Submissions, a different
+# collection) — must clarify, never silently drop or guess.
+_LANGUAGE_HINT_RE = re.compile(r"\b(speak|speaks|speaking|language|languages|fluent in)\b", re.IGNORECASE)
+_AVAILABILITY_HINT_RE = re.compile(r"\b(availab\w*|free on|free from|open on|open for)\b", re.IGNORECASE)
+
+
+def _extract_height_range(text: str) -> Tuple[Optional[float], Optional[float], str]:
+    """(height_min, height_max, text_with_matched_span_removed) — removal
+    keeps a later age/location pass from tripping over height's own digits
+    ("between 5'6\" and 5'10\"" must never be read as an age range)."""
+    m = _HEIGHT_BETWEEN_RE.search(text)
+    if m:
+        a, b = parse_height_to_inches(m.group(1)), parse_height_to_inches(m.group(2))
+        if a is not None and b is not None and a > b:
+            a, b = b, a
+        return a, b, text[:m.start()] + " " + text[m.end():]
+
+    height_min = height_max = None
+    m = _HEIGHT_ABOVE_RE.search(text)
+    if m:
+        height_min = parse_height_to_inches(m.group(1))
+        text = text[:m.start()] + " " + text[m.end():]
+    m = _HEIGHT_BELOW_RE.search(text)
+    if m:
+        height_max = parse_height_to_inches(m.group(1))
+        text = text[:m.start()] + " " + text[m.end():]
+    return height_min, height_max, text
+
+
+def _extract_age_range(text: str) -> Tuple[Optional[int], Optional[int], str]:
+    """(age_min, age_max, text_with_matched_span_removed). Height's own
+    extraction always runs FIRST and strips its span (see
+    extract_talent_search_filters/extract_talent_search_refinement) so a
+    bare "between 18 and 22" reaching here is unambiguously an age range,
+    never a leftover height clause."""
+    m = _AGE_BETWEEN_RE.search(text) or _AGE_RANGE_DASH_RE.search(text)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        lo, hi = (a, b) if a <= b else (b, a)
+        return lo, hi, text[:m.start()] + " " + text[m.end():]
+
+    age_min = age_max = None
+    m = _AGE_ABOVE_RE.search(text)
+    if m:
+        age_min = int(m.group(1))
+        text = text[:m.start()] + " " + text[m.end():]
+    m = _AGE_BELOW_RE.search(text)
+    if m:
+        age_max = int(m.group(1))
+        text = text[:m.start()] + " " + text[m.end():]
+    return age_min, age_max, text
+
+
+def extract_talent_search_filters(text: str) -> Dict[str, Any]:
+    """Parses a free-text roster-search request (a fresh, trigger-anchored
+    message — "Show female models from Mumbai") into
+    {"filters": {...partial dict...}, "vague_terms": [...], "unsupported": [...]}.
+    Never guesses: a vague relative term with no number, or a criterion
+    with no backing schema field, is surfaced separately for the caller to
+    turn into a clarification question — it is NEVER folded into `filters`."""
+    original = text or ""
+    working = original
+
+    filters: Dict[str, Any] = {}
+
+    height_min, height_max, working = _extract_height_range(working)
+    if height_min is not None:
+        filters["height_min"] = height_min
+    if height_max is not None:
+        filters["height_max"] = height_max
+
+    age_min, age_max, working = _extract_age_range(working)
+    if age_min is not None:
+        filters["age_min"] = age_min
+    if age_max is not None:
+        filters["age_max"] = age_max
+
+    categories: List[str] = []
+    for m in _CATEGORY_RE.finditer(working):
+        mapped = _CATEGORY_WORD_MAP[m.group(1).lower()]
+        if mapped not in categories:
+            categories.append(mapped)
+    if categories:
+        filters["interested_in"] = categories
+    working = _CATEGORY_RE.sub(" ", working)
+
+    gender_m = _GENDER_RE.search(working)
+    if gender_m:
+        filters["gender"] = _GENDER_WORD_MAP[gender_m.group(1).lower()]
+    working = _GENDER_RE.sub(" ", working)
+
+    loc_m = _LOCATION_RE.search(working)
+    if loc_m:
+        city = " ".join(loc_m.group(1).split()).strip()
+        if city:
+            filters["location"] = [city.title()]
+
+    vague_terms: List[str] = []
+    if height_min is None and height_max is None:
+        for word in ("tall", "taller", "short", "shorter"):
+            if re.search(r"\b" + word + r"\b", original, re.IGNORECASE):
+                vague_terms.append(word)
+                break
+    if age_min is None and age_max is None:
+        for word in ("old", "older", "young", "younger"):
+            if re.search(r"\b" + word + r"\b", original, re.IGNORECASE):
+                vague_terms.append(word)
+                break
+
+    unsupported: List[str] = []
+    if _LANGUAGE_HINT_RE.search(original):
+        unsupported.append("language")
+    if _AVAILABILITY_HINT_RE.search(original):
+        unsupported.append("availability")
+
+    return {"filters": filters, "vague_terms": vague_terms, "unsupported": unsupported}
+
+
+# Narrower grammar for an UNTRIGGERED follow-up ("Only Mumbai", "Above
+# 5'7\"", "Age under 22") — casting_pipeline.py's _resolve_bare_reply only
+# ever calls this when a talent_search is already active in session (the
+# primary safety net against swallowing unrelated chatter); this function
+# is the secondary one, requiring an explicit filter-shaped clause so a
+# bare "ok thanks" returns None regardless of session state.
+_REFINE_ONLY_RE = re.compile(r"^\s*(?:only|just)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\s*[.!?]*\s*$", re.IGNORECASE)
+_REFINE_BARE_GENDER_RE = re.compile(r"^\s*(?:only\s+)?(female|male|women|men|girls|boys)\s*[.!?]*\s*$", re.IGNORECASE)
+
+
+def extract_talent_search_refinement(text: str) -> Optional[Dict[str, Any]]:
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+
+    filters: Dict[str, Any] = {}
+    height_min, height_max, remainder = _extract_height_range(stripped)
+    if height_min is not None:
+        filters["height_min"] = height_min
+    if height_max is not None:
+        filters["height_max"] = height_max
+
+    age_min, age_max, remainder = _extract_age_range(remainder)
+    if age_min is not None:
+        filters["age_min"] = age_min
+    if age_max is not None:
+        filters["age_max"] = age_max
+    if filters:
+        return filters
+
+    m = _REFINE_BARE_GENDER_RE.match(stripped)
+    if m:
+        return {"gender": _GENDER_WORD_MAP[m.group(1).lower()]}
+
+    m = _REFINE_ONLY_RE.match(stripped)
+    if m:
+        candidate = m.group(1).strip()
+        mapped_gender = _GENDER_WORD_MAP.get(candidate.lower())
+        if mapped_gender:
+            return {"gender": mapped_gender}
+        return {"location": [candidate.title()]}
+
+    return None
+
+
+# Pagination phrasing — anchored to the WHOLE stripped message (never
+# mid-sentence), so "all good" or "let's do this next week" can never be
+# misread as a page-navigation command.
+_PAGE_NEXT_RE = re.compile(r"^\s*(?:show\s+)?(?:next|more)(?:\s+\d+)?\s*[.!?]*\s*$", re.IGNORECASE)
+_PAGE_PREV_RE = re.compile(r"^\s*(?:show\s+)?(?:previous|prev)(?:\s+\d+)?\s*[.!?]*\s*$", re.IGNORECASE)
+_PAGE_ALL_RE = re.compile(r"^\s*(?:show\s+)?all\s*[.!?]*\s*$", re.IGNORECASE)
+
+
+def extract_talent_search_pagination(text: str) -> Optional[Dict[str, Any]]:
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if _PAGE_NEXT_RE.match(stripped):
+        return {"action": "next"}
+    if _PAGE_PREV_RE.match(stripped):
+        return {"action": "previous"}
+    if _PAGE_ALL_RE.match(stripped):
+        return {"action": "all"}
+    return None
 
 
 # ---------------------------------------------------------------------------

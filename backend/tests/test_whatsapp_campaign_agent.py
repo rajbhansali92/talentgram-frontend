@@ -195,6 +195,17 @@ def test_extract_fields_all_natural_language_variants():
         assert fields.get("source_query") == "Toyota"
 
 
+def test_talent_match_safety_gate_rejects_shared_surname_only():
+    """(2026-08-09 live production incident, deterministic unit form) A
+    fuzzy match sharing only a surname must be rejected; a genuine surname-
+    only search, or an exact/superset name match, must still pass."""
+    assert wca._talent_match_is_safe("Ami Trivedi", "Kripa Trivedi") is False
+    assert wca._talent_match_is_safe("Trivedi", "Kripa Trivedi") is True
+    assert wca._talent_match_is_safe("Ahana Pocha", "Ahana Pocha") is True
+    assert wca._talent_match_is_safe("Ahana", "Ahana Pocha") is True
+    assert wca._talent_match_is_safe("", "Kripa Trivedi") is False
+
+
 def test_extract_fields_legacy_campaign_grammar_unchanged():
     for verb_phrase in ("Send campaign", "Launch campaign", "Start campaign", "Run campaign"):
         text = f"{verb_phrase} to Toyota Glanza using Diwali Template"
@@ -567,6 +578,79 @@ async def test_crm_contact_type_recipient():
         assert live["source_type"] == "CRM"
     finally:
         await _cleanup(phone, template_ids=[template_id], client_ids=[c1, c2])
+        await _restore_config(original)
+
+
+async def test_talent_recipient_rejects_wrong_person_shared_surname_match():
+    """(2026-08-09 live production incident) "Send campaign to Ami Trivedi
+    using Toyota Glanza template" — no talent named "Ami Trivedi" exists,
+    but the shared fuzzy matcher (correctly, by its own internal-edit-
+    oriented tolerance) found "Kripa Trivedi" as the only same-surnamed
+    talent and auto-resolved to her — and the message was actually sent to
+    the wrong real person. Reproduces the EXACT real names involved and
+    asserts the new safety gate rejects it instead of silently sending."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    # Only ONE same-surnamed talent in the pool — the exact failure shape
+    # (a lone fuzzy survivor auto-accepts with nothing to be ambiguous
+    # against) that let the wrong send through in production.
+    t1 = await _seed_talent(f"Kripa Trivedi{uuid.uuid4().hex[:6]}", phone="918369827463",
+                             group_name="Kripa Trivedi x Talentgram Agency")
+    wrong_name = f"Ami Trivedi{uuid.uuid4().hex[:6]}"
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send campaign to {wrong_name} using {template_name} template",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        # The local dev DB can carry stray leftover talents from other test
+        # runs, so the shared matcher may see this as "ambiguous" rather
+        # than a lone survivor — either way is an acceptable SAFE outcome;
+        # the one unacceptable outcome is silently resolving to a single
+        # wrong person and sending.
+        assert "sent." not in r.reply.lower(), r.reply
+
+        # No batch of any kind (dry-run or live) was created for this —
+        # an unsafe/ambiguous match must never reach create_batch at all.
+        stray = await db.whatsapp_batches.count_documents({"template_id": template_id})
+        assert stray == 0
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_talent_recipient_surname_only_query_still_matches():
+    """The safety gate must NOT break the legitimate case: searching by a
+    surname alone (nothing more specific typed) still resolves when there's
+    exactly one such-surnamed talent — every word the user typed ("Zbaru")
+    does appear in the matched label, satisfying the gate honestly."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    surname = f"Zbaru{uuid.uuid4().hex[:6]}"
+    talent_name = f"Devika {surname}"
+    t1 = await _seed_talent(talent_name, phone="917000000018")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {surname}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"✓ {talent_name}" in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
 
 

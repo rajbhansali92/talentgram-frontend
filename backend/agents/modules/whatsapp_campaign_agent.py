@@ -384,6 +384,33 @@ class _RecipientTarget:
 
 
 _PHONE_RE = re.compile(r"^[\d\s\+\-\(\)]{7,}$")
+_NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _talent_match_is_safe(query_fragment: str, matched_label: str) -> bool:
+    """(2026-08-09, live production incident) "Ami Trivedi" fuzzy-matched
+    "Kripa Trivedi" — the ONLY talent in the database sharing the surname
+    "Trivedi" — and the shared matcher's normal "lone survivor above the
+    cutoff auto-accepts" rule (the same rule casting-agent's MOVE/ADD rely
+    on for internal pipeline edits, where a wrong pick is a data mistake
+    with an UNDO) silently sent a real WhatsApp message to the wrong real
+    person. That's a much higher bar than an internal edit: not reversible,
+    and no UI ever showed a human the wrong name before it went out.
+
+    Deliberately NOT touching nlu.resolve_against_candidates itself — it's
+    heavily tested, casting-agent's MOVE/ADD depend on its exact tolerance,
+    and this risk is specific to THIS call site (an external send target),
+    not to talent matching in general. Instead: an extra, local gate on
+    the result before trusting it as a send target — every significant
+    word the user actually typed must appear in the matched person's name
+    (a surname-only query like "Trivedi" alone still legitimately matches
+    a single same-surnamed talent; a two-word query where only the surname
+    overlaps does not)."""
+    q_tokens = set(_NAME_TOKEN_RE.findall((query_fragment or "").lower()))
+    l_tokens = set(_NAME_TOKEN_RE.findall((matched_label or "").lower()))
+    if not q_tokens:
+        return False
+    return q_tokens <= l_tokens
 
 
 async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
@@ -424,6 +451,23 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
         candidates = await _fetch_all_talent_candidates()
         resolved = nlu.resolve_against_candidates(selector, candidates)
         if resolved.ok and resolved.talent_ids:
+            # Safety gate (see _talent_match_is_safe docstring) — every
+            # resolved label must genuinely contain what the user typed,
+            # not just share one word (e.g. a surname) with it.
+            fragments = nlu.split_multi_names(q)
+            unsafe = [
+                label for label in resolved.talent_labels
+                if not any(_talent_match_is_safe(frag, label) for frag in fragments)
+            ]
+            if unsafe:
+                return _RecipientTarget(
+                    ok=False,
+                    error=(
+                        f'"{q}" matched "{", ".join(unsafe)}" but that name doesn\'t look like '
+                        f"a real match — please use the exact full name to avoid sending to the "
+                        f"wrong person."
+                    ),
+                )
             docs = await db.talents.find(
                 {"id": {"$in": resolved.talent_ids}},
                 {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
